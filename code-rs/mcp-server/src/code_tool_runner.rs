@@ -18,6 +18,7 @@ use code_core::protocol::InputItem;
 use code_core::protocol::Op;
 use code_core::protocol::Submission;
 use code_core::protocol::TaskCompleteEvent;
+use code_protocol::dynamic_tools::DynamicToolResponse;
 use mcp_types::CallToolResult;
 use mcp_types::ContentBlock;
 use mcp_types::RequestId;
@@ -104,6 +105,7 @@ pub async fn run_code_tool_session(
             items: vec![InputItem::Text {
                 text: initial_prompt.clone(),
             }],
+            final_output_json_schema: None,
         },
     };
 
@@ -138,6 +140,7 @@ pub async fn run_code_tool_session_reply(
     if let Err(e) = conversation
         .submit(Op::UserInput {
             items: vec![InputItem::Text { text: prompt }],
+            final_output_json_schema: None,
         })
         .await
     {
@@ -230,6 +233,43 @@ async fn run_code_tool_session_inner(
                         .await;
                         continue;
                     }
+                    EventMsg::RequestUserInput(ev) => {
+                        let question_count = ev.questions.len();
+                        let result = CallToolResult {
+                            content: vec![ContentBlock::TextContent(TextContent {
+                                r#type: "text".to_string(),
+                                text: format!(
+                                    "Codex requested user input ({question_count} question(s)) but interactive prompts are not supported in this MCP tool session."
+                                ),
+                                annotations: None,
+                            })],
+                            is_error: Some(true),
+                            structured_content: None,
+                        };
+                        outgoing.send_response(request_id.clone(), result).await;
+                        running_requests_id_to_code_uuid
+                            .lock()
+                            .await
+                            .remove(&request_id);
+                        break;
+                    }
+                    EventMsg::DynamicToolCallRequest(ev) => {
+                        let response = DynamicToolResponse {
+                            call_id: ev.call_id.clone(),
+                            output: "dynamic tools are not supported in MCP tool sessions"
+                                .to_string(),
+                            success: false,
+                        };
+                        if let Err(err) = codex
+                            .submit(Op::DynamicToolResponse {
+                                id: ev.call_id,
+                                response,
+                            })
+                            .await
+                        {
+                            tracing::error!("failed to submit DynamicToolResponse: {err}");
+                        }
+                    }
                     EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                         let text = match last_agent_message {
                             Some(msg) => msg.clone(),
@@ -272,7 +312,7 @@ async fn run_code_tool_session_inner(
                     | EventMsg::AgentReasoningSectionBreak(_)
                     | EventMsg::McpToolCallBegin(_)
                     | EventMsg::McpToolCallEnd(_)
-                    // | EventMsg::McpListToolsResponse(_)
+                    | EventMsg::McpListToolsResponse(_)
                     | EventMsg::ExecCommandBegin(_)
                     | EventMsg::ExecCommandOutputDelta(_)
                     | EventMsg::ExecCommandEnd(_)
@@ -300,6 +340,7 @@ async fn run_code_tool_session_inner(
                     | EventMsg::EnteredReviewMode(_)
                     | EventMsg::ExitedReviewMode(_)
                     | EventMsg::CustomToolCallBegin(_)
+                    | EventMsg::CustomToolCallUpdate(_)
                     | EventMsg::CustomToolCallEnd(_)
                     | EventMsg::ViewImageToolCall(_) => {
                         // For now, we do not do anything extra for these

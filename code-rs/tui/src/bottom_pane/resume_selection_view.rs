@@ -217,7 +217,7 @@ impl BottomPaneView<'_> for ResumeSelectionView {
             Constraint::Min(10),    // Last User Message
         ];
 
-        let header = Row::new(vec!["Modified", "Created", "User Msgs", "Branch", "Last User Message"]).height(1)
+        let header = Row::new(vec!["Modified", "Created", "User Msgs", "Branch", "Session"]).height(1)
             .style(Style::default().fg(crate::colors::text_bright()));
 
         let table = Table::new(rows_iter, widths)
@@ -228,7 +228,7 @@ impl BottomPaneView<'_> for ResumeSelectionView {
 
         // Footer hints
         // Draw a spacer line above footer (implicit by not drawing into that row)
-        let footer = Rect { x: inner.x.saturating_add(1), y: inner.y + inner.height - 1, width: inner.width.saturating_sub(1), height: 1 };
+        let footer = Rect { x: inner.x.saturating_add(1), y: inner.y + inner.height.saturating_sub(1), width: inner.width.saturating_sub(1), height: 1 };
         let footer_line = Line::from(vec![
             Span::styled("↑↓ PgUp PgDn", Style::default().fg(crate::colors::light_blue())),
             Span::raw(" Navigate  "),

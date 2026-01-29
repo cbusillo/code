@@ -568,7 +568,7 @@ async fn consume_truncated_output(
         #[cfg(target_os = "linux")]
         {
             let mut oom_killed = false;
-            let mut cgroup_memory_max_bytes = None;
+            let mut cgroup_memory_max_bytes: Option<u64> = None;
             if !timed_out {
                 if let Some(pid) = pid {
                     if matches!(exit_status.signal(), Some(SIGKILL_CODE))

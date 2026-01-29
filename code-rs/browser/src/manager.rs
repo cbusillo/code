@@ -1,6 +1,7 @@
 use crate::BrowserError;
 use crate::Result;
 use crate::config::BrowserConfig;
+use crate::config::WaitStrategy;
 use crate::page::Page;
 use chromiumoxide::Browser;
 use chromiumoxide::BrowserConfig as CdpConfig;
@@ -13,6 +14,7 @@ use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -85,10 +87,74 @@ fn is_temporary_internal_launch_error_message(message: &str) -> bool {
         || message.contains("os error 24")
 }
 
+fn chrome_logging_enabled() -> bool {
+    env_truthy("CODE_SUBAGENT_DEBUG") || env_truthy("CODEX_BROWSER_LOG")
+}
+
+fn env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn resolve_chrome_log_path() -> Option<PathBuf> {
+    if !chrome_logging_enabled() {
+        return None;
+    }
+
+    if let Ok(path) = std::env::var("CODEX_BROWSER_LOG_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    let base = if let Ok(home) = std::env::var("CODE_HOME").or_else(|_| std::env::var("CODEX_HOME")) {
+        PathBuf::from(home).join("debug_logs")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".code").join("debug_logs")
+    } else {
+        return Some(std::env::temp_dir().join("code-chrome.log"));
+    };
+
+    let path = base.join("code-chrome.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    Some(path)
+}
+
 const HANDLER_ERROR_LIMIT: u32 = 3;
 
 fn should_restart_handler(consecutive_errors: u32) -> bool {
     consecutive_errors >= HANDLER_ERROR_LIMIT
+}
+
+fn should_ignore_handler_error(message_lower: &str) -> bool {
+    // Chromiumoxide uses oneshot channels internally for CDP request/response.
+    // When we cancel or time out an in-flight request (dropping its future), the
+    // CDP runtime may surface this as an error string containing "oneshot".
+    // These should not be treated as connection failures.
+    if message_lower.contains("oneshot") {
+        return true;
+    }
+
+    // These can happen for individual targets/tabs while the overall CDP
+    // connection is still healthy (e.g. tabs closing, navigations, reloads).
+    const TRANSIENT_SUBSTRINGS: &[&str] = &[
+        "no such session",
+        "session closed",
+        "invalid session",
+        "target closed",
+        "target crashed",
+        "context destroyed",
+        "execution context was destroyed",
+        "cannot find context",
+    ];
+
+    TRANSIENT_SUBSTRINGS
+        .iter()
+        .any(|needle| message_lower.contains(needle))
 }
 
 fn should_stop_handler<E: std::fmt::Display>(
@@ -102,6 +168,13 @@ fn should_stop_handler<E: std::fmt::Display>(
             false
         }
         Err(err) => {
+            let message = err.to_string();
+            let message_lower = message.to_ascii_lowercase();
+            if should_ignore_handler_error(&message_lower) {
+                *consecutive_errors = 0;
+                debug!("{label} event handler error ignored: {message}");
+                return false;
+            }
             *consecutive_errors = consecutive_errors.saturating_add(1);
             let count = *consecutive_errors;
             if count <= HANDLER_ERROR_LIMIT {
@@ -122,6 +195,7 @@ async fn discover_ws_via_host_port(host: &str, port: u16) -> Result<String> {
 
     let client_start = tokio::time::Instant::now();
     let client = Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(5)) // Allow Chrome time to bring up /json/version on fresh launch
         .build()
         .map_err(|e| BrowserError::CdpError(format!("Failed to build HTTP client: {}", e)))?;
@@ -209,6 +283,7 @@ async fn scan_for_chrome_debug_port() -> Option<u16> {
         let test_future = async move {
             let url = format!("http://127.0.0.1:{}/json/version", port);
             let client = Client::builder()
+                .no_proxy()
                 .timeout(Duration::from_millis(200)) // Shorter timeout for parallel tests
                 .build()
                 .ok()?;
@@ -266,6 +341,22 @@ pub struct BrowserManager {
     auto_viewport_correction_enabled: Arc<tokio::sync::RwLock<bool>>,
     /// Track last applied device metrics to avoid redundant overrides
     last_metrics_applied: Arc<Mutex<Option<(i64, i64, f64, bool, std::time::Instant)>>>,
+}
+
+#[derive(Debug)]
+struct PageDebugInfo {
+    target_id: String,
+    session_id: String,
+    opener_id: Option<String>,
+    cached_url: Option<String>,
+    live_url: Option<String>,
+}
+
+#[derive(Debug)]
+struct TargetSnapshot {
+    total: usize,
+    sample: Vec<String>,
+    truncated: bool,
 }
 
 impl BrowserManager {
@@ -771,7 +862,7 @@ impl BrowserManager {
         let max_attempts = INTERNAL_LAUNCH_RETRY_DELAYS_MS.len() + 1;
 
         // Add browser launch flags (keep minimal set for screenshot functionality)
-        let log_file = format!("{}/code-chrome.log", std::env::temp_dir().display());
+        let log_file = resolve_chrome_log_path();
 
         let (browser, mut handler, user_data_path) = {
             let mut attempt = 1usize;
@@ -814,14 +905,17 @@ impl BrowserManager {
                     // Disable timeout for slow networks/pages
                     .arg("--disable-hang-monitor")
                     .arg("--disable-background-timer-throttling")
-                    // Redirect Chrome logging to a file to keep terminal clean
-                    .arg("--enable-logging")
-                    .arg("--log-level=1") // 0 = INFO, 1 = WARNING, 2 = ERROR, 3 = FATAL (1 to reduce verbosity)
-                    .arg(format!("--log-file={log_file}"))
                     // Suppress console output
                     .arg("--silent-launch")
                     // Set a longer timeout for CDP requests (60 seconds instead of default 30)
                     .request_timeout(Duration::from_secs(60));
+
+                if let Some(ref log_file) = log_file {
+                    builder = builder
+                        .arg("--enable-logging")
+                        .arg("--log-level=1")
+                        .arg(format!("--log-file={}", log_file.display()));
+                }
 
                 let browser_config = builder
                     .build()
@@ -859,8 +953,12 @@ impl BrowserManager {
                         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
                         let hint = "Ensure Chrome/Chromium is installed and available on PATH.";
 
+                        let log_note = log_file
+                            .as_ref()
+                            .map(|path| format!(" Chrome log: {}", path.display()))
+                            .unwrap_or_default();
                         return Err(BrowserError::CdpError(format!(
-                            "Failed to launch internal browser: {message}. Hint: {hint}. Chrome log: {log_file}"
+                            "Failed to launch internal browser: {message}. Hint: {hint}.{log_note}"
                         )));
                     }
                 }
@@ -1586,6 +1684,10 @@ impl BrowserManager {
                         recovery_attempts < MAX_RECOVERY_ATTEMPTS
                             && self.should_retry_after_goto_error(&err).await;
 
+                    self
+                        .log_navigation_failure(url, &err, recovery_attempts, should_retry)
+                        .await;
+
                     if !should_retry {
                         return Err(err);
                     }
@@ -1605,6 +1707,138 @@ impl BrowserManager {
                 }
             }
         }
+    }
+
+    async fn log_navigation_failure(
+        &self,
+        url: &str,
+        err: &BrowserError,
+        recovery_attempt: usize,
+        will_retry: bool,
+    ) {
+        let error_string = err.to_string();
+        let config = self.config.read().await.clone();
+        let is_external = config.connect_port.is_some() || config.connect_ws.is_some();
+        let browser_active = self.browser.lock().await.is_some();
+        let wait_desc = match &config.wait {
+            WaitStrategy::Event(event) => format!("event:{event}"),
+            WaitStrategy::Delay { delay_ms } => format!("delay:{delay_ms}ms"),
+        };
+
+        warn!(
+            url = %url,
+            error = %error_string,
+            recovery_attempt,
+            will_retry,
+            browser_active,
+            is_external,
+            headless = config.headless,
+            connect_port = ?config.connect_port,
+            connect_ws = ?config.connect_ws,
+            viewport_width = config.viewport.width,
+            viewport_height = config.viewport.height,
+            viewport_dpr = config.viewport.device_scale_factor,
+            viewport_mobile = config.viewport.mobile,
+            wait = %wait_desc,
+            "Browser navigation failed"
+        );
+
+        let page_snapshot = self.page.lock().await.clone();
+        if let Some(page) = page_snapshot.as_ref() {
+            let page_debug = Self::collect_page_debug_info(page).await;
+            warn!(
+                target_id = %page_debug.target_id,
+                session_id = %page_debug.session_id,
+                opener_id = ?page_debug.opener_id,
+                cached_url = ?page_debug.cached_url,
+                live_url = ?page_debug.live_url,
+                "Browser page debug context"
+            );
+        } else {
+            warn!("Browser navigation failed without an active page");
+        }
+
+        if let Some(snapshot) = self.collect_target_snapshot().await {
+            warn!(
+                targets_total = snapshot.total,
+                targets_truncated = snapshot.truncated,
+                targets_sample = ?snapshot.sample,
+                "Browser target snapshot"
+            );
+        }
+    }
+
+    async fn collect_page_debug_info(page: &Page) -> PageDebugInfo {
+        let cached_url = page.get_url().await.ok();
+        let live_url = match tokio::time::timeout(Duration::from_millis(600), page.get_current_url()).await {
+            Ok(Ok(url)) => Some(url),
+            Ok(Err(err)) => {
+                debug!(error = %err, "Navigation telemetry failed to read live URL");
+                None
+            }
+            Err(_) => {
+                debug!("Navigation telemetry timed out reading live URL");
+                None
+            }
+        };
+
+        PageDebugInfo {
+            target_id: page.target_id_debug(),
+            session_id: page.session_id_debug(),
+            opener_id: page.opener_id_debug(),
+            cached_url,
+            live_url,
+        }
+    }
+
+    async fn collect_target_snapshot(&self) -> Option<TargetSnapshot> {
+        let mut browser_guard = self.browser.lock().await;
+        let browser = browser_guard.as_mut()?;
+        let fetch = tokio::time::timeout(Duration::from_millis(1200), browser.fetch_targets()).await;
+        let targets = match fetch {
+            Ok(Ok(targets)) => targets,
+            Ok(Err(err)) => {
+                warn!(error = %err, "Failed to fetch CDP targets for navigation telemetry");
+                return None;
+            }
+            Err(_) => {
+                warn!("Timed out fetching CDP targets for navigation telemetry");
+                return None;
+            }
+        };
+
+        let total = targets.len();
+        let mut sample = Vec::new();
+        for (index, target) in targets.iter().take(12).enumerate() {
+            let target_id = &target.target_id;
+            let target_type = &target.r#type;
+            let subtype = target.subtype.as_deref().unwrap_or("-");
+            let opener = target
+                .opener_id
+                .as_ref()
+                .map(|opener_id| format!("{opener_id:?}"))
+                .unwrap_or_else(|| "-".to_string());
+            let url = &target.url;
+            let title = &target.title;
+            let attached = target.attached;
+            sample.push(format!(
+                "#{index} id={target_id:?} type={target_type} subtype={subtype} attached={attached} opener={opener} url={url} title={title}",
+                index = index + 1,
+                target_id = target_id,
+                target_type = target_type,
+                subtype = subtype,
+                attached = attached,
+                opener = opener,
+                url = url,
+                title = title
+            ));
+        }
+
+        Some(TargetSnapshot {
+            total,
+            truncated: total > sample.len(),
+            sample,
+        })
     }
 
     async fn should_retry_after_goto_error(&self, err: &BrowserError) -> bool {
@@ -1639,6 +1873,9 @@ impl BrowserManager {
                     "transport",
                     "timeout",
                     "timed out",
+                    "oneshot error",
+                    "oneshot canceled",
+                    "oneshot cancelled",
                     "resource temporarily unavailable",
                     "temporarily unavailable",
                     "eagain",
@@ -2022,6 +2259,8 @@ impl BrowserManager {
         self.stop_navigation_monitor().await;
 
         let navigation_callback = Arc::clone(&self.navigation_callback);
+        let page_target_id = page.target_id_debug();
+        let page_session_id = page.session_id_debug();
         let page_weak = Arc::downgrade(&page);
 
         let assets_arc = Arc::clone(&self.assets);
@@ -2031,12 +2270,22 @@ impl BrowserManager {
             let mut last_seq: u64 = 0;
             let mut _check_count = 0; // reserved for future periodic checks
 
+            debug!(
+                target_id = %page_target_id,
+                session_id = %page_session_id,
+                "Starting navigation monitor"
+            );
+
             loop {
                 // Check if page is still alive
                 let page = match page_weak.upgrade() {
                     Some(p) => p,
                     None => {
-                        debug!("Page dropped, stopping navigation monitor");
+                        debug!(
+                            target_id = %page_target_id,
+                            session_id = %page_session_id,
+                            "Page dropped, stopping navigation monitor"
+                        );
                         break;
                     }
                 };
@@ -2290,7 +2539,28 @@ pub struct BrowserStatus {
 
 #[cfg(test)]
 mod tests {
+    use super::discover_ws_via_host_port;
     use super::should_restart_handler;
+    use super::should_stop_handler;
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    #[derive(Debug)]
+    struct TestError(&'static str);
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
 
     #[test]
     fn handler_restarts_after_repeated_errors() {
@@ -2299,4 +2569,141 @@ mod tests {
         assert!(!should_restart_handler(2));
         assert!(should_restart_handler(3));
     }
+
+    #[test]
+    fn handler_ignores_oneshot_cancellations() {
+        let mut consecutive_errors = 0u32;
+        for _ in 0..10 {
+            let should_stop = should_stop_handler(
+                "[test]",
+                Err(TestError("oneshot canceled")),
+                &mut consecutive_errors,
+            );
+            assert!(!should_stop);
+            assert_eq!(consecutive_errors, 0);
+        }
+        for _ in 0..10 {
+            let should_stop = should_stop_handler(
+                "[test]",
+                Err(TestError("oneshot error")),
+                &mut consecutive_errors,
+            );
+            assert!(!should_stop);
+            assert_eq!(consecutive_errors, 0);
+        }
+    }
+
+    const TEST_PROXY_WS_URL: &str = "ws://proxy.invalid/devtools/browser/proxy";
+    const TEST_TARGET_WS_URL: &str = "ws://target.invalid/devtools/browser/target";
+
+    fn spawn_json_version_server(
+        ws_url: &str,
+    ) -> (u16, Arc<AtomicBool>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind server");
+        listener
+            .set_nonblocking(true)
+            .expect("set non-blocking");
+        let port = listener.local_addr().expect("server addr").port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let ws_url = ws_url.to_string();
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !stop_thread.load(Ordering::Relaxed) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0u8; 1024];
+                        let _ = stream.read(&mut buffer);
+
+                        let body = format!(r#"{{"webSocketDebuggerUrl":"{ws_url}"}}"#);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (port, stop, handle)
+    }
+
+    #[test]
+    fn cdp_discovery_ignores_proxy_env_vars() {
+        let (proxy_port, proxy_stop, proxy_handle) =
+            spawn_json_version_server(TEST_PROXY_WS_URL);
+        let (target_port, target_stop, target_handle) =
+            spawn_json_version_server(TEST_TARGET_WS_URL);
+
+        let exe = std::env::current_exe().expect("current exe");
+        let proxy_url = format!("http://127.0.0.1:{proxy_port}");
+
+        let output = Command::new(exe)
+            .arg("--exact")
+            .arg("manager::tests::cdp_discovery_ignores_proxy_env_vars_child")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("CODE_BROWSER_TEST_TARGET_PORT", target_port.to_string())
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env("all_proxy", &proxy_url)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .expect("spawn child test");
+
+        proxy_stop.store(true, Ordering::Relaxed);
+        target_stop.store(true, Ordering::Relaxed);
+        let _ = proxy_handle.join();
+        let _ = target_handle.join();
+
+        if !output.status.success() {
+            panic!(
+                "child test failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn cdp_discovery_ignores_proxy_env_vars_child() {
+        let target_port: u16 = std::env::var("CODE_BROWSER_TEST_TARGET_PORT")
+            .expect("CODE_BROWSER_TEST_TARGET_PORT")
+            .parse()
+            .expect("valid port");
+
+        let url = format!("http://127.0.0.1:{target_port}/json/version");
+        let default_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("build default client");
+        let resp = default_client
+            .get(&url)
+            .send()
+            .await
+            .expect("default request");
+
+        let proxy_version: super::JsonVersion =
+            resp.json().await.expect("parse proxy json");
+        assert_eq!(proxy_version.web_socket_debugger_url, TEST_PROXY_WS_URL);
+
+        let discovered = discover_ws_via_host_port("127.0.0.1", target_port)
+            .await
+            .expect("discover ws url");
+        assert_eq!(discovered, TEST_TARGET_WS_URL);
+    }
+
 }

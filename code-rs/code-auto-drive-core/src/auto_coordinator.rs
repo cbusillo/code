@@ -15,6 +15,9 @@ use code_core::project_doc::read_auto_drive_docs;
 use code_core::protocol::SandboxPolicy;
 use code_core::slash_commands::get_enabled_agents;
 use code_core::{AuthManager, ModelClient, Prompt, ResponseEvent, TextFormat};
+use code_core::{RateLimitSwitchState, switch_active_account_on_rate_limit};
+use code_core::auth;
+use code_core::auth_accounts;
 use code_core::error::CodexErr;
 use code_common::model_presets::clamp_reasoning_effort_for_model;
 use code_protocol::models::{ContentItem, ReasoningItemContent, ResponseItem};
@@ -238,7 +241,7 @@ pub enum AutoCoordinatorEvent {
         replay_updates: u32,
     },
     CompactedHistory {
-        conversation: Vec<ResponseItem>,
+        conversation: Arc<[ResponseItem]>,
         show_notice: bool,
     },
     StopAck,
@@ -279,10 +282,10 @@ impl AutoCoordinatorHandle {
 
 #[derive(Debug)]
 pub enum AutoCoordinatorCommand {
-    UpdateConversation(Vec<ResponseItem>),
+    UpdateConversation(Arc<[ResponseItem]>),
     HandleUserPrompt {
         _prompt: String,
-        conversation: Vec<ResponseItem>,
+        conversation: Arc<[ResponseItem]>,
     },
     AckDecision { seq: u64 },
     Stop,
@@ -874,8 +877,8 @@ mod tests {
     #[test]
     fn compaction_fallback_stops_once_tokens_recorded() {
         assert!(!should_compact(
-            "gpt-5.1",
-            1,
+            "unknown-model",
+            0,
             0,
             MESSAGE_LIMIT_FALLBACK,
             true,
@@ -1190,10 +1193,11 @@ fn run_auto_loop(
         schema_features.include_goal_field = true;
     }
     let include_agents = schema_features.include_agents;
-    let mut pending_conversation = Some(filter_popular_commands(initial_conversation));
+    let mut pending_conversation =
+        Some(Arc::<[ResponseItem]>::from(filter_popular_commands(initial_conversation)));
     let mut decision_seq: u64 = 0;
     let mut pending_ack_seq: Option<u64> = None;
-    let mut queued_updates: VecDeque<Vec<ResponseItem>> = VecDeque::new();
+    let mut queued_updates: VecDeque<Arc<[ResponseItem]>> = VecDeque::new();
     if !derive_goal_from_history {
         if let Some(seed) = build_initial_planning_seed(&goal_text, include_agents) {
             let transcript_item = make_message("assistant", seed.response_json.clone());
@@ -1235,7 +1239,7 @@ fn run_auto_loop(
             break;
         }
 
-        let mut next_conversation: Option<Vec<ResponseItem>> = None;
+        let mut next_conversation: Option<Arc<[ResponseItem]>> = None;
 
         if let Some(conv) = pending_conversation.take() {
             if let Some(pending_seq) = pending_ack_seq {
@@ -1256,8 +1260,9 @@ fn run_auto_loop(
                 continue;
             }
 
+            let conv = conv.as_ref().to_vec();
             let mut conv = filter_popular_commands(conv);
-            match maybe_compact(
+            let compaction_result = maybe_compact(
                 &runtime,
                 client.as_ref(),
                 &event_tx,
@@ -1266,14 +1271,19 @@ fn run_auto_loop(
                 prev_compact_summary.as_deref(),
                 &active_model_slug,
                 &compact_prompt_text,
-            ) {
-                CompactionResult::Completed { summary_text } => {
-                    prev_compact_summary = summary_text;
-                }
-                CompactionResult::Skipped => {}
+            );
+            let conv = Arc::<[ResponseItem]>::from(conv);
+            if matches!(compaction_result, CompactionResult::Completed { .. }) {
+                event_tx.send(AutoCoordinatorEvent::CompactedHistory {
+                    conversation: Arc::clone(&conv),
+                    show_notice: true,
+                });
+            }
+            if let CompactionResult::Completed { summary_text } = compaction_result {
+                prev_compact_summary = summary_text;
             }
             let developer_intro = base_developer_intro.as_str();
-            let mut retry_conversation = Some(conv.clone());
+            let mut retry_conversation: Option<Vec<ResponseItem>> = None;
             let time_budget_message = time_budget.as_mut().and_then(|budget| budget.maybe_nudge());
             let time_budget_deadline = time_budget.as_ref().map(|budget| budget.deadline);
             let loop_warning = session_metrics.loop_detection_warning();
@@ -1287,7 +1297,7 @@ fn run_auto_loop(
                 time_budget_deadline,
                 loop_warning.as_deref(),
                 &schema,
-                conv,
+                Arc::clone(&conv),
                 auto_instructions.as_deref(),
                 &event_tx,
                 &cancel_token,
@@ -1309,6 +1319,13 @@ fn run_auto_loop(
                     coordinator_turns_seen = coordinator_turns_seen.saturating_add(1);
                     if let Some(usage) = token_usage.as_ref() {
                         session_metrics.record_turn(usage);
+                        emit_auto_drive_metrics(&event_tx, &session_metrics);
+                    } else {
+                        let estimated_prompt_tokens: u64 = conv
+                            .iter()
+                            .map(|item| estimate_item_tokens(item) as u64)
+                            .sum();
+                        session_metrics.record_turn_without_usage(estimated_prompt_tokens);
                         emit_auto_drive_metrics(&event_tx, &session_metrics);
                     }
                     active_model_slug = model_slug;
@@ -1430,9 +1447,9 @@ fn run_auto_loop(
                             if let Some(raw) = raw_output.as_ref() {
                                 // Assistant message should show the model's raw output so the UI sees the failed response.
                                 let assistant_msg = make_message("assistant", raw.clone());
-                                if let Some(conv) = retry_conversation.as_mut() {
-                                    conv.push(assistant_msg);
-                                }
+                                retry_conversation
+                                    .get_or_insert_with(|| conv.as_ref().to_vec())
+                                    .push(assistant_msg);
                                 already_shared_raw = true;
                             }
 
@@ -1461,7 +1478,9 @@ fn run_auto_loop(
                                 delta: message,
                                 summary_index: None,
                             });
-                            if let Some(conv) = retry_conversation.as_mut() {
+                            {
+                                let retry_vec =
+                                    retry_conversation.get_or_insert_with(|| conv.as_ref().to_vec());
                                 let mut developer_note = format!(
                                     "Previous coordinator response failed validation (attempt {attempt}/{MAX_DECISION_RECOVERY_ATTEMPTS}).\nError: {error}\nSchema: {schema_label}"
                                 );
@@ -1478,20 +1497,22 @@ fn run_auto_loop(
                                     developer_note.push_str("\n");
                                     developer_note.push_str(OVERLONG_MSG);
                                 }
-                                conv.push(make_message("developer", developer_note));
+                                retry_vec.push(make_message("developer", developer_note));
                             }
-                            if let Some(conv) = retry_conversation.as_ref() {
-                                // Keep the model and UI in sync with the full conversation, but avoid spamming a compaction notice.
-                                let _ = event_tx.send(AutoCoordinatorEvent::CompactedHistory {
-                                    conversation: conv.clone(),
-                                    show_notice: false,
-                                });
-                            }
+                            let retry_snapshot = retry_conversation
+                                .take()
+                                .map(Arc::<[ResponseItem]>::from)
+                                .unwrap_or_else(|| Arc::clone(&conv));
+                            // Keep the model and UI in sync with the full conversation, but avoid spamming a compaction notice.
+                            let _ = event_tx.send(AutoCoordinatorEvent::CompactedHistory {
+                                conversation: Arc::clone(&retry_snapshot),
+                                show_notice: false,
+                            });
                             // Show a user-facing action entry in the Auto Drive card (does not go to the model).
                             let _ = event_tx.send(AutoCoordinatorEvent::Action {
                                 message: "Retrying prompt generation after the previous response was too long to send to the CLI.".to_string(),
                             });
-                            pending_conversation = retry_conversation.take();
+                            pending_conversation = Some(retry_snapshot);
                             continue;
                         }
                         warn!(
@@ -1536,7 +1557,8 @@ fn run_auto_loop(
             }
             Ok(AutoCoordinatorCommand::HandleUserPrompt { _prompt, conversation }) => {
                 let developer_intro = base_developer_intro.as_str();
-                let mut updated_conversation = conversation.clone();
+                let base_conversation = conversation.as_ref().to_vec();
+                let conversation_snapshot = Arc::<[ResponseItem]>::from(base_conversation);
                 let schema = user_turn_schema();
                 let time_budget_message = time_budget.as_mut().and_then(|budget| budget.maybe_nudge());
                 let time_budget_deadline = time_budget.as_ref().map(|budget| budget.deadline);
@@ -1549,17 +1571,18 @@ fn run_auto_loop(
                     time_budget_message.as_deref(),
                     time_budget_deadline,
                     &schema,
-                    updated_conversation.clone(),
+                    Arc::clone(&conversation_snapshot),
                     auto_instructions.as_deref(),
                     &event_tx,
                     &cancel_token,
                     &active_model_slug,
                 ) {
                     Ok((user_response, cli_command)) => {
+                        let mut updated_conversation = conversation_snapshot.as_ref().to_vec();
                         if let Some(response_text) = user_response.clone() {
                             updated_conversation.push(make_message("assistant", response_text.clone()));
                         }
-                        pending_conversation = Some(updated_conversation);
+                        pending_conversation = Some(Arc::<[ResponseItem]>::from(updated_conversation));
                         event_tx.send(AutoCoordinatorEvent::UserReply {
                             user_response,
                             cli_command,
@@ -1593,7 +1616,8 @@ fn run_auto_loop(
             Ok(AutoCoordinatorCommand::UpdateConversation(conv)) => {
                 requests_completed = requests_completed.saturating_add(1);
                 consecutive_decision_failures = 0;
-                let filtered = filter_popular_commands(conv);
+                let conv = conv.as_ref().to_vec();
+                let filtered = Arc::<[ResponseItem]>::from(filter_popular_commands(conv));
                 if let Some(pending_seq) = pending_ack_seq {
                     tracing::debug!(target: "auto_drive::coordinator", pending_seq, "queueing update while awaiting ack");
                     session_metrics.record_replay();
@@ -1934,7 +1958,7 @@ fn request_coordinator_decision(
     time_budget_deadline: Option<Instant>,
     loop_warning: Option<&str>,
     schema: &Value,
-    conversation: Vec<ResponseItem>,
+    conversation: Arc<[ResponseItem]>,
     auto_instructions: Option<&str>,
     event_tx: &AutoCoordinatorEventSender,
     cancel_token: &CancellationToken,
@@ -1955,7 +1979,7 @@ fn request_coordinator_decision(
         time_budget_deadline,
         loop_warning,
         schema,
-        &conversation,
+        Arc::clone(&conversation),
         auto_instructions,
         event_tx,
         cancel_token,
@@ -1988,7 +2012,7 @@ fn request_decision(
     time_budget_deadline: Option<Instant>,
     loop_warning: Option<&str>,
     schema: &Value,
-    conversation: &[ResponseItem],
+    conversation: Arc<[ResponseItem]>,
     auto_instructions: Option<&str>,
     event_tx: &AutoCoordinatorEventSender,
     cancel_token: &CancellationToken,
@@ -2004,7 +2028,7 @@ fn request_decision(
         time_budget_deadline,
         loop_warning,
         schema,
-        conversation,
+        Arc::clone(&conversation),
         auto_instructions,
         event_tx,
         cancel_token,
@@ -2036,7 +2060,7 @@ fn request_decision(
                     time_budget_deadline,
                     loop_warning,
                     schema,
-                    conversation,
+                    Arc::clone(&conversation),
                     auto_instructions,
                     event_tx,
                     cancel_token,
@@ -2082,7 +2106,7 @@ fn request_user_turn_decision(
     time_budget_message: Option<&str>,
     time_budget_deadline: Option<Instant>,
     schema: &Value,
-    conversation: Vec<ResponseItem>,
+    conversation: Arc<[ResponseItem]>,
     auto_instructions: Option<&str>,
     event_tx: &AutoCoordinatorEventSender,
     cancel_token: &CancellationToken,
@@ -2099,7 +2123,7 @@ fn request_user_turn_decision(
         time_budget_deadline,
         None,
         schema,
-        &conversation,
+        Arc::clone(&conversation),
         auto_instructions,
         event_tx,
         cancel_token,
@@ -2121,7 +2145,7 @@ fn request_decision_with_model(
     time_budget_deadline: Option<Instant>,
     loop_warning: Option<&str>,
     schema: &Value,
-    conversation: &[ResponseItem],
+    conversation: Arc<[ResponseItem]>,
     auto_instructions: Option<&str>,
     event_tx: &AutoCoordinatorEventSender,
     cancel_token: &CancellationToken,
@@ -2132,12 +2156,15 @@ fn request_decision_with_model(
     let time_budget_message = time_budget_message.map(|text| text.to_string());
     let loop_warning = loop_warning.map(|text| text.to_string());
     let schema = schema.clone();
-    let conversation: Vec<ResponseItem> = conversation.to_vec();
+    let conversation = Arc::clone(&conversation);
     let auto_instructions = auto_instructions.map(|text| text.to_string());
     let coordinator_prompt = coordinator_prompt.map(|text| text.to_string());
     let tx = event_tx.clone();
     let cancel = cancel_token.clone();
-    let classify = |error: &anyhow::Error| classify_model_error(error);
+    let mut rate_limit_switch_state = RateLimitSwitchState::default();
+    let classify = |error: &anyhow::Error| {
+        classify_model_error_with_auto_switch(client, &mut rate_limit_switch_state, event_tx, error)
+    };
     let options = RetryOptions::with_defaults(retry_max_elapsed(time_budget_deadline));
 
     let result = runtime.block_on(async move {
@@ -2147,6 +2174,7 @@ fn request_decision_with_model(
                 let coordinator_prompt = coordinator_prompt.clone();
                 let time_budget_message = time_budget_message.clone();
                 let loop_warning = loop_warning.clone();
+                let conversation = Arc::clone(&conversation);
                 let prompt = build_user_turn_prompt(
                     &developer_intro,
                     &primary_goal,
@@ -2154,7 +2182,7 @@ fn request_decision_with_model(
                     time_budget_message.as_deref(),
                     loop_warning.as_deref(),
                     &schema,
-                    &conversation,
+                    conversation.as_ref(),
                     model_slug,
                     instructions.as_deref(),
                 );
@@ -2308,7 +2336,7 @@ fn build_user_turn_prompt(
     time_budget_message: Option<&str>,
     loop_warning: Option<&str>,
     schema: &Value,
-    conversation: &Vec<ResponseItem>,
+    conversation: &[ResponseItem],
     model_slug: &str,
     auto_instructions: Option<&str>,
 ) -> Prompt {
@@ -2494,6 +2522,104 @@ pub(crate) fn classify_model_error(error: &anyhow::Error) -> RetryDecision {
     }
 
     RetryDecision::Fatal(anyhow!(error.to_string()))
+}
+
+fn classify_model_error_with_auto_switch(
+    client: &ModelClient,
+    state: &mut RateLimitSwitchState,
+    event_tx: &AutoCoordinatorEventSender,
+    error: &anyhow::Error,
+) -> RetryDecision {
+    if let Some(code_err) = find_in_chain::<CodexErr>(error) {
+        if let CodexErr::UsageLimitReached(limit) = code_err {
+            if client.auto_switch_accounts_on_rate_limit()
+                && auth::read_code_api_key_from_env().is_none()
+            {
+                if let Some(auth_manager) = client.get_auth_manager() {
+                    let auth = auth_manager.auth();
+                    let current_account_id = auth
+                        .as_ref()
+                        .and_then(|current| current.get_account_id())
+                        .or_else(|| {
+                            auth_accounts::get_active_account_id(client.code_home())
+                                .ok()
+                                .flatten()
+                        });
+                    if let Some(current_account_id) = current_account_id {
+                        let now = Utc::now();
+                        let blocked_until = limit
+                            .resets_in_seconds
+                            .map(|seconds| now + chrono::Duration::seconds(seconds as i64));
+                        let current_auth_mode = auth
+                            .as_ref()
+                            .map(|current| current.mode)
+                            .or_else(|| {
+                                auth_accounts::find_account(
+                                    client.code_home(),
+                                    current_account_id.as_str(),
+                                )
+                                .ok()
+                                .flatten()
+                                .map(|account| account.mode)
+                            });
+                        if let Some(current_auth_mode) = current_auth_mode {
+                            match switch_active_account_on_rate_limit(
+                                client.code_home(),
+                                state,
+                                client.api_key_fallback_on_all_accounts_limited(),
+                                now,
+                                current_account_id.as_str(),
+                                current_auth_mode,
+                                blocked_until,
+                            ) {
+                                Ok(Some(next_account_id)) => {
+                                    let next_label = auth_accounts::find_account(
+                                        client.code_home(),
+                                        &next_account_id,
+                                    )
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|account| account.label)
+                                    .unwrap_or_else(|| next_account_id.clone());
+                                    tracing::info!(
+                                        from_account_id = %current_account_id,
+                                        to_account_id = %next_account_id,
+                                        reason = "usage_limit_reached",
+                                        "rate limit hit; auto-switching active account"
+                                    );
+                                    auth_manager.reload();
+                                    event_tx.send(AutoCoordinatorEvent::Action {
+                                        message: format!(
+                                            "Auto-switch: now using {next_label} due to usage limit."
+                                        ),
+                                    });
+                                    return RetryDecision::RateLimited {
+                                        wait_until: Instant::now(),
+                                        reason: "usage limit reached; switched accounts".to_string(),
+                                    };
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    warn!(
+                                        from_account_id = %current_account_id,
+                                        error = %err,
+                                        "failed to activate account after usage limit"
+                                    );
+                                }
+                            }
+                        } else {
+                            warn!(
+                                from_account_id = %current_account_id,
+                                "skipping account switch after usage limit: missing auth mode"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    classify_model_error(error)
 }
 
 fn classify_reqwest_error(err: &reqwest::Error) -> RetryDecision {
@@ -3136,14 +3262,14 @@ fn maybe_compact(
         .sum();
     let estimated_next = metrics.estimated_next_prompt_tokens();
     let message_count = conversation.len();
-    let has_recorded_turns = metrics.turn_count() > 0;
+    let has_recorded_usage = metrics.has_recorded_usage();
 
     if !should_compact(
         model_slug,
         transcript_tokens,
         estimated_next,
         message_count,
-        has_recorded_turns,
+        has_recorded_usage,
     ) {
         return CompactionResult::Skipped;
     }
@@ -3163,10 +3289,6 @@ fn maybe_compact(
             let removed = original_len.saturating_sub(compacted.len());
             let plural = if removed == 1 { "" } else { "s" };
             *conversation = compacted;
-            event_tx.send(AutoCoordinatorEvent::CompactedHistory {
-                conversation: conversation.clone(),
-                show_notice: true,
-            });
             event_tx.send(AutoCoordinatorEvent::Thinking {
                 delta: format!(
                     "Finished compacting history ({removed} message{plural} -> {} total).",
@@ -3214,7 +3336,28 @@ fn maybe_compact(
         });
     }
 
-    if apply_compaction(conversation, bounds, prev_summary, checkpoint.message).is_none() {
+    let summary_message = checkpoint.message;
+    let mut applied = apply_compaction(
+        conversation,
+        bounds,
+        prev_summary,
+        summary_message.clone(),
+    )
+    .is_some();
+    if !applied {
+        if let Some(retry_bounds) = compute_slice_bounds(conversation)
+            .filter(|retry_bounds| *retry_bounds != bounds)
+        {
+            applied = apply_compaction(
+                conversation,
+                retry_bounds,
+                prev_summary,
+                summary_message,
+            )
+            .is_some();
+        }
+    }
+    if !applied {
         warn!("[Auto coordinator] apply_compaction returned None; bounds={bounds:?}");
         event_tx.send(AutoCoordinatorEvent::Thinking {
             delta: "Failed to compact history because the conversation changed while applying the summary. Continuing without compaction.".to_string(),
@@ -3222,11 +3365,6 @@ fn maybe_compact(
         });
         return CompactionResult::Skipped;
     }
-
-    event_tx.send(AutoCoordinatorEvent::CompactedHistory {
-        conversation: conversation.clone(),
-        show_notice: true,
-    });
 
     let removed = slice.len();
     let total = conversation.len();
@@ -3258,12 +3396,13 @@ fn maybe_compact(
 /// * `session_total` - Total tokens used in the session so far
 /// * `estimated_next` - Estimated tokens for the next turn
 /// * `message_count` - Number of messages in the current conversation (fallback heuristic)
+/// * `has_recorded_usage` - Whether we have real token usage from the backend
 pub fn should_compact(
     model_slug: &str,
     transcript_tokens: u64,
     estimated_next: u64,
     message_count: usize,
-    has_recorded_turns: bool,
+    has_recorded_usage: bool,
 ) -> bool {
     // Get model family to look up model info
     let family = find_family_for_model(model_slug)
@@ -3290,7 +3429,7 @@ pub fn should_compact(
         }
     }
 
-    if has_recorded_turns {
+    if has_recorded_usage {
         return false;
     }
 

@@ -11,6 +11,7 @@ use crate::model_family::ModelFamily;
 use crate::plan_tool::PLAN_TOOL;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
+use code_protocol::dynamic_tools::DynamicToolSpec;
 use crate::tool_apply_patch::{
     create_apply_patch_freeform_tool, create_apply_patch_json_tool, ApplyPatchToolType,
 };
@@ -393,6 +394,99 @@ fn create_image_view_tool() -> OpenAiTool {
     })
 }
 
+fn create_request_user_input_tool() -> OpenAiTool {
+    let mut option_props = BTreeMap::new();
+    option_props.insert(
+        "label".to_string(),
+        JsonSchema::String {
+            description: Some("User-facing label (1-5 words).".to_string()),
+            allowed_values: None,
+        },
+    );
+    option_props.insert(
+        "description".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "One short sentence explaining impact/tradeoff if selected.".to_string(),
+            ),
+            allowed_values: None,
+        },
+    );
+
+    let options_schema = JsonSchema::Array {
+        description: Some(
+            "Optional 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; use isOther on the question to request a free form choice. If the question is free form in nature, please do not have any option.".to_string(),
+        ),
+        items: Box::new(JsonSchema::Object {
+            properties: option_props,
+            required: Some(vec!["label".to_string(), "description".to_string()]),
+            additional_properties: Some(false.into()),
+        }),
+    };
+
+    let mut question_props = BTreeMap::new();
+    question_props.insert(
+        "id".to_string(),
+        JsonSchema::String {
+            description: Some("Stable identifier for mapping answers (snake_case).".to_string()),
+            allowed_values: None,
+        },
+    );
+    question_props.insert(
+        "header".to_string(),
+        JsonSchema::String {
+            description: Some("Short header label shown in the UI (12 or fewer chars).".to_string()),
+            allowed_values: None,
+        },
+    );
+    question_props.insert(
+        "question".to_string(),
+        JsonSchema::String {
+            description: Some("Single-sentence prompt shown to the user.".to_string()),
+            allowed_values: None,
+        },
+    );
+    question_props.insert(
+        "isOther".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "True when this question should include a free-form \"Other\" option. Otherwise false."
+                    .to_string(),
+            ),
+        },
+    );
+    question_props.insert("options".to_string(), options_schema);
+
+    let questions_schema = JsonSchema::Array {
+        description: Some("Questions to show the user. Prefer 1 and do not exceed 3".to_string()),
+        items: Box::new(JsonSchema::Object {
+            properties: question_props,
+            required: Some(vec![
+                "id".to_string(),
+                "header".to_string(),
+                "question".to_string(),
+                "isOther".to_string(),
+            ]),
+            additional_properties: Some(false.into()),
+        }),
+    };
+
+    let mut properties = BTreeMap::new();
+    properties.insert("questions".to_string(), questions_schema);
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "request_user_input".to_string(),
+        description: "Request user input for one to three short questions and wait for the response."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["questions".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_shell_tool_for_sandbox(sandbox_policy: &SandboxPolicy) -> OpenAiTool {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -583,6 +677,25 @@ pub(crate) fn mcp_tool_to_openai_tool(
     })
 }
 
+fn dynamic_tool_to_openai_tool(
+    tool: &DynamicToolSpec,
+) -> Result<ResponsesApiTool, serde_json::Error> {
+    let input_schema = parse_tool_input_schema(&tool.input_schema)?;
+
+    Ok(ResponsesApiTool {
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        strict: false,
+        parameters: input_schema,
+    })
+}
+
+fn parse_tool_input_schema(input_schema: &JsonValue) -> Result<JsonSchema, serde_json::Error> {
+    let mut input_schema = input_schema.clone();
+    sanitize_json_schema(&mut input_schema);
+    serde_json::from_value::<JsonSchema>(input_schema)
+}
+
 /// Sanitize a JSON Schema (as serde_json::Value) so it can fit our limited
 /// JsonSchema enum. This function:
 /// - Ensures every schema object has a "type". If missing, infers it from
@@ -702,6 +815,7 @@ pub fn get_openai_tools(
     mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
     browser_enabled: bool,
     _agents_active: bool,
+    dynamic_tools: &[DynamicToolSpec],
 ) -> Vec<OpenAiTool> {
     let mut tools: Vec<OpenAiTool> = Vec::new();
 
@@ -741,6 +855,8 @@ pub fn get_openai_tools(
         tools.push(PLAN_TOOL.clone());
     }
 
+    tools.push(create_request_user_input_tool());
+
     tools.push(create_browser_tool(browser_enabled));
 
     // Add agent management tool for launching and monitoring asynchronous agents
@@ -776,6 +892,20 @@ pub fn get_openai_tools(
                 Ok(converted_tool) => tools.push(OpenAiTool::Function(converted_tool)),
                 Err(e) => {
                     tracing::error!("Failed to convert {name:?} MCP tool to OpenAI tool: {e:?}");
+                }
+            }
+        }
+    }
+
+    if !dynamic_tools.is_empty() {
+        for tool in dynamic_tools {
+            match dynamic_tool_to_openai_tool(tool) {
+                Ok(converted_tool) => tools.push(OpenAiTool::Function(converted_tool)),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to convert dynamic tool {:?} to OpenAI tool: {e:?}",
+                        tool.name
+                    );
                 }
             }
         }
@@ -1011,13 +1141,14 @@ mod tests {
             false,
         );
         apply_default_agent_models(&mut config);
-        let tools = get_openai_tools(&config, Some(HashMap::new()), false, false);
+        let tools = get_openai_tools(&config, Some(HashMap::new()), false, false, &[]);
 
         assert_eq_tool_names(
             &tools,
             &[
                 "local_shell",
                 "update_plan",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1044,13 +1175,14 @@ mod tests {
             false,
         );
         apply_default_agent_models(&mut config);
-        let tools = get_openai_tools(&config, Some(HashMap::new()), false, true);
+        let tools = get_openai_tools(&config, Some(HashMap::new()), false, true, &[]);
 
         assert_eq_tool_names(
             &tools,
             &[
                 "local_shell",
                 "update_plan",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1076,13 +1208,14 @@ mod tests {
             false,
         );
         apply_default_agent_models(&mut config);
-        let tools = get_openai_tools(&config, Some(HashMap::new()), false, false);
+        let tools = get_openai_tools(&config, Some(HashMap::new()), false, false, &[]);
 
         assert_eq_tool_names(
             &tools,
             &[
                 "shell",
                 "update_plan",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1146,12 +1279,14 @@ mod tests {
             )])),
             false,
             true,
+            &[],
         );
 
         assert_eq_tool_names(
             &tools,
             &[
                 "shell",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1164,7 +1299,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[8],
+            tools[9],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -1268,6 +1403,7 @@ mod tests {
             )])),
             false,
             true,
+            &[],
         );
 
         assert_eq_tool_names(
@@ -1275,6 +1411,7 @@ mod tests {
             &[
                 "shell",
                 "image_view",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1287,7 +1424,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[9],
+            tools[10],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -1393,6 +1530,7 @@ mod tests {
             )])),
             false,
             true,
+            &[],
         );
 
         assert_eq_tool_names(
@@ -1400,6 +1538,7 @@ mod tests {
             &[
                 "shell",
                 "image_view",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1412,7 +1551,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[9],
+            tools[10],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -1468,12 +1607,14 @@ mod tests {
             )])),
             false,
             true,
+            &[],
         );
 
         assert_eq_tool_names(
             &tools,
             &[
                 "shell",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1543,12 +1684,14 @@ mod tests {
             )])),
             false,
             true,
+            &[],
         );
 
         assert_eq_tool_names(
             &tools,
             &[
                 "shell",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1560,7 +1703,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[8],
+            tools[9],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -1616,12 +1759,14 @@ mod tests {
             )])),
             false,
             true,
+            &[],
         );
 
         assert_eq_tool_names(
             &tools,
             &[
                 "shell",
+                "request_user_input",
                 "browser",
                 "agent",
                 "wait",
@@ -1633,7 +1778,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[8],
+            tools[9],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {

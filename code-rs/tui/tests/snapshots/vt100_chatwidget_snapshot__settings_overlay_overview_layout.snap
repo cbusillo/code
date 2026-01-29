@@ -7,7 +7,7 @@ expression: output
  +------------------------------------------------------------------------------------------------+
  +Settings ▸ Overview-----------------------------------------------------------------------------+
  |                                                                                                |
- | › Model              Model: GPT-5.1-Codex-Max (Medium)                                         |
+ | › Model              Model: GPT-5.2-Codex (Medium)                                             |
  |   + Choose the language model used for new completions.                                        |
  |                                                                                                |
  |   Theme              Theme: Light - Photon (16-color) · Spinner: Diamond                       |
@@ -28,4 +28,4 @@ expression: output
  +------------------------------------------------------------------------------------------------+
  | What can I code for you today?                                                                 |
  +------------------------------------------------------------------------------------------------+
- Read Only  (Shift+Tab change)                                            Ctrl+G guide  •  API key
+ Read Only  (Shift+Tab change)                                           Ctrl+G editor  •  API key

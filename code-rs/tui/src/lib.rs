@@ -64,6 +64,7 @@ mod colors;
 pub mod card_theme;
 mod diff_render;
 mod exec_command;
+mod external_editor;
 mod file_search;
 pub mod gradient_background;
 mod get_git_diff;
@@ -130,6 +131,41 @@ pub mod test_backend;
 pub use cli::Cli;
 pub use self::markdown_render::render_markdown_text;
 pub use public_widgets::composer_input::{ComposerAction, ComposerInput};
+
+const TUI_LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const TUI_LOG_BACKUPS: usize = 2;
+
+fn rotate_log_file(log_dir: &Path, file_name: &str) {
+    let path = log_dir.join(file_name);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    if meta.len() <= TUI_LOG_MAX_BYTES {
+        return;
+    }
+    if TUI_LOG_BACKUPS == 0 {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+
+    let oldest = log_dir.join(format!("{file_name}.{TUI_LOG_BACKUPS}"));
+    let _ = std::fs::remove_file(&oldest);
+
+    if TUI_LOG_BACKUPS > 1 {
+        for idx in (1..TUI_LOG_BACKUPS).rev() {
+            let from = log_dir.join(format!("{file_name}.{idx}"));
+            let to = log_dir.join(format!("{file_name}.{}", idx + 1));
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+
+    let rotated = log_dir.join(format!("{file_name}.1"));
+    if std::fs::rename(&path, rotated).is_err() {
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+            let _ = file.set_len(0);
+        }
+    }
+}
 
 #[cfg(feature = "test-helpers")]
 pub mod test_helpers {
@@ -417,6 +453,7 @@ pub async fn run_main(
         tools_web_search_request: Some(cli.web_search),
         mcp_servers: None,
         experimental_client_tools: None,
+        dynamic_tools: None,
         compact_prompt_override: cli.compact_prompt_override.clone(),
         compact_prompt_override_file: cli.compact_prompt_file.clone(),
     };
@@ -442,6 +479,8 @@ pub async fn run_main(
             std::process::exit(1);
         }
     };
+
+    code_core::config::migrate_legacy_log_dirs(&code_home);
 
     let housekeeping_home = code_home.clone();
     let housekeeping_handle = thread_spawner::spawn_lightweight("housekeeping", move || {
@@ -604,51 +643,50 @@ pub async fn run_main(
 
     let log_dir = code_core::config::log_dir(&config)?;
     std::fs::create_dir_all(&log_dir)?;
-    // Open (or create) your log file, appending to it.
-    let mut log_file_opts = OpenOptions::new();
-    log_file_opts.create(true).append(true);
 
-    // Ensure the file is only readable and writable by the current user.
-    // Doing the equivalent to `chmod 600` on Windows is quite a bit more code
-    // and requires the Windows API crates, so we can reconsider that when
-    // Code CLI is officially supported on Windows.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        log_file_opts.mode(0o600);
-    }
+    let (env_layer, _log_guard) = if cli.debug {
+        rotate_log_file(&log_dir, "codex-tui.log");
+        // Open (or create) your log file, appending to it.
+        let mut log_file_opts = OpenOptions::new();
+        log_file_opts.create(true).append(true);
 
-    let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
+        // Ensure the file is only readable and writable by the current user.
+        // Doing the equivalent to `chmod 600` on Windows is quite a bit more code
+        // and requires the Windows API crates, so we can reconsider that when
+        // Code CLI is officially supported on Windows.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            log_file_opts.mode(0o600);
+        }
 
-    // Wrap file in non‑blocking writer.
-    let (log_writer, _log_guard) = non_blocking(log_file);
+        let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
 
-    let critical_dir = {
-        let mut path = code_home.clone();
-        path.push("logs");
-        path
+        // Wrap file in non‑blocking writer.
+        let (log_writer, log_guard) = non_blocking(log_file);
+
+        let default_filter = "code_core=info,code_tui=info,code_browser=warn,code_auto_drive_core=info";
+
+        // use RUST_LOG env var, defaulting based on debug flag.
+        let env_filter = || {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter))
+        };
+
+        let env_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_ansi(false)
+            .with_writer(log_writer)
+            .with_filter(env_filter());
+
+        (Some(env_layer), Some(log_guard))
+    } else {
+        (None, None)
     };
-    std::fs::create_dir_all(&critical_dir)?;
+
+    let critical_dir = log_dir.clone();
     let critical_appender = rolling::daily(&critical_dir, "critical.log");
     let (critical_writer, _critical_guard) = non_blocking(critical_appender);
-
-    let default_filter = if cli.debug {
-        "code_core=info,code_tui=info,code_browser=info,code_auto_drive_core=info"
-    } else {
-        "code_core=warn,code_tui=warn,code_browser=warn"
-    };
-
-    // use RUST_LOG env var, defaulting based on debug flag.
-    let env_filter = || {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter))
-    };
-
-    let env_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .with_ansi(false)
-        .with_writer(log_writer)
-        .with_filter(env_filter());
 
     let critical_layer = tracing_subscriber::fmt::layer()
         .with_target(false)

@@ -30,6 +30,7 @@ use tracing::warn;
 
 use crate::config_types::McpServerConfig;
 use crate::config_types::McpServerTransportConfig;
+use crate::protocol::{McpServerFailure, McpServerFailurePhase};
 
 /// Delimiter used to separate the server name from the tool name in a fully
 /// qualified tool name.
@@ -39,36 +40,83 @@ use crate::config_types::McpServerTransportConfig;
 const MCP_TOOL_NAME_DELIMITER: &str = "__";
 const MAX_TOOL_NAME_LENGTH: usize = 64;
 
+/// The Responses API requires tool names to match `^[a-zA-Z0-9_-]+$`.
+/// MCP server/tool names are user-controlled, so sanitize the fully-qualified
+/// name we expose to the model by replacing any disallowed character with `_`.
+fn sanitize_responses_api_tool_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sha1_hex(s: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(s.as_bytes());
+    let sha1 = hasher.finalize();
+    format!("{sha1:x}")
+}
+
+/// Append a deterministic SHA1 suffix while keeping the name within the maximum length.
+fn append_sha1_suffix(base: &str, raw: &str) -> String {
+    let sha1_str = sha1_hex(raw);
+    let prefix_len = MAX_TOOL_NAME_LENGTH.saturating_sub(sha1_str.len());
+    let prefix = if base.len() > prefix_len {
+        &base[..prefix_len]
+    } else {
+        base
+    };
+    format!("{prefix}{sha1_str}")
+}
+
 /// Default timeout for initializing MCP server & initially listing tools.
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Map that holds a startup error for every MCP server that could **not** be
-/// spawned successfully.
-pub type ClientStartErrors = HashMap<String, anyhow::Error>;
+/// Map that holds startup or tool-list errors for MCP servers.
+pub type ClientStartErrors = HashMap<String, McpServerFailure>;
 
 fn qualify_tools(tools: Vec<ToolInfo>) -> HashMap<String, ToolInfo> {
     let mut used_names = HashSet::new();
+    let mut seen_raw_names = HashSet::new();
     let mut qualified_tools = HashMap::new();
     for tool in tools {
-        let mut qualified_name = format!(
+        let qualified_name_raw = format!(
             "{}{}{}",
             tool.server_name, MCP_TOOL_NAME_DELIMITER, tool.tool_name
         );
+        if !seen_raw_names.insert(qualified_name_raw.clone()) {
+            warn!("skipping duplicated tool {}", qualified_name_raw);
+            continue;
+        }
+
+        // Start from a "pretty" name (sanitized), then deterministically disambiguate on
+        // collisions by appending a hash of the *raw* (unsanitized) qualified name. This
+        // ensures tools like `foo.bar` and `foo_bar` don't collapse to the same key.
+        let mut qualified_name = sanitize_responses_api_tool_name(&qualified_name_raw);
+
+        // Enforce length constraints early; use the raw name for the hash input so the
+        // output remains stable even when sanitization changes.
         if qualified_name.len() > MAX_TOOL_NAME_LENGTH {
-            let mut hasher = Sha1::new();
-            hasher.update(qualified_name.as_bytes());
-            let sha1 = hasher.finalize();
-            let sha1_str = format!("{sha1:x}");
-
-            // Truncate to make room for the hash suffix
-            let prefix_len = MAX_TOOL_NAME_LENGTH - sha1_str.len();
-
-            qualified_name = format!("{}{}", &qualified_name[..prefix_len], sha1_str);
+            qualified_name = append_sha1_suffix(&qualified_name, &qualified_name_raw);
         }
 
         if used_names.contains(&qualified_name) {
-            warn!("skipping duplicated tool {}", qualified_name);
-            continue;
+            let disambiguated_name = append_sha1_suffix(&qualified_name, &qualified_name_raw);
+            if used_names.contains(&disambiguated_name) {
+                warn!("skipping duplicated tool {}", disambiguated_name);
+                continue;
+            }
+            qualified_name = disambiguated_name;
         }
 
         used_names.insert(qualified_name.clone());
@@ -163,6 +211,8 @@ pub struct McpConnectionManager {
 
     /// Fully qualified tool name -> tool instance.
     tools: HashMap<String, ToolInfo>,
+    server_names: Vec<String>,
+    failures: HashMap<String, McpServerFailure>,
 }
 
 impl McpConnectionManager {
@@ -172,8 +222,8 @@ impl McpConnectionManager {
     ///   are human-readable server identifiers and *values* are the spawn
     ///   instructions.
     ///
-    /// Servers that fail to start are reported in `ClientStartErrors`: the
-    /// user should be informed about these errors.
+    /// Servers that fail to start or list tools are reported in `ClientStartErrors`:
+    /// the user should be informed about these errors.
     pub async fn new(
         mcp_servers: HashMap<String, McpServerConfig>,
         excluded_tools: HashSet<(String, String)>,
@@ -190,10 +240,13 @@ impl McpConnectionManager {
         for (server_name, cfg) in mcp_servers {
             // Validate server name before spawning
             if !is_valid_mcp_server_name(&server_name) {
-                let error = anyhow::anyhow!(
+                let message = format!(
                     "invalid server name '{server_name}': must match pattern ^[a-zA-Z0-9_-]+$"
                 );
-                errors.insert(server_name, error);
+                errors.insert(
+                    server_name,
+                    McpServerFailure { phase: McpServerFailurePhase::Start, message },
+                );
                 continue;
             }
 
@@ -291,7 +344,14 @@ impl McpConnectionManager {
                     );
                 }
                 Err(e) => {
-                    errors.insert(server_name, e);
+                    let message = format!("server '{server_name}': {e:#}");
+                    errors.insert(
+                        server_name,
+                        McpServerFailure {
+                            phase: McpServerFailurePhase::Start,
+                            message,
+                        },
+                    );
                 }
             }
         }
@@ -300,9 +360,15 @@ impl McpConnectionManager {
 
         let tools = qualify_tools(all_tools);
 
+        let mut server_names: Vec<String> = clients.keys().cloned().collect();
+        server_names.sort();
+        let failures = errors.clone();
+
         Ok((Self {
             clients: RwLock::new(clients),
             tools,
+            server_names,
+            failures,
         }, errors))
     }
 
@@ -313,6 +379,31 @@ impl McpConnectionManager {
             .iter()
             .map(|(name, tool)| (name.clone(), tool.tool.clone()))
             .collect()
+    }
+
+    pub fn list_tools_by_server(&self) -> HashMap<String, Vec<String>> {
+        let mut tools_by_server: HashMap<String, Vec<String>> = HashMap::new();
+        for tool in self.tools.values() {
+            tools_by_server
+                .entry(tool.server_name.clone())
+                .or_default()
+                .push(tool.tool_name.clone());
+        }
+
+        for server_name in &self.server_names {
+            tools_by_server.entry(server_name.clone()).or_default();
+        }
+
+        for tools in tools_by_server.values_mut() {
+            tools.sort();
+            tools.dedup();
+        }
+
+        tools_by_server
+    }
+
+    pub fn list_server_failures(&self) -> HashMap<String, McpServerFailure> {
+        self.failures.clone()
     }
 
     /// Invoke the tool indicated by the (server, tool) pair.
@@ -412,7 +503,13 @@ async fn list_all_tools(
                 warn!(
                     "Failed to list tools for MCP server '{server_name}': {err:#?}"
                 );
-                errors.insert(server_name, err.into());
+                errors.insert(
+                    server_name,
+                    McpServerFailure {
+                        phase: McpServerFailurePhase::ListTools,
+                        message: format!("{err:#}"),
+                    },
+                );
             }
         }
     }
@@ -520,6 +617,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_qualify_tools_sanitizes_invalid_characters() {
+        let tools = vec![create_test_tool("server.one", "tool.two")];
+
+        let qualified_tools = qualify_tools(tools);
+
+        assert_eq!(qualified_tools.len(), 1);
+        let (qualified_name, tool) = qualified_tools.into_iter().next().expect("one tool");
+        assert_eq!(qualified_name, "server_one__tool_two");
+
+        // The key is sanitized for OpenAI, but we keep original parts for the actual MCP call.
+        assert_eq!(tool.server_name, "server.one");
+        assert_eq!(tool.tool_name, "tool.two");
+
+        assert!(
+            qualified_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "qualified name must be Responses API compatible: {qualified_name:?}"
+        );
+    }
+
     #[tokio::test]
     async fn stdio_spawn_error_mentions_server_and_command() {
         let mut servers = HashMap::new();
@@ -543,7 +662,7 @@ mod tests {
         let err = errors
             .get("context7-mcp")
             .expect("missing executable should be reported under server name");
-        let msg = format!("{err:#}");
+        let msg = err.message.as_str();
 
         assert!(msg.contains("context7-mcp"), "error should mention the server name");
         assert!(

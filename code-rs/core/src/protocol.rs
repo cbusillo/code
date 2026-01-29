@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
+use serde_json::Value;
 use strum_macros::Display;
 use uuid::Uuid;
 
@@ -26,6 +27,9 @@ use crate::model_provider_info::ModelProviderInfo;
 use crate::client_common::TextFormat;
 use crate::parse_command::ParsedCommand;
 use crate::plan_tool::UpdatePlanArgs;
+use code_protocol::dynamic_tools::DynamicToolCallRequest;
+use code_protocol::dynamic_tools::DynamicToolResponse;
+use code_protocol::dynamic_tools::DynamicToolSpec;
 
 // Re-export review types from the shared protocol crate so callers can use
 // `code_core::protocol::ReviewFinding` and friends.
@@ -38,6 +42,9 @@ pub use code_protocol::protocol::GitInfo;
 pub use code_protocol::protocol::RolloutItem;
 pub use code_protocol::protocol::RolloutLine;
 pub use code_protocol::protocol::ConversationPathResponseEvent;
+pub use code_protocol::protocol::McpListToolsResponseEvent;
+pub use code_protocol::protocol::McpServerFailure;
+pub use code_protocol::protocol::McpServerFailurePhase;
 pub use code_protocol::protocol::ListCustomPromptsResponseEvent;
 pub use code_protocol::protocol::ListSkillsResponseEvent;
 pub use code_protocol::protocol::ViewImageToolCallEvent;
@@ -45,6 +52,8 @@ pub use code_protocol::skills::Skill;
 pub use code_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
 pub use code_protocol::protocol::ExitedReviewModeEvent;
 pub use code_protocol::protocol::ReviewSnapshotInfo;
+pub use code_protocol::request_user_input::RequestUserInputEvent;
+pub use code_protocol::request_user_input::RequestUserInputResponse;
 
 /// Submission Queue Entry - requests from user
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -132,6 +141,10 @@ pub enum Op {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         demo_developer_message: Option<String>,
+
+        /// Dynamic tools to include for this session.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dynamic_tools: Vec<DynamicToolSpec>,
     },
 
     /// Abort current task.
@@ -152,6 +165,9 @@ pub enum Op {
     UserInput {
         /// User input items, see `InputItem`
         items: Vec<InputItem>,
+        /// Optional JSON Schema used to constrain the final assistant message for this turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_output_json_schema: Option<Value>,
     },
 
     /// Queue user input to be appended to the next model request without
@@ -189,6 +205,23 @@ pub enum Op {
         id: String,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
+    },
+
+    /// Resolve a request_user_input tool call.
+    #[serde(rename = "user_input_answer", alias = "request_user_input_response")]
+    UserInputAnswer {
+        /// Turn id for the in-flight request.
+        id: String,
+        /// User-provided answers.
+        response: RequestUserInputResponse,
+    },
+
+    /// Resolve a dynamic tool call request.
+    DynamicToolResponse {
+        /// Call id for the in-flight request.
+        id: String,
+        /// Tool output payload.
+        response: DynamicToolResponse,
     },
 
     /// Update a specific validation tool toggle for the session.
@@ -230,6 +263,10 @@ pub enum Op {
 
     /// Request a single history entry identified by `log_id` + `offset`.
     GetHistoryEntryRequest { offset: usize, log_id: u64 },
+
+    /// Request the list of MCP tools available across configured servers.
+    /// Reply is delivered via `EventMsg::McpListToolsResponse`.
+    ListMcpTools,
 
     /// Request the list of available custom prompts.
     /// Reply is delivered via `EventMsg::ListCustomPromptsResponse`.
@@ -771,6 +808,7 @@ pub enum EventMsg {
 
     /// Custom tool call events for non-MCP tools (browser, agent, etc)
     CustomToolCallBegin(CustomToolCallBeginEvent),
+    CustomToolCallUpdate(CustomToolCallUpdateEvent),
     CustomToolCallEnd(CustomToolCallEndEvent),
 
     /// Notification that the server is about to execute a command.
@@ -782,6 +820,10 @@ pub enum EventMsg {
     ExecCommandEnd(ExecCommandEndEvent),
 
     ExecApprovalRequest(ExecApprovalRequestEvent),
+
+    RequestUserInput(RequestUserInputEvent),
+
+    DynamicToolCallRequest(DynamicToolCallRequest),
 
     ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent),
 
@@ -798,6 +840,9 @@ pub enum EventMsg {
 
     /// Response to GetHistoryEntryRequest.
     GetHistoryEntryResponse(GetHistoryEntryResponseEvent),
+
+    /// List of MCP tools available to the agent.
+    McpListToolsResponse(McpListToolsResponseEvent),
 
     /// List of custom prompts available to the agent.
     ListCustomPromptsResponse(ListCustomPromptsResponseEvent),
@@ -1116,6 +1161,16 @@ pub struct CustomToolCallBeginEvent {
     /// Identifier so this can be paired with the CustomToolCallEnd event.
     pub call_id: String,
     /// Name of the tool (e.g., "browser_navigate", "agent")
+    pub tool_name: String,
+    /// Parameters passed to the tool as JSON
+    pub parameters: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CustomToolCallUpdateEvent {
+    /// Identifier for the corresponding CustomToolCallBegin that is still running.
+    pub call_id: String,
+    /// Name of the tool
     pub tool_name: String,
     /// Parameters passed to the tool as JSON
     pub parameters: Option<serde_json::Value>,

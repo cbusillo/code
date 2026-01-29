@@ -378,8 +378,7 @@ struct OrderReplayArgs {
     /// Path to a response.json captured under ~/.code/debug_logs/*_response.json
     /// (legacy ~/.codex/debug_logs/ is still read).
     response_json: std::path::PathBuf,
-    /// Path to codex-tui.log (typically ~/.code/log/codex-tui.log; legacy
-    /// ~/.codex/log/codex-tui.log is still read).
+    /// Path to codex-tui.log (typically ~/.code/debug_logs/codex-tui.log).
     tui_log: std::path::PathBuf,
 }
 
@@ -416,6 +415,25 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
 
     interactive.finalize_defaults();
     interactive.demo_developer_message = demo_developer_message.clone();
+
+    // The TUI already runs housekeeping. For headless `exec` sessions, kick off
+    // housekeeping early so stale worktrees/branches don't accumulate.
+    let housekeeping_handle = match &subcommand {
+        Some(Subcommand::Exec(_)) | Some(Subcommand::Auto(_)) => {
+            match code_core::config::find_code_home() {
+                Ok(code_home) => Some(std::thread::spawn(move || {
+                    if let Err(err) = code_core::run_housekeeping_if_due(&code_home) {
+                        tracing::warn!("code home housekeeping failed: {err}");
+                    }
+                })),
+                Err(err) => {
+                    tracing::warn!("failed to resolve code home for housekeeping: {err}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
     match subcommand {
         None => {
@@ -611,6 +629,10 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
             );
             run_llm(llm_cli).await?;
         }
+    }
+
+    if let Some(handle) = housekeeping_handle {
+        let _ = handle.join();
     }
 
     Ok(())

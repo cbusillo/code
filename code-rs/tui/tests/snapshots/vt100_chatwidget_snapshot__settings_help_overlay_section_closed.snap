@@ -9,7 +9,7 @@ expression: section_closed
  |                                                                                                |
  | ›  Model              + Select Model & Reasoning --------------------------------------------+ |
  |    Theme              |                                                                      | |
- |    Updates            |  Current model: GPT-5.1-Codex-Max                                    | |
+ |    Updates            |  Current model: GPT-5.2-Codex                                        | |
  |    Accounts           |  Reasoning effort: Medium                                            | |
  |    Agents             |                                                                      | |
  |    Prompts            |  GPT-5.2                                                             | |
@@ -28,4 +28,4 @@ expression: section_closed
  +------------------------------------------------------------------------------------------------+
  | What can I code for you today?                                                                 |
  +------------------------------------------------------------------------------------------------+
- Read Only  (Shift+Tab change)                                            Ctrl+G guide  •  API key
+ Read Only  (Shift+Tab change)                                           Ctrl+G editor  •  API key

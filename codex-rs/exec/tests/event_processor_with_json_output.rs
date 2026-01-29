@@ -1,6 +1,10 @@
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningEvent;
+use codex_core::protocol::AgentStatus;
 use codex_core::protocol::AskForApproval;
+use codex_core::protocol::CollabAgentSpawnBeginEvent;
+use codex_core::protocol::CollabAgentSpawnEndEvent;
+use codex_core::protocol::CollabWaitingEndEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
@@ -19,6 +23,11 @@ use codex_core::protocol::WarningEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_exec::event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use codex_exec::exec_events::AgentMessageItem;
+use codex_exec::exec_events::CollabAgentState;
+use codex_exec::exec_events::CollabAgentStatus;
+use codex_exec::exec_events::CollabTool;
+use codex_exec::exec_events::CollabToolCallItem;
+use codex_exec::exec_events::CollabToolCallStatus;
 use codex_exec::exec_events::CommandExecutionItem;
 use codex_exec::exec_events::CommandExecutionStatus;
 use codex_exec::exec_events::ErrorItem;
@@ -44,6 +53,7 @@ use codex_exec::exec_events::TurnFailedEvent;
 use codex_exec::exec_events::TurnStartedEvent;
 use codex_exec::exec_events::Usage;
 use codex_exec::exec_events::WebSearchItem;
+use codex_protocol::ThreadId;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -69,13 +79,13 @@ fn event(id: &str, msg: EventMsg) -> Event {
 fn session_configured_produces_thread_started_event() {
     let mut ep = EventProcessorWithJsonOutput::new(None);
     let session_id =
-        codex_protocol::ConversationId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")
-            .unwrap();
+        codex_protocol::ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
     let rollout_path = PathBuf::from("/tmp/rollout.json");
     let ev = event(
         "e1",
         EventMsg::SessionConfigured(SessionConfiguredEvent {
             session_id,
+            forked_from_id: None,
             model: "codex-mini-latest".to_string(),
             model_provider_id: "test-provider".to_string(),
             approval_policy: AskForApproval::Never,
@@ -85,7 +95,7 @@ fn session_configured_produces_thread_started_event() {
             history_log_id: 0,
             history_entry_count: 0,
             initial_messages: None,
-            rollout_path,
+            rollout_path: Some(rollout_path),
         }),
     );
     let out = ep.collect_thread_events(&ev);
@@ -102,7 +112,7 @@ fn task_started_produces_turn_started_event() {
     let mut ep = EventProcessorWithJsonOutput::new(None);
     let out = ep.collect_thread_events(&event(
         "t1",
-        EventMsg::TaskStarted(codex_core::protocol::TaskStartedEvent {
+        EventMsg::TurnStarted(codex_core::protocol::TurnStartedEvent {
             model_context_window: Some(32_000),
         }),
     ));
@@ -218,7 +228,7 @@ fn plan_update_emits_todo_list_started_updated_and_completed() {
     // Task completes => item.completed (same id, latest state)
     let complete = event(
         "p3",
-        EventMsg::TaskComplete(codex_core::protocol::TaskCompleteEvent {
+        EventMsg::TurnComplete(codex_core::protocol::TurnCompleteEvent {
             last_agent_message: None,
         }),
     );
@@ -445,6 +455,135 @@ fn mcp_tool_call_defaults_arguments_and_preserves_structured_content() {
 }
 
 #[test]
+fn collab_spawn_begin_and_end_emit_item_events() {
+    let mut ep = EventProcessorWithJsonOutput::new(None);
+    let sender_thread_id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+    let new_thread_id = ThreadId::from_string("9e107d9d-372b-4b8c-a2a4-1d9bb3fce0c1").unwrap();
+    let prompt = "draft a plan".to_string();
+
+    let begin = event(
+        "c1",
+        EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
+            call_id: "call-10".to_string(),
+            sender_thread_id,
+            prompt: prompt.clone(),
+        }),
+    );
+    let begin_events = ep.collect_thread_events(&begin);
+    assert_eq!(
+        begin_events,
+        vec![ThreadEvent::ItemStarted(ItemStartedEvent {
+            item: ThreadItem {
+                id: "item_0".to_string(),
+                details: ThreadItemDetails::CollabToolCall(CollabToolCallItem {
+                    tool: CollabTool::SpawnAgent,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: Vec::new(),
+                    prompt: Some(prompt.clone()),
+                    agents_states: std::collections::HashMap::new(),
+                    status: CollabToolCallStatus::InProgress,
+                }),
+            },
+        })]
+    );
+
+    let end = event(
+        "c2",
+        EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "call-10".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(new_thread_id),
+            prompt: prompt.clone(),
+            status: AgentStatus::Running,
+        }),
+    );
+    let end_events = ep.collect_thread_events(&end);
+    assert_eq!(
+        end_events,
+        vec![ThreadEvent::ItemCompleted(ItemCompletedEvent {
+            item: ThreadItem {
+                id: "item_0".to_string(),
+                details: ThreadItemDetails::CollabToolCall(CollabToolCallItem {
+                    tool: CollabTool::SpawnAgent,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: vec![new_thread_id.to_string()],
+                    prompt: Some(prompt),
+                    agents_states: [(
+                        new_thread_id.to_string(),
+                        CollabAgentState {
+                            status: CollabAgentStatus::Running,
+                            message: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    status: CollabToolCallStatus::Completed,
+                }),
+            },
+        })]
+    );
+}
+
+#[test]
+fn collab_wait_end_without_begin_synthesizes_failed_item() {
+    let mut ep = EventProcessorWithJsonOutput::new(None);
+    let sender_thread_id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+    let running_thread_id = ThreadId::from_string("3f76d2a0-943e-4f43-8a38-b289c9c6c3d1").unwrap();
+    let failed_thread_id = ThreadId::from_string("c1dfd96e-1f0c-4f26-9b4f-1aa02c2d3c4d").unwrap();
+    let mut receiver_thread_ids = vec![running_thread_id.to_string(), failed_thread_id.to_string()];
+    receiver_thread_ids.sort();
+    let mut statuses = std::collections::HashMap::new();
+    statuses.insert(
+        running_thread_id,
+        AgentStatus::Completed(Some("done".to_string())),
+    );
+    statuses.insert(failed_thread_id, AgentStatus::Errored("boom".to_string()));
+
+    let end = event(
+        "c3",
+        EventMsg::CollabWaitingEnd(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-11".to_string(),
+            statuses: statuses.clone(),
+        }),
+    );
+    let events = ep.collect_thread_events(&end);
+    assert_eq!(
+        events,
+        vec![ThreadEvent::ItemCompleted(ItemCompletedEvent {
+            item: ThreadItem {
+                id: "item_0".to_string(),
+                details: ThreadItemDetails::CollabToolCall(CollabToolCallItem {
+                    tool: CollabTool::Wait,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids,
+                    prompt: None,
+                    agents_states: [
+                        (
+                            running_thread_id.to_string(),
+                            CollabAgentState {
+                                status: CollabAgentStatus::Completed,
+                                message: Some("done".to_string()),
+                            },
+                        ),
+                        (
+                            failed_thread_id.to_string(),
+                            CollabAgentState {
+                                status: CollabAgentStatus::Errored,
+                                message: Some("boom".to_string()),
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    status: CollabToolCallStatus::Failed,
+                }),
+            },
+        })]
+    );
+}
+
+#[test]
 fn plan_update_after_complete_starts_new_todo_list_with_new_id() {
     let mut ep = EventProcessorWithJsonOutput::new(None);
 
@@ -462,7 +601,7 @@ fn plan_update_after_complete_starts_new_todo_list_with_new_id() {
     let _ = ep.collect_thread_events(&start);
     let complete = event(
         "t2",
-        EventMsg::TaskComplete(codex_core::protocol::TaskCompleteEvent {
+        EventMsg::TurnComplete(codex_core::protocol::TurnCompleteEvent {
             last_agent_message: None,
         }),
     );
@@ -614,7 +753,7 @@ fn error_followed_by_task_complete_produces_turn_failed() {
 
     let complete_event = event(
         "e2",
-        EventMsg::TaskComplete(codex_core::protocol::TaskCompleteEvent {
+        EventMsg::TurnComplete(codex_core::protocol::TurnCompleteEvent {
             last_agent_message: None,
         }),
     );
@@ -1058,10 +1197,10 @@ fn task_complete_produces_turn_completed_with_usage() {
     );
     assert!(ep.collect_thread_events(&token_count_event).is_empty());
 
-    // Then TaskComplete should produce turn.completed with the captured usage.
+    // Then TurnComplete should produce turn.completed with the captured usage.
     let complete_event = event(
         "e2",
-        EventMsg::TaskComplete(codex_core::protocol::TaskCompleteEvent {
+        EventMsg::TurnComplete(codex_core::protocol::TurnCompleteEvent {
             last_agent_message: Some("done".to_string()),
         }),
     );

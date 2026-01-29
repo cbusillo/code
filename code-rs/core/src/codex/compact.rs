@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::AgentTask;
+use super::streaming::AgentTask;
 use super::Session;
 use super::compact_remote;
 use super::TurnContext;
-use super::get_last_assistant_message_from_turn;
+use super::streaming::get_last_assistant_message_from_turn;
 use crate::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::environment_context::EnvironmentContext;
@@ -42,6 +42,7 @@ const COMPACT_TOOL_ARGS_MAX_BYTES: usize = 4 * 1024;
 const COMPACT_TOOL_OUTPUT_MAX_BYTES: usize = 4 * 1024;
 const COMPACT_IMAGE_URL_MAX_BYTES: usize = 512;
 const MAX_COMPACTION_SNIPPETS: usize = 12;
+const COMPACT_STREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Determine whether to use remote compaction (ChatGPT-based) or local compaction.
 ///
@@ -799,26 +800,38 @@ async fn drain_to_completed(
     prompt: &Prompt,
 ) -> CodexResult<()> {
     let mut stream = turn_context.client.clone().stream(prompt).await?;
-    loop {
-        let maybe_event = stream.next().await;
-        let Some(event) = maybe_event else {
-            return Err(CodexErr::Stream(
-                "stream closed before response.completed".into(),
-                None,
-                None,
-            ));
-        };
-        match event {
-            Ok(ResponseEvent::OutputItemDone { item, .. }) => {
-                let mut state = sess.state.lock().unwrap();
-                state.history.record_items(std::slice::from_ref(&item));
+    let result = tokio::time::timeout(COMPACT_STREAM_TIMEOUT, async {
+        loop {
+            let maybe_event = stream.next().await;
+            let Some(event) = maybe_event else {
+                return Err(CodexErr::Stream(
+                    "stream closed before response.completed".into(),
+                    None,
+                    None,
+                ));
+            };
+            match event {
+                Ok(ResponseEvent::OutputItemDone { item, .. }) => {
+                    let mut state = sess.state.lock().unwrap();
+                    state.history.record_items(std::slice::from_ref(&item));
+                }
+                Ok(ResponseEvent::Completed { .. }) => {
+                    return Ok(());
+                }
+                Ok(_) => continue,
+                Err(e) => return Err(e),
             }
-            Ok(ResponseEvent::Completed { .. }) => {
-                return Ok(());
-            }
-            Ok(_) => continue,
-            Err(e) => return Err(e),
         }
+    })
+    .await;
+
+    match result {
+        Ok(res) => res,
+        Err(_) => Err(CodexErr::Stream(
+            "compaction stream timed out".into(),
+            None,
+            None,
+        )),
     }
 }
 
@@ -972,7 +985,8 @@ mod tests {
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
-                    text: "<user_instructions>do things</user_instructions>".to_string(),
+                    text: "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\ndo things\n</INSTRUCTIONS>"
+                        .to_string(),
                 }],
             },
             ResponseItem::Message {
@@ -1070,13 +1084,14 @@ mod tests {
     #[test]
     fn build_emergency_compacted_history_creates_minimal_history() {
         let initial_context = vec![
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "<user_instructions>test</user_instructions>".to_string(),
-                }],
-            },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\ntest\n</INSTRUCTIONS>"
+                            .to_string(),
+                    }],
+                },
             ResponseItem::Message {
                 id: None,
                 role: "user".to_string(),

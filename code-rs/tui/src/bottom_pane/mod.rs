@@ -62,6 +62,7 @@ mod update_settings_view;
 mod undo_timeline_view;
 mod notifications_settings_view;
 mod settings_overlay;
+mod request_user_input_view;
 pub(crate) use settings_overlay::SettingsSection;
 pub(crate) mod review_settings_view;
 pub mod settings_panel;
@@ -107,6 +108,7 @@ pub(crate) use mcp_settings_view::McpSettingsView;
 pub(crate) use theme_selection_view::ThemeSelectionView;
 use verbosity_selection_view::VerbositySelectionView;
 pub(crate) use undo_timeline_view::{UndoTimelineEntry, UndoTimelineEntryKind, UndoTimelineView};
+pub(crate) use request_user_input_view::RequestUserInputView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveViewKind {
@@ -358,9 +360,10 @@ impl BottomPane<'_> {
                 x: area.x + horizontal_padding,
                 y: area.y + y_offset,
                 width: area.width.saturating_sub(horizontal_padding * 2),
-                height: (area.height.saturating_sub(y_offset))
-                    - BottomPane::BOTTOM_PAD_LINES
+                height: (area.height.saturating_sub(y_offset)).saturating_sub(
+                    BottomPane::BOTTOM_PAD_LINES
                         .min((area.height.saturating_sub(y_offset)).saturating_sub(1)),
+                ),
             };
             self.composer.cursor_pos(composer_rect)
         }
@@ -511,6 +514,11 @@ impl BottomPane<'_> {
 
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.composer.insert_str(text);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_composer_text(&mut self, text: String) {
+        self.composer.set_text_content(text);
         self.request_redraw();
     }
 
@@ -795,6 +803,29 @@ impl BottomPane<'_> {
         self.active_view_kind = ActiveViewKind::Other;
         self.status_view_active = false;
         self.request_redraw();
+    }
+
+    pub(crate) fn show_request_user_input(&mut self, view: RequestUserInputView) {
+        self.active_view = Some(Box::new(view));
+        self.active_view_kind = ActiveViewKind::Other;
+        self.status_view_active = false;
+        self.request_redraw();
+    }
+
+    pub(crate) fn close_request_user_input_view(&mut self) {
+        let should_close = self
+            .active_view
+            .as_ref()
+            .and_then(|view| view.as_any())
+            .is_some_and(|any| any.is::<RequestUserInputView>());
+        if !should_close {
+            return;
+        }
+
+        self.active_view = None;
+        self.active_view_kind = ActiveViewKind::None;
+        self.set_standard_terminal_hint(None);
+        self.status_view_active = false;
     }
 
     /// Show a generic list selection popup with items and actions.
@@ -1220,8 +1251,10 @@ fn compute_composer_rect(area: Rect, top_spacer_enabled: bool) -> Rect {
     if top_spacer_enabled {
         y_offset = y_offset.saturating_add(1);
     }
-    let height = (area.height - y_offset)
-        - BottomPane::BOTTOM_PAD_LINES.min((area.height - y_offset).saturating_sub(1));
+    let available = area.height.saturating_sub(y_offset);
+    let height = available.saturating_sub(
+        BottomPane::BOTTOM_PAD_LINES.min(available.saturating_sub(1)),
+    );
     Rect {
         x: area.x + horizontal_padding,
         y: area.y + y_offset,

@@ -591,7 +591,9 @@ fn exec_interrupts_flush_when_stream_idles() {
     });
     harness.flush_into_widget();
     // Drain any pending commits so the stream is idle but still marked active.
-    harness.drive_commit_tick();
+    for _ in 0..3 {
+        harness.drive_commit_tick();
+    }
 
     // Queue an Exec begin; it should not stay deferred once the stream is idle.
     harness.handle_event(Event {
@@ -613,11 +615,9 @@ fn exec_interrupts_flush_when_stream_idles() {
     std::thread::sleep(Duration::from_millis(200));
     harness.flush_into_widget();
 
-    let output = render_chat_widget_to_vt100(&mut harness, 80, 12);
     assert!(
-        output.contains("Thinking through the next steps"),
-        "stream flush should still render the latest output:\n{}",
-        output
+        harness.running_exec_call_ids().contains(&call_id),
+        "exec begin should flush once the stream is idle"
     );
 }
 
@@ -668,12 +668,18 @@ fn queued_exec_end_flushes_after_stream_clears() {
     harness.force_stream_clear();
 
     // Give the flush timers enough headroom under nextest parallelism.
-    std::thread::sleep(Duration::from_millis(400));
-    harness.flush_into_widget();
-    std::thread::sleep(Duration::from_millis(200));
-    harness.flush_into_widget();
-
-    let output = render_chat_widget_to_vt100(&mut harness, 80, 14);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let output = loop {
+        std::thread::sleep(Duration::from_millis(100));
+        harness.flush_into_widget();
+        let output = render_chat_widget_to_vt100(&mut harness, 80, 14);
+        if output.contains("queued") && !output.contains("Running...") {
+            break output;
+        }
+        if Instant::now() >= deadline {
+            break output;
+        }
+    };
     assert!(
         output.contains("queued"),
         "exec output should render after the deferred end is delivered:\n{}",

@@ -1,6 +1,8 @@
 use assert_cmd::Command as AssertCommand;
 use codex_core::RolloutRecorder;
+use codex_core::auth::CODEX_API_KEY_ENV_VAR;
 use codex_core::protocol::GitInfo;
+use codex_utils_cargo_bin::find_resource;
 use core_test_support::fs_wait;
 use core_test_support::skip_if_no_network;
 use std::time::Duration;
@@ -11,6 +13,16 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+fn repo_root() -> std::path::PathBuf {
+    #[expect(clippy::expect_used)]
+    find_resource!(".").expect("failed to resolve repo root")
+}
+
+fn cli_responses_fixture() -> std::path::PathBuf {
+    #[expect(clippy::expect_used)]
+    find_resource!("tests/cli_responses_fixture.sse").expect("failed to resolve fixture path")
+}
 
 /// Tests streaming chat completions through the CLI using a mock server.
 /// This test:
@@ -23,6 +35,7 @@ async fn chat_mode_stream_cli() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
+    let repo_root = repo_root();
     let sse = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
         "data: {\"choices\":[{\"delta\":{}}]}\n\n",
@@ -53,7 +66,7 @@ async fn chat_mode_stream_cli() {
         .arg("-c")
         .arg("model_provider=\"mock\"")
         .arg("-C")
-        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg(&repo_root)
         .arg("hello?");
     cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy")
@@ -72,10 +85,11 @@ async fn chat_mode_stream_cli() {
 
     // Verify a new session rollout was created and is discoverable via list_conversations
     let provider_filter = vec!["mock".to_string()];
-    let page = RolloutRecorder::list_conversations(
+    let page = RolloutRecorder::list_threads(
         home.path(),
         10,
         None,
+        codex_core::ThreadSortKey::UpdatedAt,
         &[],
         Some(provider_filter.as_slice()),
         "mock",
@@ -95,11 +109,11 @@ async fn chat_mode_stream_cli() {
     );
 }
 
-/// Verify that passing `-c experimental_instructions_file=...` to the CLI
+/// Verify that passing `-c model_instructions_file=...` to the CLI
 /// overrides the built-in base instructions by inspecting the request body
 /// received by a mock OpenAI Responses endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_cli_applies_experimental_instructions_file() {
+async fn exec_cli_applies_model_instructions_file() {
     skip_if_no_network!();
 
     // Start mock server which will capture the request and return a minimal
@@ -114,7 +128,7 @@ async fn exec_cli_applies_experimental_instructions_file() {
     // Create a temporary instructions file with a unique marker we can assert
     // appears in the outbound request payload.
     let custom = TempDir::new().unwrap();
-    let marker = "cli-experimental-instructions-marker";
+    let marker = "cli-model-instructions-file-marker";
     let custom_path = custom.path().join("instr.md");
     std::fs::write(&custom_path, marker).unwrap();
     let custom_path_str = custom_path.to_string_lossy().replace('\\', "/");
@@ -127,6 +141,7 @@ async fn exec_cli_applies_experimental_instructions_file() {
     );
 
     let home = TempDir::new().unwrap();
+    let repo_root = repo_root();
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
     let mut cmd = AssertCommand::new(bin);
     cmd.arg("exec")
@@ -136,11 +151,9 @@ async fn exec_cli_applies_experimental_instructions_file() {
         .arg("-c")
         .arg("model_provider=\"mock\"")
         .arg("-c")
-        .arg(format!(
-            "experimental_instructions_file=\"{custom_path_str}\""
-        ))
+        .arg(format!("model_instructions_file=\"{custom_path_str}\""))
         .arg("-C")
-        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg(&repo_root)
         .arg("hello?\n");
     cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy")
@@ -177,8 +190,8 @@ async fn exec_cli_applies_experimental_instructions_file() {
 async fn responses_api_stream_cli() {
     skip_if_no_network!();
 
-    let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cli_responses_fixture.sse");
+    let fixture = cli_responses_fixture();
+    let repo_root = repo_root();
 
     let home = TempDir::new().unwrap();
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
@@ -186,7 +199,7 @@ async fn responses_api_stream_cli() {
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg(&repo_root)
         .arg("hello?");
     cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy")
@@ -213,8 +226,8 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let prompt = format!("echo {marker}");
 
     // 3. Use the same offline SSE fixture as responses_api_stream_cli so the test is hermetic.
-    let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cli_responses_fixture.sse");
+    let fixture = cli_responses_fixture();
+    let repo_root = repo_root();
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
@@ -222,10 +235,10 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg(&repo_root)
         .arg(&prompt);
     cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
+        .env(CODEX_API_KEY_ENV_VAR, "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
         // Required for CLI arg parsing even though fixture short-circuits network usage.
         .env("OPENAI_BASE_URL", "http://unused.local");
@@ -343,7 +356,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg(&repo_root)
         .arg(&prompt2)
         .arg("resume")
         .arg("--last");

@@ -8,6 +8,7 @@ use codex_windows_sandbox::create_process_as_user;
 use codex_windows_sandbox::create_readonly_token_with_cap_from;
 use codex_windows_sandbox::create_workspace_write_token_with_cap_from;
 use codex_windows_sandbox::get_current_token_for_restriction;
+use codex_windows_sandbox::hide_current_user_profile_dir;
 use codex_windows_sandbox::log_note;
 use codex_windows_sandbox::parse_policy;
 use codex_windows_sandbox::to_wide;
@@ -15,6 +16,7 @@ use codex_windows_sandbox::SandboxPolicy;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::path::Path;
 use std::path::PathBuf;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::GetLastError;
@@ -77,13 +79,20 @@ unsafe fn create_job_kill_on_close() -> Result<HANDLE> {
     Ok(h)
 }
 
+fn read_request_file(req_path: &Path) -> Result<String> {
+    let content = std::fs::read_to_string(req_path)
+        .with_context(|| format!("read request file {}", req_path.display()));
+    let _ = std::fs::remove_file(req_path);
+    content
+}
+
 pub fn main() -> Result<()> {
     let mut input = String::new();
     let mut args = std::env::args().skip(1);
     if let Some(first) = args.next() {
         if let Some(rest) = first.strip_prefix("--request-file=") {
             let req_path = PathBuf::from(rest);
-            input = std::fs::read_to_string(&req_path).context("read request file")?;
+            input = read_request_file(&req_path)?;
         }
     }
     if input.is_empty() {
@@ -91,6 +100,7 @@ pub fn main() -> Result<()> {
     }
     let req: RunnerRequest = serde_json::from_str(&input).context("parse runner request json")?;
     let log_dir = Some(req.codex_home.as_path());
+    hide_current_user_profile_dir(req.codex_home.as_path());
     log_note(
         &format!(
             "runner start cwd={} cmd={:?} real_codex_home={}",
@@ -262,4 +272,22 @@ pub fn main() -> Result<()> {
         eprintln!("runner child exited with code {}", exit_code);
     }
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_request_file;
+    use pretty_assertions::assert_eq;
+    use std::fs;
+
+    #[test]
+    fn removes_request_file_after_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let req_path = dir.path().join("request.json");
+        fs::write(&req_path, "{\"ok\":true}").expect("write request");
+
+        let content = read_request_file(&req_path).expect("read request");
+        assert_eq!(content, "{\"ok\":true}");
+        assert!(!req_path.exists(), "request file should be removed");
+    }
 }

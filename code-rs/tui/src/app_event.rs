@@ -36,6 +36,7 @@ use crate::app::ChatWidgetArgs;
 use crate::chrome_launch::ChromeLaunchOption;
 use crate::slash_command::SlashCommand;
 use code_protocol::models::ResponseItem;
+use code_protocol::request_user_input::RequestUserInputResponse;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
@@ -82,6 +83,12 @@ pub(crate) enum TerminalCommandGate {
 #[derive(Debug, Clone)]
 pub(crate) enum TerminalAfter {
     RefreshAgentsAndClose { selected_index: usize },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum GitInitResume {
+    SubmitText { text: String },
+    DispatchCommand { command: SlashCommand, command_text: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,12 +169,21 @@ pub(crate) enum AppEvent {
     /// Text pasted from the terminal clipboard.
     Paste(String),
 
+    /// Open the external editor with the current composer text.
+    OpenExternalEditor { initial: String },
+
     /// Request to exit the application gracefully.
     ExitRequest,
 
     /// Forward an `Op` to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
     CodexOp(code_core::protocol::Op),
+
+    /// Submit a response for a pending `request_user_input` tool call.
+    RequestUserInputAnswer {
+        turn_id: String,
+        response: RequestUserInputResponse,
+    },
 
     AutoCoordinatorDecision {
         seq: u64,
@@ -199,7 +215,7 @@ pub(crate) enum AppEvent {
         replay_updates: u32,
     },
     AutoCoordinatorCompactedHistory {
-        conversation: Vec<ResponseItem>,
+        conversation: std::sync::Arc<[ResponseItem]>,
         show_notice: bool,
     },
     AutoCoordinatorStopAck,
@@ -246,6 +262,9 @@ pub(crate) enum AppEvent {
 
     /// Resume picker failed to load
     ResumePickerLoadFailed { message: String },
+
+    /// Session nickname update finished
+    SessionRenameCompleted { message: String },
 
     /// Signal that agents are about to start (triggered when /plan, /solve, /code commands are entered)
     PrepareAgents,
@@ -347,6 +366,13 @@ pub(crate) enum AppEvent {
     /// Prefill the composer input with the given text
     #[allow(dead_code)]
     PrefillComposer(String),
+
+    /// Confirm and run git init, then resume a pending action.
+    ConfirmGitInit { resume: GitInitResume },
+    /// Continue without git; disables git-dependent actions for this session.
+    DeclineGitInit,
+    /// Git init completed (success or failure).
+    GitInitFinished { ok: bool, message: String },
 
     /// Submit a message with hidden preface instructions
     SubmitTextWithPreface { visible: String, preface: String },

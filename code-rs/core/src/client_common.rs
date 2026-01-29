@@ -8,7 +8,7 @@ use crate::model_family::ModelFamily;
 use crate::openai_tools::OpenAiTool;
 use crate::protocol::RateLimitSnapshotEvent;
 use crate::protocol::TokenUsage;
-use code_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
+use crate::user_instructions::UserInstructions;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
 use futures::Stream;
@@ -34,9 +34,6 @@ static DEFAULT_DEVELOPER_PROMPT: Lazy<String> = Lazy::new(|| {
 const ENVIRONMENT_CONTEXT_START: &str = "<environment_context>\n\n";
 const ENVIRONMENT_CONTEXT_END: &str = "\n\n</environment_context>";
 
-/// wraps user instructions message in a tag for the model to parse more easily.
-const USER_INSTRUCTIONS_START: &str = "<user_instructions>\n\n";
-const USER_INSTRUCTIONS_END: &str = "\n\n</user_instructions>";
 /// Review thread system prompt. Edit `core/src/review_prompt.md` to customize.
 #[allow(dead_code)]
 pub const REVIEW_PROMPT: &str = include_str!("../review_prompt.md");
@@ -120,28 +117,11 @@ impl Default for Prompt {
 impl Prompt {
     pub(crate) fn get_full_instructions<'a>(&'a self, model: &'a ModelFamily) -> Cow<'a, str> {
         let effective_model = self.model_family_override.as_ref().unwrap_or(model);
-        let base = self
-            .base_instructions_override
-            .as_deref()
-            .unwrap_or(effective_model.base_instructions.deref());
-        let _sections: Vec<&str> = vec![base];
-        // When there are no custom instructions, add apply_patch_tool_instructions if:
-        // - the model needs special instructions (4.1)
-        // AND
-        // - there is no apply_patch tool present
-        let is_apply_patch_tool_present = self.tools.iter().any(|tool| match tool {
-            OpenAiTool::Function(f) => f.name == "apply_patch",
-            OpenAiTool::Freeform(f) => f.name == "apply_patch",
-            _ => false,
-        });
-        if self.base_instructions_override.is_none()
-            && effective_model.needs_special_apply_patch_instructions
-            && !is_apply_patch_tool_present
-        {
-            Cow::Owned(format!("{base}\n{APPLY_PATCH_TOOL_INSTRUCTIONS}"))
-        } else {
-            Cow::Borrowed(base)
-        }
+        Cow::Borrowed(
+            self.base_instructions_override
+                .as_deref()
+                .unwrap_or(effective_model.base_instructions.deref()),
+        )
     }
 
     pub fn set_log_tag<S: Into<String>>(&mut self, tag: S) {
@@ -156,10 +136,21 @@ impl Prompt {
         }
     }
 
-    fn get_formatted_user_instructions(&self) -> Option<String> {
-        self.user_instructions
+    fn get_formatted_user_instructions(&self) -> Option<ResponseItem> {
+        let instructions = self.user_instructions.as_ref()?;
+        let directory = self
+            .environment_context
             .as_ref()
-            .map(|ui| format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}"))
+            .and_then(|ctx| ctx.cwd.as_ref())
+            .map(|cwd| cwd.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(
+            UserInstructions {
+                directory,
+                text: instructions.clone(),
+            }
+            .into(),
+        )
     }
 
     fn get_formatted_environment_context(&self) -> Option<String> {
@@ -211,17 +202,10 @@ impl Prompt {
             if let Some(ui) = self.get_formatted_user_instructions() {
                 let has_user_instructions = self.input.iter().any(|item| {
                     matches!(item, ResponseItem::Message { role, content, .. }
-                        if role == "user"
-                            && content.iter().any(|c| matches!(c,
-                                ContentItem::InputText { text } if text.contains(USER_INSTRUCTIONS_START)
-                            )))
+                        if role == "user" && UserInstructions::is_user_instructions(content))
                 });
                 if !has_user_instructions {
-                    input_with_instructions.push(ResponseItem::Message {
-                        id: None,
-                        role: "user".to_string(),
-                        content: vec![ContentItem::InputText { text: ui }],
-                    });
+                    input_with_instructions.push(ui);
                 }
             }
         }
@@ -260,13 +244,11 @@ impl Prompt {
     /// Creates a formatted user instructions message from a string
     #[allow(dead_code)]
     pub(crate) fn format_user_instructions_message(ui: &str) -> ResponseItem {
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}"),
-            }],
+        UserInstructions {
+            directory: String::new(),
+            text: ui.to_string(),
         }
+        .into()
     }
 }
 
@@ -274,6 +256,10 @@ impl Prompt {
 pub enum ResponseEvent {
     Created,
     OutputItemDone { item: ResponseItem, sequence_number: Option<u64>, output_index: Option<u32> },
+    /// Indicates that the server will include reasoning content on this stream.
+    ///
+    /// Some providers expose this as a handshake header on websocket streams.
+    ServerReasoningIncluded(bool),
     Completed {
         response_id: String,
         token_usage: Option<TokenUsage>,
@@ -497,6 +483,7 @@ impl Stream for ResponseStream {
 #[cfg(test)]
 mod tests {
     use crate::model_family::find_family_for_model;
+    use code_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -542,18 +529,21 @@ mod tests {
         ];
         for test_case in test_cases {
             let model_family = find_family_for_model(test_case.slug).expect("known model slug");
-            let expected = if test_case.expects_apply_patch_instructions {
-                format!(
-                    "{}\n{}",
-                    model_family.clone().base_instructions,
-                    APPLY_PATCH_TOOL_INSTRUCTIONS
-                )
-            } else {
-                model_family.clone().base_instructions
-            };
-
             let full = prompt.get_full_instructions(&model_family);
-            assert_eq!(full, expected);
+            assert_eq!(full, model_family.base_instructions);
+            if test_case.expects_apply_patch_instructions {
+                assert!(
+                    full.contains(APPLY_PATCH_TOOL_INSTRUCTIONS),
+                    "expected apply_patch instructions for {}",
+                    test_case.slug
+                );
+            } else {
+                assert!(
+                    !full.contains(APPLY_PATCH_TOOL_INSTRUCTIONS),
+                    "did not expect apply_patch instructions for {}",
+                    test_case.slug
+                );
+            }
         }
     }
 

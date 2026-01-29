@@ -55,6 +55,7 @@ use code_core::auth_accounts::{self, StoredAccount};
 use code_login::AuthManager;
 use code_login::AuthMode;
 use code_protocol::mcp_protocol::AuthMode as McpAuthMode;
+use code_protocol::dynamic_tools::DynamicToolResponse;
 use code_protocol::protocol::SessionSource;
 use code_protocol::num_format::format_with_separators;
 use code_core::split_command_and_args;
@@ -62,6 +63,9 @@ use serde_json::Value as JsonValue;
 
 
 mod diff_handlers;
+mod agent_summary;
+mod esc;
+mod modals;
 mod agent_install;
 mod diff_ui;
 mod exec_tools;
@@ -89,90 +93,10 @@ mod running_tools;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod smoke_helpers;
 
-fn agent_summary_counts(config_agents: &[AgentConfig]) -> (usize, usize) {
-    use std::collections::HashMap;
-
-    let mut enabled = 0usize;
-    let mut total = 0usize;
-
-    let mut config_by_name: HashMap<String, &AgentConfig> = HashMap::new();
-    for cfg in config_agents {
-        config_by_name.insert(cfg.name.to_ascii_lowercase(), cfg);
-    }
-
-    for spec in code_core::agent_defaults::agent_model_specs() {
-        total += 1;
-        let key = spec.slug.to_ascii_lowercase();
-        if let Some(cfg) = config_by_name.get(&key) {
-            if cfg.enabled {
-                enabled += 1;
-            }
-        }
-    }
-
-    for cfg in config_agents {
-        let key = cfg.name.to_ascii_lowercase();
-        if code_core::agent_defaults::agent_model_spec(&key).is_some() {
-            continue;
-        }
-        total += 1;
-        if cfg.enabled {
-            enabled += 1;
-        }
-    }
-
-    (enabled, total)
-}
-
 #[cfg(test)]
-mod agent_summary_counts_tests {
-    use super::agent_summary_counts;
-    use code_core::config_types::AgentConfig;
-
-    fn make_agent(name: &str, enabled: bool) -> AgentConfig {
-        AgentConfig {
-            name: name.to_string(),
-            command: name.to_string(),
-            args: Vec::new(),
-            read_only: false,
-            enabled,
-            description: None,
-            env: None,
-            args_read_only: None,
-            args_write: None,
-            instructions: None,
-        }
-    }
-
-    #[test]
-    fn missing_builtins_default_to_disabled() {
-        let agents = vec![
-            make_agent("code-gpt-5.2-codex", true),
-            make_agent("code-gpt-5.2", true),
-        ];
-
-        let (enabled, total) = agent_summary_counts(&agents);
-        let builtins = code_core::agent_defaults::agent_model_specs().len();
-
-        assert_eq!(enabled, 2);
-        assert_eq!(total, builtins);
-    }
-
-    #[test]
-    fn custom_agents_are_counted() {
-        let agents = vec![
-            make_agent("code-gpt-5.2-codex", true),
-            make_agent("my-custom-agent", false),
-        ];
-
-        let (enabled, total) = agent_summary_counts(&agents);
-        let builtins = code_core::agent_defaults::agent_model_specs().len();
-
-        assert_eq!(enabled, 1);
-        assert_eq!(total, builtins + 1);
-    }
-}
-
+pub(crate) use self::esc::EscIntent;
+use self::agent_summary::agent_summary_counts;
+use self::esc::AutoGoalEscState;
 use self::agent_install::{
     start_agent_install_session,
     start_direct_terminal_session,
@@ -236,6 +160,7 @@ use code_core::protocol::BrowserScreenshotUpdateEvent;
 use code_core::protocol::BrowserSnapshotEvent;
 use code_core::protocol::CustomToolCallBeginEvent;
 use code_core::protocol::CustomToolCallEndEvent;
+use code_core::protocol::CustomToolCallUpdateEvent;
 use code_core::protocol::ErrorEvent;
 use code_core::protocol::Event;
 use code_core::protocol::EventMsg;
@@ -246,6 +171,8 @@ use code_core::protocol::ExecOutputStream;
 use code_core::protocol::EnvironmentContextDeltaEvent;
 use code_core::protocol::EnvironmentContextFullEvent;
 use code_core::protocol::InputItem;
+use code_core::protocol::McpServerFailure;
+use code_core::protocol::McpServerFailurePhase;
 use code_core::protocol::SessionConfiguredEvent;
 // MCP tool call handlers moved into chatwidget::tools
 use code_core::protocol::Op;
@@ -296,7 +223,8 @@ use crate::history::compat::{
 };
 
 pub(crate) const DOUBLE_ESC_HINT: &str = "undo timeline";
-const AUTO_ESC_EXIT_HINT: &str = "Press Esc again to exit Auto Drive";
+const AUTO_ESC_EXIT_HINT: &str = "Press Esc to exit Auto Drive";
+const AUTO_ESC_EXIT_HINT_DOUBLE: &str = "Press Esc again to exit Auto Drive";
 const AUTO_COMPLETION_CELEBRATION_DURATION: Duration = Duration::from_secs(5);
 const HISTORY_ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(120);
 const AUTO_BOOTSTRAP_GOAL_PLACEHOLDER: &str = "Deriving goal from recent conversation";
@@ -304,51 +232,6 @@ const AUTO_DRIVE_SESSION_SUMMARY_NOTICE: &str = "Summarizing session";
 const AUTO_DRIVE_SESSION_SUMMARY_PROMPT: &str =
     include_str!("../prompt_for_auto_drive_session_summary.md");
 const CONTEXT_DELTA_HISTORY: usize = 10;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EscIntent {
-    DismissModal,
-    CloseSettings,
-    CloseFilePopup,
-    AutoPauseForEdit,
-    AutoStopDuringApproval,
-    AutoStopActive,
-    AutoGoalEnableEdit,
-    AutoGoalExitPreserveDraft,
-    AutoDismissSummary,
-    DiffConfirm,
-    AgentsTerminal,
-    CancelAgents,
-    CancelTask,
-    ClearComposer,
-    ShowUndoHint,
-    OpenUndoTimeline,
-    None,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AutoGoalEscState {
-    Inactive,
-    NeedsEnableEditing,
-    ArmedForExit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EscRoute {
-    pub intent: EscIntent,
-    pub consume: bool,
-    pub allows_double_esc: bool,
-}
-
-impl EscRoute {
-    const fn new(intent: EscIntent, consume: bool, allows_double_esc: bool) -> Self {
-        Self {
-            intent,
-            consume,
-            allows_double_esc,
-        }
-    }
-}
 
 struct MergeRepoState {
     git_root: PathBuf,
@@ -626,68 +509,61 @@ impl MergeRepoState {
         let repo_status = Self::format_status_for_context(&self.repo_status);
         let fast_forward_label = if self.fast_forward_possible { "yes" } else { "no" };
         let mut preface = format!(
-            "[developer] Automation skipped because: {}. Finish the merge manually with the steps below.\n\nContext:\n- Worktree path (current cwd): {} — branch {} @ {}, status {}\n- Repo root path: {} — target {} checkout, status {}\n- Fast-forward possible: {}\n",
-            reason_text,
-            self.worktree_path.display(),
-            self.worktree_branch,
-            self.worktree_sha,
-            worktree_status,
-            self.git_root.display(),
-            default_branch_line,
-            repo_status,
-            fast_forward_label,
+            "[developer] Automation skipped because: {reason_text}. Finish the merge manually with the steps below.\n\nContext:\n- Worktree path: {worktree_path} — branch {worktree_branch} @ {worktree_sha}, status {worktree_status}\n- Repo root path (current cwd): {git_root} — target {default_branch_line} checkout, status {repo_status}\n- Fast-forward possible: {fast_forward_label}\n",
+            reason_text = reason_text,
+            worktree_path = self.worktree_path.display(),
+            worktree_branch = self.worktree_branch.as_str(),
+            worktree_sha = self.worktree_sha.as_str(),
+            worktree_status = worktree_status,
+            git_root = self.git_root.display(),
+            default_branch_line = default_branch_line,
+            repo_status = repo_status,
+            fast_forward_label = fast_forward_label,
         );
         preface.push_str(
-            "\nNOTE: Each command runs in its own shell. Use `cd <path> && <command>` (or `git -C <path> ...`) whenever you need to operate in a different directory.\n",
+            "\nNOTE: Each command runs in its own shell. `/merge` switches the working directory to the repo root; use `git -C <path> ...` or `cd <path> && ...` whenever you need to operate in a different directory.\n",
         );
         preface.push_str(&format!(
-            "\n1. Worktree prep (already in {} on {}):\n   - Review `git status`.\n   - Stage and commit every change that belongs in the merge. Use descriptive messages; no network commands and no resets.\n",
-            self.worktree_path.display(),
-            self.worktree_branch,
+            "\n1. Worktree prep (worktree {worktree_path} on {worktree_branch}):\n   - Review `git status`.\n   - Stage and commit every change that belongs in the merge. Use descriptive messages; no network commands and no resets.\n",
+            worktree_path = self.worktree_path.display(),
+            worktree_branch = self.worktree_branch.as_str(),
         ));
         preface.push_str(&format!(
-            "   - When running commands here, prefix them with `cd {} && ...` (or use `git -C {}`) so they actually execute inside the worktree.\n",
-            self.worktree_path.display(),
-            self.worktree_path.display(),
+            "   - Run worktree commands as `git -C {worktree_path}` (or `cd {worktree_path} && ...`) so they execute inside the worktree.\n",
+            worktree_path = self.worktree_path.display(),
         ));
         if let Some(ref default_branch) = self.default_branch {
             preface.push_str(&format!(
-                "2. Default-branch checkout prep:\n   - cd {}\n   - If HEAD is not {}, run `git checkout {}`.\n   - If this checkout is dirty, stash with a clear message before continuing.\n",
-                self.git_root.display(),
-                default_branch,
-                default_branch,
+                "2. Default-branch checkout prep (repo root {git_root}):\n   - If HEAD is not {default_branch}, run `git checkout {default_branch}`.\n   - If this checkout is dirty, stash with a clear message before continuing.\n",
+                git_root = self.git_root.display(),
+                default_branch = default_branch,
             ));
         } else {
             preface.push_str(&format!(
-                "2. Default-branch checkout prep:\n   - cd {}\n   - Determine the correct default branch for this repo (metadata missing) and check it out.\n   - If this checkout is dirty, stash with a clear message before continuing.\n",
-                self.git_root.display(),
+                "2. Default-branch checkout prep (repo root {git_root}):\n   - Determine the correct default branch for this repo (metadata missing) and check it out.\n   - If this checkout is dirty, stash with a clear message before continuing.\n",
+                git_root = self.git_root.display(),
             ));
         }
-        preface.push_str(&format!(
-            "   - Run these commands as `cd {} && ...` (or `git -C {}`) so they execute inside the repo root.\n",
-            self.git_root.display(),
-            self.git_root.display(),
-        ));
         let default_branch_for_copy = self
             .default_branch
             .as_deref()
             .unwrap_or("the default branch you selected");
         preface.push_str(&format!(
-            "3. Merge locally (still in {} on {}):\n   - Run `git merge --no-ff {}`.\n   - Resolve conflicts line by line; keep intent from both branches.\n   - No network commands, no `git reset --hard`, no `git checkout -- .`, no `git clean`, and no `-X ours/theirs`.\n   - WARNING: Do not delete files, rewrite them in full, or checkout/prefer commits from one branch over another. Instead use apply_patch to surgically resolve conflicts, even if they are large in scale. Work on each conflict, line by line, so both branches' changes survive.\n   - If you stashed in step 2, apply/pop it now and commit if needed.\n",
-            self.git_root.display(),
-            default_branch_for_copy,
-            self.worktree_branch,
+            "3. Merge locally (repo root {git_root} on {default_branch_for_copy}):\n   - Run `git merge --no-ff {worktree_branch}`.\n   - Resolve conflicts line by line; keep intent from both branches.\n   - No network commands, no `git reset --hard`, no `git checkout -- .`, no `git clean`, and no `-X ours/theirs`.\n   - WARNING: Do not delete files, rewrite them in full, or checkout/prefer commits from one branch over another. Instead use apply_patch to surgically resolve conflicts, even if they are large in scale. Work on each conflict, line by line, so both branches' changes survive.\n   - If you stashed in step 2, apply/pop it now and commit if needed.\n",
+            git_root = self.git_root.display(),
+            default_branch_for_copy = default_branch_for_copy,
+            worktree_branch = self.worktree_branch.as_str(),
         ));
         preface.push_str(&format!(
-            "4. Verify in {}:\n   - `git status` is clean.\n   - `git merge-base --is-ancestor {} HEAD` succeeds.\n   - No MERGE_HEAD/rebase/cherry-pick artifacts remain.\n",
-            self.git_root.display(),
-            self.worktree_branch,
+            "4. Verify in {git_root}:\n   - `git status` is clean.\n   - `git merge-base --is-ancestor {worktree_branch} HEAD` succeeds.\n   - No MERGE_HEAD/rebase/cherry-pick artifacts remain.\n",
+            git_root = self.git_root.display(),
+            worktree_branch = self.worktree_branch.as_str(),
         ));
         preface.push_str(&format!(
-            "5. Cleanup:\n   - `git worktree remove {}` (only after verification).\n   - `git branch -D {}` in {} if the branch still exists.\n",
-            self.worktree_path.display(),
-            self.worktree_branch,
-            self.git_root.display(),
+            "5. Cleanup:\n   - `git worktree remove {worktree_path}` (only after verification).\n   - `git branch -D {worktree_branch}` in {git_root} if the branch still exists.\n",
+            worktree_path = self.worktree_path.display(),
+            worktree_branch = self.worktree_branch.as_str(),
+            git_root = self.git_root.display(),
         ));
         preface.push_str(
             "6. Report back with a concise command log and any conflicts you resolved.\n\nAbsolute rules: no network operations, no resets, no dropping local history, no blanket \"ours/theirs\" strategies.\n",
@@ -1042,6 +918,7 @@ use crate::app_event::{
     AppEvent,
     AutoContinueMode,
     BackgroundPlacement,
+    GitInitResume,
     ModelSelectionKind,
     TerminalAfter,
     TerminalCommandGate,
@@ -1114,6 +991,7 @@ use crate::history::state::{
     RateLimitsRecord,
     TextTone,
     TextEmphasis,
+    ToolArgument,
     ToolStatus,
 };
 use crate::cloud_tasks_service::CloudEnvironment;
@@ -1325,7 +1203,6 @@ pub(crate) struct GhostState {
     queue: VecDeque<(u64, GhostSnapshotRequest)>,
     active: Option<(u64, GhostSnapshotRequest)>,
     next_id: u64,
-    pending_dispatches: VecDeque<PendingSnapshotDispatch>,
     queued_user_messages: VecDeque<UserMessage>,
 }
 
@@ -1430,21 +1307,33 @@ fn detect_auto_review_phase(progress: Option<&str>) -> AutoReviewPhase {
 const SKIP_REVIEW_PROGRESS_SENTINEL: &str = "Another review is already running; skipping this /review.";
 const AUTO_REVIEW_SHARED_WORKTREE: &str = "auto-review";
 const AUTO_REVIEW_FALLBACK_PREFIX: &str = "auto-review-";
+const AUTO_REVIEW_BASELINE_FILENAME: &str = "auto-review-baseline";
 const AUTO_REVIEW_FALLBACK_MAX: usize = 3;
 const AUTO_REVIEW_FALLBACK_MAX_AGE_SECS: u64 = 12 * 60 * 60; // 12h
 const AUTO_REVIEW_STALE_SECS: u64 = 5 * 60;
 
-fn auto_review_branches_dir(git_root: &Path) -> Result<PathBuf, String> {
+fn auto_review_repo_dir(git_root: &Path) -> Result<PathBuf, String> {
     let repo_name = git_root
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("repo");
-    let mut code_home = code_core::config::find_code_home()
+    let code_home = code_core::config::find_code_home()
         .map_err(|e| format!("failed to locate code home: {e}"))?;
-    code_home = code_home.join("working").join(repo_name).join("branches");
-    std::fs::create_dir_all(&code_home)
+    let repo_dir = code_home.join("working").join(repo_name);
+    std::fs::create_dir_all(&repo_dir)
+        .map_err(|e| format!("failed to create auto review repo dir: {e}"))?;
+    Ok(repo_dir)
+}
+
+fn auto_review_branches_dir(git_root: &Path) -> Result<PathBuf, String> {
+    let branches_dir = auto_review_repo_dir(git_root)?.join("branches");
+    std::fs::create_dir_all(&branches_dir)
         .map_err(|e| format!("failed to create branches dir: {e}"))?;
-    Ok(code_home)
+    Ok(branches_dir)
+}
+
+fn auto_review_baseline_path_for_repo(git_root: &Path) -> Result<PathBuf, String> {
+    Ok(auto_review_repo_dir(git_root)?.join(AUTO_REVIEW_BASELINE_FILENAME))
 }
 
 fn resolve_auto_review_worktree_path(git_root: &Path, branch: &str) -> Option<PathBuf> {
@@ -1579,6 +1468,14 @@ pub(crate) enum TurnOrigin {
     Developer,
 }
 
+#[derive(Clone, Debug)]
+struct PendingRequestUserInput {
+    turn_id: String,
+    call_id: String,
+    anchor_key: OrderKey,
+    questions: Vec<code_protocol::request_user_input::RequestUserInputQuestion>,
+}
+
 #[derive(Clone)]
 struct RenderRequestSeed {
     history_id: HistoryId,
@@ -1615,6 +1512,8 @@ pub(crate) struct ChatWidget<'a> {
     context_last_sequence: Option<u64>,
     context_browser_sequence: Option<u64>,
     config: Config,
+    mcp_tools_by_server: HashMap<String, Vec<String>>,
+    mcp_server_failures: HashMap<String, McpServerFailure>,
 
     /// Optional remote-merged presets list delivered asynchronously.
     /// When absent, the TUI falls back to built-in presets.
@@ -1661,6 +1560,7 @@ pub(crate) struct ChatWidget<'a> {
     // Cache of the last developer/system note we injected (hidden messages)
     last_developer_message: Option<String>,
     pending_turn_origin: Option<TurnOrigin>,
+    pending_request_user_input: Option<PendingRequestUserInput>,
     current_turn_origin: Option<TurnOrigin>,
     // Tracks whether lingering running exec/tool cells have been cleared for the
     // current turn. Reset on TaskStarted; set after the first assistant message
@@ -1768,6 +1668,10 @@ pub(crate) struct ChatWidget<'a> {
     // State for the Agents Terminal view
     agents_terminal: AgentsTerminalState,
 
+    pending_git_init_resume: Option<GitInitResume>,
+    git_init_inflight: bool,
+    git_init_declined: bool,
+
     pending_upgrade_notice: Option<(u64, String)>,
 
     // Cached visible rows for the diff overlay body to clamp scrolling (kept within diffs)
@@ -1815,7 +1719,6 @@ pub(crate) struct ChatWidget<'a> {
     ghost_snapshot_queue: VecDeque<(u64, GhostSnapshotRequest)>,
     active_ghost_snapshot: Option<(u64, GhostSnapshotRequest)>,
     next_ghost_snapshot_id: u64,
-    pending_snapshot_dispatches: VecDeque<PendingSnapshotDispatch>,
     queue_block_started_at: Option<Instant>,
 
     auto_drive_card_sequence: u64,
@@ -2035,19 +1938,6 @@ impl GhostSnapshotRequest {
 enum GhostSnapshotJobHandle {
     Scheduled(u64),
     Skipped,
-}
-
-#[derive(Clone)]
-enum PendingSnapshotDispatch {
-    Queued { job_id: u64, message: UserMessage },
-}
-
-impl PendingSnapshotDispatch {
-    fn job_id(&self) -> u64 {
-        match self {
-            PendingSnapshotDispatch::Queued { job_id, .. } => *job_id,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -3844,39 +3734,20 @@ impl ChatWidget<'_> {
             status_parts.join(", ")
         };
         let auto_active = self.auto_state.is_active();
-        let non_agent_activity =
-            self.has_running_commands_or_tools() || !self.active_task_ids.is_empty();
         self.push_background_tail(format!("Cancelling {descriptor}…"));
         self.bottom_pane
             .update_status_text("Cancelling agents…".to_string());
         self.bottom_pane.set_task_running(true);
         self.submit_op(Op::CancelAgents { batch_ids, agent_ids });
 
-        // Mark agents locally so Esc can progress to stopping Auto Drive even if
-        // backend acknowledgements arrive later.
         self.agents_ready_to_start = false;
-        for agent in &mut self.active_agents {
-            if Self::agent_is_cancelable(agent) {
-                agent.status = AgentStatus::Cancelled;
-            }
-        }
-        let status_message = if auto_active {
-            "Agents cancelled. Esc stops Auto Drive.".to_string()
-        } else if non_agent_activity {
-            "Agents cancelled. Esc cancels the running command.".to_string()
-        } else {
-            "Agents cancelled.".to_string()
-        };
-        self.bottom_pane.update_status_text(status_message);
-        self.bottom_pane
-            .set_task_running(auto_active || non_agent_activity);
 
         if auto_active {
             self.show_auto_drive_exit_hint();
         } else if self
             .bottom_pane
             .standard_terminal_hint()
-            .is_some_and(|hint| hint == AUTO_ESC_EXIT_HINT)
+            .is_some_and(|hint| hint == AUTO_ESC_EXIT_HINT || hint == AUTO_ESC_EXIT_HINT_DOUBLE)
         {
             self.bottom_pane.set_standard_terminal_hint(None);
         }
@@ -4294,9 +4165,22 @@ impl ChatWidget<'_> {
             .map(|c| {
                 let modified = human_ago(&c.modified_ts.unwrap_or_default());
                 let created = human_ago(&c.created_ts.unwrap_or_default());
-                let user_msgs = format!("{}", c.user_message_count);
+                let user_message_count = c.user_message_count;
+                let user_msgs = format!("{user_message_count}");
                 let branch = c.branch.unwrap_or_else(|| "-".to_string());
-                let mut summary = c.snippet.unwrap_or_else(|| c.subtitle.unwrap_or_default());
+                let nickname = c
+                    .nickname
+                    .and_then(|name| {
+                        let trimmed = name.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    });
+                let snippet = c.snippet.or(c.subtitle);
+                let mut summary = match (nickname, snippet) {
+                    (Some(name), Some(snippet)) => format!("{name} - {snippet}"),
+                    (Some(name), None) => name,
+                    (None, Some(snippet)) => snippet,
+                    (None, None) => String::new(),
+                };
                 const SNIPPET_MAX: usize = 64;
                 if summary.chars().count() > SNIPPET_MAX {
                     summary = summary.chars().take(SNIPPET_MAX).collect::<String>() + "…";
@@ -4617,8 +4501,7 @@ impl ChatWidget<'_> {
         }
         self.request_redraw();
     }
-    /// If the user is at or near the bottom, keep following new messages.
-    /// We treat "near" as within 3 rows, matching our scroll step.
+    /// If the user is at the bottom, keep following new messages.
     fn autoscroll_if_near_bottom(&mut self) {
         layout_scroll::autoscroll_if_near_bottom(self);
     }
@@ -5314,7 +5197,7 @@ impl ChatWidget<'_> {
         }
         let total_height = self.history_render.last_total_height();
         let max_scroll = total_height.saturating_sub(viewport_rows);
-        let clamped_offset = self.layout.scroll_offset.min(max_scroll);
+        let clamped_offset = self.layout.scroll_offset.get().min(max_scroll);
         let scroll_pos = max_scroll.saturating_sub(clamped_offset);
         let history_len = self.history_cells.len();
         let history_total = {
@@ -5449,7 +5332,9 @@ impl ChatWidget<'_> {
         {
             self.handle_exec_end_now(pending_end, &order2);
         }
-        self.flush_interrupt_queue();
+        if self.interrupts.has_queued() {
+            self.flush_interrupt_queue();
+        }
     }
 
     /// Handle exec command end immediately
@@ -6064,11 +5949,103 @@ impl ChatWidget<'_> {
         self.bottom_pane.insert_str(s);
     }
 
+    pub(crate) fn set_composer_text(&mut self, text: String) {
+        if self.auto_state.should_show_goal_entry()
+            && matches!(self.auto_goal_escape_state, AutoGoalEscState::Inactive)
+            && !text.trim().is_empty()
+        {
+            self.auto_goal_escape_state = AutoGoalEscState::NeedsEnableEditing;
+        }
+        self.bottom_pane.set_composer_text(text);
+    }
+
     // Removed: pending insert sequencing is not used under strict ordering.
 
     pub(crate) fn register_pasted_image(&mut self, placeholder: String, path: std::path::PathBuf) {
-        self.pending_images.insert(placeholder, path);
-        self.request_redraw();
+        let persisted = self
+            .persist_user_image_if_needed(&path)
+            .unwrap_or_else(|| path.clone());
+        if persisted.exists() && persisted.is_file() {
+            self.pending_images.insert(placeholder, persisted);
+            self.request_redraw();
+            return;
+        }
+
+        // Some terminals (notably on macOS) can drop a "promised" file path
+        // (e.g., from Preview) that doesn't actually exist on disk. Fall back
+        // to reading the image directly from the clipboard.
+        match crate::clipboard_paste::paste_image_to_temp_png() {
+            Ok((clipboard_path, _info)) => {
+                let clipboard_persisted = self
+                    .persist_user_image_if_needed(&clipboard_path)
+                    .unwrap_or(clipboard_path);
+                self.pending_images.insert(placeholder, clipboard_persisted);
+                self.push_background_tail("Used clipboard image (dropped file path was missing).");
+                self.request_redraw();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "dropped/pasted image path missing ({}); clipboard fallback failed: {}",
+                    persisted.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    fn persist_user_image_if_needed(&self, path: &std::path::Path) -> Option<PathBuf> {
+        if !path.exists() || !path.is_file() {
+            return None;
+        }
+
+        let temp_dir = std::env::temp_dir();
+        let path_lossy = path.to_string_lossy();
+        let looks_ephemeral = path.starts_with(&temp_dir)
+            || path_lossy.contains("/TemporaryItems/")
+            || path_lossy.contains("\\TemporaryItems\\");
+        if !looks_ephemeral {
+            return None;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png")
+            .to_string();
+
+        let mut dir = self
+            .config
+            .code_home
+            .join("working")
+            .join("_pasted_images");
+        if let Some(session_id) = self.session_id {
+            dir = dir.join(session_id.to_string());
+        }
+
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                "failed to create pasted image dir {}: {}",
+                dir.display(),
+                err
+            );
+            return None;
+        }
+
+        let file_name = format!("dropped-{}.{}", Uuid::new_v4(), ext);
+        let dest = dir.join(file_name);
+
+        match std::fs::copy(path, &dest) {
+            Ok(_) => Some(dest),
+            Err(err) => {
+                tracing::warn!(
+                    "failed to persist dropped image {} -> {}: {}",
+                    path.display(),
+                    dest.display(),
+                    err
+                );
+                None
+            }
+        }
     }
 
     fn parse_message_with_images(&mut self, text: String) -> UserMessage {
@@ -6096,14 +6073,30 @@ impl ChatWidget<'_> {
                 }
             }
 
+
             let placeholder = mat.as_str();
             if placeholder.starts_with("[image:") {
                 if let Some(path) = self.pending_images.remove(placeholder) {
-                    // Emit a small marker followed by the image so the LLM sees placement
-                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-                    let marker = format!("[image: {}]", filename);
-                    ordered_items.push(InputItem::Text { text: marker });
-                    ordered_items.push(InputItem::LocalImage { path });
+                    if path.exists() && path.is_file() {
+                        // Emit the placeholder marker verbatim followed by the image so the LLM sees placement
+                        ordered_items.push(InputItem::Text {
+                            text: placeholder.to_string(),
+                        });
+                        ordered_items.push(InputItem::LocalImage { path });
+                    } else {
+                        tracing::warn!(
+                            "pending image placeholder {} resolved to missing path {}",
+                            placeholder,
+                            path.display()
+                        );
+                        self.push_background_tail(format!(
+                            "Dropped image file went missing; not attaching ({})",
+                            path.display()
+                        ));
+                        ordered_items.push(InputItem::Text {
+                            text: placeholder.to_string(),
+                        });
+                    }
                 } else {
                     // Unknown placeholder: preserve as text
                     ordered_items.push(InputItem::Text {
@@ -6147,11 +6140,14 @@ impl ChatWidget<'_> {
             if path.exists() {
                 // Add a marker then the image so the LLM has contextual placement info
                 let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+                let persisted_path = self
+                    .persist_user_image_if_needed(path)
+                    .unwrap_or_else(|| path.to_path_buf());
                 ordered_items.push(InputItem::Text {
                     text: format!("[image: {}]", filename),
                 });
                 ordered_items.push(InputItem::LocalImage {
-                    path: path.to_path_buf(),
+                    path: persisted_path,
                 });
             }
         }
@@ -6280,13 +6276,8 @@ impl ChatWidget<'_> {
 
     fn interrupt_running_task(&mut self) {
         let bottom_running = self.bottom_pane.is_task_running();
-        let exec_related_running = !self.exec.running_commands.is_empty()
-            || !self.tools_state.running_custom_tools.is_empty()
-            || !self.tools_state.web_search_sessions.is_empty()
-            || !self.tools_state.running_wait_tools.is_empty()
-            || !self.tools_state.running_kill_tools.is_empty();
-
-        if !(bottom_running || exec_related_running) {
+        let wait_running = self.wait_running();
+        if !self.is_task_running() && !wait_running {
             return;
         }
 
@@ -6452,6 +6443,8 @@ impl ChatWidget<'_> {
             active_exec_cell: None,
             history_cells,
             config: config.clone(),
+            mcp_tools_by_server: HashMap::new(),
+            mcp_server_failures: HashMap::new(),
             remote_model_presets: None,
             allow_remote_default_at_startup: !config.model_explicit,
             chat_model_selected_explicitly: false,
@@ -6486,6 +6479,7 @@ impl ChatWidget<'_> {
             last_user_message: None,
             last_developer_message: None,
             pending_turn_origin: None,
+            pending_request_user_input: None,
             current_turn_origin: None,
             cleared_lingering_execs_this_turn: true,
             exec: ExecState {
@@ -6583,6 +6577,9 @@ impl ChatWidget<'_> {
             pending_manual_terminal: HashMap::new(),
             agents_overview_selected_index: 0,
             agents_terminal: AgentsTerminalState::new(),
+            pending_git_init_resume: None,
+            git_init_inflight: false,
+            git_init_declined: false,
             pending_upgrade_notice: None,
             history_render: HistoryRenderState::new(),
             last_render_settings: Cell::new(RenderSettings::new(0, 0, false)),
@@ -6602,7 +6599,7 @@ impl ChatWidget<'_> {
                 crate::height_manager::HeightManagerConfig::default(),
             )),
             layout: LayoutState {
-                scroll_offset: 0,
+                scroll_offset: Cell::new(0),
                 last_max_scroll: std::cell::Cell::new(0),
                 last_history_viewport_height: std::cell::Cell::new(0),
                 vertical_scrollbar_state: std::cell::RefCell::new(ScrollbarState::default()),
@@ -6629,7 +6626,6 @@ impl ChatWidget<'_> {
             ghost_snapshot_queue: VecDeque::new(),
             active_ghost_snapshot: None,
             next_ghost_snapshot_id: 0,
-            pending_snapshot_dispatches: VecDeque::new(),
             history_virtualization_sync_pending: Cell::new(false),
             auto_drive_card_sequence: 0,
             auto_drive_variant,
@@ -6679,6 +6675,7 @@ impl ChatWidget<'_> {
             resume_placeholder_visible: false,
             resume_picker_loading: false,
         };
+        new_widget.load_auto_review_baseline_marker();
         new_widget.spawn_conversation_runtime(config.clone(), auth_manager.clone(), code_op_rx);
         if let Ok(Some(active_id)) = auth_accounts::get_active_account_id(&config.code_home) {
             if let Ok(records) = account_usage::list_rate_limit_snapshots(&config.code_home) {
@@ -6807,6 +6804,8 @@ impl ChatWidget<'_> {
             active_exec_cell: None,
             history_cells,
             config: config.clone(),
+            mcp_tools_by_server: HashMap::new(),
+            mcp_server_failures: HashMap::new(),
             remote_model_presets: None,
             allow_remote_default_at_startup: !config.model_explicit,
             chat_model_selected_explicitly: false,
@@ -6838,6 +6837,7 @@ impl ChatWidget<'_> {
             last_user_message: None,
             last_developer_message: None,
             pending_turn_origin: None,
+            pending_request_user_input: None,
             current_turn_origin: None,
             cleared_lingering_execs_this_turn: true,
             exec: ExecState {
@@ -6952,6 +6952,9 @@ impl ChatWidget<'_> {
             pending_manual_terminal: HashMap::new(),
             agents_overview_selected_index: 0,
             agents_terminal: AgentsTerminalState::new(),
+            pending_git_init_resume: None,
+            git_init_inflight: false,
+            git_init_declined: false,
             pending_upgrade_notice: None,
             history_render: HistoryRenderState::new(),
             last_render_settings: Cell::new(RenderSettings::new(0, 0, false)),
@@ -6971,7 +6974,7 @@ impl ChatWidget<'_> {
                 crate::height_manager::HeightManagerConfig::default(),
             )),
             layout: LayoutState {
-                scroll_offset: 0,
+                scroll_offset: Cell::new(0),
                 last_max_scroll: std::cell::Cell::new(0),
                 last_history_viewport_height: std::cell::Cell::new(0),
                 vertical_scrollbar_state: std::cell::RefCell::new(ScrollbarState::default()),
@@ -6998,7 +7001,6 @@ impl ChatWidget<'_> {
             ghost_snapshot_queue: VecDeque::new(),
             active_ghost_snapshot: None,
             next_ghost_snapshot_id: 0,
-            pending_snapshot_dispatches: VecDeque::new(),
             history_virtualization_sync_pending: Cell::new(false),
             auto_drive_card_sequence: 0,
             auto_drive_variant,
@@ -7048,6 +7050,7 @@ impl ChatWidget<'_> {
             resume_placeholder_visible: false,
             resume_picker_loading: false,
         };
+        w.load_auto_review_baseline_marker();
         if let Ok(Some(active_id)) = auth_accounts::get_active_account_id(&config.code_home) {
             if let Ok(records) = account_usage::list_rate_limit_snapshots(&config.code_home) {
                 if let Some(record) = records.into_iter().find(|r| r.account_id == active_id) {
@@ -7755,6 +7758,22 @@ impl ChatWidget<'_> {
         if let Some(range) = spacing_range {
             self.history_render.append_spacing_range(range);
         }
+        if next.height >= 2
+            && next
+                .cell
+                .and_then(|cell| {
+                    cell.as_any()
+                        .downcast_ref::<crate::history_cell::AssistantMarkdownCell>()
+                })
+                .is_some()
+        {
+            let cell_end = self.history_render.last_total_height();
+            let cell_start = cell_end.saturating_sub(next.height);
+            self.history_render
+                .append_spacing_range((cell_start, cell_start.saturating_add(1)));
+            self.history_render
+                .append_spacing_range((cell_end.saturating_sub(1), cell_end));
+        }
         true
     }
 
@@ -8034,6 +8053,21 @@ impl ChatWidget<'_> {
             }
         }
 
+        if let KeyEvent {
+            code: crossterm::event::KeyCode::Char('g'),
+            modifiers: crossterm::event::KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press | KeyEventKind::Repeat,
+            ..
+        } = key_event
+        {
+            if !self.bottom_pane.has_active_modal_view() {
+                let initial = self.bottom_pane.composer_text();
+                self.app_event_tx
+                    .send(AppEvent::OpenExternalEditor { initial });
+            }
+            return;
+        }
+
         // Fast-path PageUp/PageDown to scroll the transcript by a viewport at a time.
         if let crossterm::event::KeyEvent {
             code: crossterm::event::KeyCode::PageUp,
@@ -8090,6 +8124,10 @@ impl ChatWidget<'_> {
 
         match input_result {
             InputResult::Submitted(text) => {
+                if let Some(pending) = self.pending_request_user_input.take() {
+                    self.submit_request_user_input_answer(pending, text);
+                    return;
+                }
                 self.pending_turn_origin = Some(TurnOrigin::User);
                 let cleaned = Self::strip_context_sections(&text);
                 self.last_user_message = (!cleaned.trim().is_empty()).then_some(cleaned);
@@ -8123,12 +8161,12 @@ impl ChatWidget<'_> {
                 self.app_event_tx.send(AppEvent::RequestRedraw);
             }
             InputResult::ScrollUp => {
-                let before = self.layout.scroll_offset;
+                let before = self.layout.scroll_offset.get();
                 // Only allow Up to navigate command history when the top view
                 // cannot be scrolled at all (no scrollback available).
                 if self.layout.last_max_scroll.get() == 0 {
                     if self.bottom_pane.try_history_up() {
-                        self.perf_track_scroll_delta(before, self.layout.scroll_offset);
+                        self.perf_track_scroll_delta(before, self.layout.scroll_offset.get());
                         return;
                     }
                 }
@@ -8137,13 +8175,14 @@ impl ChatWidget<'_> {
                 let new_offset = self
                     .layout
                     .scroll_offset
+                    .get()
                     .saturating_add(3)
                     .min(self.layout.last_max_scroll.get());
-                self.layout.scroll_offset = new_offset;
+                self.layout.scroll_offset.set(new_offset);
                 self.flash_scrollbar();
                 self.sync_history_virtualization();
                 // Enable compact mode so history can use the spacer line
-                if self.layout.scroll_offset > 0 {
+                if self.layout.scroll_offset.get() > 0 {
                     self.bottom_pane.set_compact_compose(true);
                     self.height_manager
                         .borrow_mut()
@@ -8156,21 +8195,21 @@ impl ChatWidget<'_> {
                     .borrow_mut()
                     .record_event(HeightEvent::UserScroll);
                 self.maybe_show_history_nav_hint_on_first_scroll();
-                self.perf_track_scroll_delta(before, self.layout.scroll_offset);
+                self.perf_track_scroll_delta(before, self.layout.scroll_offset.get());
             }
             InputResult::ScrollDown => {
-                let before = self.layout.scroll_offset;
+                let before = self.layout.scroll_offset.get();
                 // Only allow Down to navigate command history when the top view
                 // cannot be scrolled at all (no scrollback available).
                 if self.layout.last_max_scroll.get() == 0 && self.bottom_pane.history_is_browsing()
                 {
                     if self.bottom_pane.try_history_down() {
-                        self.perf_track_scroll_delta(before, self.layout.scroll_offset);
+                        self.perf_track_scroll_delta(before, self.layout.scroll_offset.get());
                         return;
                     }
                 }
                 // Scroll down in chat history (decrease offset, towards bottom)
-                if self.layout.scroll_offset == 0 {
+                if self.layout.scroll_offset.get() == 0 {
                     // Already at bottom: ensure spacer above input is enabled.
                     self.bottom_pane.set_compact_compose(false);
                     self.sync_history_virtualization();
@@ -8182,30 +8221,32 @@ impl ChatWidget<'_> {
                     self.height_manager
                         .borrow_mut()
                         .record_event(HeightEvent::ComposerModeChange);
-                    self.perf_track_scroll_delta(before, self.layout.scroll_offset);
-                } else if self.layout.scroll_offset >= 3 {
+                    self.perf_track_scroll_delta(before, self.layout.scroll_offset.get());
+                } else if self.layout.scroll_offset.get() >= 3 {
                     // Move towards bottom but do NOT toggle spacer yet; wait until
                     // the user confirms by pressing Down again at bottom.
-                    self.layout.scroll_offset = self.layout.scroll_offset.saturating_sub(3);
+                    self.layout
+                        .scroll_offset
+                        .set(self.layout.scroll_offset.get().saturating_sub(3));
                     self.sync_history_virtualization();
                     self.app_event_tx.send(AppEvent::RequestRedraw);
                     self.height_manager
                         .borrow_mut()
                         .record_event(HeightEvent::UserScroll);
                     self.maybe_show_history_nav_hint_on_first_scroll();
-                    self.perf_track_scroll_delta(before, self.layout.scroll_offset);
-                } else if self.layout.scroll_offset > 0 {
+                    self.perf_track_scroll_delta(before, self.layout.scroll_offset.get());
+                } else if self.layout.scroll_offset.get() > 0 {
                     // Land exactly at bottom without toggling spacer yet; require
                     // a subsequent Down to re-enable the spacer so the input
                     // doesn't move when scrolling into the line above it.
-                    self.layout.scroll_offset = 0;
+                    self.layout.scroll_offset.set(0);
                     self.sync_history_virtualization();
                     self.app_event_tx.send(AppEvent::RequestRedraw);
                     self.height_manager
                         .borrow_mut()
                         .record_event(HeightEvent::UserScroll);
                     self.maybe_show_history_nav_hint_on_first_scroll();
-                    self.perf_track_scroll_delta(before, self.layout.scroll_offset);
+                    self.perf_track_scroll_delta(before, self.layout.scroll_offset.get());
                 }
                 self.flash_scrollbar();
             }
@@ -9345,8 +9386,10 @@ impl ChatWidget<'_> {
                     // Add a placeholder to the compose field instead of submitting
                     let placeholder = format!("[image: {}]", filename);
 
+                    let persisted = self.persist_user_image_if_needed(&path).unwrap_or(path);
+
                     // Store the image path for later submission
-                    self.pending_images.insert(placeholder.clone(), path);
+                    self.pending_images.insert(placeholder.clone(), persisted);
 
                     // Add the placeholder text to the compose field
                     self.bottom_pane.handle_paste(placeholder);
@@ -9381,6 +9424,17 @@ impl ChatWidget<'_> {
         layout_scroll::flash_scrollbar(self);
     }
 
+    fn ensure_image_cell_picker(&self, cell: &dyn HistoryCell) {
+        if let Some(image) = cell
+            .as_any()
+            .downcast_ref::<crate::history_cell::ImageOutputCell>()
+        {
+            let picker = self.terminal_info.picker.clone();
+            let font_size = self.terminal_info.font_size;
+            image.ensure_picker_initialized(picker, font_size);
+        }
+    }
+
     fn history_insert_with_key_global(
         &mut self,
         cell: Box<dyn HistoryCell>,
@@ -9408,6 +9462,7 @@ impl ChatWidget<'_> {
                 );
             }
         }
+        self.ensure_image_cell_picker(cell.as_ref());
         // Any ordered insert of a non-reasoning cell means reasoning is no longer the
         // bottom-most active block; drop the in-progress ellipsis on collapsed titles.
         let is_reasoning_cell = cell
@@ -9967,6 +10022,63 @@ impl ChatWidget<'_> {
         }
     }
 
+    fn merge_tool_arguments(existing: &mut Vec<ToolArgument>, updates: Vec<ToolArgument>) {
+        for update in updates {
+            if let Some(existing_arg) = existing.iter_mut().find(|arg| arg.name == update.name) {
+                *existing_arg = update;
+            } else {
+                existing.push(update);
+            }
+        }
+    }
+
+    fn apply_custom_tool_update(
+        &mut self,
+        call_id: &str,
+        parameters: Option<serde_json::Value>,
+    ) {
+        let Some(params) = parameters else {
+            return;
+        };
+        let updates = history_cell::arguments_from_json(&params);
+        if updates.is_empty() {
+            return;
+        }
+
+        let running_entry = self
+            .tools_state
+            .running_custom_tools
+            .get(&ToolCallId(call_id.to_string()))
+            .copied();
+        let resolved_idx = running_entry
+            .as_ref()
+            .and_then(|entry| running_tools::resolve_entry_index(self, entry, call_id))
+            .or_else(|| running_tools::find_by_call_id(self, call_id));
+
+        let Some(idx) = resolved_idx else {
+            return;
+        };
+        if idx >= self.history_cells.len() {
+            return;
+        }
+        let Some(running_cell) = self.history_cells[idx]
+            .as_any()
+            .downcast_ref::<history_cell::RunningToolCallCell>()
+        else {
+            return;
+        };
+
+        let mut state = running_cell.state().clone();
+        Self::merge_tool_arguments(&mut state.arguments, updates);
+        let mut updated_cell = history_cell::RunningToolCallCell::from_state(state.clone());
+        updated_cell.state_mut().call_id = Some(call_id.to_string());
+        self.history_replace_with_record(
+            idx,
+            Box::new(updated_cell),
+            HistoryDomainRecord::from(state),
+        );
+    }
+
     fn hydrate_cell_from_record(
         &self,
         cell: &mut Box<dyn HistoryCell>,
@@ -10136,9 +10248,11 @@ impl ChatWidget<'_> {
             HistoryRecord::BackgroundEvent(state) => {
                 Some(Box::new(history_cell::BackgroundEventCell::new(state.clone())))
             }
-            HistoryRecord::Image(state) => Some(Box::new(
-                history_cell::ImageOutputCell::from_record(state.clone()),
-            )),
+            HistoryRecord::Image(state) => {
+                let cell = history_cell::ImageOutputCell::from_record(state.clone());
+                self.ensure_image_cell_picker(&cell);
+                Some(Box::new(cell))
+            }
             HistoryRecord::Context(state) => Some(Box::new(
                 history_cell::ContextCell::new(state.clone()),
             )),
@@ -10527,6 +10641,7 @@ impl ChatWidget<'_> {
             }
         }
 
+        self.ensure_image_cell_picker(cell.as_ref());
         self.history_cells[idx] = cell;
         self.invalidate_height_cache();
         self.request_redraw();
@@ -10575,6 +10690,7 @@ impl ChatWidget<'_> {
             (None, None) => {}
         }
 
+        self.ensure_image_cell_picker(cell.as_ref());
         self.history_cells[idx] = cell;
         if idx < self.history_cell_ids.len() {
             self.history_cell_ids[idx] = maybe_id;
@@ -10889,8 +11005,138 @@ impl ChatWidget<'_> {
         }
     }
 
+    fn submit_request_user_input_answer(&mut self, pending: PendingRequestUserInput, raw: String) {
+        use code_protocol::request_user_input::RequestUserInputAnswer;
+        use code_protocol::request_user_input::RequestUserInputResponse;
+
+        tracing::info!(
+            "[request_user_input] answer turn_id={} call_id={}",
+            pending.turn_id,
+            pending.call_id
+        );
+
+        let display_text = raw.trim();
+        if !display_text.is_empty() {
+            let key = Self::order_key_successor(pending.anchor_key);
+            let state = history_cell::new_user_prompt(display_text.to_string());
+            let _ =
+                self.history_insert_plain_state_with_key(state, key, "request_user_input_answer");
+            self.restore_reasoning_in_progress_if_streaming();
+        }
+
+        let response = serde_json::from_str::<RequestUserInputResponse>(&raw).unwrap_or_else(|_| {
+            let question_count = pending.questions.len();
+            let mut lines: Vec<String> = raw
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .collect();
+
+            if question_count <= 1 {
+                lines = vec![raw.trim().to_string()];
+            } else if lines.len() > question_count {
+                let tail = lines.split_off(question_count - 1);
+                lines.push(tail.join("\n"));
+            }
+
+            while lines.len() < question_count {
+                lines.push(String::new());
+            }
+
+            let mut answers = std::collections::HashMap::new();
+            for (idx, question) in pending.questions.iter().enumerate() {
+                let value = lines.get(idx).cloned().unwrap_or_default();
+                answers.insert(
+                    question.id.clone(),
+                    RequestUserInputAnswer {
+                        answers: vec![value],
+                    },
+                );
+            }
+            RequestUserInputResponse { answers }
+        });
+
+        if let Err(e) = self.code_op_tx.send(Op::UserInputAnswer {
+            id: pending.turn_id,
+            response,
+        }) {
+            tracing::error!("failed to send Op::UserInputAnswer: {e}");
+        }
+
+        self.clear_composer();
+        self.bottom_pane
+            .update_status_text("waiting for model".to_string());
+        self.request_redraw();
+    }
+
+    pub(crate) fn on_request_user_input_answer(
+        &mut self,
+        turn_id: String,
+        response: code_protocol::request_user_input::RequestUserInputResponse,
+    ) {
+        let Some(pending) = self.pending_request_user_input.take() else {
+            tracing::warn!(
+                "[request_user_input] received UI answer but no request is pending (turn_id={turn_id})"
+            );
+            return;
+        };
+
+        if pending.turn_id != turn_id {
+            tracing::warn!(
+                "[request_user_input] received UI answer for unexpected turn_id (expected={}, got={turn_id})",
+                pending.turn_id,
+            );
+        }
+
+        self.bottom_pane.close_request_user_input_view();
+
+        let display_text = {
+            let mut lines = Vec::new();
+            for question in &pending.questions {
+                let answer: &[String] = response
+                    .answers
+                    .get(&question.id)
+                    .map(|a| a.answers.as_slice())
+                    .unwrap_or(&[]);
+                let value = answer.first().map(String::as_str).unwrap_or("");
+                let value = if value.trim().is_empty() { "(skipped)" } else { value };
+
+                if pending.questions.len() == 1 {
+                    lines.push(value.to_string());
+                } else {
+                    let header = question.header.trim();
+                    if header.is_empty() {
+                        lines.push(value.to_string());
+                    } else {
+                        lines.push(format!("{header}: {value}"));
+                    }
+                }
+            }
+            lines.join("\n")
+        };
+
+        if !display_text.trim().is_empty() {
+            let key = Self::order_key_successor(pending.anchor_key);
+            let state = history_cell::new_user_prompt(display_text);
+            let _ =
+                self.history_insert_plain_state_with_key(state, key, "request_user_input_answer");
+            self.restore_reasoning_in_progress_if_streaming();
+        }
+
+        if let Err(e) = self.code_op_tx.send(Op::UserInputAnswer {
+            id: pending.turn_id,
+            response,
+        }) {
+            tracing::error!("failed to send Op::UserInputAnswer: {e}");
+        }
+
+        self.clear_composer();
+        self.bottom_pane
+            .update_status_text("waiting for model".to_string());
+        self.request_redraw();
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        if self.layout.scroll_offset > 0 {
+        if self.layout.scroll_offset.get() > 0 {
             layout_scroll::to_bottom(self);
         }
         // Surface a local diagnostic note and anchor it to the NEXT turn,
@@ -11141,6 +11387,16 @@ impl ChatWidget<'_> {
                         Some(&self.config.agents),
                         Some(&self.config.subagent_commands),
                     );
+                    if !res.read_only
+                        && self.ensure_git_repo_for_action(
+                            GitInitResume::SubmitText {
+                                text: original_text.clone(),
+                            },
+                            "Write-enabled agents require a git repository.",
+                        )
+                    {
+                        return;
+                    }
                     // Acknowledge configuration
                     let mode = if res.read_only { "read-only" } else { "write" };
                     let agents = if res.models.is_empty() {
@@ -11191,6 +11447,16 @@ impl ChatWidget<'_> {
                         Some(&self.config.agents),
                         Some(&self.config.subagent_commands),
                     );
+                    if !res.read_only
+                        && self.ensure_git_repo_for_action(
+                            GitInitResume::SubmitText {
+                                text: original_text.clone(),
+                            },
+                            "Write-enabled agents require a git repository.",
+                        )
+                    {
+                        return;
+                    }
 
                     // Replace the message with the resolved prompt and suppress the
                     // agent launch hint that would otherwise echo back immediately.
@@ -11405,15 +11671,12 @@ impl ChatWidget<'_> {
                 Some(message.display_text.clone())
             };
 
-            match self.capture_ghost_snapshot(prompt_summary) {
-                GhostSnapshotJobHandle::Scheduled(job_id) => {
-                    self.pending_snapshot_dispatches
-                        .push_back(PendingSnapshotDispatch::Queued { job_id, message });
-                }
-                GhostSnapshotJobHandle::Skipped => {
-                    self.dispatch_queued_user_message_now(message);
-                }
+            let should_capture_snapshot = self.active_ghost_snapshot.is_none()
+                && self.ghost_snapshot_queue.is_empty();
+            if should_capture_snapshot {
+                let _ = self.capture_ghost_snapshot(prompt_summary);
             }
+            self.dispatch_queued_user_message_now(message);
             return;
         }
 
@@ -11534,35 +11797,6 @@ impl ChatWidget<'_> {
         snapshot
     }
 
-    fn dispatch_pending_snapshot(&mut self, job_id: u64) {
-        let Some(position) = self
-            .pending_snapshot_dispatches
-            .iter()
-            .position(|pending| pending.job_id() == job_id)
-        else {
-            return;
-        };
-
-        let Some(pending) = self.pending_snapshot_dispatches.remove(position) else {
-            return;
-        };
-        self.process_snapshot_dispatch(pending);
-    }
-
-    fn flush_pending_snapshot_dispatches(&mut self) {
-        while let Some(pending) = self.pending_snapshot_dispatches.pop_front() {
-            self.process_snapshot_dispatch(pending);
-        }
-    }
-
-    fn process_snapshot_dispatch(&mut self, pending: PendingSnapshotDispatch) {
-        match pending {
-            PendingSnapshotDispatch::Queued { message, .. } => {
-                self.dispatch_queued_user_message_now(message);
-            }
-        }
-    }
-
     fn dispatch_queued_batch(&mut self, batch: Vec<UserMessage>) {
         if batch.is_empty() {
             return;
@@ -11612,6 +11846,7 @@ impl ChatWidget<'_> {
                 .code_op_tx
                 .send(Op::UserInput {
                     items: combined_items,
+                    final_output_json_schema: None,
                 })
             {
                 tracing::error!("failed to send Op::UserInput: {e}");
@@ -11880,12 +12115,8 @@ impl ChatWidget<'_> {
             return;
         }
 
-        let snapshot = self.finalize_ghost_snapshot(request, result, elapsed);
+        let _ = self.finalize_ghost_snapshot(request, result, elapsed);
         self.request_redraw();
-        self.dispatch_pending_snapshot(job_id);
-        if snapshot.is_none() {
-            self.flush_pending_snapshot_dispatches();
-        }
         self.spawn_next_ghost_snapshot();
     }
 
@@ -11980,7 +12211,6 @@ impl ChatWidget<'_> {
             queue: self.ghost_snapshot_queue.clone(),
             active: self.active_ghost_snapshot.clone(),
             next_id: self.next_ghost_snapshot_id,
-            pending_dispatches: self.pending_snapshot_dispatches.clone(),
             queued_user_messages: self.queued_user_messages.clone(),
         }
     }
@@ -11996,7 +12226,6 @@ impl ChatWidget<'_> {
         self.ghost_snapshot_queue = state.queue;
         self.active_ghost_snapshot = state.active;
         self.next_ghost_snapshot_id = state.next_id;
-        self.pending_snapshot_dispatches = state.pending_dispatches;
         self.queued_user_messages = state.queued_user_messages;
         let blocked = self.is_task_running()
             || !self.active_task_ids.is_empty()
@@ -13001,6 +13230,11 @@ impl ChatWidget<'_> {
                 // Ask core for custom prompts so the slash menu can show them.
                 self.submit_op(Op::ListCustomPrompts);
                 self.submit_op(Op::ListSkills);
+                self.mcp_tools_by_server.clear();
+                self.mcp_server_failures.clear();
+                if !self.config.mcp_servers.is_empty() {
+                    self.submit_op(Op::ListMcpTools);
+                }
 
                 if self.resume_placeholder_visible && event.history_entry_count == 0 {
                     self.replace_resume_placeholder_with_notice(RESUME_NO_HISTORY_NOTICE);
@@ -13333,6 +13567,7 @@ impl ChatWidget<'_> {
                 // This begins the new turn; clear the pending prompt anchor count
                 // so subsequent background events use standard placement.
                 self.pending_user_prompts_for_next_turn = 0;
+                self.pending_request_user_input = None;
                 // Reset stream headers for new turn
                 self.stream.reset_headers_for_new_turn();
                 self.stream_state.current_kind = None;
@@ -13372,6 +13607,7 @@ impl ChatWidget<'_> {
             }
             EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                 self.clear_reconnecting();
+                self.pending_request_user_input = None;
                 let had_running_execs = !self.exec.running_commands.is_empty();
                 // Finalize any active streams
                 let finalizing_streams = self.stream.is_write_cycle_active();
@@ -13650,6 +13886,192 @@ impl ChatWidget<'_> {
                     },
                 );
             }
+            EventMsg::RequestUserInput(ev) => {
+                let key = self.near_time_key_current_req(event.order.as_ref());
+                let mut lines: Vec<String> = Vec::new();
+                lines.push("Model requested user input".to_string());
+
+                for question in &ev.questions {
+                    let header = &question.header;
+                    let id = &question.id;
+                    let question_text = &question.question;
+                    lines.push(format!("\n{header} ({id})\n{question_text}"));
+                    if let Some(options) = &question.options {
+                        lines.push("Options:".to_string());
+                        for option in options {
+                            let label = &option.label;
+                            let description = &option.description;
+                            lines.push(format!("- {label}: {description}"));
+                        }
+                    }
+                }
+                let auto_answer = self.auto_state.is_active() && !self.auto_state.is_paused_manual();
+                if auto_answer {
+                    lines.push("\nAuto Drive is active; continuing automatically.".to_string());
+                } else {
+                    lines.push(
+                        "\nUse the picker below to continue (Esc to type in the composer).".to_string(),
+                    );
+                }
+
+                let role = history_cell::plain_role_for_kind(PlainMessageKind::Notice);
+                let state =
+                    history_cell::plain_message_state_from_paragraphs(PlainMessageKind::Notice, role, lines);
+                let _ = self.history_insert_plain_state_with_key(state, key, "request_user_input");
+                self.restore_reasoning_in_progress_if_streaming();
+
+                if auto_answer {
+                    use code_protocol::request_user_input::RequestUserInputAnswer;
+                    use code_protocol::request_user_input::RequestUserInputResponse;
+
+                    fn choose_option_label(
+                        question: &code_protocol::request_user_input::RequestUserInputQuestion,
+                    ) -> Option<String> {
+                        let options = question.options.as_ref()?;
+                        if options.is_empty() {
+                            return None;
+                        }
+
+                        let recommended = options.iter().position(|opt| {
+                            opt.label.contains("(Recommended)")
+                                || opt.label.contains("Recommended")
+                                || opt.label.contains("recommended")
+                        });
+                        let idx = recommended.unwrap_or(0);
+                        options.get(idx).map(|opt| opt.label.clone())
+                    }
+
+                    fn choose_freeform_value(
+                        question: &code_protocol::request_user_input::RequestUserInputQuestion,
+                    ) -> String {
+                        let key = format!("{} {}", question.id, question.header).to_ascii_lowercase();
+                        if key.contains("confirm") || key.contains("proceed") {
+                            "yes".to_string()
+                        } else if key.contains("name") {
+                            "Auto Drive".to_string()
+                        } else {
+                            "auto".to_string()
+                        }
+                    }
+
+                    let mut answers = std::collections::HashMap::new();
+                    for question in &ev.questions {
+                        let answer_value = if let Some(label) = choose_option_label(question) {
+                            vec![label]
+                        } else {
+                            vec![choose_freeform_value(question)]
+                        };
+                        answers.insert(
+                            question.id.clone(),
+                            RequestUserInputAnswer {
+                                answers: answer_value,
+                            },
+                        );
+                    }
+                    let response = RequestUserInputResponse { answers };
+
+                    let summary = {
+                        let mut parts = Vec::new();
+                        for question in &ev.questions {
+                            let label = response
+                                .answers
+                                .get(&question.id)
+                                .and_then(|a| a.answers.first())
+                                .map(String::as_str)
+                                .unwrap_or("(skipped)");
+                            if ev.questions.len() == 1 {
+                                parts.push(label.to_string());
+                            } else {
+                                let header = question.header.trim();
+                                if header.is_empty() {
+                                    parts.push(label.to_string());
+                                } else {
+                                    parts.push(format!("{header}: {label}"));
+                                }
+                            }
+                        }
+                        parts.join("\n")
+                    };
+
+                    if !summary.trim().is_empty() {
+                        let key = Self::order_key_successor(key);
+                        let role = history_cell::plain_role_for_kind(PlainMessageKind::Notice);
+                        let state = history_cell::plain_message_state_from_paragraphs(
+                            PlainMessageKind::Notice,
+                            role,
+                            vec![format!("Auto Drive answered user input:\n{summary}")],
+                        );
+                        let _ = self
+                            .history_insert_plain_state_with_key(state, key, "request_user_input_auto_answer");
+                        self.restore_reasoning_in_progress_if_streaming();
+                    }
+
+                    if let Err(e) = self.code_op_tx.send(Op::UserInputAnswer {
+                        id: ev.turn_id.clone(),
+                        response,
+                    }) {
+                        tracing::error!("failed to send Op::UserInputAnswer: {e}");
+                    }
+
+                    self.bottom_pane
+                        .update_status_text("waiting for model".to_string());
+                    self.bottom_pane.set_task_running(true);
+                } else {
+                    self.pending_request_user_input = Some(PendingRequestUserInput {
+                        turn_id: ev.turn_id.clone(),
+                        call_id: ev.call_id.clone(),
+                        anchor_key: key,
+                        questions: ev.questions.clone(),
+                    });
+                    self.bottom_pane
+                        .update_status_text("waiting for user input".to_string());
+                    self.bottom_pane.set_task_running(true);
+                    self.bottom_pane.ensure_input_focus();
+                    self.bottom_pane
+                        .show_request_user_input(crate::bottom_pane::RequestUserInputView::new(
+                            ev.turn_id.clone(),
+                            ev.questions.clone(),
+                            self.app_event_tx.clone(),
+                        ));
+                }
+                self.request_redraw();
+            }
+            EventMsg::DynamicToolCallRequest(ev) => {
+                let key = self.near_time_key_current_req(event.order.as_ref());
+                let tool = &ev.tool;
+                let call_id = &ev.call_id;
+                let lines = vec![
+                    format!("Dynamic tool call requested: {tool}"),
+                    format!("call_id: {call_id}"),
+                    "Dynamic tools are not supported in this UI; returning a failure response."
+                        .to_string(),
+                ];
+                let role = history_cell::plain_role_for_kind(PlainMessageKind::Notice);
+                let state = history_cell::plain_message_state_from_paragraphs(
+                    PlainMessageKind::Notice,
+                    role,
+                    lines,
+                );
+                let _ = self.history_insert_plain_state_with_key(state, key, "dynamic_tool_call");
+                self.restore_reasoning_in_progress_if_streaming();
+
+                let response = DynamicToolResponse {
+                    call_id: ev.call_id.clone(),
+                    output: "dynamic tools are not supported in this UI".to_string(),
+                    success: false,
+                };
+                if let Err(e) = self.code_op_tx.send(Op::DynamicToolResponse {
+                    id: ev.call_id.clone(),
+                    response,
+                }) {
+                    tracing::error!("failed to send Op::DynamicToolResponse: {e}");
+                }
+
+                self.bottom_pane
+                    .update_status_text("waiting for model".to_string());
+                self.bottom_pane.set_task_running(true);
+                self.request_redraw();
+            }
             EventMsg::ApplyPatchApprovalRequest(ev) => {
                 let id2 = id.clone();
                 let ev2 = ev.clone();
@@ -13667,19 +14089,12 @@ impl ChatWidget<'_> {
                 );
             }
             EventMsg::ExecCommandBegin(ev) => {
-                let ev2 = ev.clone();
                 let seq = event.event_seq;
                 let om_begin = event
                     .order
                     .clone()
                     .expect("missing OrderMeta for ExecCommandBegin");
-                let om_begin_for_handler = om_begin.clone();
-                self.defer_or_handle(
-                    move |interrupts| interrupts.push_exec_begin(seq, ev, Some(om_begin)),
-                    move |this| {
-                        this.handle_exec_begin_ordered(ev2, om_begin_for_handler, seq);
-                    },
-                );
+                self.handle_exec_begin_ordered(ev, om_begin, seq);
             }
             EventMsg::ExecCommandOutputDelta(ev) => {
                 let call_id = ExecCallId(ev.call_id.clone());
@@ -13841,7 +14256,6 @@ impl ChatWidget<'_> {
                 );
             }
             EventMsg::McpToolCallBegin(ev) => {
-                let ev2 = ev.clone();
                 let seq = event.event_seq;
                 let order_ok = match event.order.as_ref() {
                     Some(om) => self.provider_order_key_from_order_meta(om),
@@ -13850,20 +14264,17 @@ impl ChatWidget<'_> {
                         self.next_internal_key()
                     }
                 };
-                self.defer_or_handle(
-                    move |interrupts| interrupts.push_mcp_begin(seq, ev, event.order.clone()),
-                    |this| {
-                        this.finalize_active_stream();
-                        this.flush_interrupt_queue();
-                        tracing::info!(
-                            "[order] McpToolCallBegin call_id={} seq={}",
-                            ev2.call_id,
-                            seq
-                        );
-                        this.ensure_spinner_for_activity("mcp-begin");
-                        tools::mcp_begin(this, ev2, order_ok);
-                    },
+                self.finalize_active_stream();
+                tracing::info!(
+                    "[order] McpToolCallBegin call_id={} seq={}",
+                    ev.call_id,
+                    seq
                 );
+                self.ensure_spinner_for_activity("mcp-begin");
+                tools::mcp_begin(self, ev, order_ok);
+                if self.interrupts.has_queued() {
+                    self.flush_interrupt_queue();
+                }
             }
             EventMsg::McpToolCallEnd(ev) => {
                 let ev2 = ev.clone();
@@ -14043,6 +14454,13 @@ impl ChatWidget<'_> {
                     self.bottom_pane
                         .update_status_text(format!("using tool: {}", tool_name));
                 }
+            }
+            EventMsg::CustomToolCallUpdate(CustomToolCallUpdateEvent {
+                call_id,
+                tool_name: _,
+                parameters,
+            }) => {
+                self.apply_custom_tool_update(&call_id, parameters);
             }
             EventMsg::CustomToolCallEnd(CustomToolCallEndEvent {
                 call_id,
@@ -14484,6 +14902,11 @@ impl ChatWidget<'_> {
                 debug!("received {len} custom prompts");
                 self.bottom_pane.set_custom_prompts(ev.custom_prompts);
             }
+            EventMsg::McpListToolsResponse(ev) => {
+                self.mcp_tools_by_server = ev.server_tools.unwrap_or_default();
+                self.mcp_server_failures = ev.server_failures.unwrap_or_default();
+                self.refresh_mcp_settings_overlay();
+            }
             EventMsg::ListSkillsResponse(ev) => {
                 let len = ev.skills.len();
                 debug!("received {len} skills");
@@ -14764,7 +15187,9 @@ impl ChatWidget<'_> {
             }
             // Newer protocol variants we currently ignore in the TUI
             EventMsg::UserMessage(_) => {}
-            EventMsg::TurnAborted(_) => {}
+            EventMsg::TurnAborted(_) => {
+                self.pending_request_user_input = None;
+            }
             EventMsg::ConversationPath(_) => {}
             EventMsg::EnteredReviewMode(review_request) => {
                 if self.auto_resolve_enabled() {
@@ -17083,7 +17508,7 @@ impl ChatWidget<'_> {
         self.agents_terminal.clamp_selected_index();
 
         if saw_new_agent && self.agents_terminal.active {
-            self.layout.scroll_offset = 0;
+            self.layout.scroll_offset.set(0);
         }
     }
 
@@ -17096,7 +17521,7 @@ impl ChatWidget<'_> {
         self.agents_terminal.focus_sidebar();
         self.agents_terminal.clear_stop_prompt();
         self.bottom_pane.set_input_focus(false);
-        self.agents_terminal.saved_scroll_offset = self.layout.scroll_offset;
+        self.agents_terminal.saved_scroll_offset = self.layout.scroll_offset.get();
         if self.agents_terminal.order.is_empty() {
             for agent in &self.active_agents {
                 if !self
@@ -17167,14 +17592,19 @@ impl ChatWidget<'_> {
         self.agents_terminal.active = false;
         self.agents_terminal.clear_stop_prompt();
         self.agents_terminal.focus_sidebar();
-        self.layout.scroll_offset = self.agents_terminal.saved_scroll_offset;
+        self.layout.scroll_offset
+            .set(self.agents_terminal.saved_scroll_offset);
         self.bottom_pane.set_input_focus(true);
         self.request_redraw();
     }
 
     fn record_current_agent_scroll(&mut self) {
         if let Some(entry) = self.agents_terminal.current_sidebar_entry() {
-            let capped = self.layout.scroll_offset.min(self.layout.last_max_scroll.get());
+            let capped = self
+                .layout
+                .scroll_offset
+                .get()
+                .min(self.layout.last_max_scroll.get());
             self
                 .agents_terminal
                 .scroll_offsets
@@ -17191,9 +17621,9 @@ impl ChatWidget<'_> {
                 .agents_terminal
                 .scroll_offsets
                 .insert(key, u16::MAX);
-            self.layout.scroll_offset = u16::MAX;
+            self.layout.scroll_offset.set(u16::MAX);
         } else {
-            self.layout.scroll_offset = 0;
+            self.layout.scroll_offset.set(0);
         }
     }
 
@@ -17206,7 +17636,7 @@ impl ChatWidget<'_> {
             .last_render_scroll
             .get()
             .min(self.layout.last_max_scroll.get());
-        self.layout.scroll_offset = applied;
+        self.layout.scroll_offset.set(applied);
         if let Some(entry) = self.agents_terminal.current_sidebar_entry() {
             self
                 .agents_terminal
@@ -18112,12 +18542,12 @@ fi\n\
         if !self.auto_state.is_paused_manual() {
             self.auto_state.clear_bypass_coordinator_flag();
         }
-        let conversation = self.current_auto_history();
+        let conversation = std::sync::Arc::<[ResponseItem]>::from(self.current_auto_history());
         let Some(handle) = self.auto_handle.as_ref() else {
             return;
         };
         if handle
-            .send(AutoCoordinatorCommand::UpdateConversation(conversation))
+            .send(AutoCoordinatorCommand::UpdateConversation(conversation.into()))
             .is_err()
         {
             self.auto_stop(Some("Coordinator stopped unexpectedly.".to_string()));
@@ -18151,12 +18581,12 @@ fi\n\
         if !self.auto_state.is_paused_manual() {
             self.auto_state.clear_bypass_coordinator_flag();
         }
-        let conversation = self.current_auto_history();
+        let conversation = std::sync::Arc::<[ResponseItem]>::from(self.current_auto_history());
         let Some(handle) = self.auto_handle.as_ref() else {
             return;
         };
         if handle
-            .send(AutoCoordinatorCommand::UpdateConversation(conversation))
+            .send(AutoCoordinatorCommand::UpdateConversation(conversation.into()))
             .is_err()
         {
             self.auto_stop(Some("Coordinator stopped unexpectedly.".to_string()));
@@ -18193,7 +18623,7 @@ fi\n\
         };
         let command = AutoCoordinatorCommand::HandleUserPrompt {
             _prompt: prompt,
-            conversation,
+            conversation: conversation.into(),
         };
         match handle.send(command) {
             Ok(()) => {
@@ -18549,13 +18979,14 @@ Have we met every part of this goal and is there no further work to do?"#
 
     pub(crate) fn auto_handle_compacted_history(
         &mut self,
-        conversation: Vec<ResponseItem>,
+        conversation: std::sync::Arc<[ResponseItem]>,
         show_notice: bool,
     ) {
         let (previous_items, previous_indices) = self.export_auto_drive_items_with_indices();
-        self.auto_history.replace_all(conversation.clone());
-        self.auto_compaction_overlay =
-            self.derive_compaction_overlay(&previous_items, &previous_indices, &conversation);
+        let conversation = conversation.as_ref().to_vec();
+        self.auto_compaction_overlay = self
+            .derive_compaction_overlay(&previous_items, &previous_indices, &conversation);
+        self.auto_history.replace_all(conversation);
         if show_notice {
             self.history_push_plain_paragraphs(
                 PlainMessageKind::Notice,
@@ -18683,7 +19114,7 @@ Have we met every part of this goal and is there no further work to do?"#
                     self.bottom_pane
                         .update_status_text("Auto Drive paused".to_string());
                     self.bottom_pane.set_standard_terminal_hint(Some(
-                        "Press Esc again to exit Auto Drive".to_string(),
+                        AUTO_ESC_EXIT_HINT.to_string(),
                     ));
                     let message = format!(
                         "Auto Drive will retry automatically in {human_delay} (attempt {attempt}). Last error: {reason}"
@@ -19770,6 +20201,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .clone()
                 .filter(|value| !value.trim().is_empty())
         };
+        let has_cli_prompt = cli_prompt.is_some();
 
         let bootstrap_pending = self.auto_pending_goal_request;
         let continue_cta_active = self.auto_should_show_continue_cta();
@@ -19788,7 +20220,6 @@ Have we met every part of this goal and is there no further work to do?"#
         };
 
         let button = if self.auto_state.awaiting_coordinator_submit() {
-            let has_cli_prompt = cli_prompt.is_some();
             let base_label = if bootstrap_pending {
                 "Complete Current Task"
             } else if has_cli_prompt {
@@ -19816,6 +20247,12 @@ Have we met every part of this goal and is there no further work to do?"#
                 Some("Edit the prompt, then press Enter to continue.".to_string())
             } else if bootstrap_pending {
                 None
+            } else if has_cli_prompt {
+                if countdown_active {
+                    Some("Enter to send now • Esc to edit".to_string())
+                } else {
+                    Some("Enter to send • Esc to edit".to_string())
+                }
             } else if continue_cta_active {
                 if countdown_active {
                     Some("Enter to continue now • Esc to stop".to_string())
@@ -19823,16 +20260,15 @@ Have we met every part of this goal and is there no further work to do?"#
                     Some("Enter to continue • Esc to stop".to_string())
                 }
             } else if countdown_active {
-                Some("Enter to send now • Esc to edit".to_string())
+                Some("Enter to send now • Esc to stop".to_string())
             } else {
-                Some("Enter to send • Esc to edit".to_string())
+                Some("Enter to send • Esc to stop".to_string())
             }
         } else {
             None
         };
 
         let ctrl_switch_hint = if self.auto_state.awaiting_coordinator_submit() {
-            let has_cli_prompt = cli_prompt.is_some();
             if self.auto_state.is_paused_manual() {
                 "Esc to cancel".to_string()
             } else if bootstrap_pending {
@@ -19842,7 +20278,7 @@ Have we met every part of this goal and is there no further work to do?"#
             } else if continue_cta_active {
                 "Esc to stop".to_string()
             } else {
-                "Esc to edit".to_string()
+                "Esc to stop".to_string()
             }
         } else if self.auto_state.is_waiting_for_response() {
             String::new()
@@ -21064,7 +21500,7 @@ Have we met every part of this goal and is there no further work to do?"#
             let build_editor = || {
                 AgentEditorView::new(
                     name.clone(),
-                    true,
+                    builtin,
                     if ro.is_empty() { None } else { Some(ro.clone()) },
                     if wr.is_empty() { None } else { Some(wr.clone()) },
                     None,
@@ -21538,7 +21974,8 @@ Have we met every part of this goal and is there no further work to do?"#
         ));
 
         // Global
-        lines.push(kv("Ctrl+G", "Guide overlay"));
+        lines.push(kv("F1", "Help overlay"));
+        lines.push(kv("Ctrl+G", "Open external editor"));
         lines.push(kv("Ctrl+R", "Toggle reasoning"));
         lines.push(kv("Ctrl+T", "Toggle screen"));
         lines.push(kv("Ctrl+D", "Diff viewer"));
@@ -22067,6 +22504,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 cwd: self.config.cwd.clone(),
                 resume_path: None,
                 demo_developer_message: self.config.demo_developer_message.clone(),
+                dynamic_tools: Vec::new(),
             };
             self.submit_op(op);
 
@@ -22697,6 +23135,7 @@ Have we met every part of this goal and is there no further work to do?"#
             cwd: self.config.cwd.clone(),
             resume_path: None,
             demo_developer_message: self.config.demo_developer_message.clone(),
+            dynamic_tools: Vec::new(),
         };
         self.submit_op(op);
     }
@@ -22723,6 +23162,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 cwd: self.config.cwd.clone(),
                 resume_path: None,
                 demo_developer_message: self.config.demo_developer_message.clone(),
+                dynamic_tools: Vec::new(),
             };
             self.submit_op(op);
         }
@@ -22929,6 +23369,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 cwd: self.config.cwd.clone(),
                 resume_path: None,
                 demo_developer_message: self.config.demo_developer_message.clone(),
+                dynamic_tools: Vec::new(),
             };
             let _ = self.code_op_tx.send(op);
         } else {
@@ -22945,7 +23386,7 @@ Have we met every part of this goal and is there no further work to do?"#
         self.agents_terminal.reset();
         if self.agents_terminal.active {
             // Reset scroll offset when a new batch starts to avoid stale positions
-            self.layout.scroll_offset = 0;
+            self.layout.scroll_offset.set(0);
         }
 
         // Initialize sparkline with some data so it shows immediately
@@ -23073,6 +23514,7 @@ Have we met every part of this goal and is there no further work to do?"#
             cwd: self.config.cwd.clone(),
             resume_path: None,
             demo_developer_message: self.config.demo_developer_message.clone(),
+            dynamic_tools: Vec::new(),
         };
 
         self.submit_op(op);
@@ -23114,6 +23556,7 @@ Have we met every part of this goal and is there no further work to do?"#
             cwd: self.config.cwd.clone(),
             resume_path: None,
             demo_developer_message: self.config.demo_developer_message.clone(),
+            dynamic_tools: Vec::new(),
         };
 
         self.submit_op(op);
@@ -23410,17 +23853,19 @@ Have we met every part of this goal and is there no further work to do?"#
 
         let mut rows: McpServerRows = Vec::new();
         for (name, cfg) in enabled.into_iter() {
+            let summary = self.format_mcp_server_summary(&name, &cfg, true);
             rows.push(McpServerRow {
                 name,
                 enabled: true,
-                summary: Self::format_mcp_summary(&cfg),
+                summary,
             });
         }
         for (name, cfg) in disabled.into_iter() {
+            let summary = self.format_mcp_server_summary(&name, &cfg, false);
             rows.push(McpServerRow {
                 name,
                 enabled: false,
-                summary: Self::format_mcp_summary(&cfg),
+                summary,
             });
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -23537,7 +23982,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 };
                 agent_rows.push(AgentOverviewRow {
                     name: cfg.name.clone(),
-                    enabled: cfg.enabled,
+                    enabled: cfg.enabled && installed,
                     installed,
                     description: Self::agent_description_for(
                         &cfg.name,
@@ -23562,7 +24007,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 };
                 agent_rows.push(AgentOverviewRow {
                     name: cfg.name.clone(),
-                    enabled: cfg.enabled,
+                    enabled: cfg.enabled && installed,
                     installed,
                     description: Self::agent_description_for(
                         &cfg.name,
@@ -23583,7 +24028,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 };
                 agent_rows.push(AgentOverviewRow {
                     name: name.clone(),
-                    enabled: true,
+                    enabled: installed,
                     installed,
                     description: Self::agent_description_for(name, Some(&cmd), None),
                 });
@@ -23915,6 +24360,18 @@ Have we met every part of this goal and is there no further work to do?"#
     fn settings_summary_skills(&self) -> Option<String> {
         let count = self.bottom_pane.skills().len();
         Some(format!("Skills loaded: {count}"))
+    }
+
+    fn refresh_mcp_settings_overlay(&mut self) {
+        let content = self.build_mcp_settings_content();
+        let Some(content) = content else {
+            return;
+        };
+        let Some(overlay) = self.settings.overlay.as_mut() else {
+            return;
+        };
+        overlay.set_mcp_content(content);
+        self.request_redraw();
     }
 
     fn refresh_settings_overview_rows(&mut self) {
@@ -24289,6 +24746,7 @@ Have we met every part of this goal and is there no further work to do?"#
             cwd: self.config.cwd.clone(),
             resume_path: None,
             demo_developer_message: self.config.demo_developer_message.clone(),
+            dynamic_tools: Vec::new(),
         };
         self.submit_op(op);
 
@@ -24487,12 +24945,7 @@ Have we met every part of this goal and is there no further work to do?"#
             CancellationEvent::Handled => return CancellationEvent::Handled,
             CancellationEvent::Ignored => {}
         }
-        let exec_related_running = !self.exec.running_commands.is_empty()
-            || !self.tools_state.running_custom_tools.is_empty()
-            || !self.tools_state.web_search_sessions.is_empty()
-            || !self.tools_state.running_wait_tools.is_empty()
-            || !self.tools_state.running_kill_tools.is_empty();
-        if self.bottom_pane.is_task_running() || exec_related_running {
+        if self.is_task_running() || self.wait_running() {
             self.interrupt_running_task();
             CancellationEvent::Ignored
         } else if self.bottom_pane.ctrl_c_quit_hint_visible() {
@@ -24510,49 +24963,6 @@ Have we met every part of this goal and is there no further work to do?"#
     }
 
     // --- Double‑Escape helpers ---
-    pub(crate) fn double_esc_hint_label() -> &'static str {
-        DOUBLE_ESC_HINT
-    }
-
-    pub(crate) fn show_esc_undo_hint(&mut self) {
-        self.bottom_pane
-            .flash_footer_notice(format!("Esc {}", Self::double_esc_hint_label()));
-    }
-
-    fn show_auto_drive_exit_hint(&mut self) {
-        self.bottom_pane
-            .set_standard_terminal_hint(Some(AUTO_ESC_EXIT_HINT.to_string()));
-    }
-
-    fn auto_stop_via_escape(&mut self, message: Option<String>) {
-        self.auto_stop(message);
-        self.bottom_pane
-            .update_status_text("Auto Drive stopped.".to_string());
-        if self.auto_state.last_run_summary.is_some() {
-            self.auto_clear_summary_panel();
-        } else {
-            self.bottom_pane.set_standard_terminal_hint(None);
-            self.bottom_pane.ensure_input_focus();
-            self.request_redraw();
-        }
-    }
-
-    fn auto_clear_summary_panel(&mut self) {
-        if self.auto_state.last_run_summary.is_none() {
-            self.bottom_pane.set_standard_terminal_hint(None);
-            self.bottom_pane.ensure_input_focus();
-            self.request_redraw();
-            return;
-        }
-        self.auto_state.last_run_summary = None;
-        self.bottom_pane.clear_auto_coordinator_view(true);
-        self.bottom_pane.clear_live_ring();
-        self.bottom_pane.set_standard_terminal_hint(None);
-        self.bottom_pane.ensure_input_focus();
-        self.auto_rebuild_live_ring();
-        self.request_redraw();
-    }
-
     fn schedule_auto_drive_card_celebration(
         &self,
         delay: Duration,
@@ -24649,171 +25059,6 @@ Have we met every part of this goal and is there no further work to do?"#
     pub(crate) fn auto_manual_entry_active(&self) -> bool {
         self.auto_state.should_show_goal_entry()
             || (self.auto_state.is_active() && self.auto_state.awaiting_coordinator_submit())
-    }
-
-    pub(crate) fn describe_esc_context(&self) -> EscRoute {
-        if self.diffs.confirm.is_some() {
-            return EscRoute::new(EscIntent::DiffConfirm, true, false);
-        }
-
-        if self.settings.overlay.is_some() {
-            return EscRoute::new(EscIntent::CloseSettings, true, false);
-        }
-
-        if self.has_active_modal_view() {
-            return EscRoute::new(EscIntent::DismissModal, true, false);
-        }
-
-        if self.agents_terminal.active {
-            return EscRoute::new(EscIntent::AgentsTerminal, true, false);
-        }
-
-        if self.bottom_pane.file_popup_visible() {
-            return EscRoute::new(EscIntent::CloseFilePopup, false, false);
-        }
-
-        if self.auto_state.is_active() {
-            let awaiting_continue_cta = self.auto_should_show_continue_cta();
-
-            if awaiting_continue_cta {
-                return EscRoute::new(EscIntent::AutoStopDuringApproval, true, false);
-            }
-
-            if self.auto_state.countdown_active()
-                || (self.auto_state.awaiting_coordinator_submit()
-                    && !self.auto_state.is_paused_manual())
-            {
-                return EscRoute::new(EscIntent::AutoPauseForEdit, true, false);
-            }
-
-            if self.has_cancelable_agents() {
-                return EscRoute::new(EscIntent::CancelAgents, true, false);
-            }
-
-            if self.is_task_running() {
-                return EscRoute::new(EscIntent::CancelTask, true, false);
-            }
-
-            if self.auto_state.awaiting_coordinator_submit() {
-                return EscRoute::new(EscIntent::AutoStopDuringApproval, true, false);
-            }
-
-            return EscRoute::new(EscIntent::AutoStopActive, true, false);
-        }
-
-        if self.auto_state.should_show_goal_entry() {
-            return EscRoute::new(
-                match self.auto_goal_escape_state {
-                    AutoGoalEscState::Inactive => EscIntent::AutoGoalExitPreserveDraft,
-                    AutoGoalEscState::NeedsEnableEditing => EscIntent::AutoGoalEnableEdit,
-                    AutoGoalEscState::ArmedForExit => EscIntent::AutoGoalExitPreserveDraft,
-                },
-                true,
-                false,
-            );
-        }
-
-        if self.has_cancelable_agents() {
-            return EscRoute::new(EscIntent::CancelAgents, true, false);
-        }
-
-        if self.auto_state.last_run_summary.is_some() {
-            return EscRoute::new(EscIntent::AutoDismissSummary, true, false);
-        }
-
-        if self.auto_manual_entry_active() && !self.composer_is_empty() {
-            return EscRoute::new(EscIntent::ClearComposer, true, false);
-        }
-
-        if self.is_task_running() {
-            return EscRoute::new(EscIntent::CancelTask, true, false);
-        }
-
-        if !self.composer_is_empty() {
-            return EscRoute::new(EscIntent::ClearComposer, true, false);
-        }
-
-        EscRoute::new(EscIntent::ShowUndoHint, true, true)
-    }
-
-    pub(crate) fn execute_esc_intent(&mut self, intent: EscIntent, key_event: KeyEvent) -> bool {
-        match intent {
-            EscIntent::DismissModal => {
-                self.handle_key_event(key_event);
-                true
-            }
-            EscIntent::CloseSettings => {
-                self.handle_key_event(key_event);
-                true
-            }
-            EscIntent::CloseFilePopup => self.close_file_popup_if_active(),
-            EscIntent::AutoPauseForEdit => {
-                self.auto_pause_for_manual_edit(false);
-                true
-            }
-            EscIntent::AutoStopDuringApproval => {
-                self.bottom_pane
-                    .update_status_text("Auto Drive stopped during approval.".to_string());
-                self.auto_stop_via_escape(Some("Auto Drive stopped during approval.".to_string()));
-                true
-            }
-            EscIntent::AutoStopActive => {
-                self.bottom_pane
-                    .update_status_text("Stopping Auto Drive…".to_string());
-                self.auto_stop_via_escape(Some("Auto Drive stopped by user.".to_string()));
-                true
-            }
-            EscIntent::AutoGoalEnableEdit => {
-                self.auto_goal_escape_state = AutoGoalEscState::ArmedForExit;
-                self.bottom_pane.ensure_input_focus();
-                self.request_redraw();
-                true
-            }
-            EscIntent::AutoGoalExitPreserveDraft => self.auto_exit_goal_entry_preserve_draft(),
-            EscIntent::AutoDismissSummary => {
-                self.auto_clear_summary_panel();
-                true
-            }
-            EscIntent::DiffConfirm => {
-                self.diffs.confirm = None;
-                self.request_redraw();
-                true
-            }
-            EscIntent::AgentsTerminal => {
-                self.handle_key_event(key_event);
-                true
-            }
-            EscIntent::CancelAgents => self.cancel_active_agents(),
-            EscIntent::CancelTask => {
-                let had_running = self.is_task_running();
-                let auto_was_active = self.auto_state.is_active();
-                let _ = self.on_ctrl_c();
-                if had_running {
-                    if auto_was_active {
-                        self.bottom_pane
-                            .update_status_text("Command cancelled. Esc stops Auto Drive.".to_string());
-                        self.auto_stop_via_escape(Some("Auto Drive stopped by user.".to_string()));
-                    } else {
-                        self.bottom_pane
-                            .update_status_text("Command cancelled.".to_string());
-                    }
-                }
-                true
-            }
-            EscIntent::ClearComposer => {
-                self.clear_composer();
-                true
-            }
-            EscIntent::ShowUndoHint => {
-                self.show_esc_undo_hint();
-                true
-            }
-            EscIntent::OpenUndoTimeline => {
-                self.handle_undo_command();
-                true
-            }
-            EscIntent::None => false,
-        }
     }
 
     fn has_running_commands_or_tools(&self) -> bool {
@@ -24938,11 +25183,6 @@ Have we met every part of this goal and is there no further work to do?"#
         }
 
         if let Some(front) = self.queued_user_messages.front().cloned() {
-            if let Some(position) = self.pending_snapshot_dispatches.iter().position(|pending| {
-                matches!(pending, PendingSnapshotDispatch::Queued { message, .. } if message == &front)
-            }) {
-                self.pending_snapshot_dispatches.remove(position);
-            }
             self.dispatch_queued_user_message_now(front);
         }
 
@@ -24967,42 +25207,6 @@ Have we met every part of this goal and is there no further work to do?"#
             .borrow_mut()
             .record_event(crate::height_manager::HeightEvent::ComposerModeChange);
         self.request_redraw();
-    }
-
-    fn auto_sync_goal_escape_state_from_composer(&mut self) {
-        if !self.auto_state.should_show_goal_entry() {
-            return;
-        }
-
-        let has_content = !self.bottom_pane.composer_text().trim().is_empty();
-        match self.auto_goal_escape_state {
-            AutoGoalEscState::Inactive => {
-                if has_content {
-                    self.auto_goal_escape_state = AutoGoalEscState::NeedsEnableEditing;
-                }
-            }
-            AutoGoalEscState::NeedsEnableEditing | AutoGoalEscState::ArmedForExit => {
-                if !has_content {
-                    self.auto_goal_escape_state = AutoGoalEscState::Inactive;
-                }
-            }
-        }
-    }
-
-    pub(crate) fn close_file_popup_if_active(&mut self) -> bool {
-        self.bottom_pane.close_file_popup_if_active()
-    }
-
-    pub(crate) fn has_active_modal_view(&self) -> bool {
-        // Treat bottom‑pane views (approval, selection popups) and top‑level overlays
-        // (diff viewer, help overlay) as "modals" for Esc routing. This ensures that
-        // a single Esc keypress closes the visible overlay instead of engaging the
-        // global Esc policy (clear input / backtrack).
-        self.bottom_pane.has_active_modal_view()
-            || self.settings.overlay.is_some()
-            || self.diffs.overlay.is_some()
-            || self.help.overlay.is_some()
-            || self.terminal.overlay.is_some()
     }
 
     /// Forward an `Op` directly to codex.
@@ -26187,10 +26391,10 @@ Have we met every part of this goal and is there no further work to do?"#
 
     fn launch_chrome_with_profile(&mut self, port: u16) {
         use std::process::Stdio;
+        let log_path = self.chrome_log_path();
 
         #[cfg(target_os = "macos")]
         {
-            let log_path = format!("{}/code-chrome.log", std::env::temp_dir().display());
             let mut cmd = std::process::Command::new(
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             );
@@ -26204,12 +26408,10 @@ Have we met every part of this goal and is there no further work to do?"#
                 .arg("--disable-features=ChromeWhatsNewUI,TriggerFirstRunUI")
                 .arg("--disable-hang-monitor")
                 .arg("--disable-background-timer-throttling")
-                .arg("--enable-logging")
-                .arg("--log-level=1")
-                .arg(format!("--log-file={}", log_path))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
+            self.apply_chrome_logging(&mut cmd, log_path.as_deref());
             if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with profile: {err}");
             }
@@ -26217,7 +26419,6 @@ Have we met every part of this goal and is there no further work to do?"#
 
         #[cfg(target_os = "linux")]
         {
-            let log_path = format!("{}/code-chrome.log", std::env::temp_dir().display());
             let mut cmd = std::process::Command::new("google-chrome");
             cmd.arg(format!("--remote-debugging-port={}", port))
                 .arg("--no-first-run")
@@ -26229,12 +26430,10 @@ Have we met every part of this goal and is there no further work to do?"#
                 .arg("--disable-features=ChromeWhatsNewUI,TriggerFirstRunUI")
                 .arg("--disable-hang-monitor")
                 .arg("--disable-background-timer-throttling")
-                .arg("--enable-logging")
-                .arg("--log-level=1")
-                .arg(format!("--log-file={}", log_path))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
+            self.apply_chrome_logging(&mut cmd, log_path.as_deref());
             if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with profile: {err}");
             }
@@ -26242,7 +26441,6 @@ Have we met every part of this goal and is there no further work to do?"#
 
         #[cfg(target_os = "windows")]
         {
-            let log_path = format!("{}\\code-chrome.log", std::env::temp_dir().display());
             let chrome_paths = vec![
                 "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_string(),
                 "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe".to_string(),
@@ -26265,12 +26463,10 @@ Have we met every part of this goal and is there no further work to do?"#
                         .arg("--disable-features=ChromeWhatsNewUI,TriggerFirstRunUI")
                         .arg("--disable-hang-monitor")
                         .arg("--disable-background-timer-throttling")
-                        .arg("--enable-logging")
-                        .arg("--log-level=1")
-                        .arg(format!("--log-file={}", log_path))
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .stdin(Stdio::null());
+                    self.apply_chrome_logging(&mut cmd, log_path.as_deref());
                     if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
                         tracing::warn!("failed to launch Chrome with profile: {err}");
                     }
@@ -26284,6 +26480,22 @@ Have we met every part of this goal and is there no further work to do?"#
         // Show browsing state in input border after launch
         self.bottom_pane
             .update_status_text("using browser".to_string());
+    }
+
+    fn chrome_log_path(&self) -> Option<String> {
+        if !self.config.debug {
+            return None;
+        }
+        let log_dir = code_core::config::log_dir(&self.config).ok()?;
+        Some(log_dir.join("code-chrome.log").display().to_string())
+    }
+
+    fn apply_chrome_logging(&self, cmd: &mut std::process::Command, log_path: Option<&str>) {
+        if let Some(path) = log_path {
+            cmd.arg("--enable-logging")
+                .arg("--log-level=1")
+                .arg(format!("--log-file={path}"));
+        }
     }
 
     fn connect_to_chrome_after_launch(
@@ -26833,10 +27045,10 @@ Have we met every part of this goal and is there no further work to do?"#
 
         let temp_dir = std::env::temp_dir();
         let profile_dir = temp_dir.join(format!("code-chrome-temp-{}", port));
+        let log_path = self.chrome_log_path();
 
         #[cfg(target_os = "macos")]
         {
-            let log_path = format!("{}/code-chrome.log", std::env::temp_dir().display());
             let mut cmd = std::process::Command::new(
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             );
@@ -26851,12 +27063,10 @@ Have we met every part of this goal and is there no further work to do?"#
                 .arg("--disable-features=ChromeWhatsNewUI,TriggerFirstRunUI")
                 .arg("--disable-hang-monitor")
                 .arg("--disable-background-timer-throttling")
-                .arg("--enable-logging")
-                .arg("--log-level=1")
-                .arg(format!("--log-file={}", log_path))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
+            self.apply_chrome_logging(&mut cmd, log_path.as_deref());
             if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with temp profile: {err}");
             }
@@ -26864,7 +27074,6 @@ Have we met every part of this goal and is there no further work to do?"#
 
         #[cfg(target_os = "linux")]
         {
-            let log_path = format!("{}/code-chrome.log", std::env::temp_dir().display());
             let mut cmd = std::process::Command::new("google-chrome");
             cmd.arg(format!("--remote-debugging-port={}", port))
                 .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -26877,12 +27086,10 @@ Have we met every part of this goal and is there no further work to do?"#
                 .arg("--disable-features=ChromeWhatsNewUI,TriggerFirstRunUI")
                 .arg("--disable-hang-monitor")
                 .arg("--disable-background-timer-throttling")
-                .arg("--enable-logging")
-                .arg("--log-level=1")
-                .arg(format!("--log-file={}", log_path))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
+            self.apply_chrome_logging(&mut cmd, log_path.as_deref());
             if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with temp profile: {err}");
             }
@@ -26890,7 +27097,6 @@ Have we met every part of this goal and is there no further work to do?"#
 
         #[cfg(target_os = "windows")]
         {
-            let log_path = format!("{}\\code-chrome.log", std::env::temp_dir().display());
             let chrome_paths = vec![
                 "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_string(),
                 "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe".to_string(),
@@ -26914,12 +27120,10 @@ Have we met every part of this goal and is there no further work to do?"#
                         .arg("--disable-features=ChromeWhatsNewUI,TriggerFirstRunUI")
                         .arg("--disable-hang-monitor")
                         .arg("--disable-background-timer-throttling")
-                        .arg("--enable-logging")
-                        .arg("--log-level=1")
-                        .arg(format!("--log-file={}", log_path))
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .stdin(Stdio::null());
+                    self.apply_chrome_logging(&mut cmd, log_path.as_deref());
                     if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
                         tracing::warn!("failed to launch Chrome with temp profile: {err}");
                     }
@@ -27744,10 +27948,77 @@ Have we met every part of this goal and is there no further work to do?"#
         }
     }
 
+    fn format_mcp_server_summary(
+        &self,
+        name: &str,
+        cfg: &code_core::config_types::McpServerConfig,
+        enabled: bool,
+    ) -> String {
+        let transport = Self::format_mcp_summary(cfg);
+        let status = self.format_mcp_tool_status(name, enabled);
+        if status.is_empty() {
+            transport
+        } else {
+            format!("{transport} · {status}")
+        }
+    }
+
+    fn format_mcp_tool_status(&self, name: &str, enabled: bool) -> String {
+        if !enabled {
+            return "Tools: disabled".to_string();
+        }
+
+        if let Some(failure) = self.mcp_server_failures.get(name) {
+            return self.format_mcp_failure(failure);
+        }
+
+        if let Some(tools) = self.mcp_tools_by_server.get(name) {
+            let list = Self::format_mcp_tool_list(tools);
+            return format!("Tools: {list}");
+        }
+
+        "Tools: pending".to_string()
+    }
+
+    fn format_mcp_tool_list(tools: &[String]) -> String {
+        const MAX_TOOLS: usize = 6;
+        const MAX_CHARS: usize = 120;
+
+        if tools.is_empty() {
+            return "none".to_string();
+        }
+
+        let mut display = tools
+            .iter()
+            .take(MAX_TOOLS)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if tools.len() > MAX_TOOLS {
+            let remaining = tools.len().saturating_sub(MAX_TOOLS);
+            display.push_str(&format!(", +{remaining} more"));
+        }
+        Self::truncate_with_ellipsis(&display, MAX_CHARS)
+    }
+
+    fn format_mcp_failure(&self, failure: &McpServerFailure) -> String {
+        const MAX_CHARS: usize = 160;
+
+        let normalized = failure.message.replace('\n', " ");
+        let message = Self::truncate_with_ellipsis(&normalized, MAX_CHARS);
+        match failure.phase {
+            McpServerFailurePhase::Start => format!("Failed to start: {message}"),
+            McpServerFailurePhase::ListTools => format!("Failed to list tools: {message}"),
+        }
+    }
+
     /// Handle `/mcp` command: manage MCP servers (status/on/off/add).
     pub(crate) fn handle_mcp_command(&mut self, command_text: String) {
         let trimmed = command_text.trim();
         if trimmed.is_empty() {
+            if !self.config.mcp_servers.is_empty() {
+                self.submit_op(Op::ListMcpTools);
+            }
             self.show_settings_overlay(Some(SettingsSection::Mcp));
             return;
         }
@@ -27756,42 +28027,51 @@ Have we met every part of this goal and is there no further work to do?"#
         let sub = parts.next().unwrap_or("");
 
         match sub {
-            "status" => match find_code_home() {
-                Ok(home) => match code_core::config::list_mcp_servers(&home) {
-                    Ok((enabled, disabled)) => {
-                        let mut lines = String::new();
-                        if enabled.is_empty() && disabled.is_empty() {
-                            lines.push_str("No MCP servers configured. Use /mcp add … to add one.");
-                        } else {
-                            lines.push_str(&format!("Enabled ({}):\n", enabled.len()));
-                            for (name, cfg) in enabled {
-                                lines.push_str(&format!(
-                                    "• {} — {}\n",
-                                    name,
-                                    Self::format_mcp_summary(&cfg)
-                                ));
+            "status" => {
+                if !self.config.mcp_servers.is_empty() {
+                    self.submit_op(Op::ListMcpTools);
+                }
+                match find_code_home() {
+                    Ok(home) => match code_core::config::list_mcp_servers(&home) {
+                        Ok((enabled, disabled)) => {
+                            let mut lines = String::new();
+                            if enabled.is_empty() && disabled.is_empty() {
+                                lines.push_str(
+                                    "No MCP servers configured. Use /mcp add … to add one.",
+                                );
+                            } else {
+                                let enabled_count = enabled.len();
+                                lines.push_str(&format!("Enabled ({enabled_count}):\n"));
+                                for (name, cfg) in enabled {
+                                    lines.push_str(&format!(
+                                        "• {} — {}\n",
+                                        name,
+                                        self.format_mcp_server_summary(&name, &cfg, true)
+                                    ));
+                                }
+                                let disabled_count = disabled.len();
+                                lines.push_str(&format!("\nDisabled ({disabled_count}):\n"));
+                                for (name, cfg) in disabled {
+                                    lines.push_str(&format!(
+                                        "• {} — {}\n",
+                                        name,
+                                        self.format_mcp_server_summary(&name, &cfg, false)
+                                    ));
+                                }
                             }
-                            lines.push_str(&format!("\nDisabled ({}):\n", disabled.len()));
-                            for (name, cfg) in disabled {
-                                lines.push_str(&format!(
-                                    "• {} — {}\n",
-                                    name,
-                                    Self::format_mcp_summary(&cfg)
-                                ));
-                            }
+                            self.push_background_tail(lines);
                         }
-                        self.push_background_tail(lines);
-                    }
+                        Err(e) => {
+                            let msg = format!("Failed to read MCP config: {e}");
+                            self.history_push_plain_state(history_cell::new_error_event(msg));
+                        }
+                    },
                     Err(e) => {
-                        let msg = format!("Failed to read MCP config: {}", e);
+                        let msg = format!("Failed to locate CODEX_HOME: {e}");
                         self.history_push_plain_state(history_cell::new_error_event(msg));
                     }
-                },
-                Err(e) => {
-                    let msg = format!("Failed to locate CODEX_HOME: {}", e);
-                    self.history_push_plain_state(history_cell::new_error_event(msg));
                 }
-            },
+            }
             "on" | "off" => {
                 let name = parts.next().unwrap_or("");
                 if name.is_empty() {
@@ -28434,7 +28714,10 @@ Have we met every part of this goal and is there no further work to do?"#
         }
 
         let items = message.ordered_items.clone();
-        if let Err(e) = self.code_op_tx.send(Op::UserInput { items }) {
+        if let Err(e) = self.code_op_tx.send(Op::UserInput {
+            items,
+            final_output_json_schema: None,
+        }) {
             tracing::error!("failed to send immediate UserInput: {e}");
         }
 
@@ -29336,6 +29619,7 @@ impl Drop for AutoReviewStubGuard {
             CAPTURE_AUTO_TURN_COMMIT_STUB,
             GIT_DIFF_NAME_ONLY_BETWEEN_STUB,
         };
+        use crate::app_event::AppEvent;
         use crate::bottom_pane::AutoCoordinatorViewModel;
     use crate::chatwidget::message::UserMessage;
     use crate::chatwidget::smoke_helpers::{enter_test_runtime_guard, ChatWidgetHarness};
@@ -29369,6 +29653,7 @@ impl Drop for AutoReviewStubGuard {
     };
 use code_core::parse_command::ParsedCommand;
 use code_core::protocol::OrderMeta;
+    use code_core::config_types::{McpServerConfig, McpServerTransportConfig};
     use code_core::protocol::{
         AskForApproval,
         AgentMessageEvent,
@@ -29377,6 +29662,8 @@ use code_core::protocol::OrderMeta;
         Event,
         EventMsg,
         ExecCommandBeginEvent,
+        McpServerFailure,
+        McpServerFailurePhase,
         TaskCompleteEvent,
     };
     use code_core::protocol::AgentInfo as CoreAgentInfo;
@@ -29418,6 +29705,55 @@ use code_core::protocol::OrderMeta;
         let summary_text = summary.unwrap();
         assert!(summary_text.contains("needs work"));
         assert!(summary_text.contains("bug"));
+    }
+
+    #[test]
+    fn mcp_summary_includes_tools_and_failures() {
+        let mut harness = ChatWidgetHarness::new();
+        harness.with_chat(|chat| {
+            chat.mcp_tools_by_server.insert(
+                "alpha".to_string(),
+                vec!["fetch".to_string(), "search".to_string()],
+            );
+            chat.mcp_server_failures.insert(
+                "beta".to_string(),
+                McpServerFailure {
+                    phase: McpServerFailurePhase::ListTools,
+                    message: "timeout".to_string(),
+                },
+            );
+
+            let ok_cfg = McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "alpha-bin".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                },
+                startup_timeout_sec: None,
+                tool_timeout_sec: None,
+            };
+            let fail_cfg = McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "beta-bin".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                },
+                startup_timeout_sec: None,
+                tool_timeout_sec: None,
+            };
+
+            let ok_summary = chat.format_mcp_server_summary("alpha", &ok_cfg, true);
+            let fail_summary = chat.format_mcp_server_summary("beta", &fail_cfg, true);
+
+            assert!(
+                ok_summary.contains("Tools: fetch, search"),
+                "expected tool list in summary, got: {ok_summary}"
+            );
+            assert!(
+                fail_summary.contains("Failed to list tools: timeout"),
+                "expected failure message in summary, got: {fail_summary}"
+            );
+        });
     }
 
     #[test]
@@ -29784,6 +30120,76 @@ use code_core::protocol::OrderMeta;
             .iter()
             .any(|msg| msg.contains("[developer]") && msg.contains("Merge the worktree") && msg.contains("auto-review-branch"));
         assert!(developer_sent, "developer merge-hint note should be injected when busy");
+    }
+
+    #[test]
+    fn terminal_auto_review_without_worktree_state_does_not_surface_blank_path() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = None;
+
+        let agent = code_core::protocol::AgentInfo {
+            id: "agent-blank".to_string(),
+            name: "Auto Review".to_string(),
+            status: "failed".to_string(),
+            batch_id: None,
+            model: Some("code-review".to_string()),
+            last_progress: None,
+            result: None,
+            error: Some("fatal: not a git repository".to_string()),
+            elapsed_ms: None,
+            token_count: None,
+            last_activity_at: None,
+            seconds_since_last_activity: None,
+            source_kind: Some(AgentSourceKind::AutoReview),
+        };
+
+        chat.observe_auto_review_status(&[agent]);
+
+        let blank_path_message = chat
+            .pending_dispatched_user_messages
+            .iter()
+            .any(|msg| msg.contains("Worktree path: \n") || msg.contains("Worktree path: \r\n"));
+        assert!(!blank_path_message, "should not emit auto-review message with blank worktree path");
+        assert!(chat.processed_auto_review_agents.contains("agent-blank"));
+    }
+
+    #[test]
+    fn missing_agent_clis_start_disabled_in_overview() {
+        let orig_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "");
+        }
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        let (rows, _commands) = chat.collect_agents_overview_rows();
+        let qwen = rows
+            .iter()
+            .find(|row| row.name == "qwen-3-coder")
+            .expect("qwen row present");
+        assert!(!qwen.installed);
+        assert!(!qwen.enabled);
+
+        let code = rows
+            .iter()
+            .find(|row| row.name == "code-gpt-5.2")
+            .expect("code row present");
+        assert!(code.installed);
+        assert!(code.enabled);
+
+        if let Some(path) = orig_path {
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
     }
 
     #[test]
@@ -30159,7 +30565,7 @@ use code_core::protocol::OrderMeta;
         chat.resume_expected_next_request = None;
         chat.resume_provider_baseline = None;
         chat.synthetic_system_req = None;
-        chat.layout.scroll_offset = 0;
+        chat.layout.scroll_offset.set(0);
         chat.layout.last_max_scroll.set(0);
         chat.layout.last_history_viewport_height.set(0);
         #[cfg(any(test, feature = "test-helpers"))]
@@ -30290,7 +30696,43 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
-    fn esc_router_prioritizes_agent_cancel_before_cli_interrupt() {
+    fn esc_router_stops_auto_drive_while_waiting_for_response() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.auto_state.set_coordinator_waiting(true);
+
+        let route = chat.describe_esc_context();
+        assert_eq!(route.intent, EscIntent::AutoStopActive);
+        assert!(!route.allows_double_esc);
+    }
+
+    #[test]
+    fn esc_router_prioritizes_cli_interrupt_before_agent_cancel() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.active_agents.push(AgentInfo {
+            id: "agent-1".to_string(),
+            name: "Agent 1".to_string(),
+            status: AgentStatus::Running,
+            source_kind: None,
+            batch_id: Some("batch-1".to_string()),
+            model: None,
+            result: None,
+            error: None,
+            last_progress: None,
+        });
+        chat.active_task_ids.insert("turn-1".to_string());
+        chat.bottom_pane.set_task_running(true);
+
+        let route = chat.describe_esc_context();
+        assert_eq!(route.intent, EscIntent::CancelTask);
+    }
+
+    #[test]
+    fn esc_router_cancels_agents_when_only_agents_running() {
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
@@ -30408,18 +30850,15 @@ use code_core::protocol::OrderMeta;
         let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
 
         let route = chat.describe_esc_context();
-        assert_eq!(route.intent, EscIntent::CancelAgents);
+        assert_eq!(route.intent, EscIntent::AutoStopActive);
         assert!(chat.execute_esc_intent(route.intent, esc_event));
-        assert!(chat.auto_state.is_active(), "Auto Drive remains active until follow-up Esc");
-        assert!(chat
-            .active_agents
-            .iter()
-            .all(|agent| matches!(agent.status, AgentStatus::Cancelled)));
+        assert!(!chat.auto_state.is_active(), "Auto Drive stops before canceling agents");
         let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let route = chat.describe_esc_context();
-        assert_eq!(route.intent, EscIntent::CancelTask);
+        assert_eq!(route.intent, EscIntent::CancelAgents);
         assert!(chat.execute_esc_intent(route.intent, esc_event));
         assert!(!chat.auto_state.is_active());
+        assert!(chat.has_cancelable_agents());
         assert!(chat.auto_state.last_run_summary.is_none());
     }
 
@@ -30470,14 +30909,11 @@ use code_core::protocol::OrderMeta;
         ));
 
         assert!(!chat.auto_state.is_active(), "Auto Drive remains inactive");
-        assert!(chat
-            .active_agents
-            .iter()
-            .all(|agent| matches!(agent.status, AgentStatus::Cancelled)));
+        assert!(chat.has_cancelable_agents());
         chat.maybe_hide_spinner();
         assert!(
-            !chat.bottom_pane.is_task_running(),
-            "Spinner now clears once overlays dismiss and no other work remains",
+            chat.bottom_pane.is_task_running(),
+            "Spinner stays active while agents or terminal work are still running",
         );
     }
 
@@ -30518,18 +30954,18 @@ use code_core::protocol::OrderMeta;
 
         let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let route = chat.describe_esc_context();
-        assert_eq!(route.intent, EscIntent::CancelAgents);
+        assert_eq!(route.intent, EscIntent::CancelTask);
         assert!(chat.execute_esc_intent(route.intent, esc_event));
 
         let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let route = chat.describe_esc_context();
-        assert_eq!(route.intent, EscIntent::CancelTask);
+        assert_eq!(route.intent, EscIntent::CancelAgents);
         assert!(chat.execute_esc_intent(route.intent, esc_event));
         assert!(!chat.auto_state.is_active(), "Auto Drive should stop after cancelling the command");
         assert!(chat.auto_state.last_run_summary.is_none());
 
         let route = chat.describe_esc_context();
-        assert_eq!(route.intent, EscIntent::AutoGoalExitPreserveDraft);
+        assert_eq!(route.intent, EscIntent::CancelAgents);
     }
 
     #[allow(dead_code)]
@@ -30570,10 +31006,7 @@ use code_core::protocol::OrderMeta;
         let route = chat.describe_esc_context();
         assert_eq!(route.intent, EscIntent::CancelAgents);
         assert!(chat.execute_esc_intent(route.intent, esc_event));
-        assert!(chat
-            .active_agents
-            .iter()
-            .all(|agent| matches!(agent.status, AgentStatus::Cancelled)));
+        assert!(chat.has_cancelable_agents());
         assert!(
             chat.bottom_pane.standard_terminal_hint().is_none(),
             "Auto Drive exit hint should not display when Auto Drive is inactive",
@@ -30850,7 +31283,7 @@ use code_core::protocol::OrderMeta;
                 .expect("assistant message"),
         ];
 
-        chat.auto_handle_compacted_history(conversation, false);
+        chat.auto_handle_compacted_history(std::sync::Arc::from(conversation), false);
 
         let has_checkpoint = chat.history_cells.iter().any(|cell| {
             cell.display_lines_trimmed().iter().any(|line| {
@@ -30965,6 +31398,20 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn ctrl_g_dispatches_external_editor_event() {
+        let mut harness = ChatWidgetHarness::new();
+        let key_event = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        harness.chat().handle_key_event(key_event);
+        let events = harness.drain_events();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::OpenExternalEditor { .. })),
+            "expected external editor request on Ctrl+G",
+        );
+    }
+
+    #[test]
     fn goal_entry_esc_exits_immediately_without_suggestion() {
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
@@ -31030,6 +31477,7 @@ use code_core::protocol::OrderMeta;
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
+        chat.active_task_ids.insert("turn-1".to_string());
         chat.bottom_pane.set_task_running(true);
 
         let route = chat.describe_esc_context();
@@ -32175,7 +32623,7 @@ use code_core::protocol::OrderMeta;
         insert_plain_cell(chat, &["new-1", "new-2"]);
 
         let viewport_height = 6;
-        chat.layout.scroll_offset = 2;
+        chat.layout.scroll_offset.set(2);
 
         let mut terminal = Terminal::new(TestBackend::new(40, viewport_height)).expect("terminal");
         terminal
@@ -32271,7 +32719,7 @@ use code_core::protocol::OrderMeta;
         insert_plain_cell(chat, &["new-1", "new-2"]);
 
         let viewport_height = 6;
-        chat.layout.scroll_offset = 2;
+        chat.layout.scroll_offset.set(2);
 
         {
             let mut terminal =
@@ -32312,7 +32760,7 @@ use code_core::protocol::OrderMeta;
 
         let max_scroll = chat.layout.last_max_scroll.get();
         assert!(max_scroll > 0, "expected overflow to produce a positive max scroll");
-        chat.layout.scroll_offset = max_scroll;
+        chat.layout.scroll_offset.set(max_scroll);
 
         let mut terminal = Terminal::new(TestBackend::new(40, 6)).expect("terminal");
         terminal
@@ -32320,7 +32768,7 @@ use code_core::protocol::OrderMeta;
             .expect("draw history at top boundary");
 
         let max_scroll = chat.layout.last_max_scroll.get();
-        let scroll_from_top = max_scroll.saturating_sub(chat.layout.scroll_offset);
+        let scroll_from_top = max_scroll.saturating_sub(chat.layout.scroll_offset.get());
         let effective = chat.history_render.adjust_scroll_to_content(scroll_from_top);
         let prefix = chat.history_render.prefix_sums.borrow();
         let mut start_idx = match prefix.binary_search(&effective) {
@@ -33637,6 +34085,66 @@ impl ChatWidget<'_> {
         self.request_redraw();
     }
 
+    fn auto_review_git_root(&self) -> Option<PathBuf> {
+        self.run_git_command(["rev-parse", "--show-toplevel"], |stdout| {
+            let root = stdout.lines().next().unwrap_or("").trim();
+            if root.is_empty() {
+                Err("auto review git root unavailable".to_string())
+            } else {
+                Ok(root.to_string())
+            }
+        })
+        .ok()
+        .map(PathBuf::from)
+    }
+
+    fn auto_review_baseline_path(&self) -> Option<PathBuf> {
+        let git_root = self.auto_review_git_root()?;
+        match auto_review_baseline_path_for_repo(&git_root) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                tracing::warn!("failed to resolve auto review baseline path: {err}");
+                None
+            }
+        }
+    }
+
+    fn load_auto_review_baseline_marker(&mut self) {
+        if self.auto_review_reviewed_marker.is_some() {
+            return;
+        }
+        let Some(path) = self.auto_review_baseline_path() else {
+            return;
+        };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let commit_id = contents.lines().next().unwrap_or("").trim();
+        if commit_id.is_empty() {
+            return;
+        }
+        self.auto_review_reviewed_marker = Some(GhostCommit::new(commit_id.to_string(), None));
+    }
+
+    fn persist_auto_review_baseline_marker(&self, commit_id: &str) {
+        let commit_id = commit_id.trim();
+        if commit_id.is_empty() {
+            return;
+        }
+        let Some(path) = self.auto_review_baseline_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                tracing::warn!("failed to create auto review baseline dir: {err}");
+                return;
+            }
+        }
+        if let Err(err) = std::fs::write(&path, format!("{commit_id}\n")) {
+            tracing::warn!("failed to persist auto review baseline: {err}");
+        }
+    }
+
     fn maybe_trigger_auto_review(&mut self) {
         if !self.config.tui.auto_review_enabled {
             return;
@@ -33925,14 +34433,30 @@ impl ChatWidget<'_> {
                     state.snapshot.clone(),
                 )
             } else {
-                let branch = agent.batch_id.clone().unwrap_or_default();
-                let worktree_path = resolve_auto_review_worktree_path(&self.config.cwd, &branch)
-                    .unwrap_or_default();
+                let Some(branch) = agent
+                    .batch_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    // We sometimes observe the same terminal auto-review agent multiple
+                    // times (especially after cancellation/resend). If the background
+                    // review state is already cleared and we cannot resolve the worktree,
+                    // do not surface a misleading blank-path error.
+                    self.processed_auto_review_agents.insert(agent.id.clone());
+                    continue;
+                };
+                let Some(worktree_path) =
+                    resolve_auto_review_worktree_path(&self.config.cwd, &branch)
+                else {
+                    self.processed_auto_review_agents.insert(agent.id.clone());
+                    continue;
+                };
                 (worktree_path, branch, None)
             };
 
             let (has_findings, findings, summary) = Self::parse_agent_review_result(agent.result.as_deref());
 
+            self.processed_auto_review_agents.insert(agent.id.clone());
             self.on_background_review_finished(
                 worktree_path,
                 branch,
@@ -33943,7 +34467,6 @@ impl ChatWidget<'_> {
                 Some(agent.id.clone()),
                 snapshot,
             );
-            self.processed_auto_review_agents.insert(agent.id.clone());
         }
     }
 
@@ -34336,6 +34859,7 @@ impl ChatWidget<'_> {
         if !errored {
             if let Some(id) = snapshot.as_ref() {
                 self.auto_review_reviewed_marker = Some(GhostCommit::new(id.clone(), None));
+                self.persist_auto_review_baseline_marker(id);
             }
         }
 
@@ -35526,8 +36050,208 @@ impl ChatWidget<'_> {
             .iter()
             .find(|task| task.id.0 == task_id)
     }
+
+    fn ensure_git_repo_for_action(&mut self, resume: GitInitResume, reason: &str) -> bool {
+        if code_core::git_info::get_git_repo_root(&self.config.cwd).is_some() {
+            if self.git_init_declined {
+                self.git_init_declined = false;
+            }
+            return false;
+        }
+
+        if self.git_init_inflight {
+            self.bottom_pane
+                .flash_footer_notice("Initializing git repository...".to_string());
+            return true;
+        }
+
+        if self.git_init_declined {
+            let notice = format!(
+                "{reason} Run `git init` in {} to enable write-enabled agents and worktrees.",
+                self.config.cwd.display()
+            );
+            self.history_push_plain_paragraphs(
+                PlainMessageKind::Notice,
+                vec!["Git repository not initialized.".to_string(), notice],
+            );
+            self.request_redraw();
+            return true;
+        }
+
+        self.show_git_init_prompt(resume, reason);
+        true
+    }
+
+    fn show_git_init_prompt(&mut self, resume: GitInitResume, reason: &str) {
+        let subtitle = format!(
+            "{reason}\nInitialize a git repository in {}?",
+            self.config.cwd.display()
+        );
+        let resume_init = resume.clone();
+        let items = vec![
+            SelectionItem {
+                name: "Initialize git repository".to_string(),
+                description: Some("Run `git init` in this folder (recommended).".to_string()),
+                is_current: true,
+                actions: vec![Box::new(move |tx: &AppEventSender| {
+                    tx.send(AppEvent::ConfirmGitInit {
+                        resume: resume_init.clone(),
+                    });
+                })],
+            },
+            SelectionItem {
+                name: "Continue without git".to_string(),
+                description: Some("Write-enabled agents and worktrees will be unavailable.".to_string()),
+                is_current: false,
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::DeclineGitInit);
+                })],
+            },
+        ];
+
+        let view = ListSelectionView::new(
+            " Git repository required ".to_string(),
+            Some(subtitle),
+            Some("Enter select - Esc cancel".to_string()),
+            items,
+            self.app_event_tx.clone(),
+            6,
+        );
+        self.bottom_pane.show_list_selection(
+            "Git repository required".to_string(),
+            None,
+            None,
+            view,
+        );
+        self.request_redraw();
+    }
+
+    pub(crate) fn confirm_git_init(&mut self, resume: GitInitResume) {
+        if self.git_init_inflight {
+            self.bottom_pane
+                .flash_footer_notice("Git init already running...".to_string());
+            return;
+        }
+
+        self.pending_git_init_resume = Some(resume);
+        self.git_init_inflight = true;
+
+        let cwd = self.config.cwd.clone();
+        let ticket = self.make_background_tail_ticket();
+        self.app_event_tx.send_background_event_with_ticket(
+            &ticket,
+            format!("Initializing git repository in {}...", cwd.display()),
+        );
+
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let output = tokio::process::Command::new("git")
+                .current_dir(&cwd)
+                .arg("init")
+                .output()
+                .await;
+
+            let (ok, message) = match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let trimmed = stdout.trim();
+                    let msg = if trimmed.is_empty() {
+                        format!("Initialized git repository in {}.", cwd.display())
+                    } else {
+                        trimmed.to_string()
+                    };
+                    (true, msg)
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let detail = if !stderr.trim().is_empty() {
+                        stderr.trim().to_string()
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    let msg = if detail.is_empty() {
+                        "git init failed.".to_string()
+                    } else {
+                        format!("git init failed: {detail}")
+                    };
+                    (false, msg)
+                }
+                Err(e) => (false, format!("Failed to run git init: {e}")),
+            };
+
+            tx.send(AppEvent::GitInitFinished { ok, message });
+        });
+    }
+
+    pub(crate) fn decline_git_init(&mut self) {
+        self.git_init_declined = true;
+        let notice = format!(
+            "Write-enabled agents and worktrees are unavailable until you run `git init` in {}.",
+            self.config.cwd.display()
+        );
+        self.history_push_plain_paragraphs(
+            PlainMessageKind::Notice,
+            vec!["Git repository not initialized.".to_string(), notice],
+        );
+        self.request_redraw();
+    }
+
+    pub(crate) fn handle_git_init_finished(&mut self, ok: bool, message: String) {
+        self.git_init_inflight = false;
+        if ok {
+            self.git_init_declined = false;
+            let notice = if message.trim().is_empty() {
+                format!("Initialized git repository in {}.", self.config.cwd.display())
+            } else {
+                message
+            };
+            self.push_background_tail(notice);
+            if let Some(resume) = self.pending_git_init_resume.take() {
+                match resume {
+                    GitInitResume::SubmitText { text } => {
+                        self.app_event_tx.send(AppEvent::SubmitTextWithPreface {
+                            visible: text,
+                            preface: String::new(),
+                        });
+                    }
+                    GitInitResume::DispatchCommand {
+                        command,
+                        command_text,
+                    } => {
+                        self.app_event_tx
+                            .send(AppEvent::DispatchCommand(command, command_text));
+                    }
+                }
+            }
+        } else {
+            let err = if message.trim().is_empty() {
+                "git init failed.".to_string()
+            } else {
+                message
+            };
+            self.history_push_plain_state(history_cell::new_error_event(err));
+            self.pending_git_init_resume = None;
+        }
+        self.request_redraw();
+    }
+
     pub(crate) fn handle_branch_command(&mut self, args: String) {
         self.consume_pending_prompt_for_ui_only_turn();
+        let command_text = if args.trim().is_empty() {
+            "/branch".to_string()
+        } else {
+            format!("/branch {}", args.trim())
+        };
+        if self.ensure_git_repo_for_action(
+            GitInitResume::DispatchCommand {
+                command: SlashCommand::Branch,
+                command_text,
+            },
+            "Creating a branch worktree requires a git repository.",
+        ) {
+            return;
+        }
         if Self::is_branch_worktree_path(&self.config.cwd) {
             self.history_push_plain_state(crate::history_cell::new_error_event(
                 "`/branch` — already inside a branch worktree; switch to the repo root before creating another branch."
@@ -35743,6 +36467,15 @@ impl ChatWidget<'_> {
 
     pub(crate) fn handle_push_command(&mut self) {
         self.consume_pending_prompt_for_ui_only_turn();
+        if self.ensure_git_repo_for_action(
+            GitInitResume::DispatchCommand {
+                command: SlashCommand::Push,
+                command_text: "/push".to_string(),
+            },
+            "Pushing changes requires a git repository.",
+        ) {
+            return;
+        }
         let Some(git_root) =
             code_core::git_info::resolve_root_git_project_for_trust(&self.config.cwd)
         else {
@@ -36064,6 +36797,7 @@ impl ChatWidget<'_> {
             cwd: self.config.cwd.clone(),
             resume_path: None,
             demo_developer_message: self.config.demo_developer_message.clone(),
+            dynamic_tools: Vec::new(),
         };
         self.submit_op(op);
 
@@ -36082,6 +36816,15 @@ impl ChatWidget<'_> {
     /// with explicit manual instructions.
     pub(crate) fn handle_merge_command(&mut self) {
         self.consume_pending_prompt_for_ui_only_turn();
+        if self.ensure_git_repo_for_action(
+            GitInitResume::DispatchCommand {
+                command: SlashCommand::Merge,
+                command_text: "/merge".to_string(),
+            },
+            "Merging a branch worktree requires a git repository.",
+        ) {
+            return;
+        }
         if !Self::is_branch_worktree_path(&self.config.cwd) {
             self.history_push_plain_state(crate::history_cell::new_error_event(
                 "`/merge` — run this command from inside a branch worktree created with '/branch'.".to_string(),
@@ -36127,15 +36870,17 @@ impl ChatWidget<'_> {
                     reasons.push("manual follow-up requested".to_string());
                 }
                 let reason_text = reasons.join(", ");
+                if state.git_root != state.worktree_path {
+                    let _ = tx.send(AppEvent::SwitchCwd(state.git_root.clone(), None));
+                }
                 send_background(
                     tx,
                     ticket,
-                    format!("`/merge` — handing off to agent ({})", reason_text),
+                    format!("`/merge` — handing off to agent ({reason_text})"),
                 );
-                let visible = format!(
-                    "Finalize branch '{}' via /merge (agent merge required)",
-                    state.worktree_branch
-                );
+                let worktree_branch = state.worktree_branch.as_str();
+                let visible =
+                    format!("Finalize branch '{worktree_branch}' via /merge (agent merge required)");
                 let preface = state.agent_preface(&reason_text);
                 let _ = tx.send(AppEvent::SubmitTextWithPreface { visible, preface });
             }
@@ -37937,7 +38682,18 @@ impl WidgetRef for &ChatWidget<'_> {
                         p.record_render((idx, content_width), label.as_str(), ns);
                     }
                 }
+                let cell_start = acc;
                 acc = acc.saturating_add(line_count);
+                let cell_end = acc;
+
+                if cell
+                    .as_any()
+                    .is::<crate::history_cell::AssistantMarkdownCell>()
+                    && line_count >= 2
+                {
+                    spacing_ranges.push((cell_start, cell_start.saturating_add(1)));
+                    spacing_ranges.push((cell_end.saturating_sub(1), cell_end));
+                }
 
                 let mut should_add_spacing = idx < cells.len().saturating_sub(1) && line_count > 0;
                 if should_add_spacing {
@@ -38037,7 +38793,7 @@ impl WidgetRef for &ChatWidget<'_> {
         }
 
         let composer_rows = self.layout.last_bottom_reserved_rows.get();
-        let ensure_footer_space = self.layout.scroll_offset == 0
+        let ensure_footer_space = self.layout.scroll_offset.get() == 0
             && composer_rows > 0
             && base_total_height >= viewport_rows
             && request_count > 0;
@@ -38078,8 +38834,11 @@ impl WidgetRef for &ChatWidget<'_> {
         }
         let overscan_extra = total_height.saturating_sub(base_total_height);
         // Calculate scroll position and vertical alignment
-        // Stabilize viewport when input area height changes while scrolled up.
+        // Preserve a stable viewport anchor when history grows while the user is scrolled up.
         let prev_viewport_h = self.layout.last_history_viewport_height.get();
+        let prev_max_scroll = self.layout.last_max_scroll.get();
+        let prev_scroll_offset = self.layout.scroll_offset.get().min(prev_max_scroll);
+        let prev_scroll_from_top = prev_max_scroll.saturating_sub(prev_scroll_offset);
         if prev_viewport_h == 0 {
             // Initialize on first render
             self.layout
@@ -38098,14 +38857,32 @@ impl WidgetRef for &ChatWidget<'_> {
             // scroll_offset is measured from the bottom (0 = bottom/newest)
             // Convert to distance from the top for rendering math.
             let max_scroll = total_height.saturating_sub(content_area.height);
-            // Update cache and clamp for display only
+            if self.layout.scroll_offset.get() > 0 && max_scroll != prev_max_scroll {
+                // If the user has scrolled up and the history height changes (e.g. new output
+                // arrives while streaming), keep the same content anchored at the top of the
+                // viewport by adjusting our bottom-anchored scroll offset.
+                self.layout
+                    .scroll_offset
+                    .set(max_scroll.saturating_sub(prev_scroll_from_top));
+            }
+
+            // Update cache and clamp for display only.
             self.layout.last_max_scroll.set(max_scroll);
-            let clamped_scroll_offset = self.layout.scroll_offset.min(max_scroll);
+            let clamped_scroll_offset = self.layout.scroll_offset.get().min(max_scroll);
             let mut scroll_from_top = max_scroll.saturating_sub(clamped_scroll_offset);
 
             if overscan_extra > 0 && clamped_scroll_offset == 0 {
                 scroll_from_top = scroll_from_top.saturating_sub(overscan_extra);
             }
+
+            if clamped_scroll_offset == 0 && content_area.height == 1 {
+                scroll_from_top = self
+                    .history_render
+                    .adjust_scroll_to_content(scroll_from_top);
+            }
+
+            // NOTE: when pinned to the bottom, avoid guessing at cell-internal padding.
+            // Only skip known spacer intervals recorded by the history render cache.
 
             tracing::debug!(
                 target: "code_tui::scrollback",
@@ -38118,21 +38895,6 @@ impl WidgetRef for &ChatWidget<'_> {
                 initial_scroll_from_top = scroll_from_top,
                 "scrollback pre-adjust scroll position",
             );
-
-            // Viewport stabilization: when user is scrolled up (offset > 0) and the
-            // history viewport height changes due to the input area growing/shrinking,
-            // adjust the scroll_from_top to keep the top line steady on screen.
-            if clamped_scroll_offset > 0 {
-                let prev_h = prev_viewport_h as i32;
-                let curr_h = content_area.height as i32;
-                let delta_h = prev_h - curr_h; // positive if viewport shrank
-                if delta_h != 0 {
-                    // Adjust in the opposite direction to keep the same top anchor
-                    let sft = scroll_from_top as i32 - delta_h;
-                    let sft = sft.clamp(0, max_scroll as i32) as u16;
-                    scroll_from_top = sft;
-                }
-            }
 
             // If our scroll origin landed on a spacer row between cells, nudge it up so
             // the viewport starts with real content instead of an empty separator.
@@ -39848,7 +40610,7 @@ struct StreamState {
 #[derive(Default)]
 struct LayoutState {
     // Scroll offset from bottom (0 = bottom)
-    scroll_offset: u16,
+    scroll_offset: Cell<u16>,
     // Cached max scroll from last render
     last_max_scroll: std::cell::Cell<u16>,
     // Track last viewport height of the history content area

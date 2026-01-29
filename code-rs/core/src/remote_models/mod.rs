@@ -8,6 +8,7 @@ use code_protocol::openai_models::ApplyPatchToolType as ProtocolApplyPatchToolTy
 use code_protocol::openai_models::ModelInfo;
 use code_protocol::openai_models::ModelsResponse;
 use code_protocol::openai_models::ReasoningEffort as ProtocolReasoningEffort;
+use code_protocol::openai_models::TruncationMode as ProtocolTruncationMode;
 use reqwest::header;
 use reqwest::Method;
 use reqwest::Url;
@@ -332,11 +333,9 @@ impl RemoteModelsManager {
 }
 
 pub fn apply_model_info_overrides(info: &ModelInfo, mut family: ModelFamily) -> ModelFamily {
-    if let Some(instructions) = info.base_instructions.as_ref() {
-        let trimmed = instructions.trim();
-        if !trimmed.is_empty() {
-            family.base_instructions = instructions.clone();
-        }
+    let trimmed = info.base_instructions.trim();
+    if !trimmed.is_empty() {
+        family.base_instructions = info.base_instructions.clone();
     }
 
     if let Some(context_window) = info
@@ -350,9 +349,17 @@ pub fn apply_model_info_overrides(info: &ModelInfo, mut family: ModelFamily) -> 
         family.apply_patch_tool_type = Some(map_apply_patch_tool_type(tool_type));
     }
 
+    if let Some(limit) = info.auto_compact_token_limit() {
+        family.set_auto_compact_token_limit(Some(limit));
+    }
+
+    family.set_truncation_policy(map_truncation_policy(&info.truncation_policy));
+
     family.supports_reasoning_summaries = info.supports_reasoning_summaries;
     family.supports_parallel_tool_calls = info.supports_parallel_tool_calls;
-    family.default_reasoning_effort = Some(map_reasoning_effort(info.default_reasoning_level));
+    if let Some(effort) = info.default_reasoning_level {
+        family.default_reasoning_effort = Some(map_reasoning_effort(effort));
+    }
     family
 }
 
@@ -373,6 +380,16 @@ fn map_reasoning_effort(effort: ProtocolReasoningEffort) -> crate::config_types:
         ProtocolReasoningEffort::Medium => LocalEffort::Medium,
         ProtocolReasoningEffort::High => LocalEffort::High,
         ProtocolReasoningEffort::XHigh => LocalEffort::XHigh,
+    }
+}
+
+fn map_truncation_policy(
+    policy: &code_protocol::openai_models::TruncationPolicyConfig,
+) -> code_protocol::protocol::TruncationPolicy {
+    let limit = usize::try_from(policy.limit).unwrap_or(usize::MAX);
+    match policy.mode {
+        ProtocolTruncationMode::Bytes => code_protocol::protocol::TruncationPolicy::Bytes(limit),
+        ProtocolTruncationMode::Tokens => code_protocol::protocol::TruncationPolicy::Tokens(limit),
     }
 }
 

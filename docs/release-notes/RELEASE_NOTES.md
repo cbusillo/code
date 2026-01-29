@@ -1,11 +1,9 @@
-## @just-every/code v0.6.30
-
-Bugfix release improving TUI rendering stability and log noise handling.
+## @just-every/code v0.6.54
+Short release focusing on clearer gh_run_wait progress and sturdier auto-compaction.
 
 ### Changes
-- TUI/Auto Drive: avoid full render rebuilds to cut redraw overhead during runs.
-- TUI/History: cache patch summary layout to reduce churn and flicker.
-- TUI/Logs: throttle thread spawn errors to prevent repeated warnings.
+- TUI/GH: live-update gh_run_wait progress with richer summaries.
+- Core/Compact: harden auto-compact flow for safer recovery.
 
 ### Install
 ```
@@ -13,4 +11,4 @@ npm install -g @just-every/code@latest
 code
 ```
 
-Compare: https://github.com/just-every/code/compare/v0.6.29...v0.6.30
+Compare: https://github.com/just-every/code/compare/v0.6.53...v0.6.54

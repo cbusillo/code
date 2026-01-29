@@ -79,26 +79,60 @@ pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default timeout for individual tool calls.
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The Responses API requires tool names to match `^[a-zA-Z0-9_-]+$`.
+/// MCP server/tool names are user-controlled, so sanitize the fully-qualified
+/// name we expose to the model by replacing any disallowed character with `_`.
+fn sanitize_responses_api_tool_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sha1_hex(s: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(s.as_bytes());
+    let sha1 = hasher.finalize();
+    format!("{sha1:x}")
+}
+
 fn qualify_tools<I>(tools: I) -> HashMap<String, ToolInfo>
 where
     I: IntoIterator<Item = ToolInfo>,
 {
     let mut used_names = HashSet::new();
+    let mut seen_raw_names = HashSet::new();
     let mut qualified_tools = HashMap::new();
     for tool in tools {
-        let mut qualified_name = format!(
+        let qualified_name_raw = format!(
             "mcp{}{}{}{}",
             MCP_TOOL_NAME_DELIMITER, tool.server_name, MCP_TOOL_NAME_DELIMITER, tool.tool_name
         );
+        if !seen_raw_names.insert(qualified_name_raw.clone()) {
+            warn!("skipping duplicated tool {}", qualified_name_raw);
+            continue;
+        }
+
+        // Start from a "pretty" name (sanitized), then deterministically disambiguate on
+        // collisions by appending a hash of the *raw* (unsanitized) qualified name. This
+        // ensures tools like `foo.bar` and `foo_bar` don't collapse to the same key.
+        let mut qualified_name = sanitize_responses_api_tool_name(&qualified_name_raw);
+
+        // Enforce length constraints early; use the raw name for the hash input so the
+        // output remains stable even when sanitization changes.
         if qualified_name.len() > MAX_TOOL_NAME_LENGTH {
-            let mut hasher = Sha1::new();
-            hasher.update(qualified_name.as_bytes());
-            let sha1 = hasher.finalize();
-            let sha1_str = format!("{sha1:x}");
-
-            // Truncate to make room for the hash suffix
+            let sha1_str = sha1_hex(&qualified_name_raw);
             let prefix_len = MAX_TOOL_NAME_LENGTH - sha1_str.len();
-
             qualified_name = format!("{}{}", &qualified_name[..prefix_len], sha1_str);
         }
 
@@ -119,6 +153,8 @@ pub(crate) struct ToolInfo {
     pub(crate) server_name: String,
     pub(crate) tool_name: String,
     pub(crate) tool: Tool,
+    pub(crate) connector_id: Option<String>,
+    pub(crate) connector_name: Option<String>,
 }
 
 type ResponderMap = HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>;
@@ -278,7 +314,7 @@ pub(crate) struct McpConnectionManager {
 impl McpConnectionManager {
     pub async fn initialize(
         &mut self,
-        mcp_servers: HashMap<String, McpServerConfig>,
+        mcp_servers: &HashMap<String, McpServerConfig>,
         store_mode: OAuthCredentialsStoreMode,
         auth_entries: HashMap<String, McpAuthStatusEntry>,
         tx_event: Sender<Event>,
@@ -291,6 +327,7 @@ impl McpConnectionManager {
         let mut clients = HashMap::new();
         let mut join_set = JoinSet::new();
         let elicitation_requests = ElicitationRequestManager::default();
+        let mcp_servers = mcp_servers.clone();
         for (server_name, cfg) in mcp_servers.into_iter().filter(|(_, cfg)| cfg.enabled) {
             let cancel_token = cancel_token.child_token();
             let _ = emit_update(
@@ -864,14 +901,16 @@ async fn list_tools_for_client(
     client: &Arc<RmcpClient>,
     timeout: Option<Duration>,
 ) -> Result<Vec<ToolInfo>> {
-    let resp = client.list_tools(None, timeout).await?;
+    let resp = client.list_tools_with_connector_ids(None, timeout).await?;
     Ok(resp
         .tools
         .into_iter()
         .map(|tool| ToolInfo {
             server_name: server_name.to_owned(),
-            tool_name: tool.name.clone(),
-            tool,
+            tool_name: tool.tool.name.clone(),
+            tool: tool.tool,
+            connector_id: tool.connector_id,
+            connector_name: tool.connector_name,
         })
         .collect())
 }
@@ -969,6 +1008,8 @@ mod tests {
                 output_schema: None,
                 title: None,
             },
+            connector_id: None,
+            connector_name: None,
         }
     }
 
@@ -1032,6 +1073,28 @@ mod tests {
         assert_eq!(
             keys[1],
             "mcp__my_server__yet_anot419a82a89325c1b477274a41f8c65ea5f3a7f341"
+        );
+    }
+
+    #[test]
+    fn test_qualify_tools_sanitizes_invalid_characters() {
+        let tools = vec![create_test_tool("server.one", "tool.two")];
+
+        let qualified_tools = qualify_tools(tools);
+
+        assert_eq!(qualified_tools.len(), 1);
+        let (qualified_name, tool) = qualified_tools.into_iter().next().expect("one tool");
+        assert_eq!(qualified_name, "mcp__server_one__tool_two");
+
+        // The key is sanitized for OpenAI, but we keep original parts for the actual MCP call.
+        assert_eq!(tool.server_name, "server.one");
+        assert_eq!(tool.tool_name, "tool.two");
+
+        assert!(
+            qualified_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "qualified name must be Responses API compatible: {qualified_name:?}"
         );
     }
 
@@ -1114,10 +1177,12 @@ mod tests {
                     env_http_headers: None,
                 },
                 enabled: true,
+                disabled_reason: None,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
             auth_status: McpAuthStatus::Unsupported,
         };
@@ -1158,10 +1223,12 @@ mod tests {
                     env_http_headers: None,
                 },
                 enabled: true,
+                disabled_reason: None,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
             auth_status: McpAuthStatus::Unsupported,
         };

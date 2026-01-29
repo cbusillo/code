@@ -7,6 +7,149 @@
 
 - (none)
 
+## [0.6.54] - 2026-01-29
+
+- TUI/GH: live-update gh_run_wait progress with richer summaries. (76d56c63, 999fd1d2)
+- Core/Compact: harden auto-compact flow for safer recovery. (654d0bba)
+
+## [0.6.53] - 2026-01-27
+
+- Core/Tools: add dynamic tool injection and wire the dynamic tool pipeline. (d594693d, 8a81f9f8)
+- MCP/Auth: allow MCP server scopes config as OAuth fallback. (bdc4742b)
+- App Server: add thread read, archived listing, and unarchive support. (80240b3b, 733cb684, 62266b13)
+- TUI: add /personality selector and /permissions flow. (031bafd1, 038b78c9)
+- Core/Collab: reduce high CPU usage during collaboration runs. (375a5ef0)
+
+## [0.6.52] - 2026-01-26
+
+- Browser: bound DOMContentLoaded waits to avoid hangs during navigation. (1e1da83d)
+- Browser: bound load waits with readyState polling fallback. (1e1da83d)
+
+## [0.6.51] - 2026-01-26
+
+- Core/TUI: add session nicknames to label runs. (30d5e045)
+- TUI/Editor: open external editor with Ctrl+G. (d3a315c9)
+- TUI/Scroll: keep viewport stable and prevent scroll jumps during streaming. (f198c33f, d07f6f63)
+- MCP/Exec: show per-server tool status and handle list-tools responses. (b26e4d6f, d042f7ce)
+
+## [0.6.50] - 2026-01-22
+
+- Core/Models: default to gpt-5.2-codex with personality templating and request-user-input support. (7aad17a5, 95bcf62e)
+- Core/Config: add layered config.toml support for app-server reads and merges. (2ca9a565)
+- TUI: add request-user-input overlay with interactive picker and reliable pending/answer routing. (5f55ed66, c7123257, 35f18684, b972185d)
+- Core/Runtime: preserve interrupted turns to prevent repeats and avoid touching thread mtime on resume. (b236f1c9, b0049ab6)
+- Sandbox/Paths: harden tilde expansion and Windows sandbox audit paths for safer writable roots. (8179312f, c73a11d5, f2de9201)
+
+## [0.6.49] - 2026-01-17
+
+- CLI/Fork: /fork now clones the current session and surfaces the source session id in /status. (e893e83e, c26fe645)
+- Auth: add device code login for headless environments to simplify setup. (13159006)
+- TUI/Auto-review: persist review baselines across sessions to avoid repeated prompts. (8aba6b6f)
+- Core: align tool output caps with model policy to prevent unexpected truncation. (63dcaeda)
+- API: allow listing threads ordered by created_at or updated_at for predictable pagination. (f1653dd4)
+
+## [0.6.48] - 2026-01-14
+
+- Browser: stabilize /browser command handling and diff rendering for reliable runs. (bfd15335)
+- Browser: honor proxy discovery when finding CDP targets so automation works behind proxies. (bfd15335)
+
+## [0.6.47] - 2026-01-13
+
+- Core/Websocket: reuse connections and add append support to cut reconnect churn. (d75626a, e726a82)
+- MCP: hot reload servers with static callbacks for smoother development. (3e91a95c, d5562983)
+- CLI: add --url with OAuth-friendly defaults and prompt Windows users on unsafe commands. (145974c4, ddae70bd)
+- TUI: keep scrollback tails visible and show in-flight coalesced tool calls. (7c1e7747, 602ddfee, 273ba32d, 12779c7c)
+- Exec/Auto: honor reasoning effort and dedupe reasoning output during auto runs. (bc81e7c2, 00fbc71a)
+
+## [0.6.46] - 2026-01-11
+
+- TUI/Stream: preserve commit ticks while debouncing to keep command ordering intact. (365bf7a)
+- TUI/Render: resync buffers after WouldBlock errors so redraws recover cleanly. (7ef6a6c)
+
+## [0.6.45] - 2026-01-09
+
+- TUI/Render: clear after WouldBlock redraws to resync the terminal and remove stale tail lines. (a354fdf8)
+- TUI/Render: improve redraw stability under terminal backpressure so frames recover cleanly. (a354fdf8)
+
+## [0.6.44] - 2026-01-08
+
+- TUI/Render: reset skip flags when filling backgrounds so reused buffer cells redraw correctly. (035abd0d)
+- TUI/Render: ensure background fill without characters also clears skip to prevent lingering artifacts. (035abd0d)
+
+## [0.6.43] - 2026-01-08
+
+- TUI/Images: guard dropped images and clipped views so broken files fall back to placeholders. (b76b2455)
+- TUI/Images: avoid partial rendering on graphic protocols to prevent cursor corruption while scrolling. (b76b2455)
+
+## [0.6.42] - 2026-01-08
+
+- TUI/Images: persist pasted or dropped images from temp locations into session storage so they stay available when sending. (00cbdfc)
+- TUI/Composer: keep image placeholders verbatim when building messages so inline markers align with attachments. (00cbdfc)
+
+## [0.6.41] - 2026-01-08
+
+- TUI/History: show exec and MCP cards immediately and drop spacer after collapsed reasoning before exec. (3c68afba, fcb48a71)
+- Exec: send prompt and images in one turn to keep runs aligned. (f23e562f)
+- TUI/Queue: dispatch queued input immediately so interactions start without delay. (b00b6ce3)
+- TUI/Render: preserve WouldBlock kind in draw errors for accurate diagnostics. (5faf4411)
+
+## [0.6.40] - 2026-01-07
+
+- TUI/Image: initialize picker state for image cards so selection works reliably. (63e53af9)
+- Core: gate cgroup helpers on Linux to avoid non-Linux builds invoking them. (7369620a)
+
+## [0.6.39] - 2026-01-07
+
+- TUI/Auto-drive: add navigation telemetry and forward aligned compacted history for new browser runs. (94eb8d23, d6d52b7f, aaac24f7)
+- TUI2/Markdown: stream logical lines so transcripts reflow correctly on resize and copy/paste. (c92dbea7)
+- TUI: render view-image paths relative to the working directory for non-git projects. (4c3d2a5b)
+- TUI2/Transcript: add an auto-hiding scrollbar, anchor the copy pill at the viewport bottom, and cache rendering to cut redraws. (8f10d3bf, 56782130, 90f37e85)
+
+## [0.6.38] - 2026-01-06
+
+- Docs/Config: clarify `--model` applies to the active provider and call out OpenAI-compatible requirements for custom providers. (fa6c482)
+- Docs/Config: add a proxy example for routing OpenAI-style requests to other vendors. (fa6c482)
+
+## [0.6.37] - 2026-01-06
+
+- TUI/Image: render view image cards so attached visuals show inline. (658ddfb)
+- TUI/Browser: scope console logs to each browser card to avoid spillover. (e1d8f12)
+- TUI/Resume: prevent footer underflow in resume layouts. (deef15a)
+- TUI/Composer: guard composer height to keep the input stable. (041dff4)
+- Core/Config: allow tool output size override to honor config limits. (c3782ba)
+
+## [0.6.36] - 2026-01-05
+
+- TUI: prioritize task cancellation on Esc before agent input to make stopping runs reliable. (76e3dd8)
+- Tests: reduce linux sandbox and TUI timeout flakes for steadier CI runs. (9d5dbfc)
+
+## [0.6.35] - 2026-01-05
+
+- Core/Agent: keep packaged code executable available for read-only agents to avoid missing-binary failures. (d1557c5)
+- Core/Agent: fall back to local dev build when the running binary disappears to keep agent commands working. (d1557c5)
+
+## [0.6.34] - 2026-01-05
+
+- Core/Auth: auto-switch to another account when usage limits hit to keep runs moving. (590f46be)
+- UX: show notices when accounts auto-switch due to rate limits so users stay informed. (590f46be)
+
+## [0.6.33] - 2026-01-05
+
+- TUI: keep cancelable agents prioritized when Esc is pressed. (195c768)
+- TUI: prompt to init git before git-dependent actions run. (6d693c3f)
+- Logging: overhaul debug log handling for clearer diagnostics. (afba3b9c)
+
+## [0.6.32] - 2026-01-04
+
+- TUI: prevent Esc undo priming from sticking and stabilize word-motion shortcuts. (d90b0f9)
+- TUI: refactor Esc handling into a dedicated module for clearer behavior. (d90b0f9)
+
+## [0.6.31] - 2026-01-04
+
+- Core/Config: add missing test imports to keep config checks stable. (97672cc7)
+- TUI/Logging: throttle frame timer spam to reduce noisy redraw logs. (3eeef61c)
+- Core/TUI: split large modules to improve stability and maintainability. (5c9d9743)
+
 ## [0.6.30] - 2026-01-04
 
 - TUI/Auto Drive: avoid full render rebuilds to cut redraw overhead during runs. (6db1e0b)

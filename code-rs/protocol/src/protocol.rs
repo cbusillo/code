@@ -14,6 +14,7 @@ use crate::ConversationId;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::custom_prompts::CustomPrompt;
+use crate::dynamic_tools::{DynamicToolCallRequest, DynamicToolResponse};
 use crate::skills::Skill;
 use crate::message_history::HistoryEntry;
 use crate::models::ContentItem;
@@ -21,8 +22,10 @@ use crate::models::ResponseItem;
 use crate::num_format::format_with_separators;
 use crate::parse_command::ParsedCommand;
 use crate::plan_tool::UpdatePlanArgs;
+use crate::request_user_input::RequestUserInputResponse;
 use mcp_types::CallToolResult;
 use mcp_types::Tool as McpTool;
+pub use crate::request_user_input::RequestUserInputEvent;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -34,6 +37,7 @@ use ts_rs::TS;
 /// duplicated hardcoded strings.
 pub const USER_INSTRUCTIONS_OPEN_TAG: &str = "<user_instructions>";
 pub const USER_INSTRUCTIONS_CLOSE_TAG: &str = "</user_instructions>";
+pub const USER_INSTRUCTIONS_PREFIX: &str = "# AGENTS.md instructions for ";
 pub const ENVIRONMENT_CONTEXT_OPEN_TAG: &str = "<environment_context>";
 pub const ENVIRONMENT_CONTEXT_CLOSE_TAG: &str = "</environment_context>";
 pub const ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG: &str = "<environment_context_delta>";
@@ -65,6 +69,9 @@ pub enum Op {
     UserInput {
         /// User input items, see `InputItem`
         items: Vec<InputItem>,
+        /// Optional JSON Schema used to constrain the final assistant message for this turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_output_json_schema: Option<Value>,
     },
 
     /// Queue user input to be appended to the next model request without
@@ -162,6 +169,23 @@ pub enum Op {
         id: String,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
+    },
+
+    /// Resolve a request_user_input tool call.
+    #[serde(rename = "user_input_answer", alias = "request_user_input_response")]
+    UserInputAnswer {
+        /// Turn id for the in-flight request.
+        id: String,
+        /// User-provided answers.
+        response: RequestUserInputResponse,
+    },
+
+    /// Resolve a dynamic tool call request.
+    DynamicToolResponse {
+        /// Call id for the in-flight request.
+        id: String,
+        /// Tool output payload.
+        response: DynamicToolResponse,
     },
 
     /// Append an entry to the persistent cross-session message history.
@@ -443,12 +467,12 @@ pub enum InputItem {
     Text {
         text: String,
     },
-    /// Pre‑encoded data: URI image.
+    /// Pre-encoded data: URI image.
     Image {
         image_url: String,
     },
 
-    /// Local image path provided by the user.  This will be converted to an
+    /// Local image path provided by the user. This will be converted to an
     /// `Image` variant (base64 data URL) during request serialization.
     LocalImage {
         path: std::path::PathBuf,
@@ -569,6 +593,10 @@ pub enum EventMsg {
     ViewImageToolCall(ViewImageToolCallEvent),
 
     ExecApprovalRequest(ExecApprovalRequestEvent),
+
+    RequestUserInput(RequestUserInputEvent),
+
+    DynamicToolCallRequest(DynamicToolCallRequest),
 
     ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent),
 
@@ -881,7 +909,7 @@ pub struct AgentMessageEvent {
 pub enum InputMessageKind {
     /// Plain user text (default)
     Plain,
-    /// XML-wrapped user instructions (<user_instructions>...)
+    /// User instructions (AGENTS.md prefix or legacy XML tag).
     UserInstructions,
     /// XML-wrapped environment context (<environment_context>...)
     EnvironmentContext,
@@ -909,8 +937,9 @@ where
             && ends_with_ignore_ascii_case(trimmed, ENVIRONMENT_CONTEXT_CLOSE_TAG)
         {
             InputMessageKind::EnvironmentContext
-        } else if starts_with_ignore_ascii_case(trimmed, USER_INSTRUCTIONS_OPEN_TAG)
-            && ends_with_ignore_ascii_case(trimmed, USER_INSTRUCTIONS_CLOSE_TAG)
+        } else if trimmed.starts_with(USER_INSTRUCTIONS_PREFIX)
+            || (starts_with_ignore_ascii_case(trimmed, USER_INSTRUCTIONS_OPEN_TAG)
+                && ends_with_ignore_ascii_case(trimmed, USER_INSTRUCTIONS_CLOSE_TAG))
         {
             InputMessageKind::UserInstructions
         } else {
@@ -1072,7 +1101,7 @@ impl InitialHistory {
     }
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq, TS, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS, Default)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename_all = "lowercase")]
 pub enum SessionSource {
@@ -1081,8 +1110,48 @@ pub enum SessionSource {
     VSCode,
     Exec,
     Mcp,
+    SubAgent(SubAgentSource),
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubAgentSource {
+    Review,
+    Compact,
+    ThreadSpawn {
+        parent_thread_id: ConversationId,
+        depth: i32,
+    },
+    Other(String),
+}
+
+impl fmt::Display for SessionSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionSource::Cli => f.write_str("cli"),
+            SessionSource::VSCode => f.write_str("vscode"),
+            SessionSource::Exec => f.write_str("exec"),
+            SessionSource::Mcp => f.write_str("mcp"),
+            SessionSource::SubAgent(sub_source) => write!(f, "subagent_{sub_source}"),
+            SessionSource::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+impl fmt::Display for SubAgentSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SubAgentSource::Review => f.write_str("review"),
+            SubAgentSource::Compact => f.write_str("compact"),
+            SubAgentSource::ThreadSpawn { parent_thread_id, depth } => {
+                write!(f, "thread_spawn:{parent_thread_id}:{depth}")
+            }
+            SubAgentSource::Other(label) => f.write_str(label),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, TS)]
@@ -1405,11 +1474,28 @@ pub struct GetHistoryEntryResponseEvent {
     pub entry: Option<HistoryEntry>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerFailurePhase {
+    Start,
+    ListTools,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct McpServerFailure {
+    pub phase: McpServerFailurePhase,
+    pub message: String,
+}
+
 /// Response payload for `Op::ListMcpTools`.
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct McpListToolsResponseEvent {
     /// Fully qualified tool name -> tool definition.
     pub tools: std::collections::HashMap<String, McpTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tools: Option<std::collections::HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_failures: Option<std::collections::HashMap<String, McpServerFailure>>,
 }
 
 /// Response payload for `Op::ListCustomPrompts`.

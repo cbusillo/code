@@ -35,6 +35,11 @@ use code_tui::test_helpers::{
 };
 use code_core::codex::compact::COMPACTION_CHECKPOINT_MESSAGE;
 use code_protocol::protocol::CompactionCheckpointWarningEvent;
+use code_protocol::request_user_input::{
+    RequestUserInputEvent,
+    RequestUserInputQuestion,
+    RequestUserInputQuestionOption,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use regex_lite::{Captures, Regex};
 use serde_json::json;
@@ -1157,6 +1162,106 @@ fn scroll_spacing_remains_when_scrolled_up() {
 }
 
 #[test]
+fn scroll_position_stable_when_history_grows_scrolled_up() {
+    let mut harness = ChatWidgetHarness::new();
+
+    for idx in 0..6 {
+        harness.push_user_prompt(format!("User prompt #{idx}: scroll stability"));
+        harness.push_assistant_markdown(format!(
+            "Assistant response #{idx} with enough text to wrap and keep the history tall across renders.\n\nSecond paragraph for idx {idx}."
+        ));
+    }
+
+    let _ = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    let metrics = harness_layout_metrics(&harness);
+    assert!(
+        metrics.last_max_scroll > 0,
+        "scenario must overflow the history viewport to exercise scrolling"
+    );
+
+    let offset = metrics.last_max_scroll.min(5).max(1);
+    harness_force_scroll_offset(&mut harness, offset);
+    let _ = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    let before = harness_layout_metrics(&harness);
+    let before_from_top =
+        before
+            .last_max_scroll
+            .saturating_sub(before.scroll_offset.min(before.last_max_scroll));
+
+    // Simulate additional output arriving while the user has scrolled up.
+    harness.push_assistant_markdown(
+        "New assistant output appended after the user scrolled up.\n\nThis should not move the viewport.",
+    );
+    let _ = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    let after = harness_layout_metrics(&harness);
+    let after_from_top =
+        after
+            .last_max_scroll
+            .saturating_sub(after.scroll_offset.min(after.last_max_scroll));
+
+    assert_eq!(
+        before_from_top,
+        after_from_top,
+        "scroll jumped while history grew; user viewport should stay anchored"
+    );
+}
+
+#[test]
+fn scroll_position_stable_during_streaming_when_scrolled_up() {
+    let mut harness = ChatWidgetHarness::new();
+
+    for idx in 0..6 {
+        harness.push_user_prompt(format!("User prompt #{idx}: streaming scroll"));
+        harness.push_assistant_markdown(format!(
+            "Assistant response #{idx} keeps the history tall.\n\nExtra paragraph for idx {idx}."
+        ));
+    }
+
+    let _ = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    let metrics = harness_layout_metrics(&harness);
+    assert!(
+        metrics.last_max_scroll > 0,
+        "scenario must overflow the history viewport to exercise scrolling"
+    );
+
+    let offset = metrics.last_max_scroll.min(3).max(1);
+    harness_force_scroll_offset(&mut harness, offset);
+    let _ = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    let before = harness_layout_metrics(&harness);
+    let before_from_top =
+        before
+            .last_max_scroll
+            .saturating_sub(before.scroll_offset.min(before.last_max_scroll));
+
+    harness.handle_event(Event {
+        id: "stream-scroll".into(),
+        event_seq: 1,
+        msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: "Streaming update line one.\nStreaming update line two.\n".into(),
+        }),
+        order: Some(OrderMeta {
+            request_ordinal: 1,
+            output_index: Some(0),
+            sequence_number: Some(1),
+        }),
+    });
+    harness.drive_commit_tick();
+
+    let _ = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    let after = harness_layout_metrics(&harness);
+    let after_from_top =
+        after
+            .last_max_scroll
+            .saturating_sub(after.scroll_offset.min(after.last_max_scroll));
+
+    assert_eq!(
+        before_from_top,
+        after_from_top,
+        "streaming output should not move the viewport while scrolled"
+    );
+}
+
+#[test]
 fn multiline_final_history_line_visible_at_bottom() {
     init_tracing_once();
     let mut harness = ChatWidgetHarness::new();
@@ -1432,6 +1537,121 @@ fn tool_activity_showcase() {
 }
 
 #[test]
+fn request_user_input_picker_allows_selection_and_typing() {
+    let mut harness = ChatWidgetHarness::new();
+
+    let mut event_seq = 0u64;
+    let mut order_seq = 0u64;
+    push_ordered_event(
+        &mut harness,
+        &mut event_seq,
+        &mut order_seq,
+        EventMsg::RequestUserInput(RequestUserInputEvent {
+            call_id: "call-1".into(),
+            turn_id: "turn-1".into(),
+            questions: vec![
+                RequestUserInputQuestion {
+                    id: "color".into(),
+                    header: "Pick One".into(),
+                    question: "Select a color:".into(),
+                    is_other: false,
+                    options: Some(vec![
+                        RequestUserInputQuestionOption {
+                            label: "Blue (Recommended)".into(),
+                            description: "Exercises the option picker UI.".into(),
+                        },
+                        RequestUserInputQuestionOption {
+                            label: "Green".into(),
+                            description: "Same flow, different choice.".into(),
+                        },
+                    ]),
+                },
+                RequestUserInputQuestion {
+                    id: "display_name".into(),
+                    header: "Name".into(),
+                    question: "Type a short display name (freeform):".into(),
+                    is_other: false,
+                    options: None,
+                },
+            ],
+        }),
+    );
+
+    let frame = normalize_output(render_chat_widget_to_vt100(&mut harness, 90, 26));
+    assert!(frame.contains("User input"), "request_user_input modal not visible");
+    assert!(
+        frame.contains("(x) Blue (Recommended)"),
+        "options list did not render"
+    );
+
+    harness.send_key(make_key(KeyCode::Down, KeyModifiers::NONE));
+    let frame = normalize_output(render_chat_widget_to_vt100(&mut harness, 90, 26));
+    assert!(
+        frame.contains("(x) Green"),
+        "Down key did not move selection"
+    );
+
+    harness.send_key(make_key(KeyCode::Enter, KeyModifiers::NONE));
+    harness.send_key(make_key(KeyCode::Char('A'), KeyModifiers::NONE));
+    harness.send_key(make_key(KeyCode::Char('l'), KeyModifiers::NONE));
+    harness.send_key(make_key(KeyCode::Char('i'), KeyModifiers::NONE));
+    let frame = normalize_output(render_chat_widget_to_vt100(&mut harness, 90, 26));
+    assert!(
+        frame.contains("Ali"),
+        "freeform question did not capture typed input"
+    );
+}
+
+#[test]
+fn request_user_input_auto_drive_auto_answers_without_modal() {
+    let mut harness = ChatWidgetHarness::new();
+    harness.auto_drive_activate(
+        "Auto Drive user input",
+        true,
+        true,
+        AutoContinueModeFixture::TenSeconds,
+    );
+
+    let mut event_seq = 0u64;
+    let mut order_seq = 0u64;
+    push_ordered_event(
+        &mut harness,
+        &mut event_seq,
+        &mut order_seq,
+        EventMsg::RequestUserInput(RequestUserInputEvent {
+            call_id: "call-2".into(),
+            turn_id: "turn-1".into(),
+            questions: vec![RequestUserInputQuestion {
+                id: "confirm".into(),
+                header: "Confirm".into(),
+                question: "Proceed?".into(),
+                is_other: false,
+                options: Some(vec![
+                    RequestUserInputQuestionOption {
+                        label: "Yes (Recommended)".into(),
+                        description: "Return the collected answers.".into(),
+                    },
+                    RequestUserInputQuestionOption {
+                        label: "No".into(),
+                        description: "Lets you see the cancel path.".into(),
+                    },
+                ]),
+            }],
+        }),
+    );
+
+    let frame = normalize_output(render_chat_widget_to_vt100(&mut harness, 90, 24));
+    assert!(
+        frame.contains("Auto Drive answered user input"),
+        "Auto Drive did not auto-resolve request_user_input"
+    );
+    assert!(
+        !frame.contains("User input"),
+        "request_user_input modal should not appear in Auto Drive"
+    );
+}
+
+#[test]
 fn browser_session_grouped_desired_layout() {
     let mut harness = ChatWidgetHarness::new();
     harness.push_user_prompt("Open docs and find login button");
@@ -1525,7 +1745,7 @@ fn browser_session_grouped_desired_layout() {
         &mut event_seq,
         &mut order_seq,
         EventMsg::BackgroundEvent(BackgroundEventEvent {
-            message: "cdp warning: Refused to load script from cdn.example.com".into(),
+            message: "[browser console] cdp warning: Refused to load script from cdn.example.com".into(),
         }),
     );
 
@@ -1592,7 +1812,7 @@ fn browser_session_grouped_with_unordered_actions() {
         &mut harness,
         &mut event_seq,
         EventMsg::BackgroundEvent(BackgroundEventEvent {
-            message: "Encountering captcha block".into(),
+            message: "[browser console] Encountering captcha block".into(),
         }),
     );
     push_unordered_event(
@@ -1673,7 +1893,7 @@ fn browser_session_skips_foreign_background_events() {
         &mut event_seq,
         &mut order_seq,
         EventMsg::BackgroundEvent(BackgroundEventEvent {
-            message: "Encountering captcha challenge on checkout".into(),
+            message: "[browser console] Encountering captcha challenge on checkout".into(),
         }),
     );
 

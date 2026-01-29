@@ -13,6 +13,7 @@ use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
+use super::selection_popup_common::wrap_styled_line;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint::KeyBinding;
 use crate::render::Insets;
@@ -41,6 +42,7 @@ pub(crate) struct SelectionItem {
     pub selected_description: Option<String>,
     pub is_current: bool,
     pub is_default: bool,
+    pub is_disabled: bool,
     pub actions: Vec<SelectionAction>,
     pub dismiss_on_select: bool,
     pub search_value: Option<String>,
@@ -50,6 +52,7 @@ pub(crate) struct SelectionItem {
 pub(crate) struct SelectionViewParams {
     pub title: Option<String>,
     pub subtitle: Option<String>,
+    pub footer_note: Option<Line<'static>>,
     pub footer_hint: Option<Line<'static>>,
     pub items: Vec<SelectionItem>,
     pub is_searchable: bool,
@@ -63,6 +66,7 @@ impl Default for SelectionViewParams {
         Self {
             title: None,
             subtitle: None,
+            footer_note: None,
             footer_hint: None,
             items: Vec::new(),
             is_searchable: false,
@@ -74,6 +78,7 @@ impl Default for SelectionViewParams {
 }
 
 pub(crate) struct ListSelectionView {
+    footer_note: Option<Line<'static>>,
     footer_hint: Option<Line<'static>>,
     items: Vec<SelectionItem>,
     state: ScrollState,
@@ -101,6 +106,7 @@ impl ListSelectionView {
             ]));
         }
         let mut s = Self {
+            footer_note: params.footer_note,
             footer_hint: params.footer_hint,
             items: params.items,
             state: ScrollState::new(),
@@ -212,12 +218,14 @@ impl ListSelectionView {
                         .flatten()
                         .or_else(|| item.description.clone());
                     let wrap_indent = description.is_none().then_some(wrap_prefix_width);
+                    let is_disabled = item.is_disabled || item.disabled_reason.is_some();
                     GenericDisplayRow {
                         name: display_name,
                         display_shortcut: item.display_shortcut,
                         match_indices: None,
                         description,
                         wrap_indent,
+                        is_disabled,
                         disabled_reason: item.disabled_reason.clone(),
                     }
                 })
@@ -242,19 +250,27 @@ impl ListSelectionView {
     }
 
     fn accept(&mut self) {
-        if let Some(idx) = self.state.selected_idx
-            && let Some(actual_idx) = self.filtered_indices.get(idx)
-            && let Some(item) = self.items.get(*actual_idx)
+        let selected_item = self
+            .state
+            .selected_idx
+            .and_then(|idx| self.filtered_indices.get(idx))
+            .and_then(|actual_idx| self.items.get(*actual_idx));
+        if let Some(item) = selected_item
             && item.disabled_reason.is_none()
+            && !item.is_disabled
         {
-            self.last_selected_actual_idx = Some(*actual_idx);
+            if let Some(idx) = self.state.selected_idx
+                && let Some(actual_idx) = self.filtered_indices.get(idx)
+            {
+                self.last_selected_actual_idx = Some(*actual_idx);
+            }
             for act in &item.actions {
                 act(&self.app_event_tx);
             }
             if item.dismiss_on_select {
                 self.complete = true;
             }
-        } else {
+        } else if selected_item.is_none() {
             self.complete = true;
         }
     }
@@ -281,7 +297,7 @@ impl ListSelectionView {
                 && self
                     .items
                     .get(*actual_idx)
-                    .is_some_and(|item| item.disabled_reason.is_some())
+                    .is_some_and(|item| item.disabled_reason.is_some() || item.is_disabled)
             {
                 self.state.move_down_wrap(len);
             } else {
@@ -298,7 +314,7 @@ impl ListSelectionView {
                 && self
                     .items
                     .get(*actual_idx)
-                    .is_some_and(|item| item.disabled_reason.is_some())
+                    .is_some_and(|item| item.disabled_reason.is_some() || item.is_disabled)
             {
                 self.state.move_up_wrap(len);
             } else {
@@ -390,7 +406,7 @@ impl BottomPaneView for ListSelectionView {
                     && self
                         .items
                         .get(idx)
-                        .is_some_and(|item| item.disabled_reason.is_none())
+                        .is_some_and(|item| item.disabled_reason.is_none() && !item.is_disabled)
                 {
                     self.state.selected_idx = Some(idx);
                     self.accept();
@@ -434,6 +450,11 @@ impl Renderable for ListSelectionView {
         if self.is_searchable {
             height = height.saturating_add(1);
         }
+        if let Some(note) = &self.footer_note {
+            let note_width = width.saturating_sub(2);
+            let note_lines = wrap_styled_line(note, note_width);
+            height = height.saturating_add(note_lines.len() as u16);
+        }
         if self.footer_hint.is_some() {
             height = height.saturating_add(1);
         }
@@ -445,11 +466,15 @@ impl Renderable for ListSelectionView {
             return;
         }
 
-        let [content_area, footer_area] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(if self.footer_hint.is_some() { 1 } else { 0 }),
-        ])
-        .areas(area);
+        let note_width = area.width.saturating_sub(2);
+        let note_lines = self
+            .footer_note
+            .as_ref()
+            .map(|note| wrap_styled_line(note, note_width));
+        let note_height = note_lines.as_ref().map_or(0, |lines| lines.len() as u16);
+        let footer_rows = note_height + u16::from(self.footer_hint.is_some());
+        let [content_area, footer_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(footer_rows)]).areas(area);
 
         Block::default()
             .style(user_message_style())
@@ -517,14 +542,43 @@ impl Renderable for ListSelectionView {
             );
         }
 
-        if let Some(hint) = &self.footer_hint {
-            let hint_area = Rect {
-                x: footer_area.x + 2,
-                y: footer_area.y,
-                width: footer_area.width.saturating_sub(2),
-                height: footer_area.height,
-            };
-            hint.clone().dim().render(hint_area, buf);
+        if footer_area.height > 0 {
+            let [note_area, hint_area] = Layout::vertical([
+                Constraint::Length(note_height),
+                Constraint::Length(if self.footer_hint.is_some() { 1 } else { 0 }),
+            ])
+            .areas(footer_area);
+
+            if let Some(lines) = note_lines {
+                let note_area = Rect {
+                    x: note_area.x + 2,
+                    y: note_area.y,
+                    width: note_area.width.saturating_sub(2),
+                    height: note_area.height,
+                };
+                for (idx, line) in lines.iter().enumerate() {
+                    if idx as u16 >= note_area.height {
+                        break;
+                    }
+                    let line_area = Rect {
+                        x: note_area.x,
+                        y: note_area.y + idx as u16,
+                        width: note_area.width,
+                        height: 1,
+                    };
+                    line.clone().render(line_area, buf);
+                }
+            }
+
+            if let Some(hint) = &self.footer_hint {
+                let hint_area = Rect {
+                    x: hint_area.x + 2,
+                    y: hint_area.y,
+                    width: hint_area.width.saturating_sub(2),
+                    height: hint_area.height,
+                };
+                hint.clone().dim().render(hint_area, buf);
+            }
         }
     }
 }
@@ -609,6 +663,38 @@ mod tests {
     fn renders_blank_line_between_subtitle_and_items() {
         let view = make_selection_view(Some("Switch between Codex approval presets"));
         assert_snapshot!("list_selection_spacing_with_subtitle", render_lines(&view));
+    }
+
+    #[test]
+    fn snapshot_footer_note_wraps() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let items = vec![SelectionItem {
+            name: "Read Only".to_string(),
+            description: Some("Codex can read files".to_string()),
+            is_current: true,
+            dismiss_on_select: true,
+            ..Default::default()
+        }];
+        let footer_note = Line::from(vec![
+            "Note: ".dim(),
+            "Use /setup-elevated-sandbox".cyan(),
+            " to allow network access.".dim(),
+        ]);
+        let view = ListSelectionView::new(
+            SelectionViewParams {
+                title: Some("Select Approval Mode".to_string()),
+                footer_note: Some(footer_note),
+                footer_hint: Some(standard_popup_hint_line()),
+                items,
+                ..Default::default()
+            },
+            tx,
+        );
+        assert_snapshot!(
+            "list_selection_footer_note_wraps",
+            render_lines_with_width(&view, 40)
+        );
     }
 
     #[test]

@@ -78,6 +78,16 @@ use code_auto_drive_core::AutoResolvePhase;
 use code_auto_drive_core::AutoResolveState;
 use code_core::{entry_to_rollout_path, AutoDriveMode, AutoDrivePidFile, SessionCatalog, SessionQuery};
 use code_core::protocol::SandboxPolicy;
+
+fn build_auto_drive_exec_config(config: &Config) -> Config {
+	    let mut auto_config = config.clone();
+	    auto_config.model = config.auto_drive.model.trim().to_string();
+	    if auto_config.model.is_empty() {
+	        auto_config.model = MODEL_SLUG.to_string();
+	    }
+	    auto_config.model_reasoning_effort = config.auto_drive.model_reasoning_effort;
+	    auto_config
+}
 use code_core::git_info::current_branch_name;
 use code_core::timeboxed_exec_guidance::{
     AUTO_EXEC_TIMEBOXED_CLI_GUIDANCE,
@@ -279,6 +289,7 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
         tools_web_search_request: None,
         mcp_servers: None,
         experimental_client_tools: None,
+        dynamic_tools: None,
         compact_prompt_override: None,
         compact_prompt_override_file: None,
     };
@@ -507,7 +518,12 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
             .new_conversation(config.clone())
             .await?
     };
-    event_processor.print_config_summary(&config, &summary_prompt);
+    if auto_drive_goal.is_some() {
+        let summary_config = build_auto_drive_exec_config(&config);
+        event_processor.print_config_summary(&summary_config, &summary_prompt);
+    } else {
+        event_processor.print_config_summary(&config, &summary_prompt);
+    }
     info!("Codex initialized with event: {session_configured:?}");
 
     if let Some(goal) = auto_drive_goal {
@@ -646,43 +662,6 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
         });
     }
 
-    // Send images first, if any.
-    if !images.is_empty() {
-        let items: Vec<InputItem> = images
-            .into_iter()
-            .map(|path| InputItem::LocalImage { path })
-            .collect();
-        let initial_images_event_id = conversation.submit(Op::UserInput { items }).await?;
-        info!("Sent images with event ID: {initial_images_event_id}");
-        loop {
-            let event = if let Some(deadline) = run_deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, conversation.next_event()).await {
-                    Ok(event) => event?,
-                    Err(_) => {
-                        eprintln!("Time budget exceeded (--max-seconds={})", max_seconds.unwrap_or_default());
-                        let _ = conversation.submit(Op::Interrupt).await;
-                        let _ = conversation.submit(Op::Shutdown).await;
-                        return Err(anyhow::anyhow!("Time budget exceeded"));
-                    }
-                }
-            } else {
-                conversation.next_event().await?
-            };
-
-            if event.id == initial_images_event_id
-                && matches!(
-                    event.msg,
-                    EventMsg::TaskComplete(TaskCompleteEvent {
-                        last_agent_message: _,
-                    })
-                )
-            {
-                break;
-            }
-        }
-    }
-
     // Send the prompt.
     let mut _review_guard: Option<code_core::review_coord::ReviewGuard> = None;
 
@@ -741,10 +720,15 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
         info!("Sent /review with event ID: {event_id}");
         event_id
     } else {
-        let items: Vec<InputItem> = vec![InputItem::Text { text: prompt_to_send }];
+        let mut items: Vec<InputItem> = Vec::new();
+        items.push(InputItem::Text { text: prompt_to_send });
+        items.extend(images.into_iter().map(|path| InputItem::LocalImage { path }));
         // Fallback for older core protocol: send only user input items.
         let event_id = conversation
-            .submit(Op::UserInput { items })
+            .submit(Op::UserInput {
+                items,
+                final_output_json_schema: None,
+            })
             .await?;
         info!("Sent prompt with event ID: {event_id}");
         event_id
@@ -1315,7 +1299,12 @@ async fn run_auto_drive_session(
             .into_iter()
             .map(|path| InputItem::LocalImage { path })
             .collect();
-        let initial_images_event_id = conversation.submit(Op::UserInput { items }).await?;
+        let initial_images_event_id = conversation
+            .submit(Op::UserInput {
+                items,
+                final_output_json_schema: None,
+            })
+            .await?;
         loop {
             let event = if let Some(deadline) = run_deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1354,12 +1343,7 @@ async fn run_auto_drive_session(
     let mut auto_drive_pid_guard =
         AutoDrivePidFile::write(&config.code_home, Some(goal.as_str()), AutoDriveMode::Exec);
 
-    let mut auto_config = config.clone();
-    auto_config.model = config.auto_drive.model.trim().to_string();
-    if auto_config.model.is_empty() {
-        auto_config.model = MODEL_SLUG.to_string();
-    }
-    auto_config.model_reasoning_effort = config.auto_drive.model_reasoning_effort;
+	    let auto_config = build_auto_drive_exec_config(&config);
 
     let (auto_tx, mut auto_rx) = tokio::sync::mpsc::unbounded_channel();
     let sender = AutoCoordinatorEventSender::new(move |event| {
@@ -1417,7 +1401,7 @@ async fn run_auto_drive_session(
                 );
             }
             AutoCoordinatorEvent::CompactedHistory { conversation, .. } => {
-                history.replace_all(conversation);
+                history.replace_all(conversation.to_vec());
             }
             AutoCoordinatorEvent::UserReply {
                 user_response,
@@ -1457,7 +1441,9 @@ async fn run_auto_drive_session(
                             final_last_message = Some(text);
                         }
                         let _ = handle
-                            .send(AutoCoordinatorCommand::UpdateConversation(history.raw_snapshot()));
+                            .send(AutoCoordinatorCommand::UpdateConversation(
+                                history.raw_snapshot().into(),
+                            ));
                     }
                 }
             }
@@ -1522,7 +1508,9 @@ async fn run_auto_drive_session(
                 }
 
                 if handle
-                    .send(AutoCoordinatorCommand::UpdateConversation(history.raw_snapshot()))
+                    .send(AutoCoordinatorCommand::UpdateConversation(
+                        history.raw_snapshot().into(),
+                    ))
                     .is_err()
                 {
                     break;
@@ -2119,7 +2107,12 @@ async fn dispatch_auto_fix(
 ) -> anyhow::Result<()> {
     let fix_prompt = build_fix_prompt(review);
     let items: Vec<InputItem> = vec![InputItem::Text { text: fix_prompt }];
-    let _ = conversation.submit(Op::UserInput { items }).await?;
+    let _ = conversation
+        .submit(Op::UserInput {
+            items,
+            final_output_json_schema: None,
+        })
+        .await?;
     Ok(())
 }
 
@@ -2551,6 +2544,7 @@ async fn submit_and_wait(
     let submit_id = conversation
         .submit(Op::UserInput {
             items: vec![InputItem::Text { text: prompt_text }],
+            final_output_json_schema: None,
         })
         .await?;
 
@@ -2902,6 +2896,23 @@ mod tests {
         )
         .unwrap()
     }
+
+	    #[test]
+	    fn auto_drive_exec_config_uses_auto_drive_reasoning_effort() {
+	        let temp = TempDir::new().unwrap();
+	        let mut config = test_config(temp.path());
+	        config.model_reasoning_effort = code_core::config_types::ReasoningEffort::Low;
+	        config.auto_drive.model = "gpt-5.2".to_string();
+	        config.auto_drive.model_reasoning_effort =
+	            code_core::config_types::ReasoningEffort::XHigh;
+
+	        let auto_config = build_auto_drive_exec_config(&config);
+	        assert_eq!(auto_config.model, "gpt-5.2");
+	        assert_eq!(
+	            auto_config.model_reasoning_effort,
+	            code_core::config_types::ReasoningEffort::XHigh
+	        );
+	    }
 
     fn write_rollout(
         code_home: &Path,
