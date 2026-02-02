@@ -49,6 +49,7 @@ use codex_core::protocol::CollabCloseBeginEvent;
 use codex_core::protocol::CollabCloseEndEvent;
 use codex_core::protocol::CollabWaitingBeginEvent;
 use codex_core::protocol::CollabWaitingEndEvent;
+use codex_protocol::models::WebSearchAction;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use serde_json::Value as JsonValue;
@@ -57,6 +58,7 @@ use tracing::warn;
 
 pub struct EventProcessorWithJsonOutput {
     last_message_path: Option<PathBuf>,
+    last_proposed_plan: Option<String>,
     next_event_id: AtomicU64,
     // Tracks running commands by call_id, including the associated item id.
     running_commands: HashMap<String, RunningCommand>,
@@ -66,6 +68,7 @@ pub struct EventProcessorWithJsonOutput {
     last_total_token_usage: Option<codex_core::protocol::TokenUsage>,
     running_mcp_tool_calls: HashMap<String, RunningMcpToolCall>,
     running_collab_tool_calls: HashMap<String, RunningCollabToolCall>,
+    running_web_search_calls: HashMap<String, String>,
     last_critical_error: Option<ThreadErrorEvent>,
 }
 
@@ -100,6 +103,7 @@ impl EventProcessorWithJsonOutput {
     pub fn new(last_message_path: Option<PathBuf>) -> Self {
         Self {
             last_message_path,
+            last_proposed_plan: None,
             next_event_id: AtomicU64::new(0),
             running_commands: HashMap::new(),
             running_patch_applies: HashMap::new(),
@@ -107,6 +111,7 @@ impl EventProcessorWithJsonOutput {
             last_total_token_usage: None,
             running_mcp_tool_calls: HashMap::new(),
             running_collab_tool_calls: HashMap::new(),
+            running_web_search_calls: HashMap::new(),
             last_critical_error: None,
         }
     }
@@ -114,7 +119,15 @@ impl EventProcessorWithJsonOutput {
     pub fn collect_thread_events(&mut self, event: &protocol::Event) -> Vec<ThreadEvent> {
         match &event.msg {
             protocol::EventMsg::SessionConfigured(ev) => self.handle_session_configured(ev),
+            protocol::EventMsg::ThreadNameUpdated(_) => Vec::new(),
             protocol::EventMsg::AgentMessage(ev) => self.handle_agent_message(ev),
+            protocol::EventMsg::ItemCompleted(protocol::ItemCompletedEvent {
+                item: codex_protocol::items::TurnItem::Plan(item),
+                ..
+            }) => {
+                self.last_proposed_plan = Some(item.text.clone());
+                Vec::new()
+            }
             protocol::EventMsg::AgentReasoning(ev) => self.handle_reasoning_event(ev),
             protocol::EventMsg::ExecCommandBegin(ev) => self.handle_exec_command_begin(ev),
             protocol::EventMsg::ExecCommandEnd(ev) => self.handle_exec_command_end(ev),
@@ -138,7 +151,7 @@ impl EventProcessorWithJsonOutput {
             protocol::EventMsg::CollabCloseEnd(ev) => self.handle_collab_close_end(ev),
             protocol::EventMsg::PatchApplyBegin(ev) => self.handle_patch_apply_begin(ev),
             protocol::EventMsg::PatchApplyEnd(ev) => self.handle_patch_apply_end(ev),
-            protocol::EventMsg::WebSearchBegin(_) => Vec::new(),
+            protocol::EventMsg::WebSearchBegin(ev) => self.handle_web_search_begin(ev),
             protocol::EventMsg::WebSearchEnd(ev) => self.handle_web_search_end(ev),
             protocol::EventMsg::TokenCount(ev) => {
                 if let Some(info) = &ev.info {
@@ -195,11 +208,36 @@ impl EventProcessorWithJsonOutput {
         })]
     }
 
-    fn handle_web_search_end(&self, ev: &protocol::WebSearchEndEvent) -> Vec<ThreadEvent> {
+    fn handle_web_search_begin(&mut self, ev: &protocol::WebSearchBeginEvent) -> Vec<ThreadEvent> {
+        if self.running_web_search_calls.contains_key(&ev.call_id) {
+            return Vec::new();
+        }
+        let item_id = self.get_next_item_id();
+        self.running_web_search_calls
+            .insert(ev.call_id.clone(), item_id.clone());
         let item = ThreadItem {
-            id: self.get_next_item_id(),
+            id: item_id,
             details: ThreadItemDetails::WebSearch(WebSearchItem {
+                id: ev.call_id.clone(),
+                query: String::new(),
+                action: WebSearchAction::Other,
+            }),
+        };
+
+        vec![ThreadEvent::ItemStarted(ItemStartedEvent { item })]
+    }
+
+    fn handle_web_search_end(&mut self, ev: &protocol::WebSearchEndEvent) -> Vec<ThreadEvent> {
+        let item_id = self
+            .running_web_search_calls
+            .remove(&ev.call_id)
+            .unwrap_or_else(|| self.get_next_item_id());
+        let item = ThreadItem {
+            id: item_id,
+            details: ThreadItemDetails::WebSearch(WebSearchItem {
+                id: ev.call_id.clone(),
                 query: ev.query.clone(),
+                action: ev.action.clone(),
             }),
         };
 
@@ -821,16 +859,20 @@ impl EventProcessor for EventProcessorWithJsonOutput {
 
         let protocol::Event { msg, .. } = event;
 
-        if let protocol::EventMsg::TurnComplete(protocol::TurnCompleteEvent {
-            last_agent_message,
-        }) = msg
-        {
-            if let Some(output_file) = self.last_message_path.as_deref() {
-                handle_last_message(last_agent_message.as_deref(), output_file);
+        match msg {
+            protocol::EventMsg::TurnComplete(protocol::TurnCompleteEvent {
+                last_agent_message,
+            }) => {
+                if let Some(output_file) = self.last_message_path.as_deref() {
+                    let last_message = last_agent_message
+                        .as_deref()
+                        .or(self.last_proposed_plan.as_deref());
+                    handle_last_message(last_message, output_file);
+                }
+                CodexStatus::InitiateShutdown
             }
-            CodexStatus::InitiateShutdown
-        } else {
-            CodexStatus::Running
+            protocol::EventMsg::ShutdownComplete => CodexStatus::Shutdown,
+            _ => CodexStatus::Running,
         }
     }
 }

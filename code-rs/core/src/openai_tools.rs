@@ -352,6 +352,18 @@ fn create_shell_tool() -> OpenAiTool {
             description: Some("Optional hard timeout in milliseconds (minimum 1,800,000 / 30 minutes). By default, commands have no hard timeout; long runs are streamed and may be backgrounded by the agent.".to_string()),
         },
     );
+    properties.insert(
+        "prefix_rule".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String {
+                description: None,
+                allowed_values: None,
+            }),
+            description: Some(
+                "Suggests a command prefix to persist for future sessions".to_string(),
+            ),
+        },
+    );
 
     OpenAiTool::Function(ResponsesApiTool {
         name: "shell".to_string(),
@@ -415,7 +427,7 @@ fn create_request_user_input_tool() -> OpenAiTool {
 
     let options_schema = JsonSchema::Array {
         description: Some(
-            "Optional 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; use isOther on the question to request a free form choice. If the question is free form in nature, please do not have any option.".to_string(),
+            "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.".to_string(),
         ),
         items: Box::new(JsonSchema::Object {
             properties: option_props,
@@ -446,15 +458,6 @@ fn create_request_user_input_tool() -> OpenAiTool {
             allowed_values: None,
         },
     );
-    question_props.insert(
-        "isOther".to_string(),
-        JsonSchema::Boolean {
-            description: Some(
-                "True when this question should include a free-form \"Other\" option. Otherwise false."
-                    .to_string(),
-            ),
-        },
-    );
     question_props.insert("options".to_string(), options_schema);
 
     let questions_schema = JsonSchema::Array {
@@ -465,7 +468,7 @@ fn create_request_user_input_tool() -> OpenAiTool {
                 "id".to_string(),
                 "header".to_string(),
                 "question".to_string(),
-                "isOther".to_string(),
+                "options".to_string(),
             ]),
             additional_properties: Some(false.into()),
         }),
@@ -497,6 +500,16 @@ fn create_shell_tool_for_sandbox(sandbox_policy: &SandboxPolicy) -> OpenAiTool {
                 allowed_values: None,
             }),
             description: Some("The command to execute".to_string()),
+        },
+    );
+    properties.insert(
+        "prefix_rule".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String {
+                description: None,
+                allowed_values: None,
+            }),
+            description: Some("Suggests a command prefix to persist for future sessions".to_string()),
         },
     );
     properties.insert(

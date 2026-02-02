@@ -7,6 +7,23 @@
 
 - (none)
 
+## [0.6.57] - 2026-02-02
+
+- TUI/GH: show gh_run_wait summary output after completion. (816aae9c)
+- TUI/GH: trim redundant title lines in gh_run_wait previews for cleaner display. (816aae9c)
+
+## [0.6.56] - 2026-02-02
+
+- Auto Drive: stop cleanly on usage limit without resetting state. (66abab5f)
+- Core/Agent: honor requested agent models during runs. (e1eafd17)
+
+## [0.6.55] - 2026-02-02
+
+- TUI/Plan: enable Plan mode with streamed plan items and clearer prompts. (30ed29a7, ec4a2d07, 3dd9a37e)
+- Skills: load skills from .agents/skills with clearer lookup guidance. (39a6a840, aab3705c)
+- CLI/Logs: show runtime metrics in console and include output in /ps. (8660ad6c, a270a28a)
+- File Search: support multi-root walks and keep search rooted to the active session CWD. (d59685f6, 13e85b15, b8156706)
+
 ## [0.6.54] - 2026-01-29
 
 - TUI/GH: live-update gh_run_wait progress with richer summaries. (76d56c63, 999fd1d2)

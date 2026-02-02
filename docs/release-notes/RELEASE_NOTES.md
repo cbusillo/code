@@ -1,14 +1,14 @@
-## @just-every/code v0.6.54
-Short release focusing on clearer gh_run_wait progress and sturdier auto-compaction.
+## @just-every/code v0.6.57
+This release improves the TUI display for GitHub Actions wait summaries.
 
 ### Changes
-- TUI/GH: live-update gh_run_wait progress with richer summaries.
-- Core/Compact: harden auto-compact flow for safer recovery.
+- TUI/GH: show gh_run_wait summary output after completion.
+- TUI/GH: trim redundant title lines in gh_run_wait previews for cleaner display.
 
 ### Install
-```
+```sh
 npm install -g @just-every/code@latest
 code
 ```
 
-Compare: https://github.com/just-every/code/compare/v0.6.53...v0.6.54
+Compare: https://github.com/just-every/code/compare/v0.6.56...v0.6.57
