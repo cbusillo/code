@@ -3,6 +3,7 @@ use crate::CodexAuth;
 use crate::codex::Codex;
 use crate::codex::CodexSpawnOk;
 use crate::codex::INITIAL_SUBMIT_ID;
+use crate::conversation_hub::ConversationHub;
 use crate::code_conversation::CodexConversation;
 use crate::config::Config;
 use crate::error::CodexErr;
@@ -17,7 +18,7 @@ use code_protocol::models::ResponseItem;
 use code_protocol::protocol::InitialHistory;
 use code_protocol::protocol::RolloutItem;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -29,10 +30,17 @@ pub struct NewConversation {
     pub session_configured: SessionConfiguredEvent,
 }
 
+pub struct NewConversationHub {
+    pub conversation_id: ConversationId,
+    pub hub: Arc<ConversationHub>,
+    pub session_configured: SessionConfiguredEvent,
+}
+
 /// [`ConversationManager`] is responsible for creating conversations and
 /// maintaining them in memory.
 pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
+    hubs: Arc<RwLock<HashMap<ConversationId, Arc<ConversationHub>>>>,
     auth_manager: Arc<AuthManager>,
     session_source: SessionSource,
 }
@@ -41,6 +49,7 @@ impl ConversationManager {
     pub fn new(auth_manager: Arc<AuthManager>, session_source: SessionSource) -> Self {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
+            hubs: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
             session_source,
         }
@@ -62,6 +71,26 @@ impl ConversationManager {
     pub async fn new_conversation(&self, config: Config) -> CodexResult<NewConversation> {
         self.spawn_conversation(config, self.auth_manager.clone())
             .await
+    }
+
+    pub async fn new_conversation_with_hub(
+        &self,
+        config: Config,
+    ) -> CodexResult<NewConversationHub> {
+        let new_conversation = self.new_conversation(config).await?;
+        let hub = self
+            .get_or_create_hub(
+                new_conversation.conversation_id,
+                Some(new_conversation.session_configured.model.clone()),
+                None,
+            )
+            .await?;
+
+        Ok(NewConversationHub {
+            conversation_id: new_conversation.conversation_id,
+            hub,
+            session_configured: new_conversation.session_configured,
+        })
     }
 
     async fn spawn_conversation(
@@ -125,6 +154,40 @@ impl ConversationManager {
             .ok_or_else(|| CodexErr::ConversationNotFound(conversation_id.into()))
     }
 
+    pub async fn get_or_create_hub(
+        &self,
+        conversation_id: ConversationId,
+        model: Option<String>,
+        rollout_path: Option<PathBuf>,
+    ) -> CodexResult<Arc<ConversationHub>> {
+        if let Some(existing) = self.hubs.read().await.get(&conversation_id).cloned() {
+            return Ok(existing);
+        }
+
+        let conversation = self.get_conversation(conversation_id).await?;
+
+        let mut hubs = self.hubs.write().await;
+        if let Some(existing) = hubs.get(&conversation_id).cloned() {
+            return Ok(existing);
+        }
+
+        let hub = ConversationHub::new(conversation_id, model, rollout_path, conversation);
+        hubs.insert(conversation_id, hub.clone());
+        Ok(hub)
+    }
+
+    pub async fn find_conversation_id_by_rollout_path(
+        &self,
+        rollout_path: &Path,
+    ) -> Option<ConversationId> {
+        let hubs = self.hubs.read().await;
+        hubs.values().find_map(|hub| {
+            hub.rollout_path()
+                .filter(|path| *path == rollout_path)
+                .map(|_| hub.conversation_id())
+        })
+    }
+
     pub async fn resume_conversation_from_rollout(
         &self,
         mut config: Config,
@@ -142,6 +205,29 @@ impl ConversationManager {
         self.finalize_spawn(codex, conversation_id).await
     }
 
+    pub async fn resume_conversation_from_rollout_with_hub(
+        &self,
+        config: Config,
+        rollout_path: PathBuf,
+        auth_manager: Arc<AuthManager>,
+    ) -> CodexResult<NewConversationHub> {
+        let resumed = self
+            .resume_conversation_from_rollout(config, rollout_path.clone(), auth_manager)
+            .await?;
+        let hub = self
+            .get_or_create_hub(
+                resumed.conversation_id,
+                Some(resumed.session_configured.model.clone()),
+                Some(rollout_path),
+            )
+            .await?;
+        Ok(NewConversationHub {
+            conversation_id: resumed.conversation_id,
+            hub,
+            session_configured: resumed.session_configured,
+        })
+    }
+
     /// Removes the conversation from the manager's internal map, though the
     /// conversation is stored as `Arc<CodexConversation>`, it is possible that
     /// other references to it exist elsewhere. Returns the conversation if the
@@ -150,6 +236,7 @@ impl ConversationManager {
         &self,
         conversation_id: &ConversationId,
     ) -> Option<Arc<CodexConversation>> {
+        self.hubs.write().await.remove(conversation_id);
         self.conversations.write().await.remove(conversation_id)
     }
 

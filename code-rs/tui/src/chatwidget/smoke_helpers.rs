@@ -10,13 +10,17 @@ use crate::bottom_pane::SettingsSection;
 use crossterm::event::KeyEvent;
 use code_auto_drive_core::AutoRunPhase;
 use code_core::config::{Config, ConfigOverrides, ConfigToml};
+use code_core::ConversationManager;
 use code_core::history::state::HistoryRecord;
 use code_core::history::state::ExecStatus;
 use code_core::protocol::{BackgroundEventEvent, Event, EventMsg, OrderMeta};
+use code_login::{AuthManager, AuthMode};
+use code_protocol::protocol::SessionSource;
 use once_cell::sync::Lazy;
 use chrono::Utc;
 use ratatui::text::Line;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -96,12 +100,24 @@ impl ChatWidgetHarness {
             font_size: (8, 16),
         };
 
+        let auth_manager = AuthManager::shared_with_mode_and_originator(
+            cfg.code_home.clone(),
+            AuthMode::ApiKey,
+            cfg.responses_originator_header.clone(),
+        );
+        let conversation_manager = Arc::new(ConversationManager::new(
+            auth_manager.clone(),
+            SessionSource::Cli,
+        ));
+
         let runtime = &*TEST_RUNTIME;
         let _guard = runtime.enter();
 
         let chat = ChatWidget::new(
             cfg,
             app_event_tx,
+            conversation_manager,
+            auth_manager,
             None,
             Vec::new(),
             false,

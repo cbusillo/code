@@ -13,6 +13,7 @@ use crate::protocol::FileChange;
 use crate::protocol::ReviewDecision;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::TurnAbortReason;
+use crate::request_user_input::RequestUserInputResponse;
 use mcp_types::JSONRPCNotification;
 use mcp_types::RequestId;
 use serde::Deserialize;
@@ -137,6 +138,11 @@ pub enum ClientRequest {
         #[serde(rename = "id")]
         request_id: RequestId,
         params: SendUserMessageParams,
+    },
+    UserInputAnswer {
+        #[serde(rename = "id")]
+        request_id: RequestId,
+        params: UserInputAnswerParams,
     },
     SendUserTurn {
         #[serde(rename = "id")]
@@ -638,6 +644,18 @@ pub struct InterruptConversationResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SendUserMessageResponse {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputAnswerParams {
+    pub conversation_id: ConversationId,
+    pub call_id: String,
+    pub response: RequestUserInputResponse,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputAnswerResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]

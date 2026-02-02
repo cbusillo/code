@@ -29,8 +29,11 @@ mcp-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
     "io-std",
     "macros",
+    "net",
     "process",
     "rt-multi-thread",
     "signal",

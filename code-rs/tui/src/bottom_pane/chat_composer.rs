@@ -1618,6 +1618,17 @@ impl ChatComposer {
                 // Do nothing here so App can implement global Esc ordering.
                 (InputResult::None, false)
             }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } if modifiers.contains(KeyModifiers::SHIFT) => {
+                self.next_down_scrolls_history = false;
+                self.insert_str("\n");
+                self.history.reset_navigation();
+                (InputResult::None, true)
+            }
             // -------------------------------------------------------------
             // Up/Down key handling - check modifiers to determine action
             // -------------------------------------------------------------

@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use code_core::review_coord::{
     bump_snapshot_epoch, clear_stale_lock_if_dead, read_lock_info, try_acquire_lock,
 };
+use std::sync::Arc;
 use std::sync::Once;
 use std::sync::OnceLock;
 use tracing_appender::non_blocking;
@@ -715,6 +716,7 @@ pub async fn run_main(
         None
     };
 
+    let cli_overrides = Arc::new(cli_kv_overrides.clone());
     let run_result = run_ratatui_app(
         cli,
         config,
@@ -722,6 +724,7 @@ pub async fn run_main(
         startup_footer_notice,
         latest_upgrade_version,
         theme_configured_explicitly,
+        cli_overrides,
     );
 
     if let Some(handle) = housekeeping_handle {
@@ -781,6 +784,7 @@ fn run_ratatui_app(
     startup_footer_notice: Option<String>,
     latest_upgrade_version: Option<String>,
     theme_configured_explicitly: bool,
+    cli_overrides: Arc<Vec<(String, toml::Value)>>,
 ) -> color_eyre::Result<ExitSummary> {
     color_eyre::install()?;
     install_unified_panic_hook();
@@ -827,6 +831,7 @@ fn run_ratatui_app(
         resume_picker,
         startup_footer_notice,
         latest_upgrade_version,
+        cli_overrides,
     );
 
     let app_result = app.run(&mut terminal);

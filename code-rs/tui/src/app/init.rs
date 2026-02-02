@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
@@ -14,6 +15,8 @@ use signal_hook::flag;
 
 use code_core::config::Config;
 use code_core::ConversationManager;
+use code_app_server::run_broker_with_manager;
+use code_gateway::run_with_manager;
 use code_login::{AuthManager, AuthMode};
 use code_protocol::protocol::SessionSource;
 
@@ -41,6 +44,7 @@ impl App<'_> {
         resume_picker: bool,
         startup_footer_notice: Option<String>,
         latest_upgrade_version: Option<String>,
+        cli_overrides: Arc<Vec<(String, toml::Value)>>,
     ) -> Self {
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
@@ -51,6 +55,17 @@ impl App<'_> {
             auth_manager.clone(),
             SessionSource::Cli,
         ));
+        let shared_config = Arc::new(config.clone());
+        maybe_start_broker(
+            shared_config.clone(),
+            conversation_manager.clone(),
+            config.code_linux_sandbox_exe.clone(),
+        );
+        maybe_start_gateway(
+            shared_config,
+            cli_overrides.clone(),
+            conversation_manager.clone(),
+        );
 
         // Split queues so interactive input never waits behind bulk updates.
         let (high_tx, app_event_rx_high) = channel();
@@ -282,6 +297,8 @@ impl App<'_> {
             let mut chat_widget = ChatWidget::new(
                 config.clone(),
                 app_event_tx.clone(),
+                conversation_manager.clone(),
+                auth_manager.clone(),
                 initial_prompt,
                 initial_images,
                 enhanced_keys_supported,
@@ -346,6 +363,92 @@ impl App<'_> {
             sigterm_flag,
         }
     }
+}
+
+fn gateway_bind_addr(config: &Config) -> Option<SocketAddr> {
+    match std::env::var("CODE_GATEWAY_BIND") {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
+                return None;
+            }
+            trimmed.parse().ok()
+        }
+        Err(_) => {
+            if !config.gateway.auto_start {
+                return None;
+            }
+            config
+                .gateway
+                .bind
+                .as_deref()
+                .unwrap_or("127.0.0.1:3210")
+                .parse()
+                .ok()
+        }
+    }
+}
+
+fn gateway_broker_disabled(config: &Config) -> bool {
+    match config.gateway.broker.as_deref() {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off")
+        }
+        None => true,
+    }
+}
+
+fn maybe_start_broker(
+    config: Arc<Config>,
+    conversation_manager: Arc<ConversationManager>,
+    code_linux_sandbox_exe: Option<PathBuf>,
+) {
+    if crate::chatwidget::is_test_mode() {
+        return;
+    }
+    if !config.app_server.enabled {
+        return;
+    }
+
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        if let Err(err) =
+            run_broker_with_manager(config, conversation_manager, code_linux_sandbox_exe).await
+        {
+            tracing::warn!("app-server broker failed: {err}");
+        }
+    });
+
+    #[cfg(not(unix))]
+    {
+        let _ = (config, conversation_manager, code_linux_sandbox_exe);
+        tracing::warn!("app-server broker is only supported on unix platforms");
+    }
+}
+
+fn maybe_start_gateway(
+    config: Arc<Config>,
+    cli_overrides: Arc<Vec<(String, toml::Value)>>,
+    conversation_manager: Arc<ConversationManager>,
+) {
+    if crate::chatwidget::is_test_mode() {
+        return;
+    }
+    if !gateway_broker_disabled(&config) {
+        return;
+    }
+    let Some(bind_addr) = gateway_bind_addr(&config) else {
+        return;
+    };
+
+    tokio::spawn(async move {
+        if let Err(err) =
+            run_with_manager(config, cli_overrides, conversation_manager, bind_addr, None).await
+        {
+            tracing::warn!("embedded gateway failed: {err}");
+        }
+    });
 }
 
 fn should_show_onboarding(

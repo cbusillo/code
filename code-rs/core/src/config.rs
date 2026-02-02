@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use crate::config_types::AutoDriveSettings;
 use crate::config_types::AllowedCommand;
 use crate::config_types::AllowedCommandMatchKind;
+use crate::config_types::AppServerConfig;
 use crate::config_types::BrowserConfig;
 use crate::config_types::ClientTools;
 use crate::config_types::Notice;
 use crate::config_types::History;
+use crate::config_types::GatewayConfig;
 use crate::config_types::GithubConfig;
 use crate::config_types::ValidationConfig;
 use crate::config_types::McpServerConfig;
@@ -325,6 +327,12 @@ pub struct Config {
     /// Collection of settings that are specific to the TUI.
     pub tui: Tui,
 
+    /// HTTP gateway settings for the WebUI.
+    pub gateway: GatewayConfig,
+
+    /// App-server broker settings.
+    pub app_server: AppServerConfig,
+
     /// Shared Auto Drive defaults.
     pub auto_drive: AutoDriveSettings,
     /// Whether Auto Drive should inherit the chat model instead of a dedicated override.
@@ -444,6 +452,13 @@ impl Config {
             .with_cli_overrides(cli_overrides)
             .with_overrides(overrides)
             .load()
+    }
+
+    pub fn app_server_listen_path(&self) -> PathBuf {
+        self.app_server
+            .listen
+            .clone()
+            .unwrap_or_else(|| self.code_home.join("app-server.sock"))
     }
 }
 
@@ -596,6 +611,12 @@ pub struct ConfigToml {
 
     /// Collection of settings that are specific to the TUI.
     pub tui: Option<Tui>,
+
+    /// HTTP gateway settings for the WebUI.
+    pub gateway: Option<GatewayConfig>,
+
+    /// App-server broker settings.
+    pub app_server: Option<AppServerConfig>,
 
     /// Auto Drive behavioral defaults.
     pub auto_drive: Option<AutoDriveSettings>,
@@ -1414,6 +1435,8 @@ impl Config {
             history,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             tui: cfg.tui.clone().unwrap_or_default(),
+            gateway: cfg.gateway.clone().unwrap_or_default(),
+            app_server: cfg.app_server.clone().unwrap_or_default(),
             auto_drive,
             auto_drive_use_chat_model,
             code_linux_sandbox_exe,

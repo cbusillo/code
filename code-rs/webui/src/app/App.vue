@@ -1,0 +1,1354 @@
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+
+import type {
+  HistoryLine,
+  SessionSummary,
+  TimelineItem,
+  TimelineKind,
+} from "../api/types";
+import { parseHistoryItems } from "../api/rollout";
+import { useGatewayToken } from "../hooks/useGatewayToken";
+import { useTheme } from "../hooks/useTheme";
+import ComposerDock from "../features/composer/ComposerDock.vue";
+import FiltersPanel from "../features/filters/FiltersPanel.vue";
+import SessionsPanel from "../features/sessions/SessionsPanel.vue";
+import TimelinePanel from "../features/timeline/TimelinePanel.vue";
+
+import styles from "./App.module.css";
+
+const FILTERS_KEY = "codeGatewayFiltersV3";
+const SESSIONS_CACHE_PREFIX = "codeGatewaySessionsCacheV1";
+
+type FilterState = {
+  kinds: Record<TimelineKind, boolean>;
+  subkinds: Record<string, boolean>;
+};
+
+type HistoryRequestPayload = {
+  before?: number;
+  after?: number;
+  anchor?: "head" | "tail";
+  limit?: number;
+};
+
+const defaultFilters: FilterState = {
+  kinds: {
+    assistant: true,
+    user: true,
+    system: true,
+    tool: true,
+    exec: true,
+    diff: true,
+    review: true,
+  },
+  subkinds: {
+    message: true,
+    reasoning: true,
+    image: true,
+    exec: true,
+    diff: true,
+    "tool-mcp": true,
+    "tool-custom": true,
+    "tool-web": true,
+    "tool-browser": true,
+    "tool-call": true,
+    "tool-output": true,
+  },
+};
+
+const { theme, toggle } = useTheme();
+const { token, setToken, label } = useGatewayToken();
+
+const sessions = ref<SessionSummary[]>([]);
+const sessionsPulse = ref(0);
+const sessionsLoading = ref(false);
+const activeId = ref<string | null>(null);
+const items = ref<TimelineItem[]>([]);
+const status = ref("Idle");
+const error = ref<string | null>(null);
+const loading = ref(false);
+const search = ref("");
+const hasMoreBefore = ref(false);
+const hasMoreAfter = ref(false);
+const historyStart = ref<number | null>(null);
+const historyEnd = ref<number | null>(null);
+const composerText = ref("");
+const sending = ref(false);
+const filtersCollapsed = ref(false);
+const historyMode = ref<"tail" | "head">("tail");
+const runtimeId = ref<string | null>(null);
+const sessionLoading = ref(false);
+const wsRef = ref<WebSocket | null>(null);
+const wsRetryRef = ref<number | null>(null);
+const historyWsRef = ref<WebSocket | null>(null);
+const historyRetryRef = ref<number | null>(null);
+const pendingHistoryRequests = ref<HistoryRequestPayload[]>([]);
+const historyWsDisabledRef = ref(false);
+const historyWsAttemptRef = ref(0);
+const liveIndexRef = ref<number | null>(null);
+const seenEventRef = ref<Set<string>>(new Set());
+const reasoningIdRef = ref<string | null>(null);
+const controlWsRef = ref<WebSocket | null>(null);
+const controlRetryRef = ref<number | null>(null);
+const pendingSessionsRef = ref(false);
+const pendingControlMessages = ref<object[]>([]);
+const pendingResumeRef = ref<string | null>(null);
+const sessionLoadSeq = ref(0);
+const mobilePanel = ref<"none" | "sessions" | "filters">("none");
+const lazyHistory = ref(true);
+const historyPrimed = ref(false);
+const primeHistoryTimerRef = ref<number | null>(null);
+const primeHistoryInFlightRef = ref(false);
+const primeFillTimerRef = ref<number | null>(null);
+const primeFillInFlightRef = ref(false);
+const primeFillExpectedBeforeRef = ref<number | null>(null);
+
+const HISTORY_PRIME_LIMIT = 40;
+const HISTORY_TARGET_LIMIT = 200;
+const HISTORY_LARGE_SESSION_THRESHOLD = 10000;
+const HISTORY_LARGE_PRIME_LIMIT = 20;
+const HISTORY_AUTO_FILL_THRESHOLD = 5000;
+
+const sessionsCacheKey = (tokenValue: string) =>
+  `${SESSIONS_CACHE_PREFIX}::${tokenValue.slice(0, 8)}`;
+
+const readSessionsCache = (tokenValue: string): SessionSummary[] | null => {
+  try {
+    const raw = localStorage.getItem(sessionsCacheKey(tokenValue));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as { items?: unknown };
+    if (!Array.isArray(parsed.items)) {
+      return null;
+    }
+    return parsed.items as SessionSummary[];
+  } catch {
+    return null;
+  }
+};
+
+const writeSessionsCache = (tokenValue: string, itemsList: SessionSummary[]) => {
+  try {
+    localStorage.setItem(
+      sessionsCacheKey(tokenValue),
+      JSON.stringify({
+        savedAt: new Date().toISOString(),
+        items: itemsList,
+      }),
+    );
+  } catch {
+    // Ignore cache failures (quota, privacy mode, etc.).
+  }
+};
+
+const loadFilters = (): FilterState => {
+  try {
+    const raw = localStorage.getItem(FILTERS_KEY);
+    if (!raw) {
+      return defaultFilters;
+    }
+    const parsed = JSON.parse(raw) as Partial<FilterState>;
+    return {
+      kinds: { ...defaultFilters.kinds, ...(parsed.kinds || {}) },
+      subkinds: { ...defaultFilters.subkinds, ...(parsed.subkinds || {}) },
+    };
+  } catch {
+    return defaultFilters;
+  }
+};
+
+const filters = ref<FilterState>(loadFilters());
+
+const filteredItems = computed(() =>
+  items.value.filter((item: TimelineItem) => {
+    if (!filters.value.kinds[item.kind]) {
+      return false;
+    }
+    if (item.subkind && filters.value.subkinds[item.subkind] === false) {
+      return false;
+    }
+    return true;
+  }),
+);
+
+const timelineLoading = computed(() => {
+  if (loading.value) {
+    return true;
+  }
+  if (sessionLoading.value && activeId.value && items.value.length === 0) {
+    return true;
+  }
+  if (sessionsLoading.value && !activeId.value) {
+    return true;
+  }
+  return false;
+});
+
+const counts = computed(() => {
+  const next: Record<TimelineKind, number> = {
+    assistant: 0,
+    user: 0,
+    system: 0,
+    tool: 0,
+    exec: 0,
+    diff: 0,
+    review: 0,
+  };
+  items.value.forEach((item: TimelineItem) => {
+    next[item.kind] += 1;
+  });
+  return next;
+});
+
+const subCounts = computed(() => {
+  const next: Record<string, number> = {};
+  Object.keys(defaultFilters.subkinds).forEach((key) => {
+    next[key] = 0;
+  });
+  items.value.forEach((item: TimelineItem) => {
+    if (item.subkind) {
+      next[item.subkind] = (next[item.subkind] || 0) + 1;
+    }
+  });
+  return next;
+});
+
+const messageCountFor = (id: string | null) => {
+  if (!id) return null;
+  const match = sessions.value.find(
+    (session) => session.conversation_id === id,
+  );
+  if (!match || typeof match.message_count !== "number") {
+    return null;
+  }
+  return match.message_count;
+};
+
+const historyPrimeLimitFor = (id: string | null) => {
+  const count = messageCountFor(id);
+  if (count !== null && count >= HISTORY_LARGE_SESSION_THRESHOLD) {
+    return HISTORY_LARGE_PRIME_LIMIT;
+  }
+  return HISTORY_PRIME_LIMIT;
+};
+
+const shouldAutoFillHistory = (id: string | null) => {
+  const count = messageCountFor(id);
+  if (count === null) {
+    return true;
+  }
+  return count <= HISTORY_AUTO_FILL_THRESHOLD;
+};
+
+watch(
+  filters,
+  (value) => {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(value));
+  },
+  { deep: true },
+);
+
+const scheduleResume = (id: string, delay: number) => {
+  pendingResumeRef.value = id;
+  sessionLoading.value = true;
+  status.value = "Resuming session";
+  const attempt = () => {
+    if (pendingResumeRef.value != id) {
+      return;
+    }
+    const ws = controlWsRef.value;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      window.setTimeout(attempt, 500);
+      return;
+    }
+    sendControlMessage({ type: "resume_conversation", conversation_id: id });
+  };
+  window.setTimeout(attempt, delay);
+};
+
+const requestSessions = () => {
+  sessionsLoading.value = true;
+  pendingSessionsRef.value = true;
+  const ws = controlWsRef.value;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(
+      JSON.stringify({
+        type: "list_conversations",
+        limit: 200,
+      }),
+    );
+    pendingSessionsRef.value = false;
+  }
+};
+
+const applySessionsList = (itemsList: SessionSummary[]) => {
+  sessions.value = itemsList || [];
+  sessionsPulse.value += 1;
+  sessionsLoading.value = false;
+  error.value = null;
+  if (token.value) {
+    writeSessionsCache(token.value, sessions.value);
+  }
+  if (!itemsList?.length) {
+    activateSession(null);
+    status.value = "Ready";
+    return;
+  }
+  const active = activeId.value;
+  if (active && itemsList.some((item) => item.conversation_id === active)) {
+    return;
+  }
+  const last = localStorage.getItem("codeGatewayLastConversation");
+  if (last && itemsList.some((item) => item.conversation_id === last)) {
+    activateSession(last);
+    return;
+  }
+  const fallback = itemsList[0].conversation_id;
+  activateSession(fallback);
+};
+
+const sendControlMessage = (payload: object) => {
+  const ws = controlWsRef.value;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    pendingControlMessages.value = [...pendingControlMessages.value, payload];
+    return true;
+  }
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch (err) {
+    error.value = (err as Error).message;
+    status.value = "Error";
+    return false;
+  }
+  return true;
+};
+
+const handleHistoryChunk = (message: {
+  items: HistoryLine[];
+  start_index?: number | null;
+  end_index?: number | null;
+  truncated?: boolean;
+  before?: number | null;
+  after?: number | null;
+  anchor?: string | null;
+}) => {
+  primeHistoryInFlightRef.value = false;
+  const startIndex = message.start_index;
+  const endIndex = message.end_index;
+  const parsed = parseHistoryItems(message.items || []);
+  if (message.anchor === "head") {
+    cancelPrimeFill();
+    reasoningIdRef.value = null;
+    items.value = parsed;
+    historyMode.value = "head";
+    hasMoreAfter.value = Boolean(message.truncated);
+    hasMoreBefore.value = false;
+    historyStart.value = startIndex ?? null;
+    historyEnd.value = endIndex ?? null;
+  } else if (message.anchor === "tail") {
+    cancelPrimeFill();
+    reasoningIdRef.value = null;
+    items.value = parsed;
+    historyMode.value = "tail";
+    hasMoreBefore.value = Boolean(message.truncated);
+    hasMoreAfter.value = false;
+    historyStart.value = startIndex ?? null;
+    historyEnd.value = endIndex ?? null;
+    cancelPrimeHistory();
+    const canAutoFill = shouldAutoFillHistory(activeId.value);
+    if (
+      !primeFillInFlightRef.value &&
+      canAutoFill &&
+      message.truncated &&
+      parsed.length < HISTORY_TARGET_LIMIT &&
+      startIndex !== undefined &&
+      startIndex !== null
+    ) {
+      primeFillInFlightRef.value = true;
+      primeFillExpectedBeforeRef.value = startIndex;
+      const remaining = HISTORY_TARGET_LIMIT - parsed.length;
+      if (primeFillTimerRef.value !== null) {
+        window.clearTimeout(primeFillTimerRef.value);
+      }
+      primeFillTimerRef.value = window.setTimeout(() => {
+        primeFillTimerRef.value = null;
+        sendHistoryRequest({ before: startIndex, limit: remaining });
+      }, 200);
+    }
+  } else if (message.before !== undefined && message.before !== null) {
+    if (primeFillExpectedBeforeRef.value === message.before) {
+      primeFillInFlightRef.value = false;
+      primeFillExpectedBeforeRef.value = null;
+    }
+    items.value = [...parsed, ...items.value];
+    historyMode.value = "tail";
+    hasMoreBefore.value = Boolean(message.truncated);
+  } else if (message.after !== undefined && message.after !== null) {
+    items.value = [...items.value, ...parsed];
+    historyMode.value = "head";
+    hasMoreAfter.value = Boolean(message.truncated);
+  }
+  if (
+    message.anchor !== "head" &&
+    message.anchor !== "tail" &&
+    startIndex !== undefined &&
+    startIndex !== null
+  ) {
+    historyStart.value =
+      historyStart.value === null
+        ? startIndex
+        : Math.min(historyStart.value, startIndex);
+  }
+  if (
+    message.anchor !== "head" &&
+    message.anchor !== "tail" &&
+    endIndex !== undefined &&
+    endIndex !== null
+  ) {
+    historyEnd.value =
+      historyEnd.value === null
+        ? endIndex
+        : Math.max(historyEnd.value, endIndex);
+    if (liveIndexRef.value === null || liveIndexRef.value <= endIndex) {
+      liveIndexRef.value = endIndex + 1;
+    }
+  }
+  loading.value = false;
+  status.value = "Live";
+  sessionLoading.value = false;
+};
+
+const activateSession = (id: string | null) => {
+  if (id === activeId.value) {
+    return;
+  }
+  reasoningIdRef.value = null;
+  primeHistoryInFlightRef.value = false;
+  historyPrimed.value = false;
+  pendingHistoryRequests.value = [];
+  cancelPrimeFill();
+  if (id) {
+    localStorage.setItem("codeGatewayLastConversation", id);
+  }
+  sessionLoading.value = Boolean(id);
+  runtimeId.value = null;
+  items.value = [];
+  historyStart.value = null;
+  historyEnd.value = null;
+  hasMoreBefore.value = false;
+  hasMoreAfter.value = false;
+  historyMode.value = "tail";
+  activeId.value = id;
+  if (id) {
+    scheduleResume(id, 200);
+  }
+};
+
+const loadSession = (id: string, seq: number) => {
+  if (!token.value) return;
+  reasoningIdRef.value = null;
+  primeHistoryInFlightRef.value = false;
+  historyPrimed.value = false;
+  pendingHistoryRequests.value = [];
+  cancelPrimeFill();
+  sessionLoading.value = true;
+  items.value = [];
+  historyStart.value = null;
+  historyEnd.value = null;
+  hasMoreBefore.value = false;
+  hasMoreAfter.value = false;
+  runtimeId.value = null;
+  localStorage.setItem("codeGatewayLastConversation", id);
+  loading.value = true;
+  status.value = "Resuming session";
+  scheduleResume(id, 400);
+};
+
+const enqueueHistoryRequest = (request: HistoryRequestPayload) => {
+  pendingHistoryRequests.value = [...pendingHistoryRequests.value, request];
+};
+
+const buildHistoryPayload = (request: HistoryRequestPayload) => {
+  const payload: Record<string, unknown> = {
+    type: "history_request",
+    ...request,
+  };
+  if (
+    runtimeId.value &&
+    activeId.value &&
+    runtimeId.value !== activeId.value
+  ) {
+    payload.rollout = activeId.value;
+  }
+  return payload;
+};
+
+const flushPendingHistoryRequests = () => {
+  const historyWs = historyWsRef.value;
+  const streamWs = wsRef.value;
+  const activeWs =
+    historyWs && historyWs.readyState === WebSocket.OPEN
+      ? historyWs
+      : streamWs && streamWs.readyState === WebSocket.OPEN
+        ? streamWs
+        : null;
+  if (!activeWs) {
+    return;
+  }
+  if (!pendingHistoryRequests.value.length) {
+    return;
+  }
+  const queued = pendingHistoryRequests.value;
+  pendingHistoryRequests.value = [];
+  queued.forEach((request) => {
+    activeWs.send(JSON.stringify(buildHistoryPayload(request)));
+  });
+};
+
+const sendHistoryRequest = (request: HistoryRequestPayload) => {
+  const historyWs = historyWsRef.value;
+  const streamWs = wsRef.value;
+  if (historyWs && historyWs.readyState === WebSocket.OPEN) {
+    historyWs.send(JSON.stringify(buildHistoryPayload(request)));
+    return;
+  }
+  if (streamWs && streamWs.readyState === WebSocket.OPEN) {
+    streamWs.send(JSON.stringify(buildHistoryPayload(request)));
+    return;
+  }
+  if (historyWsDisabledRef.value) {
+    return;
+  }
+  enqueueHistoryRequest(request);
+};
+
+const primeHistory = async () => {
+  if (historyPrimed.value || primeHistoryInFlightRef.value) return;
+  primeHistoryInFlightRef.value = true;
+  loading.value = true;
+  status.value = "Loading recent history";
+  const limit = historyPrimeLimitFor(activeId.value);
+  sendHistoryRequest({ anchor: "tail", limit });
+};
+
+const schedulePrimeHistory = () => {
+  if (!lazyHistory.value || historyPrimed.value) return;
+  if (primeHistoryTimerRef.value !== null) return;
+  primeHistoryTimerRef.value = window.setTimeout(() => {
+    primeHistoryTimerRef.value = null;
+    void primeHistory();
+  }, 50);
+};
+
+const cancelPrimeHistory = () => {
+  if (primeHistoryTimerRef.value !== null) {
+    window.clearTimeout(primeHistoryTimerRef.value);
+    primeHistoryTimerRef.value = null;
+  }
+};
+
+const cancelPrimeFill = () => {
+  if (primeFillTimerRef.value !== null) {
+    window.clearTimeout(primeFillTimerRef.value);
+    primeFillTimerRef.value = null;
+  }
+  primeFillInFlightRef.value = false;
+  primeFillExpectedBeforeRef.value = null;
+};
+
+const loadOlder = async () => {
+  if (historyStart.value === null) return;
+  loading.value = true;
+  status.value = "Loading earlier history";
+  sendHistoryRequest({ before: historyStart.value, limit: 200 });
+};
+
+const loadNewer = async () => {
+  if (historyEnd.value === null) return;
+  loading.value = true;
+  status.value = "Loading newer history";
+  sendHistoryRequest({ after: historyEnd.value, limit: 200 });
+};
+
+const jumpToStart = async () => {
+  loading.value = true;
+  status.value = "Loading earliest history";
+  sendHistoryRequest({ anchor: "head", limit: 200 });
+};
+
+const jumpToEnd = async () => {
+  loading.value = true;
+  status.value = "Loading latest history";
+  sendHistoryRequest({ anchor: "tail", limit: 200 });
+};
+
+const createSession = () => {
+  if (!token.value) return;
+  status.value = "Creating session";
+  sendControlMessage({ type: "new_conversation" });
+};
+
+const sendMessage = () => {
+  const targetId = runtimeId.value;
+  if (!token.value || !targetId || !composerText.value.trim()) return;
+  const ws = wsRef.value;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    error.value = "Stream not connected";
+    status.value = "Error";
+    return;
+  }
+  const text = composerText.value.trim();
+  composerText.value = "";
+  items.value = [
+    ...items.value,
+    {
+      id: `local-${Date.now()}`,
+      kind: "user",
+      title: "You",
+      text,
+    },
+  ];
+  try {
+    sending.value = true;
+    ws.send(
+      JSON.stringify({
+        type: "send_user_message",
+        items: [{ type: "text", data: { text } }],
+      }),
+    );
+  } catch (err) {
+    error.value = (err as Error).message;
+  } finally {
+    sending.value = false;
+  }
+};
+
+const updateSessionFromEvent = (msgType?: string, payload?: any) => {
+  if (!activeId.value) return;
+  const now = new Date().toISOString();
+  const snippet =
+    msgType === "user_message"
+      ? String(payload?.message || "").trim().slice(0, 140)
+      : undefined;
+  sessions.value = sessions.value.map((session) => {
+    if (session.conversation_id !== activeId.value) {
+      return session;
+    }
+    return {
+      ...session,
+      updated_at: now,
+      last_user_snippet: snippet ?? session.last_user_snippet,
+    };
+  });
+};
+
+const extractReasoningText = (payload: any) => {
+  const value = payload?.text ?? payload?.delta ?? payload?.message ?? "";
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const appendReasoningDelta = (delta: string, index: number) => {
+  if (!delta) return;
+  const next = [...items.value];
+  let targetIndex = -1;
+  if (reasoningIdRef.value) {
+    targetIndex = next.findIndex((item) => item.id === reasoningIdRef.value);
+  }
+  if (targetIndex === -1) {
+    for (let i = next.length - 1; i >= 0; i -= 1) {
+      const candidate = next[i];
+      if (candidate.kind === "assistant" && candidate.subkind === "reasoning") {
+        targetIndex = i;
+        break;
+      }
+      if (candidate.kind === "assistant" && candidate.subkind === "message") {
+        break;
+      }
+    }
+  }
+  if (targetIndex !== -1) {
+    const current = next[targetIndex];
+    next[targetIndex] = {
+      ...current,
+      text: `${current.text ?? ""}${delta}`,
+    };
+    reasoningIdRef.value = next[targetIndex].id;
+    items.value = next;
+    return;
+  }
+  const id = `reasoning-${index}-${Math.random().toString(36).slice(2, 6)}`;
+  reasoningIdRef.value = id;
+  items.value = [
+    ...next,
+    {
+      id,
+      kind: "assistant",
+      subkind: "reasoning",
+      title: "Reasoning",
+      text: delta,
+      index,
+    },
+  ];
+};
+
+const appendHistoryLines = (lines: HistoryLine[]) => {
+  const parsed = parseHistoryItems(lines);
+  if (parsed.length) {
+    items.value = [...items.value, ...parsed];
+  }
+};
+
+const handleSnapshot = (message: {
+  rollout: HistoryLine[];
+  start_index?: number | null;
+  end_index?: number | null;
+  truncated?: boolean;
+}) => {
+  const hasRollout = Boolean(message.rollout && message.rollout.length);
+  const endIndex = message.end_index;
+  reasoningIdRef.value = null;
+  items.value = parseHistoryItems(message.rollout || []);
+  historyPrimed.value = hasRollout;
+  historyStart.value = message.start_index ?? null;
+  historyEnd.value = message.end_index ?? null;
+  hasMoreBefore.value = Boolean(message.truncated);
+  hasMoreAfter.value = false;
+  historyMode.value = "tail";
+  if (!hasRollout && lazyHistory.value) {
+    loading.value = true;
+    status.value = "Loading recent history";
+    void primeHistory();
+  } else {
+    loading.value = false;
+    status.value = "Live";
+  }
+  if (
+    endIndex !== undefined &&
+    endIndex !== null &&
+    (liveIndexRef.value === null || liveIndexRef.value <= endIndex)
+  ) {
+    liveIndexRef.value = endIndex + 1;
+  }
+};
+
+const handleEvent = (message: { event: any }) => {
+  const event = message.event;
+  if (!event) return;
+  const key = `${event.id ?? ""}:${event.event_seq ?? ""}`;
+  if (seenEventRef.value.has(key)) {
+    return;
+  }
+  seenEventRef.value.add(key);
+  const msgType = event?.msg?.type;
+  if (msgType === "user_message" || msgType === "agent_message") {
+    updateSessionFromEvent(msgType, event.msg);
+    reasoningIdRef.value = null;
+  }
+  const nextIndex = liveIndexRef.value ?? 0;
+  liveIndexRef.value = nextIndex + 1;
+  historyEnd.value = nextIndex;
+  historyStart.value = historyStart.value === null ? nextIndex : historyStart.value;
+  if (msgType === "agent_reasoning" || msgType === "agent_reasoning_delta") {
+    const delta = extractReasoningText(event.msg);
+    if (delta) {
+      appendReasoningDelta(delta, nextIndex);
+    }
+    return;
+  }
+  appendHistoryLines([
+    {
+      index: nextIndex,
+      type: "event",
+      payload: event,
+    } as HistoryLine,
+  ]);
+};
+
+watch(
+  token,
+  (value, _prev, onCleanup) => {
+    if (!value) {
+      sessions.value = [];
+      sessionsLoading.value = false;
+      activateSession(null);
+      return;
+    }
+    const lastSessionId = localStorage.getItem("codeGatewayLastConversation");
+
+    const cachedSessions = readSessionsCache(value);
+    if (cachedSessions?.length) {
+      sessions.value = cachedSessions;
+      sessionsPulse.value += 1;
+      if (!activeId.value) {
+        const preferred =
+          (lastSessionId &&
+            cachedSessions.some(
+              (session) => session.conversation_id === lastSessionId,
+            ) &&
+            lastSessionId) ||
+          cachedSessions[0].conversation_id;
+        activateSession(preferred);
+      }
+    } else if (lastSessionId && !activeId.value) {
+      activateSession(lastSessionId);
+    }
+
+    pendingSessionsRef.value = true;
+    sessionsLoading.value = true;
+    status.value = activeId.value ? "Resuming session" : "Loading sessions";
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.host;
+    const url = `${protocol}://${host}/ws/control?token=${encodeURIComponent(
+      value,
+    )}`;
+    let closed = false;
+    let retries = 0;
+
+    const clearRetry = () => {
+      if (controlRetryRef.value !== null) {
+        window.clearTimeout(controlRetryRef.value);
+        controlRetryRef.value = null;
+      }
+    };
+
+    const connect = () => {
+      clearRetry();
+      const ws = new WebSocket(url);
+      controlWsRef.value = ws;
+      ws.onopen = () => {
+        requestSessions();
+        if (pendingControlMessages.value.length) {
+          const queued = pendingControlMessages.value;
+          pendingControlMessages.value = [];
+          queued.forEach((payload) => {
+            try {
+              ws.send(JSON.stringify(payload));
+            } catch (err) {
+              error.value = (err as Error).message;
+              status.value = "Error";
+            }
+          });
+        }
+      };
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data as string);
+          if (message.type === "conversations_list") {
+            applySessionsList(message.items || []);
+          } else if (message.type === "conversation_created") {
+            if (message.conversation_id) {
+              runtimeId.value = message.conversation_id;
+              activateSession(message.conversation_id);
+              requestSessions();
+            }
+            status.value = "Ready";
+          } else if (message.type === "conversation_resumed") {
+            if (
+              message.requested_id &&
+              message.requested_id !== activeId.value
+            ) {
+              return;
+            }
+            if (
+              pendingResumeRef.value &&
+              message.requested_id !== pendingResumeRef.value
+            ) {
+              return;
+            }
+            pendingResumeRef.value = null;
+            if (message.conversation_id) {
+              runtimeId.value = message.conversation_id;
+            }
+            error.value = null;
+            status.value = "Streaming";
+          } else if (message.type === "error") {
+            const errorMessage = message.message || "Websocket error";
+            error.value = errorMessage;
+            status.value = "Error";
+            if (errorMessage.includes("conversation not found")) {
+              activateSession(null);
+              requestSessions();
+            }
+            if (pendingResumeRef.value) {
+              pendingResumeRef.value = null;
+              loading.value = false;
+              sessionLoading.value = false;
+            }
+          }
+        } catch (err) {
+          error.value = (err as Error).message;
+        }
+      };
+      ws.onclose = () => {
+        controlWsRef.value = null;
+        if (closed) return;
+        retries += 1;
+        const delay = Math.min(10000, 500 * 2 ** retries);
+        controlRetryRef.value = window.setTimeout(connect, delay);
+      };
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+    onCleanup(() => {
+      closed = true;
+      clearRetry();
+      sessionsLoading.value = false;
+      controlWsRef.value?.close();
+      controlWsRef.value = null;
+    });
+  },
+  { immediate: true },
+);
+
+watch(activeId, (value) => {
+  if (value) {
+    const seq = sessionLoadSeq.value + 1;
+    sessionLoadSeq.value = seq;
+    loadSession(value, seq);
+  }
+});
+
+type StreamTarget = {
+  token: string;
+  id: string;
+  rollout: string | null;
+};
+
+const streamTarget = computed<StreamTarget | null>(() => {
+  const tokenValue = token.value;
+  if (!tokenValue) return null;
+  const runtime = runtimeId.value;
+  const active = activeId.value;
+  if (runtime) {
+    return {
+      token: tokenValue,
+      id: runtime,
+      rollout: active && runtime !== active ? active : null,
+    };
+  }
+  if (sessionLoading.value || !active) {
+    return null;
+  }
+  return {
+    token: tokenValue,
+    id: active,
+    rollout: null,
+  };
+});
+
+const historyTarget = computed(() => {
+  const tokenValue = token.value;
+  const active = activeId.value;
+  if (!tokenValue || !active) return null;
+  return { token: tokenValue, id: active };
+});
+
+const historyKey = computed(() => {
+  const target = historyTarget.value;
+  if (!target) return null;
+  return `${target.token}::${target.id}::${
+    lazyHistory.value ? "lazy" : "full"
+  }`;
+});
+
+const streamKey = computed(() => {
+  const target = streamTarget.value;
+  if (!target) return null;
+  return `${target.token}::${target.id}::${target.rollout ?? ""}::${
+    lazyHistory.value ? "lazy" : "full"
+  }`;
+});
+
+
+watch(
+  streamKey,
+  (_key, _prev, onCleanup) => {
+    const target = streamTarget.value;
+    if (!target) {
+      return;
+    }
+    seenEventRef.value.clear();
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.host;
+    const params = new URLSearchParams();
+    params.set("token", target.token);
+    params.set("snapshot_limit", "0");
+    if (target.rollout) {
+      params.set("rollout", target.rollout);
+    }
+    const url = `${protocol}://${host}/ws/${target.id}?${params.toString()}`;
+    let closed = false;
+    let retries = 0;
+
+    const clearRetry = () => {
+      if (wsRetryRef.value !== null) {
+        window.clearTimeout(wsRetryRef.value);
+        wsRetryRef.value = null;
+      }
+    };
+
+    const connect = () => {
+      clearRetry();
+      const ws = new WebSocket(url);
+      wsRef.value = ws;
+      const loadingId = activeId.value;
+      if (loadingId) {
+        status.value = "Syncing";
+      }
+      ws.onopen = () => {
+        if (sessionLoading.value) {
+          status.value = "Syncing";
+        }
+        if (!lazyHistory.value) {
+          sendHistoryRequest({ anchor: "tail", limit: HISTORY_TARGET_LIMIT });
+        } else if (
+          items.value.length === 0 &&
+          (!historyWsRef.value || historyWsRef.value.readyState !== WebSocket.OPEN)
+        ) {
+          primeHistory();
+        }
+      };
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data as string);
+          if (message.type === "snapshot") {
+            if (!historyPrimed.value) {
+              handleSnapshot(message);
+              if (loadingId === activeId.value) {
+                sessionLoading.value = false;
+              }
+            }
+          } else if (message.type === "history_chunk") {
+            if (
+              !historyWsRef.value ||
+              historyWsRef.value.readyState !== WebSocket.OPEN
+            ) {
+              handleHistoryChunk(message);
+              historyPrimed.value = true;
+            }
+          } else if (message.type === "event") {
+            handleEvent(message);
+          } else if (message.type === "error") {
+            error.value = message.message || "Websocket error";
+            primeHistoryInFlightRef.value = false;
+            cancelPrimeFill();
+          }
+        } catch (err) {
+          error.value = (err as Error).message;
+        }
+      };
+      ws.onclose = () => {
+        wsRef.value = null;
+        if (closed) return;
+        retries += 1;
+        const delay = Math.min(10000, 500 * 2 ** retries);
+        wsRetryRef.value = window.setTimeout(connect, delay);
+      };
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+    onCleanup(() => {
+      closed = true;
+      clearRetry();
+      cancelPrimeHistory();
+      cancelPrimeFill();
+      primeHistoryInFlightRef.value = false;
+      wsRef.value?.close();
+      wsRef.value = null;
+    });
+  },
+  { immediate: true },
+);
+
+watch(
+  historyKey,
+  (_key, _prev, onCleanup) => {
+    const target = historyTarget.value;
+    if (!target) return;
+    historyWsDisabledRef.value = false;
+    historyWsAttemptRef.value = 0;
+    const historyTargetId = target.id;
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.host;
+    const params = new URLSearchParams();
+    params.set("token", target.token);
+    params.set("snapshot_limit", lazyHistory.value ? "0" : "200");
+    const url = `${protocol}://${host}/ws/history/${target.id}?${params.toString()}`;
+    let closed = false;
+    let retries = 0;
+
+    const clearRetry = () => {
+      if (historyRetryRef.value !== null) {
+        window.clearTimeout(historyRetryRef.value);
+        historyRetryRef.value = null;
+      }
+    };
+
+    const connect = () => {
+      if (historyWsDisabledRef.value) {
+        return;
+      }
+      clearRetry();
+      const ws = new WebSocket(url);
+      historyWsRef.value = ws;
+      let opened = false;
+      ws.onopen = () => {
+        opened = true;
+        historyWsAttemptRef.value = 0;
+        flushPendingHistoryRequests();
+        if (!lazyHistory.value) {
+          sendHistoryRequest({ anchor: "tail", limit: HISTORY_TARGET_LIMIT });
+        } else if (items.value.length === 0) {
+          primeHistory();
+        }
+      };
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data as string);
+          if (message.type === "snapshot") {
+            handleSnapshot(message);
+            if (historyTargetId === activeId.value) {
+              sessionLoading.value = false;
+            }
+          } else if (message.type === "history_chunk") {
+            handleHistoryChunk(message);
+            historyPrimed.value = true;
+          } else if (message.type === "error") {
+            error.value = message.message || "Websocket error";
+            primeHistoryInFlightRef.value = false;
+            cancelPrimeFill();
+          }
+        } catch (err) {
+          error.value = (err as Error).message;
+        }
+      };
+      ws.onclose = () => {
+        historyWsRef.value = null;
+        if (closed) return;
+        if (!opened) {
+          historyWsAttemptRef.value += 1;
+          if (historyWsAttemptRef.value >= 2) {
+            historyWsDisabledRef.value = true;
+            flushPendingHistoryRequests();
+            return;
+          }
+        }
+        retries += 1;
+        const maxDelay = historyPrimed.value ? 10000 : 2000;
+        const baseDelay = historyPrimed.value ? 500 : 200;
+        const delay = Math.min(maxDelay, baseDelay * 2 ** retries);
+        historyRetryRef.value = window.setTimeout(connect, delay);
+      };
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+    onCleanup(() => {
+      closed = true;
+      clearRetry();
+      cancelPrimeHistory();
+      cancelPrimeFill();
+      primeHistoryInFlightRef.value = false;
+      pendingHistoryRequests.value = [];
+      historyWsRef.value?.close();
+      historyWsRef.value = null;
+    });
+  },
+  { immediate: true },
+);
+
+const workbenchClass = computed(() => [
+  styles.workbench,
+  filtersCollapsed.value ? styles.workbenchCollapsed : "",
+].join(" "));
+const rightDockClass = computed(() => [
+  styles.rightDock,
+  filtersCollapsed.value ? styles.rightDockCollapsed : "",
+].join(" "));
+const hasMore = computed(() =>
+  historyMode.value === "tail" ? hasMoreBefore.value : hasMoreAfter.value,
+);
+const loadMore = async () => {
+  if (historyMode.value === "tail") {
+    await loadOlder();
+  } else {
+    await loadNewer();
+  }
+};
+const loadMorePlacement = computed(() =>
+  historyMode.value === "tail" ? "prepend" : "append",
+);
+
+const toggleKind = (kind: TimelineKind) => {
+  filters.value = {
+    ...filters.value,
+    kinds: { ...filters.value.kinds, [kind]: !filters.value.kinds[kind] },
+  };
+};
+
+const toggleSubkind = (subkind: string) => {
+  filters.value = {
+    ...filters.value,
+    subkinds: {
+      ...filters.value.subkinds,
+      [subkind]: !filters.value.subkinds[subkind],
+    },
+  };
+};
+
+const handleTokenInput = (event: Event) => {
+  const target = event.target as HTMLInputElement | null;
+  setToken(target?.value ?? "");
+};
+</script>
+
+<template>
+  <div :class="styles.app">
+    <header :class="styles.titleBar">
+      <div :class="styles.brand">Every Code</div>
+      <div :class="styles.status">{{ status }}</div>
+      <div :class="styles.toolbar">
+        <input
+          :class="styles.tokenInput"
+          :value="token"
+          placeholder="Gateway token"
+          @input="handleTokenInput"
+        />
+        <span :class="styles.tokenLabel">{{ label }}</span>
+        <button :class="styles.ghostButton" type="button" @click="toggle">
+          {{ theme === "dark" ? "Light" : "Dark" }}
+        </button>
+      </div>
+    </header>
+
+    <main :class="workbenchClass">
+      <div :class="styles.leftDock">
+        <SessionsPanel
+          :sessions="sessions"
+          :active-id="activeId"
+          :search="search"
+          :loading="sessionsLoading"
+          :pulse-key="sessionsPulse"
+          @search-change="search = $event"
+          @select="activateSession"
+          @new="createSession"
+        />
+      </div>
+
+      <section :class="styles.centerColumn">
+        <div v-if="error" :class="styles.errorBanner">{{ error }}</div>
+        <TimelinePanel
+          :items="filteredItems"
+          :loading="timelineLoading"
+          :has-more="hasMore"
+          :on-load-more="loadMore"
+          :load-more-placement="loadMorePlacement"
+          :reset-key="activeId"
+          :on-open-panels="() => (mobilePanel = 'sessions')"
+          :on-jump-to-start="jumpToStart"
+          :on-jump-to-end="jumpToEnd"
+          :status-text="timelineLoading ? status : undefined"
+          :on-user-scroll="lazyHistory && !historyPrimed ? primeHistory : undefined"
+        />
+        <ComposerDock
+          :value="composerText"
+          :disabled="!runtimeId || sending || sessionLoading"
+          @change="composerText = $event"
+          @send="sendMessage"
+        />
+      </section>
+
+      <div :class="rightDockClass">
+        <button
+          v-if="filtersCollapsed"
+          :class="styles.dockTab"
+          type="button"
+          @click="filtersCollapsed = false"
+        >
+          Filters
+        </button>
+        <FiltersPanel
+          v-else
+          :filters="filters"
+          :counts="counts"
+          :sub-counts="subCounts"
+          :collapsible="true"
+          @toggle-kind="toggleKind"
+          @toggle-subkind="toggleSubkind"
+          @collapse="filtersCollapsed = true"
+        />
+      </div>
+    </main>
+
+    <div v-if="mobilePanel !== 'none'" :class="styles.mobileOverlay">
+      <div :class="styles.mobileHeader">
+        <div :class="styles.mobileTabs">
+          <button
+            :class="mobilePanel === 'sessions' ? styles.mobileActive : ''"
+            type="button"
+            @click="mobilePanel = 'sessions'"
+          >
+            Sessions
+          </button>
+          <button
+            :class="mobilePanel === 'filters' ? styles.mobileActive : ''"
+            type="button"
+            @click="mobilePanel = 'filters'"
+          >
+            Filters
+          </button>
+        </div>
+        <button
+          :class="styles.ghostButton"
+          type="button"
+          @click="mobilePanel = 'none'"
+        >
+          Close
+        </button>
+      </div>
+      <div :class="styles.mobileBody">
+        <SessionsPanel
+          v-if="mobilePanel === 'sessions'"
+          :class-name="styles.mobilePanel"
+          :sessions="sessions"
+          :active-id="activeId"
+          :search="search"
+          :loading="sessionsLoading"
+          :pulse-key="sessionsPulse"
+          @search-change="search = $event"
+          @select="(id) => { activateSession(id); mobilePanel = 'none'; }"
+          @new="createSession"
+        />
+        <FiltersPanel
+          v-else
+          :class-name="styles.mobilePanel"
+          :filters="filters"
+          :counts="counts"
+          :sub-counts="subCounts"
+          @toggle-kind="toggleKind"
+          @toggle-subkind="toggleSubkind"
+        />
+      </div>
+    </div>
+  </div>
+</template>

@@ -1046,6 +1046,8 @@ impl Page {
     pub async fn goto(&self, url: &str, wait: Option<WaitStrategy>) -> Result<GotoResult> {
         info!("Navigating to {}", url);
 
+
+
         let wait_strategy = wait.unwrap_or_else(|| self.config.wait.clone());
 
         // Navigate to the URL with retry on timeout. If Chrome reports timeouts

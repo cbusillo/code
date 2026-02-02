@@ -1,0 +1,56 @@
+:root {
+  color-scheme: dark;
+  --bg-main: #1e1f22;
+  --bg-surface: #2b2d30;
+  --bg-elevated: #313335;
+  --bg-input: #1f2023;
+  --bg-hover: #2e3033;
+  --bg-selected: #2e436e;
+  --text-primary: #dfe1e5;
+  --text-muted: #70757c;
+  --text-faint: #4f5258;
+  --border: #3a3d41;
+  --border-strong: #44474d;
+  --accent: #3574f0;
+  --accent-strong: #4a88c7;
+  --success: #5eb562;
+  --warning: #c77d3c;
+  --danger: #c75450;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --font-ui: "IBM Plex Sans", "JetBrains Sans", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", "SFMono-Regular", monospace;
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-md: 13px;
+  --font-lg: 15px;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 18px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-main: #f3f4f6;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-input: #ffffff;
+  --bg-hover: #eef1f5;
+  --bg-selected: #e9effd;
+  --text-primary: #111827;
+  --text-muted: #6b7280;
+  --text-faint: #9aa1ab;
+  --border: #d6dae1;
+  --border-strong: #c4cbd6;
+  --accent: #1d4ed8;
+  --accent-strong: #3574f0;
+  --success: #2f855a;
+  --warning: #b45309;
+  --danger: #b91c1c;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.12);
+  --shadow-md: 0 10px 20px rgba(15, 23, 42, 0.12);
+}

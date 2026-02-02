@@ -53,13 +53,13 @@ use code_core::account_usage::{
 };
 use code_core::auth_accounts::{self, StoredAccount};
 use code_login::AuthManager;
-use code_login::AuthMode;
 use code_protocol::mcp_protocol::AuthMode as McpAuthMode;
 use code_protocol::dynamic_tools::DynamicToolResponse;
-use code_protocol::protocol::SessionSource;
+use code_protocol::ConversationId;
 use code_protocol::num_format::format_with_separators;
 use code_core::split_command_and_args;
 use serde_json::Value as JsonValue;
+use tokio::sync::broadcast;
 
 
 mod diff_handlers;
@@ -1488,6 +1488,7 @@ pub(crate) struct ChatWidget<'a> {
     app_event_tx: AppEventSender,
     code_op_tx: UnboundedSender<Op>,
     bottom_pane: BottomPane<'a>,
+    conversation_manager: Arc<ConversationManager>,
     auth_manager: Arc<AuthManager>,
     login_view_state: Option<Weak<RefCell<LoginAccountsState>>>,
     login_add_view_state: Option<Weak<RefCell<LoginAddAccountState>>>,
@@ -3155,25 +3156,26 @@ impl ChatWidget<'_> {
     fn spawn_conversation_runtime(
         &mut self,
         config: Config,
-        auth_manager: Arc<AuthManager>,
         code_op_rx: UnboundedReceiver<Op>,
     ) {
         let ticket = self.make_background_tail_ticket();
         let ticket_for_submit = ticket.clone();
         let app_event_tx_clone = self.app_event_tx.clone();
+        let conversation_manager = self.conversation_manager.clone();
 
         tokio::spawn(async move {
             let mut code_op_rx = code_op_rx;
-            let conversation_manager = ConversationManager::new(
-                auth_manager.clone(),
-                SessionSource::Cli,
-            );
+            let auth_manager = conversation_manager.auth_manager();
             let resume_path = config.experimental_resume.clone();
             let new_conversation = match resume_path {
                 Some(path) => conversation_manager
-                    .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
+                    .resume_conversation_from_rollout_with_hub(
+                        config.clone(),
+                        path,
+                        auth_manager,
+                    )
                     .await,
-                None => conversation_manager.new_conversation(config).await,
+                None => conversation_manager.new_conversation_with_hub(config).await,
             };
 
             let new_conversation = match new_conversation {
@@ -3199,14 +3201,14 @@ impl ChatWidget<'_> {
             };
             app_event_tx_clone.send(AppEvent::CodexEvent(event));
 
-            let conversation = new_conversation.conversation;
-            let conversation_clone = conversation.clone();
+            let hub = new_conversation.hub;
+            let hub_clone = hub.clone();
             let app_event_tx_submit = app_event_tx_clone.clone();
             let ticket_for_submit = ticket_for_submit.clone();
 
             tokio::spawn(async move {
                 while let Some(op) = code_op_rx.recv().await {
-                    if let Err(e) = conversation_clone.submit(op).await {
+                    if let Err(e) = hub_clone.submit(op).await {
                         tracing::error!("failed to submit op: {e}");
                         app_event_tx_submit.send_background_event_with_ticket(
                             &ticket_for_submit,
@@ -3216,8 +3218,15 @@ impl ChatWidget<'_> {
                 }
             });
 
-            while let Ok(event) = conversation.next_event().await {
-                app_event_tx_clone.send(AppEvent::CodexEvent(event));
+            let mut events_rx = hub.subscribe();
+            loop {
+                match events_rx.recv().await {
+                    Ok(event) => app_event_tx_clone.send(AppEvent::CodexEvent(event)),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!("hub consumer lagged; dropped {skipped} events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
             // (debug end notice removed)
         });
@@ -6389,6 +6398,8 @@ impl ChatWidget<'_> {
     pub(crate) fn new(
         mut config: Config,
         app_event_tx: AppEventSender,
+        conversation_manager: Arc<ConversationManager>,
+        auth_manager: Arc<AuthManager>,
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         enhanced_keys_supported: bool,
@@ -6404,12 +6415,6 @@ impl ChatWidget<'_> {
         remember_cwd_history(&config.cwd);
 
         let (code_op_tx, code_op_rx) = unbounded_channel::<Op>();
-
-        let auth_manager = AuthManager::shared_with_mode_and_originator(
-            config.code_home.clone(),
-            AuthMode::ApiKey,
-            config.responses_originator_header.clone(),
-        );
 
         // Browser manager is now handled through the global state
         // The core session will use the same global manager when browser tools are invoked
@@ -6437,6 +6442,7 @@ impl ChatWidget<'_> {
             app_event_tx: app_event_tx.clone(),
             code_op_tx,
             bottom_pane,
+            conversation_manager: conversation_manager.clone(),
             auth_manager: auth_manager.clone(),
             login_view_state: None,
             login_add_view_state: None,
@@ -6676,7 +6682,7 @@ impl ChatWidget<'_> {
             resume_picker_loading: false,
         };
         new_widget.load_auto_review_baseline_marker();
-        new_widget.spawn_conversation_runtime(config.clone(), auth_manager.clone(), code_op_rx);
+        new_widget.spawn_conversation_runtime(config.clone(), code_op_rx);
         if let Ok(Some(active_id)) = auth_accounts::get_active_account_id(&config.code_home) {
             if let Ok(records) = account_usage::list_rate_limit_snapshots(&config.code_home) {
                 if let Some(record) = records.into_iter().find(|r| r.account_id == active_id) {
@@ -6741,7 +6747,8 @@ impl ChatWidget<'_> {
     /// Construct a ChatWidget from an existing conversation (forked session).
     pub(crate) fn new_from_existing(
         config: Config,
-        conversation: std::sync::Arc<code_core::CodexConversation>,
+        conversation_id: ConversationId,
+        conversation_manager: Arc<ConversationManager>,
         session_configured: SessionConfiguredEvent,
         app_event_tx: AppEventSender,
         enhanced_keys_supported: bool,
@@ -6758,7 +6765,22 @@ impl ChatWidget<'_> {
 
         // Forward events from existing conversation
         let app_event_tx_clone = app_event_tx.clone();
+        let conversation_manager_clone = conversation_manager.clone();
         tokio::spawn(async move {
+            let hub = match conversation_manager_clone
+                .get_or_create_hub(
+                    conversation_id,
+                    Some(session_configured.model.clone()),
+                    None,
+                )
+                .await
+            {
+                Ok(hub) => hub,
+                Err(err) => {
+                    tracing::error!("failed to attach hub: {err}");
+                    return;
+                }
+            };
             // Send the provided SessionConfigured to the UI first
             let event = Event {
                 id: "fork".to_string(),
@@ -6768,18 +6790,25 @@ impl ChatWidget<'_> {
             };
             app_event_tx_clone.send(AppEvent::CodexEvent(event));
 
-            let conversation_clone = conversation.clone();
+            let hub_clone = hub.clone();
             tokio::spawn(async move {
                 while let Some(op) = code_op_rx.recv().await {
-                    let id = conversation_clone.submit(op).await;
+                    let id = hub_clone.submit(op).await;
                     if let Err(e) = id {
                         tracing::error!("failed to submit op: {e}");
                     }
                 }
             });
 
-            while let Ok(event) = conversation.next_event().await {
-                app_event_tx_clone.send(AppEvent::CodexEvent(event));
+            let mut events_rx = hub.subscribe();
+            loop {
+                match events_rx.recv().await {
+                    Ok(event) => app_event_tx_clone.send(AppEvent::CodexEvent(event)),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!("hub consumer lagged; dropped {skipped} events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
@@ -6798,6 +6827,7 @@ impl ChatWidget<'_> {
             app_event_tx: app_event_tx.clone(),
             code_op_tx,
             bottom_pane,
+            conversation_manager: conversation_manager.clone(),
             auth_manager: auth_manager.clone(),
             login_view_state: None,
             login_add_view_state: None,
@@ -16489,10 +16519,6 @@ impl ChatWidget<'_> {
 
     pub(crate) fn handle_login_command(&mut self) {
         self.show_login_accounts_view();
-    }
-
-    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
-        self.auth_manager.clone()
     }
 
     pub(crate) fn reload_auth(&self) -> bool {

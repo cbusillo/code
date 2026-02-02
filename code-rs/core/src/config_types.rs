@@ -734,6 +734,50 @@ impl Default for Tui {
     }
 }
 
+/// Settings for the HTTP gateway that hosts the WebUI.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct GatewayConfig {
+    /// When true, the TUI will attempt to start the gateway if it is not already running.
+    #[serde(default)]
+    pub auto_start: bool,
+    /// Optional bind address for the gateway (host:port).
+    #[serde(default)]
+    pub bind: Option<String>,
+    /// Broker connection mode for the gateway (e.g., "auto", "off", or a socket path).
+    #[serde(default)]
+    pub broker: Option<String>,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            auto_start: false,
+            bind: None,
+            broker: None,
+        }
+    }
+}
+
+/// Settings for the app-server broker.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct AppServerConfig {
+    /// When true, enable the broker listener.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional Unix domain socket path for the broker.
+    #[serde(default)]
+    pub listen: Option<PathBuf>,
+}
+
+impl Default for AppServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: None,
+        }
+    }
+}
+
 /// User acknowledgements for in-product notices (distinct from notifications).
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Notice {

@@ -14,7 +14,7 @@ use code_core::config::add_project_allowed_command;
 use code_core::config_types::Notifications;
 use code_core::protocol::{Event, Op, SandboxPolicy};
 use code_core::SessionCatalog;
-use code_login::{AuthManager, AuthMode, ServerOptions};
+use code_login::ServerOptions;
 use portable_pty::PtySize;
 
 use crate::app_event::AppEvent;
@@ -1150,6 +1150,8 @@ impl App<'_> {
                             let mut new_widget = ChatWidget::new(
                                 self.config.clone(),
                                 self.app_event_tx.clone(),
+                                self._server.clone(),
+                                self._server.auth_manager(),
                                 None,
                                 Vec::new(),
                                 self.enhanced_keys_supported,
@@ -1418,6 +1420,8 @@ impl App<'_> {
                         let mut new_widget = ChatWidget::new(
                             cfg,
                             self.app_event_tx.clone(),
+                            self._server.clone(),
+                            self._server.auth_manager(),
                             None,
                             Vec::new(),
                             self.enhanced_keys_supported,
@@ -2187,6 +2191,8 @@ impl App<'_> {
                     let mut w = ChatWidget::new(
                         config,
                         app_event_tx.clone(),
+                        self._server.clone(),
+                        self._server.auth_manager(),
                         initial_prompt,
                         initial_images,
                         enhanced_keys_supported,
@@ -2281,17 +2287,18 @@ impl App<'_> {
                 AppEvent::JumpBackForked { cfg, new_conv, prefix_items, prefill } => {
                     // Replace widget with a new one bound to the forked conversation
                     let session_conf = new_conv.0.session_configured.clone();
-                    let conv = new_conv.0.conversation.clone();
+                    let conversation_id = new_conv.0.conversation_id;
 
                     let mut ghost_state = self.pending_jump_back_ghost_state.take();
                     let history_snapshot = self.pending_jump_back_history_snapshot.take();
                     let emit_prefix = history_snapshot.is_none();
 
                     if let AppState::Chat { widget } = &mut self.app_state {
-                        let auth_manager = widget.auth_manager();
+                        let auth_manager = self._server.auth_manager();
                         let mut new_widget = ChatWidget::new_from_existing(
                             cfg,
-                            conv,
+                            conversation_id,
+                            self._server.clone(),
                             session_conf,
                             self.app_event_tx.clone(),
                             self.enhanced_keys_supported,
@@ -2313,14 +2320,11 @@ impl App<'_> {
                         new_widget.check_for_initial_animations();
                         *widget = Box::new(new_widget);
                     } else {
-                        let auth_manager = AuthManager::shared_with_mode_and_originator(
-                            cfg.code_home.clone(),
-                            AuthMode::ApiKey,
-                            cfg.responses_originator_header.clone(),
-                        );
+                        let auth_manager = self._server.auth_manager();
                         let mut new_widget = ChatWidget::new_from_existing(
                             cfg,
-                            conv,
+                            conversation_id,
+                            self._server.clone(),
                             session_conf,
                             self.app_event_tx.clone(),
                             self.enhanced_keys_supported,

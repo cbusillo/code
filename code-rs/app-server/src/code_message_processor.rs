@@ -4,9 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use code_core::AuthManager;
-use code_core::CodexConversation;
+use code_core::ConversationHub;
 use code_core::ConversationManager;
 use code_core::NewConversation;
+use code_core::SessionCatalog;
+use code_core::SessionQuery;
 use code_core::config::Config;
 use code_core::config::ConfigOverrides;
 use code_core::git_info::git_diff_to_remote;
@@ -52,15 +54,22 @@ use code_protocol::mcp_protocol::InputItem as WireInputItem;
 use code_protocol::mcp_protocol::InterruptConversationParams;
 use code_protocol::mcp_protocol::InterruptConversationResponse;
 // Unused login-related and diff param imports removed
+use code_protocol::mcp_protocol::ConversationSummary;
 use code_protocol::mcp_protocol::GitDiffToRemoteResponse;
+use code_protocol::mcp_protocol::ListConversationsParams;
+use code_protocol::mcp_protocol::ListConversationsResponse;
 use code_protocol::mcp_protocol::NewConversationParams;
 use code_protocol::mcp_protocol::NewConversationResponse;
+use code_protocol::mcp_protocol::ResumeConversationParams;
+use code_protocol::mcp_protocol::ResumeConversationResponse;
 use code_protocol::mcp_protocol::RemoveConversationListenerParams;
 use code_protocol::mcp_protocol::RemoveConversationSubscriptionResponse;
 use code_protocol::mcp_protocol::SendUserMessageParams;
 use code_protocol::mcp_protocol::SendUserMessageResponse;
 use code_protocol::mcp_protocol::SendUserTurnParams;
 use code_protocol::mcp_protocol::SendUserTurnResponse;
+use code_protocol::mcp_protocol::UserInputAnswerParams;
+use code_protocol::mcp_protocol::UserInputAnswerResponse;
 
 // Removed deprecated ChatGPT login support scaffolding
 
@@ -109,6 +118,12 @@ impl CodexMessageProcessor {
                 // created before processing any subsequent messages.
                 self.process_new_conversation(request_id, params).await;
             }
+            ClientRequest::ListConversations { request_id, params } => {
+                self.list_conversations(request_id, params).await;
+            }
+            ClientRequest::ResumeConversation { request_id, params } => {
+                self.resume_conversation(request_id, params).await;
+            }
             ClientRequest::SendUserMessage { request_id, params } => {
                 self.send_user_message(request_id, params).await;
             }
@@ -123,6 +138,9 @@ impl CodexMessageProcessor {
             }
             ClientRequest::SendUserTurn { request_id, params } => {
                 self.send_user_turn_compat(request_id, params).await;
+            }
+            ClientRequest::UserInputAnswer { request_id, params } => {
+                self.user_input_answer(request_id, params).await;
             }
             ClientRequest::LoginChatGpt { request_id, .. } => {
                 let error = JSONRPCErrorError {
@@ -208,14 +226,131 @@ impl CodexMessageProcessor {
         }
     }
 
+    async fn list_conversations(&self, request_id: RequestId, params: ListConversationsParams) {
+        let limit = params.page_size.unwrap_or(200).max(1);
+        let catalog = SessionCatalog::new(self._config.code_home.clone());
+        let query = SessionQuery {
+            limit: Some(limit),
+            min_user_messages: 0,
+            ..SessionQuery::default()
+        };
+        let entries = match catalog.query(&query).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("error listing conversations: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        let items = entries
+            .into_iter()
+            .map(|entry| {
+                let preview = entry
+                    .nickname
+                    .clone()
+                    .or(entry.last_user_snippet.clone())
+                    .unwrap_or_default();
+                ConversationSummary {
+                    conversation_id: ConversationId::from(entry.session_id),
+                    path: self._config.code_home.join(entry.rollout_path),
+                    preview,
+                    timestamp: Some(entry.created_at),
+                }
+            })
+            .collect();
+
+        let response = ListConversationsResponse {
+            items,
+            next_cursor: None,
+        };
+        self.outgoing.send_response(request_id, response).await;
+    }
+
+    async fn resume_conversation(&self, request_id: RequestId, params: ResumeConversationParams) {
+        let ResumeConversationParams { path, overrides } = params;
+        if std::fs::metadata(&path).is_err() {
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: format!("rollout path not found: {path:?}"),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
+
+        if let Some(conversation_id) = self
+            .conversation_manager
+            .find_conversation_id_by_rollout_path(&path)
+            .await
+        {
+            if let Ok(hub) = self
+                .conversation_manager
+                .get_or_create_hub(conversation_id, None, Some(path.clone()))
+                .await
+            {
+                let response = ResumeConversationResponse {
+                    conversation_id,
+                    model: hub.model().unwrap_or_default().to_string(),
+                    initial_messages: None,
+                };
+                self.outgoing.send_response(request_id, response).await;
+                return;
+            }
+        }
+
+        let overrides = overrides.unwrap_or_default();
+        let config = match derive_config_from_params(overrides, self.code_linux_sandbox_exe.clone()) {
+            Ok(config) => config,
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INVALID_REQUEST_ERROR_CODE,
+                    message: format!("error deriving config: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        let auth_manager = self.conversation_manager.auth_manager();
+        let resumed = self
+            .conversation_manager
+            .resume_conversation_from_rollout_with_hub(config, path, auth_manager)
+            .await;
+
+        match resumed {
+            Ok(resumed) => {
+                let response = ResumeConversationResponse {
+                    conversation_id: resumed.conversation_id,
+                    model: resumed.session_configured.model,
+                    initial_messages: None,
+                };
+                self.outgoing.send_response(request_id, response).await;
+            }
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("error resuming conversation: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
+            }
+        }
+    }
+
     async fn send_user_message(&self, request_id: RequestId, params: SendUserMessageParams) {
         let SendUserMessageParams {
             conversation_id,
             items,
         } = params;
-        let Ok(conversation) = self
+        let Ok(hub) = self
             .conversation_manager
-            .get_conversation(conversation_id)
+            .get_or_create_hub(conversation_id, None, None)
             .await
         else {
             let error = JSONRPCErrorError {
@@ -237,7 +372,7 @@ impl CodexMessageProcessor {
             .collect();
 
         // Submit user input to the conversation.
-        let _ = conversation
+        let _ = hub
             .submit(Op::UserInput {
                 items: mapped_items,
                 final_output_json_schema: None,
@@ -249,6 +384,43 @@ impl CodexMessageProcessor {
             .send_response(request_id, SendUserMessageResponse {})
             .await;
     }
+
+    async fn user_input_answer(&self, request_id: RequestId, params: UserInputAnswerParams) {
+        let UserInputAnswerParams {
+            conversation_id,
+            call_id,
+            response,
+        } = params;
+
+        let Ok(hub) = self
+            .conversation_manager
+            .get_or_create_hub(conversation_id, None, None)
+            .await
+        else {
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: format!("conversation not found: {conversation_id}"),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        };
+
+        if let Err(err) = hub.handle_user_input_response(call_id, response).await {
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: err,
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
+
+        self.outgoing
+            .send_response(request_id, UserInputAnswerResponse {})
+            .await;
+    }
+
 
     #[allow(dead_code)]
     async fn send_user_turn(&self, request_id: RequestId, params: SendUserTurnParams) {
@@ -263,9 +435,9 @@ impl CodexMessageProcessor {
             summary: _,
         } = params;
 
-        let Ok(conversation) = self
+        let Ok(hub) = self
             .conversation_manager
-            .get_conversation(conversation_id)
+            .get_or_create_hub(conversation_id, None, None)
             .await
         else {
             let error = JSONRPCErrorError {
@@ -288,7 +460,7 @@ impl CodexMessageProcessor {
 
         // Core protocol compatibility: older cores do not support per-turn overrides.
         // Submit only the user input items.
-        let _ = conversation
+        let _ = hub
             .submit(Op::UserInput {
                 items: mapped_items,
                 final_output_json_schema: None,
@@ -306,9 +478,9 @@ impl CodexMessageProcessor {
         params: InterruptConversationParams,
     ) {
         let InterruptConversationParams { conversation_id } = params;
-        let Ok(conversation) = self
+        let Ok(hub) = self
             .conversation_manager
-            .get_conversation(conversation_id)
+            .get_or_create_hub(conversation_id, None, None)
             .await
         else {
             let error = JSONRPCErrorError {
@@ -321,7 +493,7 @@ impl CodexMessageProcessor {
         };
 
         // Submit the interrupt and respond immediately (core does not emit a dedicated event).
-        let _ = conversation.submit(Op::Interrupt).await;
+        let _ = hub.submit(Op::Interrupt).await;
         let response = InterruptConversationResponse { abort_reason: TurnAbortReason::Interrupted };
         self.outgoing.send_response(request_id, response).await;
     }
@@ -332,9 +504,9 @@ impl CodexMessageProcessor {
         params: AddConversationListenerParams,
     ) {
         let AddConversationListenerParams { conversation_id } = params;
-        let Ok(conversation) = self
+        let Ok(hub) = self
             .conversation_manager
-            .get_conversation(conversation_id)
+            .get_or_create_hub(conversation_id, None, None)
             .await
         else {
             let error = JSONRPCErrorError {
@@ -352,20 +524,23 @@ impl CodexMessageProcessor {
             .insert(subscription_id, cancel_tx);
         let outgoing_for_task = self.outgoing.clone();
         let pending_interrupts = self.pending_interrupts.clone();
+        let hub_for_task = hub.clone();
         tokio::spawn(async move {
+            let mut events_rx = hub_for_task.subscribe();
             loop {
                 tokio::select! {
                     _ = &mut cancel_rx => {
                         // User has unsubscribed, so exit this task.
                         break;
                     }
-                    event = conversation.next_event() => {
+                    event = events_rx.recv() => {
                         let event = match event {
                             Ok(event) => event,
-                            Err(err) => {
-                                tracing::warn!("conversation.next_event() failed with: {err}");
-                                break;
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!("conversation event stream lagged; dropped {skipped} events");
+                                continue;
                             }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         };
 
                         // For now, we send a notification for every event,
@@ -392,7 +567,14 @@ impl CodexMessageProcessor {
                         })
                         .await;
 
-                        apply_bespoke_event_handling(event.clone(), conversation_id, conversation.clone(), outgoing_for_task.clone(), pending_interrupts.clone()).await;
+                        apply_bespoke_event_handling(
+                            event.clone(),
+                            conversation_id,
+                            hub_for_task.clone(),
+                            outgoing_for_task.clone(),
+                            pending_interrupts.clone(),
+                        )
+                        .await;
                     }
                 }
             }
@@ -505,9 +687,9 @@ impl CodexMessageProcessor {
             ..
         } = params;
 
-        let Ok(conversation) = self
+        let Ok(hub) = self
             .conversation_manager
-            .get_conversation(conversation_id)
+            .get_or_create_hub(conversation_id, None, None)
             .await
         else {
             let error = JSONRPCErrorError {
@@ -530,7 +712,7 @@ impl CodexMessageProcessor {
             .collect();
 
         // Submit user input to the conversation.
-        let _ = conversation
+        let _ = hub
             .submit(Op::UserInput {
                 items: mapped_items,
                 final_output_json_schema: None,
@@ -545,7 +727,7 @@ impl CodexMessageProcessor {
 async fn apply_bespoke_event_handling(
     event: Event,
     conversation_id: ConversationId,
-    conversation: Arc<CodexConversation>,
+    hub: Arc<ConversationHub>,
     outgoing: Arc<OutgoingMessageSender>,
     _pending_interrupts: Arc<Mutex<HashMap<Uuid, Vec<RequestId>>>>,
 ) {
@@ -600,7 +782,7 @@ async fn apply_bespoke_event_handling(
             // TODO(mbolin): Enforce a timeout so this task does not live indefinitely?
             let approval_id = call_id.clone(); // correlate by call_id, not event_id
             tokio::spawn(async move {
-                on_patch_approval_response(approval_id, rx, conversation).await;
+                on_patch_approval_response(approval_id, rx, hub).await;
             });
         }
         EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
@@ -624,7 +806,7 @@ async fn apply_bespoke_event_handling(
             // TODO(mbolin): Enforce a timeout so this task does not live indefinitely?
             let approval_id = call_id.clone(); // correlate by call_id, not event_id
             tokio::spawn(async move {
-                on_exec_approval_response(approval_id, rx, conversation).await;
+                on_exec_approval_response(approval_id, rx, hub).await;
             });
         }
         EventMsg::DynamicToolCallRequest(request) => {
@@ -642,7 +824,7 @@ async fn apply_bespoke_event_handling(
                 .await;
 
             tokio::spawn(async move {
-                on_dynamic_tool_call_response(call_id, rx, conversation).await;
+                on_dynamic_tool_call_response(call_id, rx, hub).await;
             });
         }
         // No special handling needed for interrupts; responses are sent immediately.
@@ -703,14 +885,14 @@ fn derive_config_from_params(
 async fn on_patch_approval_response(
     approval_id: String,
     receiver: tokio::sync::oneshot::Receiver<mcp_types::Result>,
-    codex: Arc<CodexConversation>,
+    hub: Arc<ConversationHub>,
 ) {
     let response = receiver.await;
     let value = match response {
         Ok(value) => value,
         Err(err) => {
             error!("request failed: {err:?}");
-            if let Err(submit_err) = codex
+            if let Err(submit_err) = hub
                 .submit(Op::PatchApproval {
                     id: approval_id.clone(),
                     decision: core_protocol::ReviewDecision::Denied,
@@ -731,7 +913,7 @@ async fn on_patch_approval_response(
             }
         });
 
-    if let Err(err) = codex
+    if let Err(err) = hub
         .submit(Op::PatchApproval {
             id: approval_id,
             decision: map_review_decision_from_wire(response.decision),
@@ -745,7 +927,7 @@ async fn on_patch_approval_response(
 async fn on_dynamic_tool_call_response(
     call_id: String,
     receiver: tokio::sync::oneshot::Receiver<mcp_types::Result>,
-    conversation: Arc<CodexConversation>,
+    hub: Arc<ConversationHub>,
 ) {
     let response = receiver.await;
     let value = match response {
@@ -757,7 +939,7 @@ async fn on_dynamic_tool_call_response(
                 output: "dynamic tool request failed".to_string(),
                 success: false,
             };
-            if let Err(err) = conversation
+            if let Err(err) = hub
                 .submit(Op::DynamicToolResponse {
                     id: call_id.clone(),
                     response: fallback,
@@ -783,7 +965,7 @@ async fn on_dynamic_tool_call_response(
         output: response.output,
         success: response.success,
     };
-    if let Err(err) = conversation
+    if let Err(err) = hub
         .submit(Op::DynamicToolResponse {
             id: call_id,
             response,
@@ -797,7 +979,7 @@ async fn on_dynamic_tool_call_response(
 async fn on_exec_approval_response(
     approval_id: String,
     receiver: tokio::sync::oneshot::Receiver<mcp_types::Result>,
-    conversation: Arc<CodexConversation>,
+    hub: Arc<ConversationHub>,
 ) {
     let response = receiver.await;
     let value = match response {
@@ -819,7 +1001,7 @@ async fn on_exec_approval_response(
             }
         });
 
-    if let Err(err) = conversation
+    if let Err(err) = hub
         .submit(Op::ExecApproval {
             id: approval_id,
             decision: map_review_decision_from_wire(response.decision),

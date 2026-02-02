@@ -71,6 +71,7 @@ pub struct BrowserConfig {
     /// Number of WS connect attempts before giving up
     #[serde(default = "default_connect_attempts")]
     pub connect_attempts: u32,
+
 }
 
 impl Default for BrowserConfig {

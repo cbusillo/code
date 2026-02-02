@@ -1,0 +1,13 @@
+[watch]
+ignore = [
+  "webui/src",
+  "webui/src/**",
+  "webui/node_modules",
+  "webui/node_modules/**",
+  "webui/.vite",
+  "webui/.vite/**",
+  "webui/dist",
+  "webui/dist/**",
+  "webui/vite.config.ts.timestamp-*",
+  "webui/*.timestamp-*",
+]
