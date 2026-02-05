@@ -27,7 +27,10 @@ use code_core::protocol::{
     Event, Op, ReviewDecision as CoreReviewDecision, RequestUserInputResponse,
 };
 use code_protocol::ConversationId;
-use code_protocol::dynamic_tools::DynamicToolResponse as WireDynamicToolResponse;
+use code_protocol::dynamic_tools::{
+    DynamicToolCallOutputContentItem,
+    DynamicToolResponse as WireDynamicToolResponse,
+};
 use code_protocol::mcp_protocol::{
     AddConversationListenerParams, AddConversationSubscriptionResponse, ApplyPatchApprovalResponse,
     AuthMode, ClientInfo, ClientRequest, DynamicToolCallResponse,
@@ -2408,9 +2411,13 @@ async fn handle_client_message(hub: &ConversationHub, message: ClientMessage) ->
             output,
             success,
         } => {
+            let content_items = if output.is_empty() {
+                Vec::new()
+            } else {
+                vec![DynamicToolCallOutputContentItem::InputText { text: output }]
+            };
             let response = WireDynamicToolResponse {
-                call_id: call_id.clone(),
-                output,
+                content_items,
                 success,
             };
             hub.handle_dynamic_tool_response(call_id, response).await?;

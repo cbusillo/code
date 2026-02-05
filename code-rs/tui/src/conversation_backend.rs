@@ -263,8 +263,19 @@ impl BrokerSession {
             }
         };
 
+        let output = response
+            .content_items
+            .iter()
+            .filter_map(|item| match item {
+                code_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText {
+                    text,
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let response = DynamicToolCallResponse {
-            output: response.output,
+            output,
             success: response.success,
         };
         let response =
