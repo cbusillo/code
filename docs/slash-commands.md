@@ -15,6 +15,7 @@ Notes
 
 - `/browser`: open internal browser.
 - `/chrome`: connect to your Chrome browser.
+- `/webui`: open the WebUI gateway URL (and token bootstrap link if enabled).
 - `/new`: start a new chat during a conversation.
 - `/resume`: resume a past session for this folder.
 - `/rename <name>`: rename the current session (shown in the resume list).
