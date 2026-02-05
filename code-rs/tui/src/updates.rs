@@ -730,12 +730,20 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut iter = v.trim().split('.');
-    let maj = iter.next()?.parse::<u64>().ok()?;
-    let min = iter.next()?.parse::<u64>().ok()?;
-    let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
+fn parse_version(v: &str) -> Option<(u64, u64, u64, u64)> {
+    let parts: Vec<&str> = v.trim().split('.').collect();
+    if parts.len() < 3 || parts.len() > 4 {
+        return None;
+    }
+    let maj = parts.get(0)?.parse::<u64>().ok()?;
+    let min = parts.get(1)?.parse::<u64>().ok()?;
+    let pat = parts.get(2)?.parse::<u64>().ok()?;
+    let hotfix = if let Some(value) = parts.get(3) {
+        value.parse::<u64>().ok()?
+    } else {
+        0
+    };
+    Some((maj, min, pat, hotfix))
 }
 
 #[cfg(test)]
