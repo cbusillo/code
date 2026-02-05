@@ -28,6 +28,22 @@ enum AgentTaskKind {
     Compact,
 }
 
+fn normalize_stream_event_id(
+    item_id: Option<String>,
+    sub_id: &str,
+    output_index: Option<u32>,
+) -> String {
+    if let Some(value) = item_id {
+        if !value.trim().is_empty() {
+            return value;
+        }
+    }
+    if let Some(index) = output_index {
+        return format!("{sub_id}#o{index}");
+    }
+    sub_id.to_string()
+}
+
 /// A series of Turns in response to user input.
 pub(super) struct AgentTask {
     sess: Arc<Session>,
@@ -740,19 +756,46 @@ pub(super) async fn submission_loop(
                     || restored_history_snapshot.is_some()
                     || restored_items.is_some()
                 {
+                    const REPLAY_HISTORY_CHUNK_SIZE: usize = 200;
                     let items = replay_history_items.clone().unwrap_or_default();
-                    let history_snapshot_value = restored_history_snapshot
-                        .as_ref()
-                        .and_then(|snapshot| serde_json::to_value(snapshot).ok());
-                    let event = sess_arc.make_event(
-                        &sub.id,
-                        EventMsg::ReplayHistory(crate::protocol::ReplayHistoryEvent {
-                            items,
-                            history_snapshot: history_snapshot_value,
-                        }),
-                    );
-                    if let Err(e) = tx_event.send(event).await {
-                        warn!("failed to send ReplayHistory event: {e}");
+                    let history_snapshot_value = restored_history_snapshot.as_ref().and_then(|snapshot| {
+                        if snapshot.records.is_empty() {
+                            None
+                        } else {
+                            serde_json::to_value(snapshot).ok()
+                        }
+                    });
+
+                    if items.is_empty() {
+                        let event = sess_arc.make_event(
+                            &sub.id,
+                            EventMsg::ReplayHistory(crate::protocol::ReplayHistoryEvent {
+                                items,
+                                history_snapshot: history_snapshot_value,
+                            }),
+                        );
+                        if let Err(e) = tx_event.send(event).await {
+                            warn!("failed to send ReplayHistory event: {e}");
+                        }
+                    } else {
+                        for (idx, chunk) in items.chunks(REPLAY_HISTORY_CHUNK_SIZE).enumerate() {
+                            let snapshot_for_chunk = if idx == 0 {
+                                history_snapshot_value.clone()
+                            } else {
+                                None
+                            };
+                            let event = sess_arc.make_event(
+                                &sub.id,
+                                EventMsg::ReplayHistory(crate::protocol::ReplayHistoryEvent {
+                                    items: chunk.to_vec(),
+                                    history_snapshot: snapshot_for_chunk,
+                                }),
+                            );
+                            if let Err(e) = tx_event.send(event).await {
+                                warn!("failed to send ReplayHistory event: {e}");
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -2751,8 +2794,8 @@ async fn try_run_turn(
                 // The complete message will be added to history when OutputItemDone arrives.
                 // This ensures items are recorded in the correct chronological order.
 
-                // Use the item_id if present, otherwise fall back to sub_id
-                let event_id = item_id.unwrap_or_else(|| sub_id.to_string());
+                // Use the item_id if present and non-empty, otherwise fall back to sub_id
+                let event_id = normalize_stream_event_id(item_id, sub_id, output_index);
                 let order = crate::protocol::OrderMeta {
                     request_ordinal: attempt_req,
                     output_index,
@@ -2767,8 +2810,8 @@ async fn try_run_turn(
                 sess.scratchpad_add_text_delta(&delta);
             }
             ResponseEvent::ReasoningSummaryDelta { delta, item_id, sequence_number, output_index, summary_index } => {
-                // Use the item_id if present, otherwise fall back to sub_id
-                let mut event_id = item_id.unwrap_or_else(|| sub_id.to_string());
+                // Use the item_id if present and non-empty, otherwise fall back to sub_id
+                let mut event_id = normalize_stream_event_id(item_id, sub_id, output_index);
                 if let Some(si) = summary_index { event_id = format!("{}#s{}", event_id, si); }
                 let order = crate::protocol::OrderMeta { request_ordinal: attempt_req, output_index, sequence_number };
                 let stamped = sess.make_event_with_order(&event_id, EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta: delta.clone() }), order, sequence_number);
@@ -2783,8 +2826,8 @@ async fn try_run_turn(
             }
             ResponseEvent::ReasoningContentDelta { delta, item_id, sequence_number, output_index, content_index } => {
                 if sess.show_raw_agent_reasoning {
-                    // Use the item_id if present, otherwise fall back to sub_id
-                    let mut event_id = item_id.unwrap_or_else(|| sub_id.to_string());
+                    // Use the item_id if present and non-empty, otherwise fall back to sub_id
+                    let mut event_id = normalize_stream_event_id(item_id, sub_id, output_index);
                     if let Some(ci) = content_index { event_id = format!("{}#c{}", event_id, ci); }
                     let order = crate::protocol::OrderMeta { request_ordinal: attempt_req, output_index, sequence_number };
                     let stamped = sess.make_event_with_order(&event_id, EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent { delta }), order, sequence_number);
@@ -2834,8 +2877,8 @@ async fn handle_response_item(
     debug!(?item, "Output item");
     let output = match item {
         ResponseItem::Message { content, id, .. } => {
-            // Use the item_id if present, otherwise fall back to sub_id
-            let event_id = id.unwrap_or_else(|| sub_id.to_string());
+            // Use the item_id if present and non-empty, otherwise fall back to sub_id
+            let event_id = normalize_stream_event_id(id, sub_id, output_index);
             for item in content {
                 if let ContentItem::OutputText { text } = item {
                     let order = crate::protocol::OrderMeta { request_ordinal: attempt_req, output_index, sequence_number: seq_hint };
@@ -2855,12 +2898,8 @@ async fn handle_response_item(
             content,
             encrypted_content: _,
         } => {
-            // Use the item_id if present and not empty, otherwise fall back to sub_id
-            let event_id = if !id.is_empty() {
-                id.clone()
-            } else {
-                sub_id.to_string()
-            };
+            // Use the item_id if present and non-empty, otherwise fall back to sub_id
+            let event_id = normalize_stream_event_id(Some(id), sub_id, output_index);
             for (i, item) in summary.into_iter().enumerate() {
                 let text = match item {
                     ReasoningItemReasoningSummary::SummaryText { text } => text,
@@ -11963,7 +12002,7 @@ fn parse_legacy_status_snapshot(item: &ResponseItem) -> Option<EnvironmentContex
 
 #[cfg(test)]
 mod tests {
-    use super::{format_exec_output_with_limit, TRUNCATION_MARKER};
+    use super::{format_exec_output_with_limit, normalize_stream_event_id, TRUNCATION_MARKER};
     use crate::exec::{ExecToolCallOutput, StreamOutput};
     use serde_json::Value;
     use std::time::Duration;
@@ -12017,5 +12056,27 @@ mod tests {
 
         assert!(!content.contains(TRUNCATION_MARKER));
         assert!(content.contains("line"));
+    }
+
+    #[test]
+    fn normalize_stream_event_id_prefers_non_empty_item_id() {
+        let value = normalize_stream_event_id(
+            Some("item-1".to_string()),
+            "sub",
+            Some(2),
+        );
+        assert_eq!(value, "item-1");
+    }
+
+    #[test]
+    fn normalize_stream_event_id_falls_back_to_output_index() {
+        let value = normalize_stream_event_id(Some("".to_string()), "sub", Some(3));
+        assert_eq!(value, "sub#o3");
+    }
+
+    #[test]
+    fn normalize_stream_event_id_falls_back_to_sub_id() {
+        let value = normalize_stream_event_id(None, "sub", None);
+        assert_eq!(value, "sub");
     }
 }

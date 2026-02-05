@@ -124,6 +124,19 @@ impl SessionCatalog {
         Ok(updated)
     }
 
+    /// Soft delete (hide) or restore a session.
+    pub async fn set_deleted(&self, session_id: Uuid, deleted: bool) -> Result<bool> {
+        let mut catalog = self.load_inner().await?;
+        let updated = catalog
+            .set_deleted(session_id, deleted)
+            .context("failed to update session deleted flag")?;
+        if updated {
+            let mut guard = self.cache.lock().await;
+            *guard = Some(catalog);
+        }
+        Ok(updated)
+    }
+
     async fn load_inner(&self) -> Result<rollout_catalog::SessionCatalog> {
         {
             let mut guard = self.cache.lock().await;

@@ -270,6 +270,18 @@ impl SessionCatalog {
         Ok(true)
     }
 
+    /// Mark a session as deleted (soft delete) or restore it.
+    pub fn set_deleted(&mut self, session_id: Uuid, deleted: bool) -> io::Result<bool> {
+        let Some(entry) = self.entries.get_mut(&session_id) else {
+            return Ok(false);
+        };
+        if entry.deleted != deleted {
+            entry.deleted = deleted;
+            self.save()?;
+        }
+        Ok(true)
+    }
+
     /// Remove an entry's session_id from secondary indexes.
     fn remove_from_indexes(&mut self, session_id: &Uuid, entry: &SessionIndexEntry) {
         // Remove from cwd index
@@ -329,6 +341,9 @@ impl SessionCatalog {
                 if should_replace(&existing, &entry) {
                     if entry.nickname.is_none() {
                         entry.nickname = existing.nickname.clone();
+                    }
+                    if existing.deleted {
+                        entry.deleted = true;
                     }
                     self.remove_from_indexes(&session_id, &existing);
                     self.index_entry(entry);
@@ -735,6 +750,45 @@ mod tests {
         let loaded = SessionCatalog::load(code_home)?;
         let retrieved = loaded.get(&session_id).expect("session entry");
         assert_eq!(retrieved.nickname.as_deref(), Some("Launch checklist"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_catalog_set_deleted() -> io::Result<()> {
+        let temp = TempDir::new()?;
+        let code_home = temp.path();
+
+        let session_id = Uuid::new_v4();
+        let entry = SessionIndexEntry {
+            session_id,
+            rollout_path: PathBuf::from("sessions/test-deleted.jsonl"),
+            snapshot_path: None,
+            created_at: "2025-01-01T10:00:00.000Z".to_string(),
+            last_event_at: "2025-01-01T10:05:00.000Z".to_string(),
+            cwd_real: PathBuf::from("/test"),
+            cwd_display: "/test".to_string(),
+            git_project_root: None,
+            git_branch: None,
+            model_provider: None,
+            session_source: SessionSource::Cli,
+            message_count: 0,
+            user_message_count: 0,
+            last_user_snippet: None,
+            nickname: None,
+            sync_origin_device: None,
+            sync_version: 0,
+            archived: false,
+            deleted: false,
+        };
+
+        let mut catalog = SessionCatalog::load(code_home)?;
+        catalog.upsert(entry.clone())?;
+        assert!(catalog.set_deleted(session_id, true)?);
+
+        let loaded = SessionCatalog::load(code_home)?;
+        let retrieved = loaded.get(&session_id).expect("session entry");
+        assert!(retrieved.deleted);
 
         Ok(())
     }

@@ -36,6 +36,7 @@ pub struct ConversationHub {
     conversation: Arc<CodexConversation>,
     broadcaster: broadcast::Sender<Event>,
     pending: Arc<Mutex<PendingRequests>>,
+    replay_history_event: Arc<Mutex<Option<Event>>>,
 }
 
 impl ConversationHub {
@@ -53,6 +54,7 @@ impl ConversationHub {
             conversation,
             broadcaster,
             pending: Arc::new(Mutex::new(PendingRequests::default())),
+            replay_history_event: Arc::new(Mutex::new(None)),
         });
 
         let hub_clone = hub.clone();
@@ -66,6 +68,7 @@ impl ConversationHub {
                     }
                 };
                 hub_clone.track_pending(&event).await;
+                hub_clone.capture_replay_history(&event).await;
                 let _ = hub_clone.broadcaster.send(event);
             }
         });
@@ -87,6 +90,10 @@ impl ConversationHub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.broadcaster.subscribe()
+    }
+
+    pub async fn replay_history_event(&self) -> Option<Event> {
+        self.replay_history_event.lock().await.clone()
     }
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
@@ -178,6 +185,73 @@ impl ConversationHub {
                 pending.user_inputs.insert(request.call_id.clone());
             }
             _ => {}
+        }
+    }
+
+    async fn capture_replay_history(&self, event: &Event) {
+        if matches!(&event.msg, EventMsg::ReplayHistory(_)) {
+            let mut replay_event = self.replay_history_event.lock().await;
+            *replay_event = Some(event.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::code_conversation::CodexConversation;
+    use crate::codex::Codex;
+    use crate::protocol::ReplayHistoryEvent;
+    use code_protocol::models::ContentItem;
+    use code_protocol::models::ResponseItem;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn replay_history_cached_for_late_listeners() {
+        let (tx_sub, _rx_sub) = async_channel::unbounded();
+        let (tx_event, rx_event) = async_channel::unbounded();
+        let codex = Codex::new_for_test(tx_sub, rx_event);
+        let conversation = Arc::new(CodexConversation::new(codex));
+        let conversation_id = ConversationId::from(Uuid::new_v4());
+        let hub = ConversationHub::new(conversation_id, None, None, conversation);
+
+        let replay = ReplayHistoryEvent {
+            items: vec![ResponseItem::Message {
+                id: Some("replay".to_string()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hello".to_string(),
+                }],
+            }],
+            history_snapshot: None,
+        };
+        let event = Event {
+            id: "sub".to_string(),
+            event_seq: 1,
+            msg: EventMsg::ReplayHistory(replay),
+            order: None,
+        };
+
+        tx_event.send(event).await.expect("send replay event");
+
+        let cached = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(event) = hub.replay_history_event().await {
+                    break event;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timeout waiting for cached replay");
+
+        match cached.msg {
+            EventMsg::ReplayHistory(ev) => {
+                assert_eq!(ev.items.len(), 1);
+            }
+            other => panic!("expected ReplayHistory, got {other:?}"),
         }
     }
 }

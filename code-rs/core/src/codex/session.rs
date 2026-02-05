@@ -1776,6 +1776,8 @@ impl Session {
             }
         }
 
+        history.retain(|item| !is_system_status_message(item));
+
         if replay_ctx.timeline.baseline().is_none() {
             if let Some(snapshot) = replay_ctx.legacy_baseline.clone() {
                 if let Err(err) = replay_ctx.timeline.add_baseline_once(snapshot.clone()) {
@@ -1957,6 +1959,29 @@ impl Session {
             warn!("failed to spawn notifier '{}': {e}", notify_command[0]);
         }
     }
+}
+
+fn is_system_status_message(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { content, .. } = item else {
+        return false;
+    };
+
+    let mut text = String::new();
+    for entry in content {
+        match entry {
+            ContentItem::InputText { text: snippet }
+            | ContentItem::OutputText { text: snippet } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(snippet);
+            }
+            _ => {}
+        }
+    }
+
+    let trimmed = text.trim();
+    trimmed.starts_with("== System Status ==")
 }
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct CleanupStats {

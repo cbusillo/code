@@ -1186,3 +1186,17 @@ impl Codex {
         Ok(event)
     }
 }
+
+#[cfg(test)]
+impl Codex {
+    pub(crate) fn new_for_test(
+        tx_sub: Sender<Submission>,
+        rx_event: Receiver<Event>,
+    ) -> Self {
+        Self {
+            next_id: AtomicU64::new(0),
+            tx_sub,
+            rx_event,
+        }
+    }
+}

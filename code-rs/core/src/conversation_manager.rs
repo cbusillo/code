@@ -41,6 +41,7 @@ pub struct NewConversationHub {
 pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
     hubs: Arc<RwLock<HashMap<ConversationId, Arc<ConversationHub>>>>,
+    session_configured: Arc<RwLock<HashMap<ConversationId, SessionConfiguredEvent>>>,
     auth_manager: Arc<AuthManager>,
     session_source: SessionSource,
 }
@@ -50,6 +51,7 @@ impl ConversationManager {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             hubs: Arc::new(RwLock::new(HashMap::new())),
+            session_configured: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
             session_source,
         }
@@ -135,6 +137,10 @@ impl ConversationManager {
             .write()
             .await
             .insert(conversation_id, conversation.clone());
+        self.session_configured
+            .write()
+            .await
+            .insert(conversation_id, session_configured.clone());
 
         Ok(NewConversation {
             conversation_id,
@@ -237,7 +243,22 @@ impl ConversationManager {
         conversation_id: &ConversationId,
     ) -> Option<Arc<CodexConversation>> {
         self.hubs.write().await.remove(conversation_id);
+        self.session_configured
+            .write()
+            .await
+            .remove(conversation_id);
         self.conversations.write().await.remove(conversation_id)
+    }
+
+    pub async fn session_configured(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Option<SessionConfiguredEvent> {
+        self.session_configured
+            .read()
+            .await
+            .get(conversation_id)
+            .cloned()
     }
 
     /// Fork an existing conversation by dropping the last `drop_last_messages`
