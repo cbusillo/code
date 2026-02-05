@@ -10,6 +10,7 @@ use code_protocol::protocol::SessionSource;
 use mcp_types::JSONRPCMessage;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+use serde::Serialize;
 use tracing::{debug, error, info, warn};
 
 use crate::message_processor::MessageProcessor;
@@ -64,6 +65,10 @@ pub async fn run_broker_with_manager(
         warn!("failed to set broker socket permissions: {err}");
     }
 
+    if let Err(err) = write_broker_stamp(&config).await {
+        warn!("failed to write broker stamp: {err}");
+    }
+
     info!("app-server broker listening on {socket_path:?}");
 
     loop {
@@ -79,6 +84,25 @@ pub async fn run_broker_with_manager(
             }
         });
     }
+}
+
+#[derive(Serialize)]
+struct BrokerStamp {
+    pid: u32,
+    version: String,
+    resume_override: bool,
+}
+
+async fn write_broker_stamp(config: &Config) -> io::Result<()> {
+    let stamp_path = config.code_home.join("app-server.stamp.json");
+    let stamp = BrokerStamp {
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        resume_override: config.experimental_resume.is_some(),
+    };
+    let payload = serde_json::to_vec(&stamp)
+        .map_err(|err| io::Error::new(ErrorKind::Other, format!("stamp serialize failed: {err}")))?;
+    tokio::fs::write(&stamp_path, payload).await
 }
 
 #[cfg(not(unix))]

@@ -68,6 +68,8 @@ use code_protocol::mcp_protocol::SendUserMessageParams;
 use code_protocol::mcp_protocol::SendUserMessageResponse;
 use code_protocol::mcp_protocol::SendUserTurnParams;
 use code_protocol::mcp_protocol::SendUserTurnResponse;
+use code_protocol::mcp_protocol::SubmitOpParams;
+use code_protocol::mcp_protocol::SubmitOpResponse;
 use code_protocol::mcp_protocol::UserInputAnswerParams;
 use code_protocol::mcp_protocol::UserInputAnswerResponse;
 
@@ -107,6 +109,31 @@ impl CodexMessageProcessor {
         }
     }
 
+    async fn send_event_notification(&self, conversation_id: ConversationId, event: Event) {
+        let method = format!("codex/event/{}", event.msg);
+        let params = match serde_json::to_value(event) {
+            Ok(serde_json::Value::Object(map)) => Some(map),
+            Ok(_) => {
+                tracing::error!("event did not serialize to an object");
+                None
+            }
+            Err(err) => {
+                tracing::error!("failed to serialize event: {err}");
+                None
+            }
+        };
+
+        if let Some(mut params) = params {
+            params.insert("conversationId".to_string(), conversation_id.to_string().into());
+            self.outgoing
+                .send_notification(OutgoingNotification {
+                    method,
+                    params: Some(params.into()),
+                })
+                .await;
+        }
+    }
+
     pub async fn process_request(&mut self, request: ClientRequest) {
         match request {
             ClientRequest::Initialize { .. } => {
@@ -138,6 +165,9 @@ impl CodexMessageProcessor {
             }
             ClientRequest::SendUserTurn { request_id, params } => {
                 self.send_user_turn_compat(request_id, params).await;
+            }
+            ClientRequest::SubmitOp { request_id, params } => {
+                self.submit_op(request_id, params).await;
             }
             ClientRequest::UserInputAnswer { request_id, params } => {
                 self.user_input_answer(request_id, params).await;
@@ -518,6 +548,24 @@ impl CodexMessageProcessor {
             return;
         };
 
+        let mut events_rx = hub.subscribe();
+
+        if let Some(session_configured) =
+            self.conversation_manager.session_configured(&conversation_id).await
+        {
+            let event = Event {
+                id: conversation_id.to_string(),
+                event_seq: 0,
+                msg: EventMsg::SessionConfigured(session_configured),
+                order: None,
+            };
+            self.send_event_notification(conversation_id, event).await;
+        }
+
+        if let Some(replay_event) = hub.replay_history_event().await {
+            self.send_event_notification(conversation_id, replay_event).await;
+        }
+
         let subscription_id = Uuid::new_v4();
         let (cancel_tx, mut cancel_rx) = oneshot::channel();
         self.conversation_listeners
@@ -526,7 +574,6 @@ impl CodexMessageProcessor {
         let pending_interrupts = self.pending_interrupts.clone();
         let hub_for_task = hub.clone();
         tokio::spawn(async move {
-            let mut events_rx = hub_for_task.subscribe();
             loop {
                 tokio::select! {
                     _ = &mut cancel_rx => {
@@ -722,6 +769,57 @@ impl CodexMessageProcessor {
         // Acknowledge.
         self.outgoing.send_response(request_id, SendUserTurnResponse {}).await;
     }
+
+    async fn submit_op(&self, request_id: RequestId, params: SubmitOpParams) {
+        let SubmitOpParams {
+            conversation_id,
+            op,
+        } = params;
+
+        let core_op = match serde_json::to_value(op)
+            .and_then(serde_json::from_value::<Op>)
+        {
+            Ok(core_op) => core_op,
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INVALID_REQUEST_ERROR_CODE,
+                    message: format!("invalid op payload: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
+        };
+
+        let Ok(hub) = self
+            .conversation_manager
+            .get_or_create_hub(conversation_id, None, None)
+            .await
+        else {
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: format!("conversation not found: {conversation_id}"),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        };
+
+        match hub.submit(core_op).await {
+            Ok(submission_id) => {
+                let response = SubmitOpResponse { submission_id };
+                self.outgoing.send_response(request_id, response).await;
+            }
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("failed to submit op: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
+            }
+        }
+    }
 }
 
 async fn apply_bespoke_event_handling(
@@ -846,6 +944,7 @@ fn derive_config_from_params(
         config: cli_overrides,
         base_instructions,
         include_plan_tool,
+        include_apply_patch_tool,
         dynamic_tools,
         ..
     } = params;
@@ -860,7 +959,7 @@ fn derive_config_from_params(
         code_linux_sandbox_exe,
         base_instructions,
         include_plan_tool,
-        include_apply_patch_tool: None,
+        include_apply_patch_tool,
         include_view_image_tool: None,
         disable_response_storage: None,
         show_raw_agent_reasoning: None,

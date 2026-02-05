@@ -51,6 +51,8 @@ pub use code_protocol::mcp_protocol::{
     SendUserMessageResponse,
     SendUserTurnParams,
     SendUserTurnResponse,
+    SubmitOpParams,
+    SubmitOpResponse,
     UserInputAnswerParams,
     UserInputAnswerResponse,
     ServerNotification,
