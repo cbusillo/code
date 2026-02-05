@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
@@ -40,6 +41,96 @@ use super::state::{
 };
 
 impl App<'_> {
+    fn gateway_bind_addr_for_ui(&self) -> Option<SocketAddr> {
+        match std::env::var("CODE_GATEWAY_BIND") {
+            Ok(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
+                    return None;
+                }
+                trimmed.parse().ok()
+            }
+            Err(_) => self
+                .config
+                .gateway
+                .bind
+                .as_deref()
+                .unwrap_or("127.0.0.1:3210")
+                .parse()
+                .ok(),
+        }
+    }
+
+    fn gateway_token_for_ui(&self) -> Option<String> {
+        if let Ok(token) = std::env::var("CODE_GATEWAY_TOKEN") {
+            if token.trim().is_empty() {
+                return Some(String::new());
+            }
+            return Some(token);
+        }
+
+        let token_path = self.config.code_home.join("gateway_token");
+        match std::fs::read_to_string(&token_path) {
+            Ok(contents) => {
+                let trimmed = contents.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                tracing::warn!("failed to read gateway token: {err}");
+                None
+            }
+        }
+    }
+
+    fn gateway_urls_for_ui(&self) -> Option<(String, Option<String>)> {
+        let bind_addr = self.gateway_bind_addr_for_ui()?;
+        let advertised_host = if bind_addr.ip().is_unspecified() {
+            "127.0.0.1".to_string()
+        } else {
+            match bind_addr.ip() {
+                std::net::IpAddr::V6(ipv6) => format!("[{ipv6}]"),
+                std::net::IpAddr::V4(ipv4) => ipv4.to_string(),
+            }
+        };
+        let safe_url = format!("http://{advertised_host}:{}/", bind_addr.port());
+        let bootstrap_url = self.gateway_token_for_ui().and_then(|token| {
+            if token.is_empty() {
+                return None;
+            }
+            let encoded = Self::encode_cookie_value(&token);
+            Some(format!("http://{advertised_host}:{}/#token={encoded}", bind_addr.port()))
+        });
+        Some((safe_url, bootstrap_url))
+    }
+
+    fn encode_cookie_value(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for byte in value.as_bytes() {
+            let ch = *byte as char;
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+                out.push(ch);
+            } else {
+                out.push('%');
+                out.push(Self::hex_char(byte >> 4));
+                out.push(Self::hex_char(byte & 0x0f));
+            }
+        }
+        out
+    }
+
+    fn hex_char(nibble: u8) -> char {
+        match nibble & 0x0f {
+            0..=9 => (b'0' + (nibble & 0x0f)) as char,
+            10..=15 => (b'A' + ((nibble & 0x0f) - 10)) as char,
+            _ => '0',
+        }
+    }
+
     fn handle_login_mode_change(&mut self, using_chatgpt_auth: bool) {
         self.config.using_chatgpt_auth = using_chatgpt_auth;
         if let AppState::Chat { widget } = &mut self.app_state {
@@ -1342,6 +1433,22 @@ impl App<'_> {
                                 } else {
                                     widget.handle_chrome_command(command_args);
                                 }
+                            }
+                        }
+                        SlashCommand::Webui => {
+                            let urls = self.gateway_urls_for_ui();
+                            if let AppState::Chat { widget } = &mut self.app_state {
+                                let Some((safe_url, bootstrap_url)) = urls else {
+                                    widget.push_background_tail(
+                                        "WebUI gateway is disabled. Set gateway.bind (or CODE_GATEWAY_BIND) and start code-gateway.".to_string(),
+                                    );
+                                    continue;
+                                };
+                                let mut lines = vec![format!("WebUI: {safe_url}")];
+                                if let Some(url) = bootstrap_url {
+                                    lines.push(format!("WebUI (token bootstrap): {url}"));
+                                }
+                                widget.push_background_tail(lines.join("\n"));
                             }
                         }
                         #[cfg(debug_assertions)]
