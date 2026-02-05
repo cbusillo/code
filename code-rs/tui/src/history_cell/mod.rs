@@ -39,7 +39,6 @@ pub(crate) use assistant::{
 pub(crate) use animated::{AnimatedWelcomeCell, new_animated_welcome};
 pub(crate) use background::{
     new_background_event,
-    new_connecting_mcp_status,
     BackgroundEventCell,
 };
 pub(crate) use context::ContextCell;

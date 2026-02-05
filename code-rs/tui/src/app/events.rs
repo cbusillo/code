@@ -55,7 +55,7 @@ impl App<'_> {
             return;
         }
         let remote_tx = self.app_event_tx.clone();
-        let remote_auth_manager = self._server.auth_manager();
+        let remote_auth_manager = self.auth_manager.clone();
         let remote_provider = self.config.model_provider.clone();
         let remote_code_home = self.config.code_home.clone();
         let remote_using_chatgpt_hint = self.config.using_chatgpt_auth;
@@ -1150,8 +1150,8 @@ impl App<'_> {
                             let mut new_widget = ChatWidget::new(
                                 self.config.clone(),
                                 self.app_event_tx.clone(),
-                                self._server.clone(),
-                                self._server.auth_manager(),
+                                self.conversation_backend.clone(),
+                                self.auth_manager.clone(),
                                 None,
                                 Vec::new(),
                                 self.enhanced_keys_supported,
@@ -1420,8 +1420,8 @@ impl App<'_> {
                         let mut new_widget = ChatWidget::new(
                             cfg,
                             self.app_event_tx.clone(),
-                            self._server.clone(),
-                            self._server.auth_manager(),
+                            self.conversation_backend.clone(),
+                            self.auth_manager.clone(),
                             None,
                             Vec::new(),
                             self.enhanced_keys_supported,
@@ -2191,8 +2191,8 @@ impl App<'_> {
                     let mut w = ChatWidget::new(
                         config,
                         app_event_tx.clone(),
-                        self._server.clone(),
-                        self._server.auth_manager(),
+                        self.conversation_backend.clone(),
+                        self.auth_manager.clone(),
                         initial_prompt,
                         initial_images,
                         enhanced_keys_supported,
@@ -2257,7 +2257,7 @@ impl App<'_> {
                         self.pending_jump_back_history_snapshot = history_snapshot;
 
                         // Perform the fork off the UI thread to avoid nested runtimes
-                        let server = self._server.clone();
+                        let conversation_backend = self.conversation_backend.clone();
                         let tx = self.app_event_tx.clone();
                         let prefill_clone = prefill.clone();
                         if let Err(err) = std::thread::Builder::new()
@@ -2271,7 +2271,7 @@ impl App<'_> {
                                 let cfg_for_rt = cfg.clone();
                                 let result = rt.block_on(async move {
                                     // Fallback: start a new conversation instead of forking
-                                    server.new_conversation(cfg_for_rt).await
+                                    conversation_backend.create_conversation(cfg_for_rt).await
                                 });
                                 if let Ok(new_conv) = result {
                                     tx.send(AppEvent::JumpBackForked { cfg, new_conv: crate::app_event::Redacted(new_conv), prefix_items, prefill: prefill_clone });
@@ -2286,26 +2286,23 @@ impl App<'_> {
                 }
                 AppEvent::JumpBackForked { cfg, new_conv, prefix_items, prefill } => {
                     // Replace widget with a new one bound to the forked conversation
-                    let session_conf = new_conv.0.session_configured.clone();
-                    let conversation_id = new_conv.0.conversation_id;
+                    let conversation_start = new_conv.0;
 
                     let mut ghost_state = self.pending_jump_back_ghost_state.take();
                     let history_snapshot = self.pending_jump_back_history_snapshot.take();
                     let emit_prefix = history_snapshot.is_none();
 
                     if let AppState::Chat { widget } = &mut self.app_state {
-                        let auth_manager = self._server.auth_manager();
                         let mut new_widget = ChatWidget::new_from_existing(
                             cfg,
-                            conversation_id,
-                            self._server.clone(),
-                            session_conf,
+                            conversation_start,
+                            self.conversation_backend.clone(),
                             self.app_event_tx.clone(),
                             self.enhanced_keys_supported,
                             self.terminal_info.clone(),
                             self.show_order_overlay,
                             self.latest_upgrade_version.clone(),
-                            auth_manager,
+                            self.auth_manager.clone(),
                             false,
                         );
                         if let Some(state) = ghost_state.take() {
@@ -2320,18 +2317,16 @@ impl App<'_> {
                         new_widget.check_for_initial_animations();
                         *widget = Box::new(new_widget);
                     } else {
-                        let auth_manager = self._server.auth_manager();
                         let mut new_widget = ChatWidget::new_from_existing(
                             cfg,
-                            conversation_id,
-                            self._server.clone(),
-                            session_conf,
+                            conversation_start,
+                            self.conversation_backend.clone(),
                             self.app_event_tx.clone(),
                             self.enhanced_keys_supported,
                             self.terminal_info.clone(),
                             self.show_order_overlay,
                             self.latest_upgrade_version.clone(),
-                            auth_manager,
+                            self.auth_manager.clone(),
                             false,
                         );
                         if let Some(state) = ghost_state.take() {

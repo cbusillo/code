@@ -88,16 +88,3 @@ pub(crate) fn new_background_event(message: String) -> BackgroundEventCell {
     };
     BackgroundEventCell::new(record)
 }
-
-/// Background status cell shown during startup while external MCP servers
-/// are being connected. Uses the standard background-event gutter (»)
-/// and inserts a blank line above the message for visual separation from
-/// the Popular commands block.
-pub(crate) fn new_connecting_mcp_status() -> BackgroundEventCell {
-    let record = BackgroundEventRecord {
-        id: HistoryId::ZERO,
-        title: String::new(),
-        description: "\nConnecting MCP servers…".to_string(),
-    };
-    BackgroundEventCell::new(record)
-}

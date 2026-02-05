@@ -12,6 +12,7 @@ use code_common::model_presets::{
     HIDE_GPT_5_2_MIGRATION_PROMPT_CONFIG,
 };
 use code_core::config_edit::{self, CONFIG_KEY_EFFORT, CONFIG_KEY_MODEL};
+use code_core::AuthManager;
 use code_core::config_types::Notice;
 use code_core::config_types::ReasoningEffort;
 use code_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
@@ -22,6 +23,7 @@ use code_core::config::ConfigToml;
 use code_core::config::find_code_home;
 use code_core::config::load_config_as_toml;
 use code_core::config::load_config_as_toml_with_cli_overrides;
+use code_core::ConversationManager;
 use code_core::protocol::AskForApproval;
 use code_core::protocol::SandboxPolicy;
 use code_core::config_types::CachedTerminalBackground;
@@ -31,9 +33,11 @@ use code_core::config_types::ThemeName;
 use regex_lite::Regex;
 use code_login::AuthMode;
 use code_login::CodexAuth;
+use code_app_server::run_broker_with_manager;
 use model_migration::{migration_copy_for_key, run_model_migration_prompt, ModelMigrationOutcome};
 use code_ollama::DEFAULT_OSS_MODEL;
 use code_protocol::config_types::SandboxMode;
+use code_protocol::protocol::SessionSource;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,6 +61,7 @@ mod account_label;
 mod bottom_pane;
 mod chrome_launch;
 mod chatwidget;
+mod conversation_backend;
 mod citation_regex;
 mod cloud_tasks_service;
 mod cli;
@@ -443,7 +448,7 @@ pub async fn run_main(
         cwd,
         model_provider: model_provider_override,
         config_profile: cli.config_profile.clone(),
-        code_linux_sandbox_exe,
+        code_linux_sandbox_exe: code_linux_sandbox_exe.clone(),
         base_instructions: None,
         include_plan_tool: Some(true),
         include_apply_patch_tool: None,
@@ -522,6 +527,23 @@ pub async fn run_main(
     };
 
     config.demo_developer_message = cli.demo_developer_message.clone();
+
+    if cli.app_server_broker {
+        let auth_manager = AuthManager::shared_with_mode_and_originator(
+            config.code_home.clone(),
+            AuthMode::ApiKey,
+            config.responses_originator_header.clone(),
+        );
+        let conversation_manager = Arc::new(ConversationManager::new(
+            auth_manager,
+            SessionSource::Mcp,
+        ));
+        let config = Arc::new(config);
+        run_broker_with_manager(config, conversation_manager, code_linux_sandbox_exe)
+            .await
+            .map_err(|err| std::io::Error::other(format!("broker failed: {err}")))?;
+        return Ok(empty_exit_summary());
+    }
 
     let cli_model_override = cli.model.is_some()
         || cli_kv_overrides
@@ -717,6 +739,7 @@ pub async fn run_main(
     };
 
     let cli_overrides = Arc::new(cli_kv_overrides.clone());
+    let config_overrides = Arc::new(overrides.clone());
     let run_result = run_ratatui_app(
         cli,
         config,
@@ -725,6 +748,7 @@ pub async fn run_main(
         latest_upgrade_version,
         theme_configured_explicitly,
         cli_overrides,
+        config_overrides,
     );
 
     if let Some(handle) = housekeeping_handle {
@@ -785,6 +809,7 @@ fn run_ratatui_app(
     latest_upgrade_version: Option<String>,
     theme_configured_explicitly: bool,
     cli_overrides: Arc<Vec<(String, toml::Value)>>,
+    config_overrides: Arc<ConfigOverrides>,
 ) -> color_eyre::Result<ExitSummary> {
     color_eyre::install()?;
     install_unified_panic_hook();
@@ -832,6 +857,7 @@ fn run_ratatui_app(
         startup_footer_notice,
         latest_upgrade_version,
         cli_overrides,
+        config_overrides,
     );
 
     let app_result = app.run(&mut terminal);

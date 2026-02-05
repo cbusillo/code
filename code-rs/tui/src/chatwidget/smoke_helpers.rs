@@ -10,7 +10,7 @@ use crate::bottom_pane::SettingsSection;
 use crossterm::event::KeyEvent;
 use code_auto_drive_core::AutoRunPhase;
 use code_core::config::{Config, ConfigOverrides, ConfigToml};
-use code_core::ConversationManager;
+use crate::conversation_backend::ConversationBackend;
 use code_core::history::state::HistoryRecord;
 use code_core::history::state::ExecStatus;
 use code_core::protocol::{BackgroundEventEvent, Event, EventMsg, OrderMeta};
@@ -105,9 +105,8 @@ impl ChatWidgetHarness {
             AuthMode::ApiKey,
             cfg.responses_originator_header.clone(),
         );
-        let conversation_manager = Arc::new(ConversationManager::new(
-            auth_manager.clone(),
-            SessionSource::Cli,
+        let conversation_backend = ConversationBackend::local(Arc::new(
+            code_core::ConversationManager::new(auth_manager.clone(), SessionSource::Cli),
         ));
 
         let runtime = &*TEST_RUNTIME;
@@ -116,7 +115,7 @@ impl ChatWidgetHarness {
         let chat = ChatWidget::new(
             cfg,
             app_event_tx,
-            conversation_manager,
+            conversation_backend,
             auth_manager,
             None,
             Vec::new(),
