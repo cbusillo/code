@@ -840,10 +840,17 @@ fn run_ratatui_app(
         order,
         timing,
         resume_picker,
-        resume_last: _,
-        resume_session_id: _,
+        resume_last,
+        resume_session_id,
         ..
     } = cli;
+    let resume_requested = resume_picker || resume_last || resume_session_id.is_some();
+    if !resume_requested && config.experimental_resume.is_some() {
+        tracing::warn!(
+            "Ignoring experimental_resume because resume was not explicitly requested"
+        );
+        config.experimental_resume = None;
+    }
     let mut app = App::new(
         config.clone(),
         prompt,
