@@ -778,6 +778,20 @@ impl Default for AppServerConfig {
     }
 }
 
+/// Settings that control update discovery and upgrade commands.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct UpdateSettings {
+    /// Optional GitHub repo slug (owner/name) used for update checks.
+    #[serde(default)]
+    pub release_repo: Option<String>,
+    /// Optional URL to use in manual upgrade instructions.
+    #[serde(default)]
+    pub release_url: Option<String>,
+    /// Optional command (argv) to run for upgrades.
+    #[serde(default)]
+    pub upgrade_command: Option<Vec<String>>,
+}
+
 /// User acknowledgements for in-product notices (distinct from notifications).
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Notice {

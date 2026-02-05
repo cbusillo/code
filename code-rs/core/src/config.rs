@@ -27,6 +27,7 @@ use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::TextVerbosity;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
+use crate::config_types::UpdateSettings;
 use crate::config_types::ConfirmGuardConfig;
 use crate::config_types::Personality;
 use crate::config_types::DEFAULT_OTEL_ENVIRONMENT;
@@ -233,6 +234,9 @@ pub struct Config {
     /// that originally installed the CLI (Homebrew or npm). Manual installs are
     /// never upgraded automatically.
     pub auto_upgrade_enabled: bool,
+
+    /// Update configuration for release discovery and upgrade commands.
+    pub updates: UpdateSettings,
 
     /// User-provided instructions from AGENTS.md.
     pub user_instructions: Option<String>,
@@ -553,6 +557,10 @@ pub struct ConfigToml {
     /// Enable silent upgrades during startup when a newer release is available.
     #[serde(default, deserialize_with = "deserialize_option_bool_from_maybe_string")]
     pub auto_upgrade_enabled: Option<bool>,
+
+    /// Optional update configuration for release discovery and upgrade commands.
+    #[serde(default)]
+    pub updates: Option<UpdateSettings>,
 
     /// Optional external command to spawn for end-user notifications.
     #[serde(default)]
@@ -1402,6 +1410,7 @@ impl Config {
                 .or(disable_response_storage)
                 .unwrap_or(false),
             auto_upgrade_enabled: cfg.auto_upgrade_enabled.unwrap_or(false),
+            updates: cfg.updates.unwrap_or_default(),
             notify: cfg.notify,
             notices: cfg.notice.unwrap_or_default(),
             user_instructions,

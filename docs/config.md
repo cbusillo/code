@@ -194,6 +194,37 @@ Alternatively, you can have the model run until it is done, and never ask to run
 approval_policy = "never"
 ```
 
+## app_server
+
+Controls the shared broker used for live streaming across multiple TUIs and the WebUI.
+
+```toml
+[app_server]
+enabled = true
+# Optional Unix socket path. Defaults to "$CODE_HOME/app-server.sock".
+# listen = "/Users/you/.code/app-server.sock"
+```
+
+When enabled, `code` starts a broker daemon on the socket path (Unix only).
+
+## gateway
+
+Configures the HTTP gateway that serves the WebUI.
+
+```toml
+[gateway]
+auto_start = true
+bind = "127.0.0.1:3210"
+# Connect the gateway to the broker ("auto" uses app_server.listen).
+broker = "auto" # or "off" or an explicit socket path
+```
+
+When `auto_start = true`, the TUI will start the gateway in-process. If
+`gateway.broker` is set (`auto` or a socket path), the gateway connects to the
+broker so the WebUI follows shared sessions. In broker mode, keep
+`gateway.broker = "auto"` (or the explicit socket path) to avoid falling back
+to a local-only gateway.
+
 ## agents
 
 Use `[[agents]]` blocks to register additional CLI programs that Code can launch as peers. Each block maps a short `name` (referenced elsewhere in the config) to the command to execute, optional default flags, and environment variables.
@@ -801,6 +832,31 @@ notify = ["python3", "/Users/mbolin/.code/notify.py"]
 > [!NOTE]
 > Use `notify` for automation and integrations: Code invokes your external program with a single JSON argument for each event, independent of the TUI. If you only want lightweight desktop notifications while using the TUI, prefer `tui.notifications`, which uses terminal escape codes and requires no external program. You can enable both; `tui.notifications` covers in‑TUI alerts (e.g., approval prompts), while `notify` is best for system‑level hooks or custom notifiers. Currently, `notify` emits only `agent-turn-complete`, whereas `tui.notifications` supports `agent-turn-complete` and `approval-requested` with optional filtering.
 
+## Updates
+
+Control where Code checks for releases and which command it should run to upgrade.
+
+```toml
+# Enable silent upgrades (uses upgrade_command or a detected package manager).
+auto_upgrade_enabled = true
+
+[updates]
+# GitHub repo used for update checks (owner/name).
+release_repo = "cbusillo/code"
+# Optional override for the release page shown in manual instructions.
+release_url = "https://github.com/cbusillo/code/releases/latest"
+# Optional explicit upgrade command (argv).
+upgrade_command = ["brew", "upgrade", "code"]
+```
+
+To use the bundled installer script instead of a package manager:
+
+```toml
+[updates]
+release_repo = "cbusillo/code"
+upgrade_command = ["bash", "-lc", "curl -fsSL https://github.com/cbusillo/code/releases/latest/download/install.sh | bash"]
+```
+
 ## history
 
 By default, the Code CLI records messages sent to the model in `$CODE_HOME/history.jsonl` (legacy `$CODEX_HOME/history.jsonl` is also read). On UNIX, the file permissions are set to `o600`, so it should only be readable and writable by the owner.
@@ -1001,6 +1057,10 @@ Project commands appear in the TUI via `/cmd <name>` and run through the standar
 | `sandbox_workspace_write.exclude_tmpdir_env_var` | boolean | Exclude `$TMPDIR` from writable roots (default: false). |
 | `sandbox_workspace_write.exclude_slash_tmp` | boolean | Exclude `/tmp` from writable roots (default: false). |
 | `disable_response_storage` | boolean | Required for ZDR orgs. |
+| `auto_upgrade_enabled` | boolean | Enable silent upgrades on startup (default: false). |
+| `updates.release_repo` | string | GitHub repo slug for update checks (owner/name). |
+| `updates.release_url` | string | Release page URL for manual upgrade instructions. |
+| `updates.upgrade_command` | array<string> | Explicit upgrade command (argv). |
 | `notify` | array<string> | External program for notifications. |
 | `instructions` | string | Currently ignored; use `experimental_instructions_file` or `AGENTS.md`. |
 | `mcp_servers.<id>.command` | string | MCP server launcher command. |
