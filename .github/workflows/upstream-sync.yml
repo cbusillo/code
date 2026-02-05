@@ -26,6 +26,10 @@ name: Upstream Sync (Mirror + PR)
         description: 'Version file to watch for upstream bumps'
         required: false
         default: 'codex-cli/package.json'
+      auto_merge:
+        description: 'Auto-merge PR when mergeable and clean'
+        required: false
+        default: 'true'
 
 permissions:
   contents: write
@@ -51,6 +55,8 @@ jobs:
         ${{ inputs.webui_branch || 'webui-main' }}
       VERSION_FILE: >-
         ${{ inputs.version_file || 'codex-cli/package.json' }}
+      AUTO_MERGE: >-
+        ${{ inputs.auto_merge || 'true' }}
     steps:
       - name: Check out repository (full history)
         uses: actions/checkout@v4
@@ -192,6 +198,7 @@ jobs:
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
           UPSTREAM_VERSION: ${{ steps.version.outputs.upstream_version }}
           WEBUI_VERSION: ${{ steps.version.outputs.webui_version }}
+          AUTO_MERGE: ${{ env.AUTO_MERGE }}
         with:
           github-token: ${{ secrets.CODE_GH_PAT || github.token }}
           script: |
@@ -199,6 +206,9 @@ jobs:
             const repo = context.repo.repo;
             const head = `${owner}:${process.env.MIRROR_BRANCH}`;
             const base = process.env.WEBUI_BRANCH;
+            const autoMerge = (process.env.AUTO_MERGE || 'true')
+              .toLowerCase();
+            const shouldMerge = ['1', 'true', 'yes'].includes(autoMerge);
 
             const existing = await github.rest.pulls.list({
               owner,
@@ -208,8 +218,55 @@ jobs:
               state: 'open'
             });
 
+            const waitForMergeable = async (prNumber) => {
+              let last = null;
+              for (let i = 0; i < 6; i += 1) {
+                const resp = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: prNumber
+                });
+                last = resp.data;
+                if (resp.data.mergeable !== null) {
+                  return resp.data;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+              }
+              return last;
+            };
+
+            const tryAutoMerge = async (prNumber) => {
+              if (!shouldMerge) {
+                return;
+              }
+              const pr = await waitForMergeable(prNumber);
+              if (!pr) {
+                core.notice('Auto-merge skipped: PR not found.');
+                return;
+              }
+              const clean = pr.mergeable === true
+                && pr.mergeable_state === 'clean'
+                && !pr.draft;
+              if (!clean) {
+                core.notice(
+                  `Auto-merge skipped: state=${pr.mergeable_state}, `
+                    + `mergeable=${pr.mergeable}, draft=${pr.draft}`
+                );
+                return;
+              }
+              await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number: prNumber,
+                merge_method: 'merge'
+              });
+              core.notice(`Auto-merged PR #${prNumber}`);
+            };
+
             if (existing.data.length) {
-              core.notice(`PR already open: #${existing.data[0].number}`);
+              const prNumber = existing.data[0].number;
+              core.notice(`PR already open: #${prNumber}`);
+              await tryAutoMerge(prNumber);
               return;
             }
 
@@ -236,3 +293,4 @@ jobs:
               body
             });
             core.notice(`Opened PR #${pr.data.number}`);
+            await tryAutoMerge(pr.data.number);
