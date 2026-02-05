@@ -1,0 +1,238 @@
+---
+name: Upstream Sync (Mirror + PR)
+
+"on":
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: 'Upstream repo (owner/name)'
+        required: false
+        default: 'just-every/code'
+      upstream_branch:
+        description: 'Upstream branch'
+        required: false
+        default: 'main'
+      mirror_branch:
+        description: 'Mirror branch on this fork'
+        required: false
+        default: 'main'
+      webui_branch:
+        description: 'Branch that carries WebUI changes'
+        required: false
+        default: 'webui-main'
+      version_file:
+        description: 'Version file to watch for upstream bumps'
+        required: false
+        default: 'codex-cli/package.json'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror upstream and open PR on version bump
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UPSTREAM_REPO: >-
+        ${{ inputs.upstream_repo || 'just-every/code' }}
+      UPSTREAM_BRANCH: >-
+        ${{ inputs.upstream_branch || 'main' }}
+      MIRROR_BRANCH: >-
+        ${{ inputs.mirror_branch || 'main' }}
+      WEBUI_BRANCH: >-
+        ${{ inputs.webui_branch || 'webui-main' }}
+      VERSION_FILE: >-
+        ${{ inputs.version_file || 'codex-cli/package.json' }}
+    steps:
+      - name: Check out repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure authenticated origin for pushes
+        env:
+          GH_TOKEN: ${{ secrets.CODE_GH_PAT || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+      - name: Set git identity for commits
+        run: |
+          git config user.name "just-every-code"
+          git config user.email "code@justevery.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Fetch upstream and fork branches
+        id: fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" \
+            2>/dev/null || true
+          git fetch --no-tags --prune origin \
+            "${MIRROR_BRANCH}" "${WEBUI_BRANCH}"
+          git fetch --no-tags --prune upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:" \
+            "refs/remotes/upstream/${UPSTREAM_BRANCH}"
+
+      - name: Fast-forward mirror branch
+        id: mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          mirror_ref="refs/remotes/origin/${MIRROR_BRANCH}"
+
+          mirror_exists=false
+          if git show-ref --verify --quiet "$mirror_ref"; then
+            mirror_exists=true
+          fi
+
+          if [ "$mirror_exists" != true ]; then
+            git checkout -B "${MIRROR_BRANCH}" "upstream/${UPSTREAM_BRANCH}"
+            git push origin "${MIRROR_BRANCH}"
+            echo "mirror_updated=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "origin/${MIRROR_BRANCH}" \
+            "upstream/${UPSTREAM_BRANCH}"; then
+            msg="Mirror branch '${MIRROR_BRANCH}' has diverged from upstream."
+            echo "$msg" >&2
+            echo "Refusing to overwrite." >&2
+            echo "mirror_updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse "origin/${MIRROR_BRANCH}" == \
+            git rev-parse "upstream/${UPSTREAM_BRANCH}"; then
+            echo "mirror_updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout -B "${MIRROR_BRANCH}" "origin/${MIRROR_BRANCH}"
+          git merge --ff-only "upstream/${UPSTREAM_BRANCH}"
+          git push origin "${MIRROR_BRANCH}"
+          echo "mirror_updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Detect upstream version bump
+        id: version
+        shell: bash
+        env:
+          MIRROR_UPDATED: ${{ steps.mirror.outputs.mirror_updated || 'false' }}
+        run: |
+          set -euo pipefail
+          upstream_ref="upstream/${UPSTREAM_BRANCH}:${VERSION_FILE}"
+          webui_ref="origin/${WEBUI_BRANCH}:${VERSION_FILE}"
+          upstream_json=$(git show "$upstream_ref" 2>/dev/null || true)
+          webui_json=$(git show "$webui_ref" 2>/dev/null || true)
+          upstream_version=$(
+            printf '%s' "$upstream_json" \
+              | jq -r '.version // empty' \
+              || true
+          )
+          webui_version=$(
+            printf '%s' "$webui_json" \
+              | jq -r '.version // empty' \
+              || true
+          )
+
+          version_bump=false
+          if [ -n "$upstream_version" ] && [ -n "$webui_version" ] \
+            && [ "$upstream_version" != "$webui_version" ]; then
+            version_bump=true
+          fi
+
+          diff_count=$(
+            git diff --name-only \
+              "origin/${WEBUI_BRANCH}...${MIRROR_BRANCH}" \
+              | wc -l \
+              | tr -d ' '
+          )
+          has_diff=false
+          if [ "$diff_count" -gt 0 ]; then
+            has_diff=true
+          fi
+
+          {
+            echo "version_bump=$version_bump";
+            echo "has_diff=$has_diff";
+            echo "upstream_version=$upstream_version";
+            echo "webui_version=$webui_version";
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Upstream Sync Summary";
+            echo "- mirror_updated: ${MIRROR_UPDATED:-false}";
+            echo "- version_bump: $version_bump";
+            echo "- upstream_version: ${upstream_version:-<unknown>}";
+            echo "- webui_version: ${webui_version:-<unknown>}";
+            echo "- diff_count: $diff_count";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open PR from mirror to WebUI branch
+        if: >-
+          steps.version.outputs.version_bump == 'true' &&
+          steps.version.outputs.has_diff == 'true'
+        uses: actions/github-script@v7
+        env:
+          MIRROR_BRANCH: ${{ env.MIRROR_BRANCH }}
+          WEBUI_BRANCH: ${{ env.WEBUI_BRANCH }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
+          UPSTREAM_VERSION: ${{ steps.version.outputs.upstream_version }}
+          WEBUI_VERSION: ${{ steps.version.outputs.webui_version }}
+        with:
+          github-token: ${{ secrets.CODE_GH_PAT || github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = `${owner}:${process.env.MIRROR_BRANCH}`;
+            const base = process.env.WEBUI_BRANCH;
+
+            const existing = await github.rest.pulls.list({
+              owner,
+              repo,
+              head,
+              base,
+              state: 'open'
+            });
+
+            if (existing.data.length) {
+              core.notice(`PR already open: #${existing.data[0].number}`);
+              return;
+            }
+
+            const upstreamVersion = process.env.UPSTREAM_VERSION || 'unknown';
+            const webuiVersion = process.env.WEBUI_VERSION || 'unknown';
+            const title =
+              `Sync upstream ${upstreamVersion} (from ${webuiVersion})`;
+            const body = [
+              `Upstream version bump detected in ${process.env.UPSTREAM_REPO}` +
+                `@${process.env.UPSTREAM_BRANCH}.`,
+              '',
+              `- Upstream version: ${upstreamVersion}`,
+              `- WebUI branch version: ${webuiVersion}`,
+              '',
+              `This PR merges ${process.env.MIRROR_BRANCH} into ${base}.`
+            ].join('\n');
+
+            const pr = await github.rest.pulls.create({
+              owner,
+              repo,
+              head,
+              base,
+              title,
+              body
+            });
+            core.notice(`Opened PR #${pr.data.number}`);
