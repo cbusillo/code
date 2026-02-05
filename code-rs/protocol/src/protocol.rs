@@ -13,8 +13,10 @@ use std::time::Duration;
 use crate::ConversationId;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use crate::config_types::Verbosity as TextVerbosityConfig;
 use crate::custom_prompts::CustomPrompt;
-use crate::dynamic_tools::{DynamicToolCallRequest, DynamicToolResponse};
+use crate::dynamic_tools::{DynamicToolCallRequest, DynamicToolResponse, DynamicToolSpec};
+use crate::model_provider_info::ModelProviderInfo;
 use crate::skills::Skill;
 use crate::message_history::HistoryEntry;
 use crate::models::ContentItem;
@@ -55,15 +57,102 @@ pub struct Submission {
     pub op: Op,
 }
 
+/// High-level toggles for validation checks.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationGroup {
+    Functional,
+    Stylistic,
+}
+
+/// Optional structured output format for `text.format` in the Responses API.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, TS)]
+pub struct TextFormat {
+    #[serde(rename = "type")]
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
+}
+
 /// Submission operation
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 #[non_exhaustive]
 pub enum Op {
+    /// Configure the model session.
+    ConfigureSession {
+        /// Provider identifier ("openai", "openrouter", ...).
+        provider: ModelProviderInfo,
+
+        /// If not specified, server will use its default model.
+        model: String,
+
+        /// True when the model choice is explicitly set by the user.
+        #[serde(default)]
+        model_explicit: bool,
+
+        model_reasoning_effort: ReasoningEffortConfig,
+        /// Optional user-preferred reasoning effort for the chat model.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        preferred_model_reasoning_effort: Option<ReasoningEffortConfig>,
+        model_reasoning_summary: ReasoningSummaryConfig,
+        model_text_verbosity: TextVerbosityConfig,
+
+        /// Model instructions that are appended to the base instructions.
+        user_instructions: Option<String>,
+
+        /// Base instructions override.
+        base_instructions: Option<String>,
+
+        /// When to escalate for approval for execution
+        approval_policy: AskForApproval,
+        /// How to sandbox commands executed in the system
+        sandbox_policy: SandboxPolicy,
+        /// Disable server-side response storage (send full context each request)
+        #[serde(default)]
+        disable_response_storage: bool,
+
+        /// Optional external notifier command tokens.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        notify: Option<Vec<String>>,
+
+        /// Working directory treated as the session root.
+        cwd: PathBuf,
+
+        /// Path to a rollout file to resume from.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume_path: Option<PathBuf>,
+
+        /// Optional developer-role message to prepend to every turn for demos.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        demo_developer_message: Option<String>,
+
+        /// Dynamic tools to include for this session.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dynamic_tools: Vec<DynamicToolSpec>,
+    },
+
     /// Abort current task.
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
+
+    /// Cancel running agents immediately without waiting for a tool call.
+    CancelAgents {
+        /// Agent batch identifiers to cancel.
+        #[serde(default)]
+        batch_ids: Vec<String>,
+        /// Specific agent identifiers to cancel when no batch is available.
+        #[serde(default)]
+        agent_ids: Vec<String>,
+    },
 
     /// Input from the user
     UserInput {
@@ -79,6 +168,11 @@ pub enum Op {
     QueueUserInput {
         /// User input items, see `InputItem`
         items: Vec<InputItem>,
+    },
+
+    /// Set a one-off text format to apply on the next turn.
+    SetNextTextFormat {
+        format: TextFormat,
     },
 
     /// Similar to [`Op::UserInput`], but contains additional context required
@@ -188,6 +282,18 @@ pub enum Op {
         response: DynamicToolResponse,
     },
 
+    /// Update a specific validation tool toggle for the session.
+    UpdateValidationTool {
+        name: String,
+        enable: bool,
+    },
+
+    /// Update a validation group toggle for the session.
+    UpdateValidationGroup {
+        group: ValidationGroup,
+        enable: bool,
+    },
+
     /// Append an entry to the persistent cross-session message history.
     ///
     /// Note the entry is not guaranteed to be logged if the user has
@@ -200,6 +306,17 @@ pub enum Op {
     /// Persist the full chat history snapshot for the current session.
     PersistHistorySnapshot {
         snapshot: serde_json::Value,
+    },
+
+    /// Execute a project-scoped custom command defined in configuration.
+    RunProjectCommand {
+        name: String,
+    },
+
+    /// Internally queue a developer-role message to be included in the next turn.
+    AddPendingInputDeveloper {
+        /// The developer message text to add to pending input.
+        text: String,
     },
 
     /// Request a single history entry identified by `log_id` + `offset`.
@@ -461,7 +578,7 @@ impl SandboxPolicy {
 
 /// User input
 #[non_exhaustive]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text {

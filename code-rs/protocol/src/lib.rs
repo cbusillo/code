@@ -5,6 +5,7 @@ pub mod skills;
 pub mod mcp_protocol;
 pub mod message_history;
 pub mod models;
+pub mod model_provider_info;
 pub mod openai_models;
 pub mod num_format;
 pub mod parse_command;

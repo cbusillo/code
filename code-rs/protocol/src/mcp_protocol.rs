@@ -159,6 +159,11 @@ pub enum ClientRequest {
         request_id: RequestId,
         params: SendUserTurnParams,
     },
+    SubmitOp {
+        #[serde(rename = "id")]
+        request_id: RequestId,
+        params: SubmitOpParams,
+    },
     InterruptConversation {
         #[serde(rename = "id")]
         request_id: RequestId,
@@ -633,6 +638,19 @@ pub struct SendUserTurnParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
     pub summary: ReasoningSummary,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitOpParams {
+    pub conversation_id: ConversationId,
+    pub op: crate::protocol::Op,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitOpResponse {
+    pub submission_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
