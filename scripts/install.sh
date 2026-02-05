@@ -123,7 +123,8 @@ if curl -fsSL "${BASE_URL}/SHA256SUMS.txt" -o "${TMP_DIR}/SHA256SUMS.txt"; then
 fi
 
 tar -C "$TMP_DIR" -xzf "${TMP_DIR}/${ASSET}"
-BIN_SRC="$(find "$TMP_DIR" -maxdepth 1 -type f -name 'code-*' | head -n 1)"
+rm -f "${TMP_DIR:?}/${ASSET}"
+BIN_SRC="$(find "$TMP_DIR" -maxdepth 1 -type f -name 'code-*' ! -name '*.tar.gz' -perm -111 | head -n 1)"
 if [[ -z "$BIN_SRC" ]]; then
 	echo "Unable to find extracted binary." >&2
 	exit 1
