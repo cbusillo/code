@@ -27,7 +27,7 @@ use code_core::protocol::{
     Event, Op, ReviewDecision as CoreReviewDecision, RequestUserInputResponse,
 };
 use code_protocol::ConversationId;
-use code_protocol::dynamic_tools::DynamicToolResponse;
+use code_protocol::dynamic_tools::DynamicToolResponse as WireDynamicToolResponse;
 use code_protocol::mcp_protocol::{
     AddConversationListenerParams, AddConversationSubscriptionResponse, ApplyPatchApprovalResponse,
     AuthMode, ClientInfo, ClientRequest, DynamicToolCallResponse,
@@ -2408,7 +2408,7 @@ async fn handle_client_message(hub: &ConversationHub, message: ClientMessage) ->
             output,
             success,
         } => {
-            let response = DynamicToolResponse {
+            let response = WireDynamicToolResponse {
                 call_id: call_id.clone(),
                 output,
                 success,
