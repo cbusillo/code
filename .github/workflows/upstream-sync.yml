@@ -82,9 +82,9 @@ jobs:
             2>/dev/null || true
           git fetch --no-tags --prune origin \
             "${MIRROR_BRANCH}" "${WEBUI_BRANCH}"
-          git fetch --no-tags --prune upstream \
-            "+refs/heads/${UPSTREAM_BRANCH}:" \
-            "refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          upstream_refspec="+refs/heads/${UPSTREAM_BRANCH}:"
+          upstream_refspec+="refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          git fetch --no-tags --prune upstream "$upstream_refspec"
 
       - name: Fast-forward mirror branch
         id: mirror
