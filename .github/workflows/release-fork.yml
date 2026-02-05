@@ -147,7 +147,38 @@ jobs:
         shell: bash
         run: |
           cd "${RUST_WORKSPACE_DIR}"
-          cargo build --release --locked --target "${{ matrix.target }}" --bin code
+          cargo build --release --locked --target "${{ matrix.target }}" --bin code --bin code-gateway
+
+      - name: Smoke test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          target="${{ matrix.target }}"
+          should_run=false
+          case "$target" in
+            *x86_64*)
+              if [[ "$arch" == "x86_64" ]]; then
+                should_run=true
+              fi
+              ;;
+            *aarch64*|*arm64*)
+              if [[ "$arch" == "arm64" || "$arch" == "aarch64" ]]; then
+                should_run=true
+              fi
+              ;;
+          esac
+
+          if [[ "$should_run" != true ]]; then
+            echo "Skipping smoke tests; host arch $arch not compatible with target $target"
+            exit 0
+          fi
+
+          code_bin="${RUST_WORKSPACE_DIR}/target/${{ matrix.target }}/release/code"
+          gateway_bin="${RUST_WORKSPACE_DIR}/target/${{ matrix.target }}/release/code-gateway"
+          "$code_bin" --help >/dev/null
+          "$code_bin" --version >/dev/null
+          "$gateway_bin" --help >/dev/null
 
       - name: Prepare artifacts
         shell: bash
