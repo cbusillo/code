@@ -50,6 +50,44 @@ pub(crate) struct HistoryChunk {
     pub(crate) truncated: bool,
 }
 
+fn is_system_status_rollout_line(value: &serde_json::Value) -> bool {
+    let Some(typ) = value.get("type").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if typ != "response_item" {
+        return false;
+    }
+    let Some(payload) = value.get("payload") else {
+        return false;
+    };
+    let Some(message_type) = payload.get("type").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if message_type != "message" {
+        return false;
+    }
+    let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    if role != "user" {
+        return false;
+    }
+    let Some(content) = payload.get("content").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let mut text = String::new();
+    for item in content {
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if item_type == "input_text" || item_type == "output_text" {
+            if let Some(snippet) = item.get("text").and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(snippet);
+            }
+        }
+    }
+    text.trim_start().starts_with("== System Status ==")
+}
+
 pub(crate) async fn load_rollout_snapshot_with_limit(
     code_home: &Path,
     conversation_id: &ConversationId,
@@ -97,6 +135,10 @@ pub(crate) async fn load_rollout_snapshot_from_path_with_limit_and_total(
         let line_bytes = line.as_bytes().len();
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(value) => {
+                if is_system_status_rollout_line(&value) {
+                    index = index.saturating_add(1);
+                    continue;
+                }
                 rollout.push_back((index, value, line_bytes));
             }
             Err(err) => warn!("failed to parse rollout line: {err}"),
@@ -169,8 +211,10 @@ pub(crate) async fn load_history_chunk_from_path(
             }
             let line_bytes = line.as_bytes().len();
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                items.push_back((index, value, line_bytes));
-                bytes_read = bytes_read.saturating_add(line_bytes);
+                if !is_system_status_rollout_line(&value) {
+                    items.push_back((index, value, line_bytes));
+                    bytes_read = bytes_read.saturating_add(line_bytes);
+                }
             }
             index = index.saturating_add(1);
 
@@ -192,8 +236,10 @@ pub(crate) async fn load_history_chunk_from_path(
             }
             let line_bytes = line.as_bytes().len();
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                items.push_back((index, value, line_bytes));
-                bytes_read = bytes_read.saturating_add(line_bytes);
+                if !is_system_status_rollout_line(&value) {
+                    items.push_back((index, value, line_bytes));
+                    bytes_read = bytes_read.saturating_add(line_bytes);
+                }
             }
             index = index.saturating_add(1);
 
@@ -557,8 +603,10 @@ async fn load_history_chunk_from_index(
         }
         let line_bytes = line.as_bytes().len();
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            items.push_back((index_cursor, value, line_bytes));
-            bytes_read = bytes_read.saturating_add(line_bytes);
+            if !is_system_status_rollout_line(&value) {
+                items.push_back((index_cursor, value, line_bytes));
+                bytes_read = bytes_read.saturating_add(line_bytes);
+            }
         }
         index_cursor = index_cursor.saturating_add(1);
 

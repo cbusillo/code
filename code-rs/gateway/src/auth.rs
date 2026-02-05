@@ -21,7 +21,11 @@ pub(crate) fn enforce_auth(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_string())
     });
-    if header_token.as_deref() == Some(expected) || query_token == Some(expected) {
+    let cookie_token = extract_cookie_token(headers, "codeGatewayToken");
+    if header_token.as_deref() == Some(expected)
+        || query_token == Some(expected)
+        || cookie_token.as_deref() == Some(expected)
+    {
         Ok(())
     } else {
         Err(error_response(
@@ -42,6 +46,21 @@ pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     } else {
         None
     }
+}
+
+pub(crate) fn extract_cookie_token(headers: &HeaderMap, key: &str) -> Option<String> {
+    let cookies = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    for chunk in cookies.split(';') {
+        let mut parts = chunk.trim().splitn(2, '=');
+        let name = parts.next()?.trim();
+        let value = parts.next().unwrap_or("").trim();
+        if name == key {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 pub(crate) fn encode_cookie_value(value: &str) -> String {

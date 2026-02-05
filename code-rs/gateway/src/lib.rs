@@ -209,6 +209,13 @@ enum ClientMessage {
         conversation_id: String,
         params: Option<NewConversationParams>,
     },
+    RenameConversation {
+        conversation_id: String,
+        nickname: Option<String>,
+    },
+    DeleteConversation {
+        conversation_id: String,
+    },
     HistoryRequest {
         before: Option<usize>,
         after: Option<usize>,
@@ -313,6 +320,16 @@ pub async fn run_main() -> Result<()> {
 
     let bind_addr: SocketAddr = resolve_gateway_bind(&config, cli.bind.as_deref())?;
     let broker_path = broker_path_from_config(&config, cli.broker.as_deref());
+    let broker_path = broker_path.and_then(|socket_path| {
+        if broker_available(&socket_path) {
+            Some(socket_path)
+        } else {
+            warn!(
+                "Gateway broker unavailable at {socket_path:?}; falling back to local mode"
+            );
+            None
+        }
+    });
     let backend = if let Some(socket_path) = broker_path {
         info!("Gateway connecting via broker at {socket_path:?}");
         GatewayBackend::Broker { socket_path }
@@ -382,6 +399,33 @@ pub async fn run_with_manager(
         backend: GatewayBackend::Local {
             conversation_manager,
         },
+        token: token.clone(),
+        control_updates,
+        webui_dev: None,
+        advertised_host: String::new(),
+    };
+
+    serve_gateway(state, bind_addr, &token_display, false).await
+}
+
+pub async fn run_with_broker(
+    config: Arc<Config>,
+    cli_overrides: Arc<Vec<(String, toml::Value)>>,
+    bind_addr: SocketAddr,
+    token: Option<String>,
+    socket_path: PathBuf,
+) -> Result<()> {
+    raise_open_file_limit();
+    let token = load_or_create_gateway_token(&config.code_home, token);
+    let token_display = token.clone().unwrap_or_default();
+    if !token_display.is_empty() {
+        info!("Gateway token: {token_display}");
+    }
+    let (control_updates, _) = broadcast::channel(32);
+    let state = GatewayState {
+        config,
+        cli_overrides,
+        backend: GatewayBackend::Broker { socket_path },
         token: token.clone(),
         control_updates,
         webui_dev: None,
@@ -922,6 +966,43 @@ async fn list_conversations_data(
     .map_err(|err| format!("failed to build session list: {err}"))
 }
 
+async fn rename_conversation_data(
+    state: &GatewayState,
+    conversation_id: &str,
+    nickname: Option<String>,
+) -> Result<(), String> {
+    let session_id = Uuid::parse_str(conversation_id)
+        .map_err(|_| "invalid conversation id".to_string())?;
+    let nickname = nickname.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let catalog = SessionCatalog::new(state.config.code_home.clone());
+    match catalog.set_nickname(session_id, nickname).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("session not found".to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn delete_conversation_data(
+    state: &GatewayState,
+    conversation_id: &str,
+) -> Result<(), String> {
+    let session_id = Uuid::parse_str(conversation_id)
+        .map_err(|_| "invalid conversation id".to_string())?;
+    let catalog = SessionCatalog::new(state.config.code_home.clone());
+    match catalog.set_deleted(session_id, true).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("session not found".to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 async fn new_conversation_data(
     state: &GatewayState,
     params: Option<NewConversationParams>,
@@ -1243,6 +1324,31 @@ async fn handle_control_socket(state: GatewayState, socket: WebSocket) {
                                 .await;
                         }
                     },
+                    ClientMessage::RenameConversation {
+                        conversation_id,
+                        nickname,
+                    } => match rename_conversation_data(&state, &conversation_id, nickname).await {
+                        Ok(()) => {
+                            broadcast_sessions_update(&state).await;
+                        }
+                        Err(err) => {
+                            let _ = outgoing_tx
+                                .send(ServerMessage::Error { message: err })
+                                .await;
+                        }
+                    },
+                    ClientMessage::DeleteConversation { conversation_id } => {
+                        match delete_conversation_data(&state, &conversation_id).await {
+                            Ok(()) => {
+                                broadcast_sessions_update(&state).await;
+                            }
+                            Err(err) => {
+                                let _ = outgoing_tx
+                                    .send(ServerMessage::Error { message: err })
+                                    .await;
+                            }
+                        }
+                    }
                     _ => {
                         let _ = outgoing_tx
                             .send(ServerMessage::Error {
@@ -2314,7 +2420,9 @@ async fn handle_client_message(hub: &ConversationHub, message: ClientMessage) ->
         }
         ClientMessage::ListConversations { .. }
         | ClientMessage::NewConversation { .. }
-        | ClientMessage::ResumeConversation { .. } => {
+        | ClientMessage::ResumeConversation { .. }
+        | ClientMessage::RenameConversation { .. }
+        | ClientMessage::DeleteConversation { .. } => {
             return Err("session management must be handled by the websocket host".to_string());
         }
         ClientMessage::HistoryRequest { .. } => {
@@ -2362,7 +2470,9 @@ async fn handle_broker_client_message(
         }
         ClientMessage::ListConversations { .. }
         | ClientMessage::NewConversation { .. }
-        | ClientMessage::ResumeConversation { .. } => {
+        | ClientMessage::ResumeConversation { .. }
+        | ClientMessage::RenameConversation { .. }
+        | ClientMessage::DeleteConversation { .. } => {
             return Err("session management is not supported via broker stream".to_string());
         }
         ClientMessage::HistoryRequest { .. } => {
@@ -2498,6 +2608,16 @@ fn broker_path_from_config(config: &Config, override_value: Option<&str>) -> Opt
     Some(PathBuf::from(trimmed))
 }
 
+#[cfg(unix)]
+fn broker_available(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+#[cfg(not(unix))]
+fn broker_available(_path: &Path) -> bool {
+    false
+}
+
 fn gateway_client_info() -> ClientInfo {
     ClientInfo {
         name: "code-gateway".to_string(),
@@ -2522,7 +2642,8 @@ fn request_id_from_client_request(request: &ClientRequest) -> Option<RequestId> 
         | ClientRequest::RemoveConversationListener { request_id, .. }
         | ClientRequest::UserInputAnswer { request_id, .. }
         | ClientRequest::ListConversations { request_id, .. }
-        | ClientRequest::SendUserTurn { request_id, .. } => Some(request_id.clone()),
+        | ClientRequest::SendUserTurn { request_id, .. }
+        | ClientRequest::SubmitOp { request_id, .. } => Some(request_id.clone()),
         _ => None,
     }
 }

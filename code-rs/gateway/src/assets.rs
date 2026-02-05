@@ -1,14 +1,21 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
-use axum::http::header::HOST;
+use axum::http::header::{HOST, SET_COOKIE};
 use axum::response::{Html, IntoResponse, Response};
+use serde::Deserialize;
 
-use crate::{APP_CORE_JS, APP_CSS, INDEX_HTML, GatewayState};
+use crate::{auth, APP_CORE_JS, APP_CSS, INDEX_HTML, GatewayState};
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AuthQuery {
+    pub(crate) token: Option<String>,
+}
 
 pub(crate) async fn index(
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
 ) -> Response {
     let html = if let Some(dev) = state.webui_dev.as_ref() {
         let host = request_host(&headers, &state.advertised_host);
@@ -19,6 +26,13 @@ pub(crate) async fn index(
         INDEX_HTML.to_string()
     };
     let mut response = Html(html).into_response();
+    if let Some(token) = query.token.as_deref() {
+        let encoded = auth::encode_cookie_value(token);
+        let cookie = format!("codeGatewayToken={encoded}; Path=/; SameSite=Lax");
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().append(SET_COOKIE, value);
+        }
+    }
     apply_no_cache(&mut response);
     response
 }
