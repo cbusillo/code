@@ -128,6 +128,11 @@
   background: var(--bg-hover);
 }
 
+.item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .active {
   background: var(--bg-selected);
   border-color: var(--accent);
@@ -150,6 +155,35 @@
   gap: var(--space-2);
   font-size: var(--font-xs);
   color: var(--text-faint);
+}
+
+.itemActions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.item:hover .itemActions,
+.item:focus-visible .itemActions,
+.itemActions:focus-within {
+  opacity: 1;
+}
+
+.actionButton {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.actionButton:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
 .loading {

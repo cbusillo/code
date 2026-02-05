@@ -18,7 +18,19 @@ const asText = (value: unknown) => {
 };
 
 const makeId = (index: number | undefined, suffix: string) =>
-  `${index ?? ""}-${suffix}-${Math.random().toString(36).slice(2, 6)}`;
+  `${index ?? "unknown"}-${suffix}`;
+
+const eventKeyFromPayload = (
+  payload: Record<string, unknown> | null | undefined,
+) => {
+  if (!payload) return null;
+  const id = typeof payload.id === "string" ? payload.id : "";
+  const seq = (payload as { event_seq?: number | string | null }).event_seq;
+  if (!id && (seq === null || seq === undefined)) {
+    return null;
+  }
+  return `${id}:${seq === null || seq === undefined ? "" : String(seq)}`;
+};
 
 const roleToKind = (role: string | undefined) => {
   switch (role) {
@@ -54,6 +66,26 @@ const summarizePayload = (payload: Record<string, unknown>) => {
 
 export const parseHistoryItems = (lines: HistoryLine[]) => {
   const items: TimelineItem[] = [];
+  const seen = new Set<string>();
+
+  const signatureFor = (item: TimelineItem, textOverride?: string) =>
+    [
+      item.index ?? "",
+      item.kind,
+      item.subkind ?? "",
+      item.title ?? "",
+      textOverride ?? item.text ?? "",
+      item.imageUrl ?? "",
+    ].join("::");
+
+  const pushUnique = (item: TimelineItem) => {
+    const signature = signatureFor(item);
+    if (seen.has(signature)) {
+      return;
+    }
+    seen.add(signature);
+    items.push(item);
+  };
 
   lines.forEach((line) => {
     const entry = extractEntry(line);
@@ -61,6 +93,9 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
 
     if (entry.type === "event") {
       const payload = entry.payload || {};
+      const eventKey = eventKeyFromPayload(
+        entry.payload as Record<string, unknown> | null | undefined,
+      );
       const msg =
         (payload as any).msg ||
         (payload as any).message ||
@@ -74,24 +109,26 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
         return;
       }
       if (msgType === "user_message") {
-        items.push({
+        pushUnique({
           id: makeId(index, "user"),
           kind: "user",
           subkind: "message",
           title: "You",
           text: asText((msg as any).message),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "agent_message") {
-        items.push({
+        pushUnique({
           id: makeId(index, "assistant"),
           kind: "assistant",
           subkind: "message",
           title: "Assistant",
           text: asText((msg as any).message),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
@@ -100,13 +137,14 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
         msgType === "task_complete" ||
         msgType === "turn_aborted"
       ) {
-        items.push({
+        pushUnique({
           id: makeId(index, "task"),
           kind: "system",
           subkind: "message",
           title: msgType.replace(/_/g, " "),
           text: asText((msg as any).message || (msg as any).reason || msg),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
@@ -125,58 +163,80 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
           last.subkind === "reasoning" &&
           last.index === index
         ) {
-          last.text = `${last.text ?? ""}${nextText}`;
+          const prevText = last.text ?? "";
+          const prevSignature = signatureFor(last, prevText);
+          const nextValue = `${prevText}${nextText}`;
+          last.text = nextValue;
+          seen.delete(prevSignature);
+          seen.add(signatureFor(last, nextValue));
         } else {
-          items.push({
+          pushUnique({
             id: makeId(index, "reasoning"),
             kind: "assistant",
             subkind: "reasoning",
             title: "Reasoning",
             text: nextText,
             index,
+            eventKey: eventKey ?? undefined,
           });
         }
         return;
       }
       if (msgType === "exec_command_begin") {
-        items.push({
+        pushUnique({
           id: makeId(index, "exec-start"),
           kind: "exec",
-          subkind: "exec",
+          subkind: "exec-begin",
           title: "Exec",
           text: Array.isArray((msg as any).command)
             ? (msg as any).command.join(" ")
             : asText((msg as any).command),
           meta: "running",
           index,
+          eventKey: eventKey ?? undefined,
+        });
+        return;
+      }
+      if (msgType === "exec_command_output_delta") {
+        pushUnique({
+          id: makeId(index, "exec-output"),
+          kind: "exec",
+          subkind: "exec-output",
+          title: "Exec output",
+          text: asText((msg as any).chunk),
+          meta: asText((msg as any).stream),
+          index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "exec_command_end") {
-        items.push({
+        pushUnique({
           id: makeId(index, "exec-end"),
           kind: "exec",
-          subkind: "exec",
-          title: "Exec finished",
+          subkind: "exec-end",
+          title: "Exec result",
           text: asText((msg as any).stderr || (msg as any).stdout),
           meta: `exit ${(msg as any).exit_code ?? "?"}`,
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "turn_diff") {
-        items.push({
+        pushUnique({
           id: makeId(index, "diff"),
           kind: "diff",
           subkind: "diff",
           title: "Diff",
           text: asText((msg as any).unified_diff),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "patch_apply_begin" || msgType === "patch_apply_end") {
-        items.push({
+        pushUnique({
           id: makeId(index, "patch"),
           kind: "diff",
           subkind: "diff",
@@ -184,22 +244,24 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
             msgType === "patch_apply_begin" ? "Apply patch" : "Patch applied",
           text: asText((msg as any).path || (msg as any).message || msg),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "background_event") {
-        items.push({
+        pushUnique({
           id: makeId(index, "background"),
           kind: "system",
           subkind: "message",
           title: "Background event",
           text: asText((msg as any).message || (msg as any).event || msg),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "web_search_begin" || msgType === "web_search_complete") {
-        items.push({
+        pushUnique({
           id: makeId(index, "web"),
           kind: "tool",
           subkind: "tool-web",
@@ -209,17 +271,19 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
               : "Web search complete",
           text: asText((msg as any).query),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
       if (msgType === "browser_screenshot_update") {
-        items.push({
+        pushUnique({
           id: makeId(index, "browser"),
           kind: "tool",
           subkind: "tool-browser",
           title: "Browser screenshot",
           text: asText((msg as any).url || (msg as any).screenshot_path),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
@@ -228,7 +292,7 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
         msgType === "mcp_tool_call_end"
       ) {
         const invocation = (msg as any).invocation || {};
-        items.push({
+        pushUnique({
           id: makeId(index, "mcp"),
           kind: "tool",
           subkind: "tool-mcp",
@@ -238,6 +302,7 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
               : "MCP tool finished",
           text: `${invocation.server || ""}.${invocation.tool || ""}`,
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
@@ -246,13 +311,14 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
         msgType === "custom_tool_call_update" ||
         msgType === "custom_tool_call_end"
       ) {
-        items.push({
+        pushUnique({
           id: makeId(index, "tool"),
           kind: "tool",
           subkind: "tool-custom",
           title: msgType.replace(/_/g, " "),
           text: asText((msg as any).tool_name),
           index,
+          eventKey: eventKey ?? undefined,
         });
         return;
       }
@@ -262,7 +328,7 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
       const payload = entry.payload || {};
       const itemType = (payload as any).type;
       if (itemType === "reasoning") {
-        items.push({
+        pushUnique({
           id: makeId(index, "reasoning"),
           kind: "assistant",
           subkind: "reasoning",
@@ -274,7 +340,7 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
       }
       if (itemType !== "message") {
         const label = (payload as any).name || (payload as any).type || "Tool";
-        items.push({
+        pushUnique({
           id: makeId(index, "tool"),
           kind: "tool",
           subkind: itemType === "function_call" ? "tool-call" : "tool-output",
@@ -289,24 +355,31 @@ export const parseHistoryItems = (lines: HistoryLine[]) => {
       const content = Array.isArray((payload as any).content)
         ? (payload as any).content
         : [];
+      const textSegments = content
+        .filter(
+          (segment: any) =>
+            segment.type === "output_text" || segment.type === "input_text",
+        )
+        .map((segment: any) => asText(segment.text || segment.refusal))
+        .filter(Boolean);
+      if (textSegments.length) {
+        pushUnique({
+          id: makeId(index, "msg"),
+          kind,
+          subkind: "message",
+          title:
+            kind === "assistant"
+              ? "Assistant"
+              : kind === "user"
+                ? "You"
+                : "System",
+          text: textSegments.join("\n\n"),
+          index,
+        });
+      }
       content.forEach((segment: any, idx: number) => {
-        if (segment.type === "output_text" || segment.type === "input_text") {
-          items.push({
-            id: makeId(index, `msg-${idx}`),
-            kind,
-            subkind: "message",
-            title:
-              kind === "assistant"
-                ? "Assistant"
-                : kind === "user"
-                  ? "You"
-                  : "System",
-            text: asText(segment.text || segment.refusal),
-            index,
-          });
-        }
         if (segment.type === "output_image" || segment.type === "input_image") {
-          items.push({
+          pushUnique({
             id: makeId(index, `img-${idx}`),
             kind,
             subkind: "image",

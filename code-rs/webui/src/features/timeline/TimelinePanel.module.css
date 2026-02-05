@@ -173,6 +173,7 @@
   flex-direction: column;
   gap: var(--space-2);
   position: relative;
+  overflow-anchor: none;
 }
 
 .sentinel {
@@ -183,6 +184,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  padding-bottom: var(--space-2);
 }
 
 .virtualizer {
@@ -194,12 +196,6 @@
 .loading {
   font-size: var(--font-xs);
   color: var(--text-muted);
-}
-
-.empty {
-  font-size: var(--font-sm);
-  color: var(--text-muted);
-  padding: var(--space-3) 0;
 }
 
 .loadMoreInline {

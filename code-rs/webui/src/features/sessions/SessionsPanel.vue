@@ -17,6 +17,8 @@ const emit = defineEmits<{
   (event: "search-change", value: string): void;
   (event: "select", id: string): void;
   (event: "new"): void;
+  (event: "rename", id: string): void;
+  (event: "delete", id: string): void;
 }>();
 
 const formatSubtitle = (session: SessionSummary) => {
@@ -59,12 +61,23 @@ const groupSessions = (sessions: SessionSummary[]) => {
   }));
 };
 
+const isBlankSession = (session: SessionSummary) => {
+  const title =
+    session.nickname || session.summary || session.last_user_snippet || "";
+  const count = session.message_count ?? 0;
+  return count === 0 && title.trim().length === 0;
+};
+
+const isHiddenSession = (session: SessionSummary) =>
+  isBlankSession(session) && session.conversation_id !== props.activeId;
+
 const filtered = computed(() => {
   const query = props.search.trim().toLowerCase();
+  const visible = props.sessions.filter((session) => !isHiddenSession(session));
   if (!query) {
-    return props.sessions;
+    return visible;
   }
-  return props.sessions.filter((session) => {
+  return visible.filter((session) => {
     const haystack = [
       session.conversation_id,
       session.nickname,
@@ -91,6 +104,16 @@ const itemClass = (id: string) => [
   styles.item,
   props.activeId === id ? styles.active : "",
 ];
+
+const onRename = (event: Event, id: string) => {
+  event.stopPropagation();
+  emit("rename", id);
+};
+
+const onDelete = (event: Event, id: string) => {
+  event.stopPropagation();
+  emit("delete", id);
+};
 </script>
 
 <template>
@@ -127,12 +150,15 @@ const itemClass = (id: string) => [
           <span>{{ group.label }}</span>
           <span :class="styles.groupLine" />
         </div>
-        <button
+        <div
           v-for="session in group.items"
           :key="session.conversation_id"
           :class="itemClass(session.conversation_id)"
-          type="button"
+          role="button"
+          tabindex="0"
           @click="emit('select', session.conversation_id)"
+          @keydown.enter.prevent="emit('select', session.conversation_id)"
+          @keydown.space.prevent="emit('select', session.conversation_id)"
         >
           <div :class="styles.itemTitle">
             {{ session.nickname || session.summary || "Untitled" }}
@@ -141,8 +167,26 @@ const itemClass = (id: string) => [
           <div :class="styles.itemMeta">
             <span>{{ session.conversation_id.slice(0, 8) }}</span>
             <span v-if="session.git_branch">{{ session.git_branch }}</span>
+            <span :class="styles.itemActions">
+              <button
+                :class="styles.actionButton"
+                type="button"
+                title="Rename session"
+                @click="(event) => onRename(event, session.conversation_id)"
+              >
+                Rename
+              </button>
+              <button
+                :class="styles.actionButton"
+                type="button"
+                title="Delete session"
+                @click="(event) => onDelete(event, session.conversation_id)"
+              >
+                Delete
+              </button>
+            </span>
           </div>
-        </button>
+        </div>
       </div>
       <div v-if="props.loading" :class="styles.loading">Loading…</div>
     </div>

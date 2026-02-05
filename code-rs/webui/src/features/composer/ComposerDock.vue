@@ -6,6 +6,7 @@ import styles from "./ComposerDock.module.css";
 type Props = {
   value: string;
   disabled?: boolean;
+  status?: string | null;
 };
 
 const props = defineProps<Props>();
@@ -65,7 +66,10 @@ const handleInput = (event: Event) => {
 <template>
   <footer :class="styles.dock">
     <div :class="styles.header">
-      <span :class="styles.label">Composer</span>
+      <div :class="styles.title">
+        <span :class="styles.label">Composer</span>
+        <span v-if="props.status" :class="styles.pill">{{ props.status }}</span>
+      </div>
       <span :class="styles.hint">Enter to send · Shift+Enter newline</span>
     </div>
     <textarea

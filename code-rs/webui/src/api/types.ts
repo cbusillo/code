@@ -46,4 +46,6 @@ export type TimelineItem = {
   meta?: string;
   imageUrl?: string;
   index?: number;
+  eventKey?: string;
+  origin?: "event" | "history";
 };

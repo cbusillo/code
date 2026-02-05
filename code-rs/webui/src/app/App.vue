@@ -19,6 +19,7 @@ import styles from "./App.module.css";
 
 const FILTERS_KEY = "codeGatewayFiltersV3";
 const SESSIONS_CACHE_PREFIX = "codeGatewaySessionsCacheV1";
+type HistoryWsMode = "initial" | "stream";
 
 type FilterState = {
   kinds: Record<TimelineKind, boolean>;
@@ -43,10 +44,12 @@ const defaultFilters: FilterState = {
     review: true,
   },
   subkinds: {
-    message: true,
     reasoning: true,
     image: true,
     exec: true,
+    "exec-begin": true,
+    "exec-output": true,
+    "exec-end": true,
     diff: true,
     "tool-mcp": true,
     "tool-custom": true,
@@ -59,6 +62,16 @@ const defaultFilters: FilterState = {
 
 const { theme, toggle } = useTheme();
 const { token, setToken, label } = useGatewayToken();
+
+const isBlankSession = (session: SessionSummary) => {
+  const title =
+    session.nickname || session.summary || session.last_user_snippet || "";
+  const count = session.message_count ?? 0;
+  return count === 0 && title.trim().length === 0;
+};
+
+const isHiddenSession = (session: SessionSummary, active: string | null) =>
+  isBlankSession(session) && session.conversation_id !== active;
 
 const sessions = ref<SessionSummary[]>([]);
 const sessionsPulse = ref(0);
@@ -82,10 +95,23 @@ const sessionLoading = ref(false);
 const wsRef = ref<WebSocket | null>(null);
 const wsRetryRef = ref<number | null>(null);
 const historyWsRef = ref<WebSocket | null>(null);
+const historyHandshakeRef = ref<
+  { id: string; token: string; at: number } | null
+>(null);
 const historyRetryRef = ref<number | null>(null);
 const pendingHistoryRequests = ref<HistoryRequestPayload[]>([]);
 const historyWsDisabledRef = ref(false);
 const historyWsAttemptRef = ref(0);
+const historyWsUrlRef = ref<string | null>(null);
+const historyConnectTimerRef = ref<number | null>(null);
+const historyWsModeRef = ref<HistoryWsMode>("initial");
+const historyInitialSessionRef = ref<string | null>(null);
+const historyActiveTokenRef = ref<string | null>(null);
+const knownSessionIdsRef = ref<Set<string>>(new Set());
+const lastRequestedSessionRef = ref<string | null>(null);
+const historyWsBackoffRef = ref(0);
+const lastIndexRef = ref<number | null>(null);
+const seenLineIndexRef = ref<Set<number>>(new Set());
 const liveIndexRef = ref<number | null>(null);
 const seenEventRef = ref<Set<string>>(new Set());
 const reasoningIdRef = ref<string | null>(null);
@@ -97,18 +123,128 @@ const pendingResumeRef = ref<string | null>(null);
 const sessionLoadSeq = ref(0);
 const mobilePanel = ref<"none" | "sessions" | "filters">("none");
 const lazyHistory = ref(true);
+const lazyHistoryReady = ref(false);
 const historyPrimed = ref(false);
 const primeHistoryTimerRef = ref<number | null>(null);
 const primeHistoryInFlightRef = ref(false);
 const primeFillTimerRef = ref<number | null>(null);
 const primeFillInFlightRef = ref(false);
 const primeFillExpectedBeforeRef = ref<number | null>(null);
+const taskActiveRef = ref(false);
+const activityLabelRef = ref<string | null>(null);
+const activeExecCountRef = ref(0);
+const activeToolCountRef = ref(0);
 
 const HISTORY_PRIME_LIMIT = 40;
 const HISTORY_TARGET_LIMIT = 200;
 const HISTORY_LARGE_SESSION_THRESHOLD = 10000;
 const HISTORY_LARGE_PRIME_LIMIT = 20;
 const HISTORY_AUTO_FILL_THRESHOLD = 5000;
+
+const messageSignatureForItem = (item: TimelineItem) =>
+  [
+    item.kind,
+    item.subkind ?? "",
+    item.title ?? "",
+    item.text ?? "",
+    item.imageUrl ?? "",
+  ].join("::");
+
+const extractEntry = (line: HistoryLine) =>
+  (line.value as Record<string, unknown> | undefined) || line;
+
+const eventKeyFromPayload = (payload: Record<string, unknown> | null | undefined) => {
+  if (!payload) return null;
+  const id = typeof payload.id === "string" ? payload.id : "";
+  const seq = (payload as { event_seq?: number | string | null }).event_seq;
+  if (!id && (seq === null || seq === undefined)) {
+    return null;
+  }
+  return `${id}:${seq === null || seq === undefined ? "" : String(seq)}`;
+};
+
+const resetHistoryTracking = () => {
+  seenLineIndexRef.value = new Set();
+  seenEventRef.value = new Set();
+};
+
+const registerHistoryLines = (
+  lines: HistoryLine[],
+  skipAgentMessages: boolean,
+) => {
+  const fresh: HistoryLine[] = [];
+  lines.forEach((line) => {
+    const index = line.index;
+    if (index !== undefined && seenLineIndexRef.value.has(index)) {
+      return;
+    }
+    const entry = extractEntry(line);
+    if (entry.type === "event") {
+      const payload = entry.payload as Record<string, unknown> | null | undefined;
+      const msg =
+        (payload as any)?.msg ||
+        (payload as any)?.message ||
+        (payload as any)?.event;
+      const msgType = (msg as any)?.type;
+      const key = eventKeyFromPayload(payload);
+      if (key) {
+        seenEventRef.value.add(key);
+      }
+      if (skipAgentMessages && msgType === "agent_message") {
+        if (index !== undefined) {
+          seenLineIndexRef.value.add(index);
+        }
+        return;
+      }
+    }
+    if (index !== undefined) {
+      seenLineIndexRef.value.add(index);
+    }
+    fresh.push(line);
+  });
+  return fresh;
+};
+
+const hasAssistantResponseItem = (lines: HistoryLine[]) =>
+  lines.some((line) => {
+    const entry = extractEntry(line);
+    if (entry.type !== "response_item") {
+      return false;
+    }
+    const payload = entry.payload as { type?: string; role?: string } | null | undefined;
+    return payload?.type === "message" && payload?.role === "assistant";
+  });
+
+const dropEventDuplicates = (historyItems: TimelineItem[]) => {
+  if (!items.value.length || !historyItems.length) {
+    return;
+  }
+  const historyEventKeys = new Set(
+    historyItems
+      .map((item) => item.eventKey)
+      .filter((key): key is string => Boolean(key)),
+  );
+  const historyMessageSignatures = new Set(
+    historyItems
+      .filter((item) => item.subkind === "message")
+      .map((item) => messageSignatureForItem(item)),
+  );
+  items.value = items.value.filter((item) => {
+    if (item.origin !== "event") {
+      return true;
+    }
+    if (item.eventKey && historyEventKeys.has(item.eventKey)) {
+      return false;
+    }
+    if (
+      item.subkind === "message" &&
+      historyMessageSignatures.has(messageSignatureForItem(item))
+    ) {
+      return false;
+    }
+    return true;
+  });
+};
 
 const sessionsCacheKey = (tokenValue: string) =>
   `${SESSIONS_CACHE_PREFIX}::${tokenValue.slice(0, 8)}`;
@@ -163,6 +299,14 @@ const filters = ref<FilterState>(loadFilters());
 
 const filteredItems = computed(() =>
   items.value.filter((item: TimelineItem) => {
+    const hasText = Boolean(item.text && item.text.trim().length > 0);
+    const hasImage = Boolean(item.imageUrl);
+    if (!hasText && !hasImage) {
+      return false;
+    }
+    if (item.subkind === "image") {
+      return filters.value.subkinds.image !== false;
+    }
     if (!filters.value.kinds[item.kind]) {
       return false;
     }
@@ -186,6 +330,23 @@ const timelineLoading = computed(() => {
   return false;
 });
 
+const composerStatus = computed(() => {
+  if (sending.value) return "Sending";
+  if (sessionLoading.value && activeId.value) return "Resuming session";
+  if (loading.value && activeId.value) return "Loading history";
+  if (activeExecCountRef.value > 0) return "Running command";
+  if (activeToolCountRef.value > 0) {
+    return activityLabelRef.value ?? "Using tools";
+  }
+  if (taskActiveRef.value) {
+    return activityLabelRef.value ?? "Thinking";
+  }
+  if (status.value && !["Live", "Ready"].includes(status.value)) {
+    return status.value;
+  }
+  return null;
+});
+
 const counts = computed(() => {
   const next: Record<TimelineKind, number> = {
     assistant: 0,
@@ -202,6 +363,24 @@ const counts = computed(() => {
   return next;
 });
 
+const isDev = import.meta.env.DEV;
+const devBanner = computed(() => {
+  if (!isDev) {
+    return null;
+  }
+  const sessionId = activeId.value ?? runtimeId.value ?? "none";
+  const sessionSource = sessions.value.find(
+    (session) => session.conversation_id === activeId.value,
+  )?.source;
+  return {
+    sessionId,
+    sessionSource: sessionSource ?? "unknown",
+    lastIndex: lastIndexRef.value ?? "-",
+    streamOpen: wsRef.value?.readyState === WebSocket.OPEN,
+    historyOpen: historyWsRef.value?.readyState === WebSocket.OPEN,
+  };
+});
+
 const subCounts = computed(() => {
   const next: Record<string, number> = {};
   Object.keys(defaultFilters.subkinds).forEach((key) => {
@@ -213,6 +392,50 @@ const subCounts = computed(() => {
     }
   });
   return next;
+});
+
+const compactLabel = (value: string, maxLength: number) => {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  if (maxLength <= 3) {
+    return trimmed.slice(0, maxLength);
+  }
+  return `${trimmed.slice(0, Math.max(0, maxLength - 3))}...`;
+};
+
+const activeSession = computed(() =>
+  sessions.value.find((session) => session.conversation_id === activeId.value),
+);
+
+const mobileSessionLabel = computed(() => {
+  const session = activeSession.value;
+  if (!session) {
+    return activeId.value ? activeId.value.slice(0, 8) : "Select session";
+  }
+  const candidate =
+    session.nickname ||
+    session.summary ||
+    session.last_user_snippet ||
+    session.cwd ||
+    session.conversation_id;
+  return compactLabel(candidate, 32);
+});
+
+const mobileFiltersCount = computed(() => {
+  let total = 0;
+  Object.values(filters.value.kinds).forEach((value) => {
+    if (!value) {
+      total += 1;
+    }
+  });
+  Object.values(filters.value.subkinds).forEach((value) => {
+    if (!value) {
+      total += 1;
+    }
+  });
+  return total;
 });
 
 const messageCountFor = (id: string | null) => {
@@ -263,9 +486,35 @@ const scheduleResume = (id: string, delay: number) => {
       window.setTimeout(attempt, 500);
       return;
     }
-    sendControlMessage({ type: "resume_conversation", conversation_id: id });
+    sendControlMessage(
+      { type: "resume_conversation", conversation_id: id },
+      false,
+    );
   };
   window.setTimeout(attempt, delay);
+};
+
+const closeHistorySocket = () => {
+  const ws = historyWsRef.value;
+  historyWsRef.value = null;
+  historyHandshakeRef.value = null;
+  if (!ws) return;
+  historyWsBackoffRef.value = 0;
+  if (ws.readyState === WebSocket.CONNECTING) {
+    ws.onopen = () => ws.close();
+    return;
+  }
+  ws.close();
+};
+
+const setHistoryWsModeForSession = (nextId: string | null) => {
+  historyWsModeRef.value = "stream";
+  historyWsDisabledRef.value = true;
+  historyInitialSessionRef.value = null;
+  historyWsBackoffRef.value = 0;
+  if (nextId) {
+    closeHistorySocket();
+  }
 };
 
 const requestSessions = () => {
@@ -284,35 +533,43 @@ const requestSessions = () => {
 };
 
 const applySessionsList = (itemsList: SessionSummary[]) => {
-  sessions.value = itemsList || [];
+  const active = activeId.value;
+  const visible = (itemsList || []).filter(
+    (item) => !isHiddenSession(item, active),
+  );
+  sessions.value = visible;
+  knownSessionIdsRef.value = new Set(
+    visible.map((item) => item.conversation_id),
+  );
   sessionsPulse.value += 1;
   sessionsLoading.value = false;
   error.value = null;
   if (token.value) {
     writeSessionsCache(token.value, sessions.value);
   }
-  if (!itemsList?.length) {
+  if (!visible.length) {
     activateSession(null);
     status.value = "Ready";
     return;
   }
-  const active = activeId.value;
-  if (active && itemsList.some((item) => item.conversation_id === active)) {
+  if (active && visible.some((item) => item.conversation_id === active)) {
     return;
   }
   const last = localStorage.getItem("codeGatewayLastConversation");
-  if (last && itemsList.some((item) => item.conversation_id === last)) {
+  if (last && visible.some((item) => item.conversation_id === last)) {
     activateSession(last);
     return;
   }
-  const fallback = itemsList[0].conversation_id;
+  const fallback = visible[0].conversation_id;
   activateSession(fallback);
 };
 
-const sendControlMessage = (payload: object) => {
+const sendControlMessage = (payload: object, allowQueue = true) => {
   const ws = controlWsRef.value;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    pendingControlMessages.value = [...pendingControlMessages.value, payload];
+    if (allowQueue) {
+      pendingControlMessages.value = [...pendingControlMessages.value, payload];
+    }
     return true;
   }
   try {
@@ -337,11 +594,18 @@ const handleHistoryChunk = (message: {
   primeHistoryInFlightRef.value = false;
   const startIndex = message.start_index;
   const endIndex = message.end_index;
-  const parsed = parseHistoryItems(message.items || []);
+  if (message.anchor === "head" || message.anchor === "tail") {
+    resetHistoryTracking();
+  }
+  const rawLines = message.items || [];
+  const skipAgentMessages = hasAssistantResponseItem(rawLines);
+  const freshLines = registerHistoryLines(rawLines, skipAgentMessages);
+  const parsed = parseHistoryItems(freshLines);
+  const historyItems = parsed.map((item) => ({ ...item, origin: "history" }));
   if (message.anchor === "head") {
     cancelPrimeFill();
     reasoningIdRef.value = null;
-    items.value = parsed;
+    items.value = historyItems;
     historyMode.value = "head";
     hasMoreAfter.value = Boolean(message.truncated);
     hasMoreBefore.value = false;
@@ -350,7 +614,7 @@ const handleHistoryChunk = (message: {
   } else if (message.anchor === "tail") {
     cancelPrimeFill();
     reasoningIdRef.value = null;
-    items.value = parsed;
+    items.value = historyItems;
     historyMode.value = "tail";
     hasMoreBefore.value = Boolean(message.truncated);
     hasMoreAfter.value = false;
@@ -362,13 +626,13 @@ const handleHistoryChunk = (message: {
       !primeFillInFlightRef.value &&
       canAutoFill &&
       message.truncated &&
-      parsed.length < HISTORY_TARGET_LIMIT &&
+      historyItems.length < HISTORY_TARGET_LIMIT &&
       startIndex !== undefined &&
       startIndex !== null
     ) {
       primeFillInFlightRef.value = true;
       primeFillExpectedBeforeRef.value = startIndex;
-      const remaining = HISTORY_TARGET_LIMIT - parsed.length;
+      const remaining = HISTORY_TARGET_LIMIT - historyItems.length;
       if (primeFillTimerRef.value !== null) {
         window.clearTimeout(primeFillTimerRef.value);
       }
@@ -382,11 +646,22 @@ const handleHistoryChunk = (message: {
       primeFillInFlightRef.value = false;
       primeFillExpectedBeforeRef.value = null;
     }
-    items.value = [...parsed, ...items.value];
+    dropEventDuplicates(historyItems);
+    items.value = [...historyItems, ...items.value];
     historyMode.value = "tail";
     hasMoreBefore.value = Boolean(message.truncated);
   } else if (message.after !== undefined && message.after !== null) {
-    items.value = [...items.value, ...parsed];
+    dropEventDuplicates(historyItems);
+    const liveStart = items.value.findIndex((item) => item.origin !== "history");
+    if (liveStart === -1) {
+      items.value = [...items.value, ...historyItems];
+    } else {
+      items.value = [
+        ...items.value.slice(0, liveStart),
+        ...historyItems,
+        ...items.value.slice(liveStart),
+      ];
+    }
     historyMode.value = "head";
     hasMoreAfter.value = Boolean(message.truncated);
   }
@@ -411,9 +686,15 @@ const handleHistoryChunk = (message: {
       historyEnd.value === null
         ? endIndex
         : Math.max(historyEnd.value, endIndex);
+  }
+  if (endIndex !== undefined && endIndex !== null) {
     if (liveIndexRef.value === null || liveIndexRef.value <= endIndex) {
       liveIndexRef.value = endIndex + 1;
     }
+    lastIndexRef.value =
+      lastIndexRef.value === null
+        ? endIndex
+        : Math.max(lastIndexRef.value, endIndex);
   }
   loading.value = false;
   status.value = "Live";
@@ -424,11 +705,26 @@ const activateSession = (id: string | null) => {
   if (id === activeId.value) {
     return;
   }
+  if (
+    id &&
+    knownSessionIdsRef.value.size > 0 &&
+    !knownSessionIdsRef.value.has(id) &&
+    runtimeId.value !== id
+  ) {
+    requestSessions();
+    return;
+  }
+  setHistoryWsModeForSession(id);
+  lastRequestedSessionRef.value = id;
   reasoningIdRef.value = null;
   primeHistoryInFlightRef.value = false;
   historyPrimed.value = false;
+  lazyHistoryReady.value = false;
   pendingHistoryRequests.value = [];
   cancelPrimeFill();
+  resetActivity();
+  resetHistoryTracking();
+  lastIndexRef.value = null;
   if (id) {
     localStorage.setItem("codeGatewayLastConversation", id);
   }
@@ -440,9 +736,11 @@ const activateSession = (id: string | null) => {
   hasMoreBefore.value = false;
   hasMoreAfter.value = false;
   historyMode.value = "tail";
+  liveIndexRef.value = null;
   activeId.value = id;
   if (id) {
     scheduleResume(id, 200);
+    schedulePrimeHistory(true);
   }
 };
 
@@ -451,14 +749,17 @@ const loadSession = (id: string, seq: number) => {
   reasoningIdRef.value = null;
   primeHistoryInFlightRef.value = false;
   historyPrimed.value = false;
+  lazyHistoryReady.value = false;
   pendingHistoryRequests.value = [];
   cancelPrimeFill();
+  resetActivity();
   sessionLoading.value = true;
   items.value = [];
   historyStart.value = null;
   historyEnd.value = null;
   hasMoreBefore.value = false;
   hasMoreAfter.value = false;
+  liveIndexRef.value = null;
   runtimeId.value = null;
   localStorage.setItem("codeGatewayLastConversation", id);
   loading.value = true;
@@ -486,18 +787,21 @@ const buildHistoryPayload = (request: HistoryRequestPayload) => {
 };
 
 const flushPendingHistoryRequests = () => {
+  if (!pendingHistoryRequests.value.length) {
+    return;
+  }
   const historyWs = historyWsRef.value;
   const streamWs = wsRef.value;
-  const activeWs =
-    historyWs && historyWs.readyState === WebSocket.OPEN
+  const activeWs = historyWsModeRef.value === "initial"
+    ? historyWs && historyWs.readyState === WebSocket.OPEN
       ? historyWs
       : streamWs && streamWs.readyState === WebSocket.OPEN
         ? streamWs
-        : null;
+        : null
+    : streamWs && streamWs.readyState === WebSocket.OPEN
+      ? streamWs
+      : null;
   if (!activeWs) {
-    return;
-  }
-  if (!pendingHistoryRequests.value.length) {
     return;
   }
   const queued = pendingHistoryRequests.value;
@@ -510,7 +814,11 @@ const flushPendingHistoryRequests = () => {
 const sendHistoryRequest = (request: HistoryRequestPayload) => {
   const historyWs = historyWsRef.value;
   const streamWs = wsRef.value;
-  if (historyWs && historyWs.readyState === WebSocket.OPEN) {
+  if (
+    historyWsModeRef.value === "initial" &&
+    historyWs &&
+    historyWs.readyState === WebSocket.OPEN
+  ) {
     historyWs.send(JSON.stringify(buildHistoryPayload(request)));
     return;
   }
@@ -518,10 +826,23 @@ const sendHistoryRequest = (request: HistoryRequestPayload) => {
     streamWs.send(JSON.stringify(buildHistoryPayload(request)));
     return;
   }
-  if (historyWsDisabledRef.value) {
+  enqueueHistoryRequest(request);
+};
+
+const handleHistoryHandshakeFailure = () => {
+  const active = activeId.value;
+  const tokenValue = token.value;
+  if (!active || !tokenValue) {
     return;
   }
-  enqueueHistoryRequest(request);
+  const state = historyHandshakeRef.value;
+  if (!state || state.id != active || state.token !== tokenValue) {
+    return;
+  }
+  historyHandshakeRef.value = null;
+  if (!pendingResumeRef.value) {
+    scheduleResume(active, 0);
+  }
 };
 
 const primeHistory = async () => {
@@ -533,8 +854,10 @@ const primeHistory = async () => {
   sendHistoryRequest({ anchor: "tail", limit });
 };
 
-const schedulePrimeHistory = () => {
+const schedulePrimeHistory = (force = false) => {
   if (!lazyHistory.value || historyPrimed.value) return;
+  if (!force && historyWsModeRef.value !== "initial") return;
+  if (!force && !lazyHistoryReady.value) return;
   if (primeHistoryTimerRef.value !== null) return;
   primeHistoryTimerRef.value = window.setTimeout(() => {
     primeHistoryTimerRef.value = null;
@@ -556,6 +879,84 @@ const cancelPrimeFill = () => {
   }
   primeFillInFlightRef.value = false;
   primeFillExpectedBeforeRef.value = null;
+};
+
+const resetActivity = () => {
+  taskActiveRef.value = false;
+  activityLabelRef.value = null;
+  activeExecCountRef.value = 0;
+  activeToolCountRef.value = 0;
+};
+
+const noteActivity = (label: string) => {
+  activityLabelRef.value = label;
+  taskActiveRef.value = true;
+};
+
+const settleActivity = () => {
+  if (activeExecCountRef.value > 0) {
+    activityLabelRef.value = "Running command";
+    return;
+  }
+  if (activeToolCountRef.value > 0) {
+    activityLabelRef.value = activityLabelRef.value ?? "Using tools";
+    return;
+  }
+  if (!taskActiveRef.value) {
+    activityLabelRef.value = null;
+  }
+};
+
+const updateActivityFromEvent = (msgType: string, msg: any) => {
+  switch (msgType) {
+    case "task_started":
+      noteActivity("Thinking");
+      return;
+    case "task_complete":
+    case "turn_aborted":
+      taskActiveRef.value = false;
+      settleActivity();
+      return;
+    case "agent_reasoning_delta":
+    case "agent_reasoning":
+      noteActivity("Thinking");
+      return;
+    case "agent_message_delta":
+      noteActivity("Responding");
+      return;
+    case "agent_message":
+      if (taskActiveRef.value) {
+        activityLabelRef.value = "Responding";
+      }
+      return;
+    case "exec_command_begin":
+      activeExecCountRef.value += 1;
+      activityLabelRef.value = "Running command";
+      return;
+    case "exec_command_end":
+      activeExecCountRef.value = Math.max(0, activeExecCountRef.value - 1);
+      settleActivity();
+      return;
+    case "custom_tool_call_begin":
+    case "mcp_tool_call_begin":
+    case "web_search_begin":
+      activeToolCountRef.value += 1;
+      activityLabelRef.value = "Using tools";
+      return;
+    case "custom_tool_call_end":
+    case "mcp_tool_call_end":
+    case "web_search_complete":
+      activeToolCountRef.value = Math.max(0, activeToolCountRef.value - 1);
+      settleActivity();
+      return;
+    case "browser_screenshot_update":
+      if (!activityLabelRef.value) {
+        activityLabelRef.value = "Using browser";
+      }
+      return;
+    default:
+      return;
+  }
 };
 
 const loadOlder = async () => {
@@ -590,6 +991,38 @@ const createSession = () => {
   sendControlMessage({ type: "new_conversation" });
 };
 
+const renameSession = (id: string) => {
+  const session = sessions.value.find((item) => item.conversation_id === id);
+  const suggested = session?.nickname || session?.summary || "";
+  const nextName = window.prompt("Rename session", suggested);
+  if (nextName === null) {
+    return;
+  }
+  const trimmed = nextName.trim();
+  sendControlMessage({
+    type: "rename_conversation",
+    conversation_id: id,
+    nickname: trimmed ? trimmed : null,
+  });
+  requestSessions();
+};
+
+const deleteSession = (id: string) => {
+  const session = sessions.value.find((item) => item.conversation_id === id);
+  const label = session?.nickname || session?.summary || id.slice(0, 8);
+  const confirmed = window.confirm(
+    `Hide session "${label}"? This keeps the files on disk.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+  sendControlMessage({ type: "delete_conversation", conversation_id: id });
+  if (activeId.value === id) {
+    activateSession(null);
+  }
+  requestSessions();
+};
+
 const sendMessage = () => {
   const targetId = runtimeId.value;
   if (!token.value || !targetId || !composerText.value.trim()) return;
@@ -606,6 +1039,7 @@ const sendMessage = () => {
     {
       id: `local-${Date.now()}`,
       kind: "user",
+      subkind: "message",
       title: "You",
       text,
     },
@@ -659,7 +1093,11 @@ const extractReasoningText = (payload: any) => {
   }
 };
 
-const appendReasoningDelta = (delta: string, index: number) => {
+const appendReasoningDelta = (
+  delta: string,
+  index: number,
+  key: string | null,
+) => {
   if (!delta) return;
   const next = [...items.value];
   let targetIndex = -1;
@@ -683,6 +1121,8 @@ const appendReasoningDelta = (delta: string, index: number) => {
     next[targetIndex] = {
       ...current,
       text: `${current.text ?? ""}${delta}`,
+      eventKey: current.eventKey ?? (key ?? undefined),
+      origin: current.origin ?? "event",
     };
     reasoningIdRef.value = next[targetIndex].id;
     items.value = next;
@@ -699,12 +1139,17 @@ const appendReasoningDelta = (delta: string, index: number) => {
       title: "Reasoning",
       text: delta,
       index,
+      eventKey: key ?? undefined,
+      origin: "event",
     },
   ];
 };
 
 const appendHistoryLines = (lines: HistoryLine[]) => {
-  const parsed = parseHistoryItems(lines);
+  const parsed = parseHistoryItems(lines).map((item) => ({
+    ...item,
+    origin: "event",
+  }));
   if (parsed.length) {
     items.value = [...items.value, ...parsed];
   }
@@ -719,10 +1164,19 @@ const handleSnapshot = (message: {
   const hasRollout = Boolean(message.rollout && message.rollout.length);
   const endIndex = message.end_index;
   reasoningIdRef.value = null;
-  items.value = parseHistoryItems(message.rollout || []);
+  resetHistoryTracking();
+  const rawLines = message.rollout || [];
+  const skipAgentMessages = hasAssistantResponseItem(rawLines);
+  const freshLines = registerHistoryLines(rawLines, skipAgentMessages);
+  const parsed = parseHistoryItems(freshLines).map((item) => ({
+    ...item,
+    origin: "history",
+  }));
+  items.value = parsed;
   historyPrimed.value = hasRollout;
   historyStart.value = message.start_index ?? null;
   historyEnd.value = message.end_index ?? null;
+  lastIndexRef.value = endIndex ?? null;
   hasMoreBefore.value = Boolean(message.truncated);
   hasMoreAfter.value = false;
   historyMode.value = "tail";
@@ -746,30 +1200,36 @@ const handleSnapshot = (message: {
 const handleEvent = (message: { event: any }) => {
   const event = message.event;
   if (!event) return;
-  const key = `${event.id ?? ""}:${event.event_seq ?? ""}`;
-  if (seenEventRef.value.has(key)) {
+  const key = eventKeyFromPayload(event as Record<string, unknown>);
+  if (key && seenEventRef.value.has(key)) {
     return;
   }
-  seenEventRef.value.add(key);
+  if (key) {
+    seenEventRef.value.add(key);
+  }
   const msgType = event?.msg?.type;
+  if (msgType && typeof msgType === "string") {
+    updateActivityFromEvent(msgType, event.msg);
+  }
   if (msgType === "user_message" || msgType === "agent_message") {
     updateSessionFromEvent(msgType, event.msg);
     reasoningIdRef.value = null;
   }
-  const nextIndex = liveIndexRef.value ?? 0;
-  liveIndexRef.value = nextIndex + 1;
-  historyEnd.value = nextIndex;
-  historyStart.value = historyStart.value === null ? nextIndex : historyStart.value;
+  const nextIndex =
+    liveIndexRef.value ??
+    (historyEnd.value === null ? 0 : historyEnd.value + 1);
+  const assignedIndex = Math.max(0, Math.trunc(nextIndex));
+  liveIndexRef.value = assignedIndex + 1;
   if (msgType === "agent_reasoning" || msgType === "agent_reasoning_delta") {
     const delta = extractReasoningText(event.msg);
     if (delta) {
-      appendReasoningDelta(delta, nextIndex);
+      appendReasoningDelta(delta, assignedIndex, key);
     }
     return;
   }
   appendHistoryLines([
     {
-      index: nextIndex,
+      index: assignedIndex,
       type: "event",
       payload: event,
     } as HistoryLine,
@@ -782,23 +1242,38 @@ watch(
     if (!value) {
       sessions.value = [];
       sessionsLoading.value = false;
+      historyActiveTokenRef.value = null;
+      knownSessionIdsRef.value = new Set();
+      resetActivity();
       activateSession(null);
       return;
     }
+    historyWsModeRef.value = "stream";
+    historyWsDisabledRef.value = true;
+    historyInitialSessionRef.value = null;
+    historyActiveTokenRef.value = value;
     const lastSessionId = localStorage.getItem("codeGatewayLastConversation");
 
     const cachedSessions = readSessionsCache(value);
     if (cachedSessions?.length) {
-      sessions.value = cachedSessions;
+      const active = activeId.value;
+      const visible = cachedSessions.filter(
+        (session) => !isHiddenSession(session, active),
+      );
+      sessions.value = visible;
+      knownSessionIdsRef.value = new Set(
+        visible.map((session) => session.conversation_id),
+      );
       sessionsPulse.value += 1;
       if (!activeId.value) {
         const preferred =
           (lastSessionId &&
-            cachedSessions.some(
+            visible.some(
               (session) => session.conversation_id === lastSessionId,
             ) &&
             lastSessionId) ||
-          cachedSessions[0].conversation_id;
+          visible[0]?.conversation_id ||
+          null;
         activateSession(preferred);
       }
     } else if (lastSessionId && !activeId.value) {
@@ -862,8 +1337,9 @@ watch(
               return;
             }
             if (
-              pendingResumeRef.value &&
-              message.requested_id !== pendingResumeRef.value
+              lastRequestedSessionRef.value &&
+              message.requested_id &&
+              message.requested_id !== lastRequestedSessionRef.value
             ) {
               return;
             }
@@ -932,6 +1408,9 @@ type StreamTarget = {
 const streamTarget = computed<StreamTarget | null>(() => {
   const tokenValue = token.value;
   if (!tokenValue) return null;
+  if (pendingResumeRef.value) {
+    return null;
+  }
   const runtime = runtimeId.value;
   const active = activeId.value;
   if (runtime) {
@@ -961,10 +1440,34 @@ const historyTarget = computed(() => {
 const historyKey = computed(() => {
   const target = historyTarget.value;
   if (!target) return null;
-  return `${target.token}::${target.id}::${
-    lazyHistory.value ? "lazy" : "full"
-  }`;
+  if (historyActiveTokenRef.value !== target.token) {
+    return null;
+  }
+  if (historyWsDisabledRef.value) {
+    return null;
+  }
+  if (historyWsModeRef.value !== "initial") {
+    return null;
+  }
+  if (
+    historyInitialSessionRef.value &&
+    target.id !== historyInitialSessionRef.value
+  ) {
+    return null;
+  }
+  return `${target.token}::${target.id}`;
 });
+
+watch(
+  historyKey,
+  (key) => {
+    if (key) {
+      lazyHistoryReady.value = true;
+      schedulePrimeHistory(true);
+    }
+  },
+  { immediate: true },
+);
 
 const streamKey = computed(() => {
   const target = streamTarget.value;
@@ -982,7 +1485,6 @@ watch(
     if (!target) {
       return;
     }
-    seenEventRef.value.clear();
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const host = window.location.host;
     const params = new URLSearchParams();
@@ -1014,6 +1516,7 @@ watch(
         if (sessionLoading.value) {
           status.value = "Syncing";
         }
+        flushPendingHistoryRequests();
         if (!lazyHistory.value) {
           sendHistoryRequest({ anchor: "tail", limit: HISTORY_TARGET_LIMIT });
         } else if (
@@ -1044,9 +1547,16 @@ watch(
           } else if (message.type === "event") {
             handleEvent(message);
           } else if (message.type === "error") {
-            error.value = message.message || "Websocket error";
+            const errorMessage = message.message || "Websocket error";
+            error.value = errorMessage;
             primeHistoryInFlightRef.value = false;
             cancelPrimeFill();
+            if (errorMessage.includes("conversation not found")) {
+              activateSession(null);
+              requestSessions();
+              loading.value = false;
+              sessionLoading.value = false;
+            }
           }
         } catch (err) {
           error.value = (err as Error).message;
@@ -1080,7 +1590,11 @@ watch(
 
 watch(
   historyKey,
-  (_key, _prev, onCleanup) => {
+  (key, _prev, onCleanup) => {
+    if (!key) {
+      closeHistorySocket();
+      return;
+    }
     const target = historyTarget.value;
     if (!target) return;
     historyWsDisabledRef.value = false;
@@ -1090,8 +1604,9 @@ watch(
     const host = window.location.host;
     const params = new URLSearchParams();
     params.set("token", target.token);
-    params.set("snapshot_limit", lazyHistory.value ? "0" : "200");
+    params.set("snapshot_limit", "0");
     const url = `${protocol}://${host}/ws/history/${target.id}?${params.toString()}`;
+    historyWsUrlRef.value = url;
     let closed = false;
     let retries = 0;
 
@@ -1107,71 +1622,118 @@ watch(
         return;
       }
       clearRetry();
-      const ws = new WebSocket(url);
-      historyWsRef.value = ws;
-      let opened = false;
-      ws.onopen = () => {
-        opened = true;
-        historyWsAttemptRef.value = 0;
-        flushPendingHistoryRequests();
-        if (!lazyHistory.value) {
-          sendHistoryRequest({ anchor: "tail", limit: HISTORY_TARGET_LIMIT });
-        } else if (items.value.length === 0) {
-          primeHistory();
+      if (historyConnectTimerRef.value !== null) {
+        window.clearTimeout(historyConnectTimerRef.value);
+      }
+      historyConnectTimerRef.value = window.setTimeout(() => {
+        historyConnectTimerRef.value = null;
+        if (historyWsDisabledRef.value) {
+          return;
         }
-      };
-      ws.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data as string);
-          if (message.type === "snapshot") {
-            handleSnapshot(message);
-            if (historyTargetId === activeId.value) {
-              sessionLoading.value = false;
+        if (historyTargetId !== activeId.value) {
+          return;
+        }
+        if (historyWsBackoffRef.value > 0) {
+          const delay = Math.min(5000, 200 * 2 ** historyWsBackoffRef.value);
+          historyConnectTimerRef.value = window.setTimeout(() => {
+            historyConnectTimerRef.value = null;
+            connect();
+          }, delay);
+          return;
+        }
+        const ws = new WebSocket(url);
+        historyWsRef.value = ws;
+        let opened = false;
+        historyHandshakeRef.value = {
+          id: historyTargetId,
+          token: target.token,
+          at: Date.now(),
+        };
+        ws.onopen = () => {
+          opened = true;
+          historyHandshakeRef.value = null;
+          historyWsAttemptRef.value = 0;
+          historyWsBackoffRef.value = 0;
+          flushPendingHistoryRequests();
+          if (!lazyHistory.value) {
+            sendHistoryRequest({ anchor: "tail", limit: HISTORY_TARGET_LIMIT });
+          } else if (items.value.length === 0) {
+            primeHistory();
+          }
+        };
+        ws.onclose = () => {
+          historyWsRef.value = null;
+          if (!opened) {
+            handleHistoryHandshakeFailure();
+          }
+          const shouldRetry = !closed && historyWsUrlRef.value === url;
+          if (!shouldRetry) return;
+          if (!opened) {
+            historyWsAttemptRef.value += 1;
+            if (historyWsAttemptRef.value >= 2) {
+              historyWsDisabledRef.value = true;
+              flushPendingHistoryRequests();
+              return;
             }
-          } else if (message.type === "history_chunk") {
-            handleHistoryChunk(message);
-            historyPrimed.value = true;
-          } else if (message.type === "error") {
-            error.value = message.message || "Websocket error";
-            primeHistoryInFlightRef.value = false;
-            cancelPrimeFill();
           }
-        } catch (err) {
-          error.value = (err as Error).message;
-        }
-      };
-      ws.onclose = () => {
-        historyWsRef.value = null;
-        if (closed) return;
-        if (!opened) {
-          historyWsAttemptRef.value += 1;
-          if (historyWsAttemptRef.value >= 2) {
-            historyWsDisabledRef.value = true;
-            flushPendingHistoryRequests();
-            return;
+          historyWsBackoffRef.value = Math.min(
+            6,
+            historyWsBackoffRef.value + 1,
+          );
+          retries += 1;
+          const maxDelay = historyPrimed.value ? 10000 : 2000;
+          const baseDelay = historyPrimed.value ? 500 : 200;
+          const delay = Math.min(maxDelay, baseDelay * 2 ** retries);
+          historyRetryRef.value = window.setTimeout(connect, delay);
+        };
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data as string);
+            if (message.type === "snapshot") {
+              handleSnapshot(message);
+              if (historyTargetId === activeId.value) {
+                sessionLoading.value = false;
+              }
+            } else if (message.type === "history_chunk") {
+              handleHistoryChunk(message);
+              historyPrimed.value = true;
+            } else if (message.type === "error") {
+              error.value = message.message || "Websocket error";
+              primeHistoryInFlightRef.value = false;
+              cancelPrimeFill();
+            }
+          } catch (err) {
+            error.value = (err as Error).message;
           }
-        }
-        retries += 1;
-        const maxDelay = historyPrimed.value ? 10000 : 2000;
-        const baseDelay = historyPrimed.value ? 500 : 200;
-        const delay = Math.min(maxDelay, baseDelay * 2 ** retries);
-        historyRetryRef.value = window.setTimeout(connect, delay);
-      };
-      ws.onerror = () => {
-        ws.close();
-      };
+        };
+        ws.onerror = () => {
+          ws.close();
+        };
+      }, 600);
     };
 
     connect();
     onCleanup(() => {
       closed = true;
       clearRetry();
+      if (historyConnectTimerRef.value !== null) {
+        window.clearTimeout(historyConnectTimerRef.value);
+        historyConnectTimerRef.value = null;
+      }
       cancelPrimeHistory();
       cancelPrimeFill();
       primeHistoryInFlightRef.value = false;
       pendingHistoryRequests.value = [];
-      historyWsRef.value?.close();
+      historyWsUrlRef.value = null;
+      const ws = historyWsRef.value;
       historyWsRef.value = null;
+      if (ws) {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.onopen = () => ws.close();
+        } else {
+          ws.close();
+        }
+      }
     });
   },
   { immediate: true },
@@ -1252,11 +1814,44 @@ const handleTokenInput = (event: Event) => {
           @search-change="search = $event"
           @select="activateSession"
           @new="createSession"
+          @rename="renameSession"
+          @delete="deleteSession"
         />
       </div>
 
       <section :class="styles.centerColumn">
         <div v-if="error" :class="styles.errorBanner">{{ error }}</div>
+        <div v-if="devBanner" :class="styles.devBanner">
+          <span :class="styles.devBadge">Dev</span>
+          <span>Session: {{ devBanner.sessionId }}</span>
+          <span>Source: {{ devBanner.sessionSource }}</span>
+          <span>Last index: {{ devBanner.lastIndex }}</span>
+          <span>Stream: {{ devBanner.streamOpen ? "open" : "closed" }}</span>
+          <span>History: {{ devBanner.historyOpen ? "open" : "closed" }}</span>
+        </div>
+        <div :class="styles.mobileBar">
+          <button
+            :class="styles.mobileSessionButton"
+            type="button"
+            @click="mobilePanel = 'sessions'"
+          >
+            <span :class="styles.mobileSessionLabel">{{ mobileSessionLabel }}</span>
+            <span :class="styles.mobileCaret">v</span>
+          </button>
+          <button
+            :class="styles.mobileFiltersButton"
+            type="button"
+            @click="mobilePanel = 'filters'"
+          >
+            Filters
+            <span
+              v-if="mobileFiltersCount > 0"
+              :class="styles.mobileFiltersBadge"
+            >
+              {{ mobileFiltersCount }}
+            </span>
+          </button>
+        </div>
         <TimelinePanel
           :items="filteredItems"
           :loading="timelineLoading"
@@ -1264,18 +1859,18 @@ const handleTokenInput = (event: Event) => {
           :on-load-more="loadMore"
           :load-more-placement="loadMorePlacement"
           :reset-key="activeId"
-          :on-open-panels="() => (mobilePanel = 'sessions')"
           :on-jump-to-start="jumpToStart"
           :on-jump-to-end="jumpToEnd"
           :status-text="timelineLoading ? status : undefined"
           :on-user-scroll="lazyHistory && !historyPrimed ? primeHistory : undefined"
         />
-        <ComposerDock
-          :value="composerText"
-          :disabled="!runtimeId || sending || sessionLoading"
-          @change="composerText = $event"
-          @send="sendMessage"
-        />
+    <ComposerDock
+      :value="composerText"
+      :disabled="!runtimeId || sending || sessionLoading"
+      :status="composerStatus"
+      @change="composerText = $event"
+      @send="sendMessage"
+    />
       </section>
 
       <div :class="rightDockClass">
@@ -1300,54 +1895,62 @@ const handleTokenInput = (event: Event) => {
       </div>
     </main>
 
-    <div v-if="mobilePanel !== 'none'" :class="styles.mobileOverlay">
-      <div :class="styles.mobileHeader">
-        <div :class="styles.mobileTabs">
+    <div
+      v-if="mobilePanel !== 'none'"
+      :class="styles.mobileOverlay"
+      @click.self="mobilePanel = 'none'"
+    >
+      <div :class="styles.mobileSheet">
+        <div :class="styles.mobileHeader">
+          <div :class="styles.mobileTabs">
+            <button
+              :class="mobilePanel === 'sessions' ? styles.mobileActive : ''"
+              type="button"
+              @click="mobilePanel = 'sessions'"
+            >
+              Sessions
+            </button>
+            <button
+              :class="mobilePanel === 'filters' ? styles.mobileActive : ''"
+              type="button"
+              @click="mobilePanel = 'filters'"
+            >
+              Filters
+            </button>
+          </div>
           <button
-            :class="mobilePanel === 'sessions' ? styles.mobileActive : ''"
+            :class="styles.ghostButton"
             type="button"
-            @click="mobilePanel = 'sessions'"
+            @click="mobilePanel = 'none'"
           >
-            Sessions
-          </button>
-          <button
-            :class="mobilePanel === 'filters' ? styles.mobileActive : ''"
-            type="button"
-            @click="mobilePanel = 'filters'"
-          >
-            Filters
+            Close
           </button>
         </div>
-        <button
-          :class="styles.ghostButton"
-          type="button"
-          @click="mobilePanel = 'none'"
-        >
-          Close
-        </button>
-      </div>
-      <div :class="styles.mobileBody">
-        <SessionsPanel
-          v-if="mobilePanel === 'sessions'"
-          :class-name="styles.mobilePanel"
-          :sessions="sessions"
-          :active-id="activeId"
-          :search="search"
-          :loading="sessionsLoading"
-          :pulse-key="sessionsPulse"
-          @search-change="search = $event"
-          @select="(id) => { activateSession(id); mobilePanel = 'none'; }"
-          @new="createSession"
-        />
-        <FiltersPanel
-          v-else
-          :class-name="styles.mobilePanel"
-          :filters="filters"
-          :counts="counts"
-          :sub-counts="subCounts"
-          @toggle-kind="toggleKind"
-          @toggle-subkind="toggleSubkind"
-        />
+        <div :class="styles.mobileBody">
+          <SessionsPanel
+            v-if="mobilePanel === 'sessions'"
+            :class-name="styles.mobilePanel"
+            :sessions="sessions"
+            :active-id="activeId"
+            :search="search"
+            :loading="sessionsLoading"
+            :pulse-key="sessionsPulse"
+            @search-change="search = $event"
+            @select="(id) => { activateSession(id); mobilePanel = 'none'; }"
+            @new="createSession"
+            @rename="renameSession"
+            @delete="deleteSession"
+          />
+          <FiltersPanel
+            v-else
+            :class-name="styles.mobilePanel"
+            :filters="filters"
+            :counts="counts"
+            :sub-counts="subCounts"
+            @toggle-kind="toggleKind"
+            @toggle-subkind="toggleSubkind"
+          />
+        </div>
       </div>
     </div>
   </div>

@@ -44,6 +44,9 @@ const jumpButtonRef = ref<HTMLButtonElement | null>(null);
 const jumpMenuRef = ref<HTMLDivElement | null>(null);
 const programmaticScrollRef = ref(false);
 const programmaticScrollTimerRef = ref<number | null>(null);
+const autoFillTimerRef = ref<number | null>(null);
+const followScrollFrameRef = ref<number | null>(null);
+const lastScrollTopRef = ref(0);
 
 const markProgrammaticScroll = () => {
   programmaticScrollRef.value = true;
@@ -64,13 +67,28 @@ const computeNearBottom = () => {
 
 const scrollToBottom = () => {
   markProgrammaticScroll();
-  const node = bottomRef.value;
-  if (node) {
-    node.scrollIntoView({ block: "end" });
+  const lastIndex = groupedItems.value.length - 1;
+  if (lastIndex >= 0) {
+    rowVirtualizer.value.scrollToIndex(lastIndex, { align: "end" });
   } else if (listRef.value) {
     listRef.value.scrollTop = listRef.value.scrollHeight;
   }
   newItems.value = 0;
+};
+
+const scheduleFollowScroll = () => {
+  if (!followOutput.value) {
+    return;
+  }
+  if (followScrollFrameRef.value !== null) {
+    return;
+  }
+  followScrollFrameRef.value = window.requestAnimationFrame(() => {
+    followScrollFrameRef.value = null;
+    if (followOutput.value) {
+      scrollToBottom();
+    }
+  });
 };
 
 const scrollToTop = () => {
@@ -104,13 +122,31 @@ const handleLoadMore = async () => {
       const nextScrollHeight = node.scrollHeight;
       const delta = nextScrollHeight - prevScrollHeight;
       if (props.loadMorePlacement === "prepend") {
+        markProgrammaticScroll();
         node.scrollTop = prevScrollTop + delta;
       } else if (nearBottom) {
+        markProgrammaticScroll();
         node.scrollTop = nextScrollHeight;
       }
     });
   } finally {
     loadInFlightRef.value = false;
+  }
+};
+
+const maybeAutoFillShortTimeline = () => {
+  if (props.loadMorePlacement !== "prepend") {
+    return;
+  }
+  if (loadingRef.value || loadInFlightRef.value || !hasMoreRef.value) {
+    return;
+  }
+  const node = listRef.value;
+  if (!node) {
+    return;
+  }
+  if (node.scrollHeight <= node.clientHeight + 4) {
+    void handleLoadMore();
   }
 };
 
@@ -129,24 +165,21 @@ const handleJumpToEnd = async () => {
   if (props.onJumpToEnd) {
     await props.onJumpToEnd();
   }
-  nextTick(scrollToBottom);
+  scheduleFollowScroll();
 };
 
 watch(
-  () => props.items,
-  (items) => {
-    const previous = lastCountRef.value;
-    const next = items.length;
+  () => props.items.length,
+  (next, previous) => {
     if (!followOutput.value && next > previous) {
       newItems.value += next - previous;
     }
     lastCountRef.value = next;
     if (followOutput.value) {
-      markProgrammaticScroll();
-      nextTick(scrollToBottom);
+      scheduleFollowScroll();
     }
+    nextTick(maybeAutoFillShortTimeline);
   },
-  { deep: true },
 );
 
 watch(
@@ -155,8 +188,7 @@ watch(
     newItems.value = 0;
     followOutput.value = true;
     lastCountRef.value = props.items.length;
-    markProgrammaticScroll();
-    nextTick(scrollToBottom);
+    scheduleFollowScroll();
   },
 );
 
@@ -166,6 +198,9 @@ watch(
     if (value && newItems.value !== 0) {
       newItems.value = 0;
     }
+    if (value) {
+      scheduleFollowScroll();
+    }
   },
 );
 
@@ -173,6 +208,7 @@ watch(
   () => props.hasMore,
   (value) => {
     hasMoreRef.value = value;
+    nextTick(maybeAutoFillShortTimeline);
   },
 );
 
@@ -181,6 +217,20 @@ watch(
   (value) => {
     loadingRef.value = value;
   },
+);
+
+watch(
+  () => listRef.value,
+  () => {
+    if (autoFillTimerRef.value !== null) {
+      window.clearTimeout(autoFillTimerRef.value);
+    }
+    autoFillTimerRef.value = window.setTimeout(() => {
+      autoFillTimerRef.value = null;
+      maybeAutoFillShortTimeline();
+    }, 0);
+  },
+  { immediate: true },
 );
 
 watch(
@@ -247,20 +297,29 @@ const groupedItems = computed(() => {
 });
 
 const rowVirtualizer = useVirtualizer(
-  computed(() => ({
-    count: groupedItems.value.length,
-    getScrollElement: () => listRef.value,
-    estimateSize: () => 200,
-    overscan: 6,
-  })),
-);
-
-watch(
-  () => props.items,
-  () => {
-    rowVirtualizer.value.measure();
-  },
-  { deep: true },
+  computed(() => {
+    const resetKey = props.resetKey;
+    return {
+      count: groupedItems.value.length,
+      getScrollElement: () => listRef.value,
+      estimateSize: () => 200,
+      overscan: 6,
+      getItemKey: (index) => {
+        const group = groupedItems.value[index];
+        let groupKey: string;
+        if (group?.index !== undefined) {
+          groupKey = `turn:${group.index}`;
+        } else {
+          const firstId = group?.items[0]?.id;
+          groupKey = firstId ? `id:${firstId}` : `row:${index}`;
+        }
+        if (resetKey !== undefined && resetKey !== null) {
+          return `${resetKey}:${groupKey}`;
+        }
+        return groupKey;
+      },
+    };
+  }),
 );
 
 const diffGroups = computed(() => {
@@ -282,6 +341,7 @@ const getCurrentGroupIndex = () => {
 };
 
 const scrollToGroup = (index: number, align: "start" | "end") => {
+  markProgrammaticScroll();
   rowVirtualizer.value.scrollToIndex(index, { align });
 };
 
@@ -320,7 +380,7 @@ const jumpToPrevDiff = () => {
 const handleToggleFollow = () => {
   followOutput.value = !followOutput.value;
   if (followOutput.value) {
-    nextTick(scrollToBottom);
+    scheduleFollowScroll();
   }
 };
 
@@ -348,16 +408,26 @@ watch(
   },
 );
 
-const handleScroll = () => {
-  props.onUserScroll?.();
+const handleScroll = (event?: Event) => {
   const node = listRef.value;
   if (!node) return;
+  if (event?.isTrusted) {
+    props.onUserScroll?.();
+  }
   const nearBottom = computeNearBottom();
+  const scrollTop = node.scrollTop;
+  const isScrollingUp = scrollTop < lastScrollTopRef.value - 2;
+  lastScrollTopRef.value = scrollTop;
   if (!followOutput.value && nearBottom && !programmaticScrollRef.value) {
     followOutput.value = true;
     newItems.value = 0;
   }
-  if (followOutput.value && !nearBottom && !programmaticScrollRef.value) {
+  if (
+    followOutput.value &&
+    isScrollingUp &&
+    event?.isTrusted &&
+    !programmaticScrollRef.value
+  ) {
     followOutput.value = false;
   }
   if (loadInFlightRef.value || loadingRef.value || !hasMoreRef.value) {
@@ -412,10 +482,24 @@ onBeforeUnmount(() => {
   if (programmaticScrollTimerRef.value !== null) {
     window.clearTimeout(programmaticScrollTimerRef.value);
   }
+  if (autoFillTimerRef.value !== null) {
+    window.clearTimeout(autoFillTimerRef.value);
+  }
+  if (followScrollFrameRef.value !== null) {
+    window.cancelAnimationFrame(followScrollFrameRef.value);
+  }
 });
 
 const virtualItems = computed(() => rowVirtualizer.value.getVirtualItems());
 const totalSize = computed(() => rowVirtualizer.value.getTotalSize());
+watch(
+  () => totalSize.value,
+  () => {
+    if (followOutput.value) {
+      scheduleFollowScroll();
+    }
+  },
+);
 const followClass = computed(() => [
   styles.follow,
   followOutput.value ? styles.followActive : "",
@@ -548,14 +632,17 @@ const handleNextDiffClick = () => {
       @wheel="handleWheel"
     >
       <div ref="topSentinelRef" :class="styles.sentinel" />
-      <div v-if="props.loading" :class="styles.loading">Loading…</div>
-      <div v-else-if="props.items.length === 0" :class="styles.empty">
-        No timeline items yet.
+      <div v-if="props.loading && props.items.length === 0" :class="styles.loading">
+        Loading…
       </div>
-      <div :class="styles.virtualizer" :style="{ height: `${totalSize}px` }">
+      <div
+        v-show="props.items.length > 0"
+        :class="styles.virtualizer"
+        :style="{ height: `${totalSize}px` }"
+      >
         <div
           v-for="virtualRow in virtualItems"
-          :key="`${groupedItems[virtualRow.index]?.index ?? 'group'}-${virtualRow.index}`"
+          :key="virtualRow.key"
           :ref="registerMeasure"
           :data-index="virtualRow.index"
           :class="styles.group"
