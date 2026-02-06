@@ -58,6 +58,26 @@ Examples:
 
 ## How to Git Push
 
+## Fork Branch + Release Policy (webui-main)
+
+This repo is a long-running fork with a persistent feature branch.
+
+- `main` is a mirror of upstream (`upstream/main`). Keep it fast-forward only.
+- `webui-main` is the fork’s default branch; fork-only changes land here.
+- Syncing upstream into the fork is **merge-only**: merge `origin/main` into
+  `webui-main` (do not rebase).
+
+### Releases (Fork)
+
+- The fork’s release workflow is `Release (Fork)`
+  (`.github/workflows/release-fork.yml`).
+- It triggers on **pushed tags** matching `v*` (e.g. `v0.6.60`).
+- Tags must point at the desired `webui-main` commit (not at `main`), otherwise
+  the workflow runs against the wrong tree.
+- Monitoring tip: `scripts/wait-for-gh-run.sh` uses the current repo by default;
+  when running locally, set `GH_REPO=cbusillo/code` (or pass `-R cbusillo/code`
+  to `gh`).
+
 ### Merge-and-Push Policy (Do Not Rebase)
 
 When the user asks you to "push" local work:
