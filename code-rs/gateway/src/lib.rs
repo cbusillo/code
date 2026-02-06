@@ -35,9 +35,9 @@ use code_protocol::mcp_protocol::{
     AddConversationListenerParams, AddConversationSubscriptionResponse, ApplyPatchApprovalResponse,
     AuthMode, ClientInfo, ClientRequest, DynamicToolCallResponse,
     ExecCommandApprovalResponse, InitializeParams, InputItem as WireInputItem,
-    InterruptConversationParams, NewConversationParams, NewConversationResponse,
-    ResumeConversationParams, ResumeConversationResponse, SendUserMessageParams,
-    ServerRequest, UserInputAnswerParams,
+    InterruptConversationParams, ListConversationsParams, ListConversationsResponse,
+    NewConversationParams, NewConversationResponse, ResumeConversationParams,
+    ResumeConversationResponse, SendUserMessageParams, ServerRequest, UserInputAnswerParams,
 };
 use code_protocol::protocol::{AskForApproval, ReviewDecision as WireReviewDecision, SessionSource};
 use futures::stream::SplitSink;
@@ -920,6 +920,9 @@ async fn list_conversations_data(
     limit: Option<usize>,
 ) -> Result<Vec<ListConversationItem>, String> {
     let limit = limit.unwrap_or(200).max(1);
+    if state.broker_path().is_some() {
+        return list_conversations_from_broker(state, limit).await;
+    }
     let catalog = SessionCatalog::new(state.config.code_home.clone());
     let session_query = SessionQuery {
         limit: Some(limit),
@@ -967,6 +970,66 @@ async fn list_conversations_data(
     })
     .await
     .map_err(|err| format!("failed to build session list: {err}"))
+}
+
+async fn list_conversations_from_broker(
+    state: &GatewayState,
+    limit: usize,
+) -> Result<Vec<ListConversationItem>, String> {
+    let request = ClientRequest::ListConversations {
+        request_id: RequestId::Integer(2),
+        params: ListConversationsParams {
+            page_size: Some(limit),
+            cursor: None,
+        },
+    };
+    let response: ListConversationsResponse = broker_roundtrip(state, request).await?;
+    Ok(response
+        .items
+        .into_iter()
+        .map(|item| {
+            let preview = item.preview.trim().to_string();
+            let summary = if preview.is_empty() {
+                None
+            } else {
+                Some(preview)
+            };
+            let timestamp = item.timestamp.clone();
+            ListConversationItem {
+                conversation_id: item.conversation_id.to_string(),
+                created_at: timestamp.clone(),
+                updated_at: timestamp,
+                path: item.path.to_string_lossy().to_string(),
+                nickname: None,
+                summary,
+                last_user_snippet: None,
+                cwd: None,
+                git_branch: None,
+                source: None,
+                message_count: 0,
+            }
+        })
+        .collect())
+}
+
+async fn resolve_rollout_path_from_broker(
+    state: &GatewayState,
+    conversation_id: &str,
+) -> Result<PathBuf, String> {
+    let request = ClientRequest::ListConversations {
+        request_id: RequestId::Integer(2),
+        params: ListConversationsParams {
+            page_size: Some(200),
+            cursor: None,
+        },
+    };
+    let response: ListConversationsResponse = broker_roundtrip(state, request).await?;
+    response
+        .items
+        .into_iter()
+        .find(|item| item.conversation_id.to_string() == conversation_id)
+        .map(|item| item.path)
+        .ok_or_else(|| "conversation not found".to_string())
 }
 
 async fn rename_conversation_data(
@@ -1053,10 +1116,7 @@ async fn resume_conversation_data(
         .map_err(|_| "invalid conversation id".to_string())?;
 
     if state.broker_path().is_some() {
-        let rollout_path = history::resolve_rollout_path(&state.config.code_home, id)
-            .await
-            .map_err(|err| err.to_string())?
-            .ok_or_else(|| "conversation not found".to_string())?;
+        let rollout_path = resolve_rollout_path_from_broker(state, id).await?;
         let overrides = params.unwrap_or_default();
         let request = ClientRequest::ResumeConversation {
             request_id: RequestId::Integer(2),

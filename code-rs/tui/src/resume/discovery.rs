@@ -36,7 +36,10 @@ pub fn list_sessions_for_cwd(
             cwd: Some(cwd),
             git_root: None,
             sources: vec![SessionSource::Cli, SessionSource::VSCode, SessionSource::Exec],
-            min_user_messages: 1,
+            // Allow sessions that have a replayable transcript even if they
+            // contain no user-role messages (e.g., assistant-only sessions).
+            // We explicitly filter out legacy "event-only" sessions below.
+            min_user_messages: 0,
             include_archived: false,
             include_deleted: false,
             limit: Some(MAX_RESULTS),
@@ -47,6 +50,12 @@ pub fn list_sessions_for_cwd(
                 .into_iter()
                 .filter(|entry| {
                     if entry.session_source == SessionSource::Mcp {
+                        return false;
+                    }
+                    // Exclude sessions that do not have any response items.
+                    // These are typically legacy "event-only" sessions that
+                    // cannot be replayed into a meaningful transcript.
+                    if entry.response_item_count == 0 {
                         return false;
                     }
                     if let Some(exclude) = exclude_path.as_deref() {
