@@ -4,6 +4,7 @@ members = [
     "ansi-escape",
     "app-server",
     "app-server-protocol",
+    "app-server-test-client",
     "apply-patch",
     "arg0",
     "code-auto-drive-core",
@@ -12,6 +13,7 @@ members = [
     "cloud-tasks",
     "cloud-tasks-client",
     "cli",
+    "code-experimental-api-macros",
     "common",
     "core",
     "exec",
@@ -34,11 +36,17 @@ members = [
     "git-apply",
     "utils/json-to-toml",
     "utils/readiness",
+    "utils/absolute-path",
+    "utils/cache",
+    "utils/cargo-bin",
+    "utils/git",
+    "utils/image",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.0.0"
+license = "Apache-2.0"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -50,6 +58,9 @@ edition = "2024"
 code-ansi-escape = { path = "ansi-escape" }
 code-app-server = { path = "app-server" }
 code-app-server-protocol = { path = "app-server-protocol" }
+code-app-server-test-client = { path = "app-server-test-client" }
+app_test_support = { path = "app-server/tests/common" }
+core_test_support = { path = "core/tests/common" }
 code-apply-patch = { path = "apply-patch" }
 code-arg0 = { path = "arg0" }
 code-browser = { path = "browser" }
@@ -60,8 +71,11 @@ code-backend-client = { path = "backend-client" }
 code-backend-openapi-models = { path = "code-backend-openapi-models" }
 code-cloud-tasks = { path = "cloud-tasks" }
 code-cloud-tasks-client = { path = "cloud-tasks-client" }
+code-execpolicy = { path = "execpolicy" }
+code-experimental-api-macros = { path = "code-experimental-api-macros" }
 code-exec = { path = "exec" }
 code-file-search = { path = "file-search" }
+code-git = { path = "utils/git" }
 code-git-tooling = { path = "git-tooling" }
 code-git-apply = { path = "git-apply" }
 code-linux-sandbox = { path = "linux-sandbox" }
@@ -76,6 +90,10 @@ code-responses-api-proxy = { path = "responses-api-proxy" }
 code-rmcp-client = { path = "rmcp-client" }
 code-otel = { path = "otel" }
 code-tui = { path = "tui" }
+code-utils-absolute-path = { path = "utils/absolute-path" }
+code-utils-cache = { path = "utils/cache" }
+code-utils-cargo-bin = { path = "utils/cargo-bin" }
+code-utils-image = { path = "utils/image" }
 code-utils-json-to-toml = { path = "utils/json-to-toml" }
 code-utils-readiness = { path = "utils/readiness" }
 code-auto-drive-core = { path = "code-auto-drive-core" }
@@ -89,9 +107,11 @@ anyhow = "1"
 arboard = "3"
 askama = "0.12"
 assert_cmd = "2"
+assert_matches = "1.5.0"
 async-channel = "2.3.1"
 async-stream = "0.3.6"
 async-trait = "0.1.89"
+axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"
 bytes = "1.10.1"
 chardetng = "0.1.17"
@@ -116,14 +136,17 @@ filetime = "0.2"
 futures = "0.3"
 icu_decimal = "2.0.0"
 icu_locale_core = "2.0.0"
+icu_provider = "2.0.0"
 ignore = "0.4.23"
 image = { version = "^0.25.8", default-features = false }
 indexmap = "2.6.0"
+inventory = "0.3.21"
 insta = "1.43.2"
 itertools = "0.14.0"
 landlock = "0.4.1"
 lazy_static = "1"
 libc = "0.2.175"
+lru = "0.13.0"
 log = "0.4"
 maplit = "1.0.2"
 mime_guess = "2.0.5"
@@ -150,11 +173,13 @@ ratatui = "0.29.0"
 regex = "1"
 regex-lite = "0.1.7"
 reqwest = "0.12"
+runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
 schemars = "0.8.22"
 seccompiler = "0.5.0"
 serde = "1"
 serde_json = "1"
 serde_with = "3.14"
+serial_test = "3.2.0"
 sha1 = "0.10.6"
 sha2 = "0.10"
 shlex = "1.3.0"
@@ -172,6 +197,7 @@ tiny_http = "0.12"
 tokio = "1"
 tokio-stream = "0.1.17"
 tokio-test = "0.4"
+tokio-tungstenite = { version = "0.23", default-features = true, features = ["rustls-tls-webpki-roots"] }
 tokio-util = "0.7.16"
 toml = "0.9.5"
 toml_edit = "0.23.4"
@@ -194,6 +220,7 @@ webbrowser = "1.0"
 which = "6"
 wildmatch = "2.5.0"
 wiremock = "0.6"
+zstd = "0.13"
 zeroize = "1.8.1"
 
 [workspace.lints]

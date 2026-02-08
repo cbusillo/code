@@ -206,6 +206,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "app_test_support"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "code-app-server-protocol",
+ "code-common",
+ "code-core",
+ "code-protocol",
+ "code-utils-cargo-bin",
+ "core_test_support",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tokio",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -337,6 +358,12 @@ dependencies = [
  "predicates-tree",
  "wait-timeout",
 ]
+
+[[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
 
 [[package]]
 name = "async-broadcast"
@@ -478,6 +505,8 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -896,28 +925,72 @@ name = "code-app-server"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "app_test_support",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "code-app-server-protocol",
  "code-arg0",
  "code-common",
  "code-core",
+ "code-execpolicy",
  "code-file-search",
  "code-login",
  "code-mcp-types",
  "code-protocol",
+ "code-utils-absolute-path",
+ "code-utils-cargo-bin",
  "code-utils-json-to-toml",
+ "core_test_support",
+ "os_info",
+ "pretty_assertions",
+ "rmcp",
  "serde",
  "serde_json",
+ "serial_test",
+ "shlex",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
 name = "code-app-server-protocol"
 version = "0.0.0"
 dependencies = [
- "code-mcp-types",
+ "anyhow",
+ "clap",
+ "code-experimental-api-macros",
  "code-protocol",
+ "code-utils-absolute-path",
+ "code-utils-cargo-bin",
+ "inventory",
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "similar",
+ "strum_macros 0.27.2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "code-app-server-test-client"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "code-app-server-protocol",
+ "code-protocol",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -953,6 +1026,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "code-app-server-protocol",
  "code-common",
  "code-core",
  "code-git-tooling",
@@ -1061,6 +1135,7 @@ dependencies = [
  "clap_complete",
  "code-app-server",
  "code-app-server-protocol",
+ "code-app-server-test-client",
  "code-arg0",
  "code-chatgpt",
  "code-cloud-tasks",
@@ -1175,6 +1250,7 @@ dependencies = [
  "code-otel",
  "code-protocol",
  "code-rmcp-client",
+ "code-utils-absolute-path",
  "code-version",
  "core-foundation 0.9.4",
  "crc32fast",
@@ -1290,6 +1366,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-experimental-api-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
+]
+
+[[package]]
 name = "code-file-search"
 version = "0.0.0"
 dependencies = [
@@ -1300,6 +1385,22 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "code-git"
+version = "0.0.0"
+dependencies = [
+ "assert_matches",
+ "once_cell",
+ "pretty_assertions",
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.17",
+ "ts-rs",
+ "walkdir",
 ]
 
 [[package]]
@@ -1451,7 +1552,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "code-execpolicy",
+ "code-git",
  "code-mcp-types",
+ "code-utils-absolute-path",
+ "code-utils-image",
  "icu_decimal",
  "icu_locale_core",
  "mime_guess",
@@ -1589,6 +1694,50 @@ dependencies = [
  "uuid",
  "vt100",
  "which",
+]
+
+[[package]]
+name = "code-utils-absolute-path"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "path-absolutize",
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
+]
+
+[[package]]
+name = "code-utils-cache"
+version = "0.0.0"
+dependencies = [
+ "lru 0.13.0",
+ "sha1",
+ "tokio",
+]
+
+[[package]]
+name = "code-utils-cargo-bin"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "runfiles",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "code-utils-image"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "code-utils-cache",
+ "image 0.25.8",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]
@@ -1749,6 +1898,27 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_test_support"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "code-core",
+ "code-protocol",
+ "code-utils-absolute-path",
+ "code-utils-cargo-bin",
+ "futures",
+ "regex-lite",
+ "serde_json",
+ "shlex",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "wiremock",
+ "zstd",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -3687,6 +3857,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "227748d55f2f0ab4735d87fd623798cb6b664512fe979705f829c9f81c934465"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4917,7 +5096,7 @@ dependencies = [
  "indoc",
  "instability",
  "itertools 0.13.0",
- "lru",
+ "lru 0.12.5",
  "paste",
  "strum 0.26.3",
  "unicode-segmentation",
@@ -5253,6 +5432,11 @@ dependencies = [
  "syn 2.0.108",
  "unicode-ident",
 ]
+
+[[package]]
+name = "runfiles"
+version = "0.1.0"
+source = "git+https://github.com/dzbarsky/rules_rust?rev=b56cbaa8465e74127f1ea216f813cd377295ad81#b56cbaa8465e74127f1ea216f813cd377295ad81"
 
 [[package]]
 name = "rustc-demangle"
@@ -5669,6 +5853,17 @@ dependencies = [
  "itoa",
  "memchr",
  "ryu",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
  "serde",
  "serde_core",
 ]
@@ -8200,6 +8395,34 @@ dependencies = [
  "crc32fast",
  "crossbeam-utils",
  "flate2",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]
