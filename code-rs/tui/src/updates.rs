@@ -3,7 +3,6 @@ use chrono::Duration as ChronoDuration;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
-use std::env;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::fs;
 use std::io::ErrorKind;
@@ -74,8 +73,7 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     let version_file = version_filepath(config);
     let read_path = resolve_code_path_for_read(&config.code_home, Path::new(VERSION_FILENAME));
     let originator = config.responses_originator_header.clone();
-    let release_repo = release_repo_for(config);
-    let cached_info = match read_version_info(&read_path, &release_repo) {
+    let cached_info = match read_version_info(&read_path) {
         Ok(info) => info,
         Err(err) => {
             warn!(
@@ -93,9 +91,8 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
         .unwrap_or(true);
 
     if should_refresh {
-        let release_repo = release_repo.clone();
         tokio::spawn(async move {
-            check_for_update(&version_file, &originator, &release_repo)
+            check_for_update(&version_file, &originator)
                 .await
                 .inspect_err(|e| tracing::error!("Failed to update version: {e}"))
         });
@@ -119,8 +116,7 @@ pub struct UpdateCheckInfo {
 pub async fn check_for_updates_now(config: &Config) -> anyhow::Result<UpdateCheckInfo> {
     let version_file = version_filepath(config);
     let originator = config.responses_originator_header.clone();
-    let release_repo = release_repo_for(config);
-    let info = check_for_update(&version_file, &originator, &release_repo).await?;
+    let info = check_for_update(&version_file, &originator).await?;
     let current_version = code_version::version().to_string();
     let latest_version = if is_newer(&info.latest_version, &current_version).unwrap_or(false) {
         Some(info.latest_version)
@@ -148,40 +144,15 @@ struct ReleaseInfo {
 }
 
 const VERSION_FILENAME: &str = "version.json";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/just-every/code/releases/latest";
 const CURRENT_RELEASE_REPO: &str = "just-every/code";
 const LEGACY_RELEASE_REPO: &str = "openai/codex";
+pub const CODE_RELEASE_URL: &str = "https://github.com/just-every/code/releases/latest";
 
 const CACHE_TTL_HOURS: i64 = 20;
 const MAX_CLOCK_SKEW_MINUTES: i64 = 5;
 
 static REFRESH_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
-
-fn clean_value(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|trimmed| !trimmed.is_empty())
-        .map(|trimmed| trimmed.to_string())
-}
-
-fn env_override(key: &str) -> Option<String> {
-    clean_value(env::var(key).ok().as_deref())
-}
-
-fn release_repo_for(config: &Config) -> String {
-    clean_value(config.updates.release_repo.as_deref())
-        .or_else(|| env_override("CODE_RELEASE_REPO"))
-        .unwrap_or_else(|| CURRENT_RELEASE_REPO.to_string())
-}
-
-fn release_url_for(config: &Config, release_repo: &str) -> String {
-    clean_value(config.updates.release_url.as_deref())
-        .or_else(|| env_override("CODE_RELEASE_URL"))
-        .unwrap_or_else(|| format!("https://github.com/{release_repo}/releases/latest"))
-}
-
-fn latest_release_api_url(release_repo: &str) -> String {
-    format!("https://api.github.com/repos/{release_repo}/releases/latest")
-}
 
 #[cfg(test)]
 type FetchOverrideFn = Arc<dyn Fn(&str) -> BoxFuture<'static, anyhow::Result<VersionInfo>> + Send + Sync>;
@@ -207,18 +178,7 @@ fn version_filepath(config: &Config) -> PathBuf {
     config.code_home.join(VERSION_FILENAME)
 }
 
-pub fn resolve_upgrade_resolution(config: &Config) -> UpgradeResolution {
-    if let Some(command) = config
-        .updates
-        .upgrade_command
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        return UpgradeResolution::Command {
-            command: command.clone(),
-            display: command.join(" "),
-        };
-    }
+pub fn resolve_upgrade_resolution() -> UpgradeResolution {
     if std::env::var_os("CODEX_MANAGED_BY_NPM").is_some() {
         return UpgradeResolution::Command {
             command: vec![
@@ -247,11 +207,9 @@ pub fn resolve_upgrade_resolution(config: &Config) -> UpgradeResolution {
         }
     }
 
-    let release_repo = release_repo_for(config);
-    let release_url = release_url_for(config, &release_repo);
     UpgradeResolution::Manual {
         instructions: format!(
-            "Download the latest release from {release_url} and replace the installed binary."
+            "Download the latest release from {CODE_RELEASE_URL} and replace the installed binary."
         ),
     }
 }
@@ -267,7 +225,7 @@ pub async fn auto_upgrade_if_enabled(config: &Config) -> anyhow::Result<AutoUpgr
         return Ok(AutoUpgradeOutcome::default());
     }
 
-    let resolution = resolve_upgrade_resolution(config);
+    let resolution = resolve_upgrade_resolution();
     let (command, command_display) = match resolution {
         UpgradeResolution::Command {
             command,
@@ -545,7 +503,7 @@ fn truncate_for_log(text: &str) -> String {
 }
 
 
-fn read_version_info(version_file: &Path, expected_repo: &str) -> anyhow::Result<Option<VersionInfo>> {
+fn read_version_info(version_file: &Path) -> anyhow::Result<Option<VersionInfo>> {
     let contents = match std::fs::read_to_string(version_file) {
         Ok(contents) => contents,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -564,15 +522,11 @@ fn read_version_info(version_file: &Path, expected_repo: &str) -> anyhow::Result
         }
     };
 
-    let expected_repo = expected_repo.trim();
-    if expected_repo.is_empty() {
-        return Ok(None);
-    }
     let repo = info
         .release_repo
         .as_deref()
         .unwrap_or(LEGACY_RELEASE_REPO);
-    if repo != expected_repo {
+    if repo != CURRENT_RELEASE_REPO {
         warn!(
             path = %version_file.display(),
             release_repo = repo,
@@ -583,7 +537,7 @@ fn read_version_info(version_file: &Path, expected_repo: &str) -> anyhow::Result
 
     info
         .release_repo
-        .get_or_insert_with(|| expected_repo.to_string());
+        .get_or_insert_with(|| CURRENT_RELEASE_REPO.to_string());
     Ok(Some(info))
 }
 
@@ -625,7 +579,7 @@ async fn write_version_info(version_file: &Path, info: &VersionInfo) -> anyhow::
     Ok(())
 }
 
-async fn fetch_latest_version(originator: &str, release_repo: &str) -> anyhow::Result<VersionInfo> {
+async fn fetch_latest_version(originator: &str) -> anyhow::Result<VersionInfo> {
     #[cfg(test)]
     {
         let override_fn = FETCH_OVERRIDE.lock().unwrap().clone();
@@ -637,7 +591,7 @@ async fn fetch_latest_version(originator: &str, release_repo: &str) -> anyhow::R
     let ReleaseInfo {
         tag_name: latest_tag_name,
     } = create_client(originator)
-        .get(latest_release_api_url(release_repo))
+        .get(LATEST_RELEASE_URL)
         .send()
         .await?
         .error_for_status()?
@@ -666,16 +620,12 @@ async fn fetch_latest_version(originator: &str, release_repo: &str) -> anyhow::R
     Ok(VersionInfo {
         latest_version,
         last_checked_at: Utc::now(),
-        release_repo: Some(release_repo.to_string()),
+        release_repo: Some(CURRENT_RELEASE_REPO.to_string()),
     })
 }
 
-async fn check_for_update(
-    version_file: &Path,
-    originator: &str,
-    release_repo: &str,
-) -> anyhow::Result<VersionInfo> {
-    if let Some(info) = read_version_info(version_file, release_repo)? {
+async fn check_for_update(version_file: &Path, originator: &str) -> anyhow::Result<VersionInfo> {
+    if let Some(info) = read_version_info(version_file)? {
         if is_cache_fresh(&info) {
             return Ok(info);
         }
@@ -683,13 +633,13 @@ async fn check_for_update(
 
     let _guard = REFRESH_LOCK.lock().await;
 
-    if let Some(info) = read_version_info(version_file, release_repo)? {
+    if let Some(info) = read_version_info(version_file)? {
         if is_cache_fresh(&info) {
             return Ok(info);
         }
     }
 
-    let info = fetch_latest_version(originator, release_repo).await?;
+    let info = fetch_latest_version(originator).await?;
     write_version_info(version_file, &info).await?;
     Ok(info)
 }
@@ -730,20 +680,12 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
-fn parse_version(v: &str) -> Option<(u64, u64, u64, u64)> {
-    let parts: Vec<&str> = v.trim().split('.').collect();
-    if parts.len() < 3 || parts.len() > 4 {
-        return None;
-    }
-    let maj = parts.get(0)?.parse::<u64>().ok()?;
-    let min = parts.get(1)?.parse::<u64>().ok()?;
-    let pat = parts.get(2)?.parse::<u64>().ok()?;
-    let hotfix = if let Some(value) = parts.get(3) {
-        value.parse::<u64>().ok()?
-    } else {
-        0
-    };
-    Some((maj, min, pat, hotfix))
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let mut iter = v.trim().split('.');
+    let maj = iter.next()?.parse::<u64>().ok()?;
+    let min = iter.next()?.parse::<u64>().ok()?;
+    let pat = iter.next()?.parse::<u64>().ok()?;
+    Some((maj, min, pat))
 }
 
 #[cfg(test)]
@@ -770,7 +712,7 @@ mod tests {
         });
         write_cache(&path, &legacy);
 
-        let result = read_version_info(&path, CURRENT_RELEASE_REPO).expect("load cache");
+        let result = read_version_info(&path).expect("load cache");
         assert!(result.is_none(), "legacy repo cache should be dropped");
     }
 
@@ -785,7 +727,7 @@ mod tests {
         });
         write_cache(&path, &info);
 
-        let parsed = read_version_info(&path, CURRENT_RELEASE_REPO)
+        let parsed = read_version_info(&path)
             .expect("load cache")
             .expect("current repo cache should load");
         assert_eq!(parsed.latest_version, "0.4.7");
@@ -821,12 +763,10 @@ mod tests {
             }
         });
 
-        let info = check_for_update(&version_file, "test-originator", CURRENT_RELEASE_REPO)
-            .await
-            .unwrap();
+        let info = check_for_update(&version_file, "test-originator").await.unwrap();
         assert_eq!(info.latest_version, expected_version);
         assert!(is_cache_fresh(&info));
-        let persisted = read_version_info(&version_file, CURRENT_RELEASE_REPO)
+        let persisted = read_version_info(&version_file)
             .unwrap()
             .expect("updated cache present");
         assert_eq!(persisted.latest_version, expected_version);
@@ -860,9 +800,7 @@ mod tests {
             }
         });
 
-        let info = check_for_update(&version_file, "test-originator", CURRENT_RELEASE_REPO)
-            .await
-            .unwrap();
+        let info = check_for_update(&version_file, "test-originator").await.unwrap();
         assert_eq!(info.latest_version, "0.4.7");
         assert_eq!(*counter.lock().await, 0, "no network call expected");
     }
@@ -892,11 +830,7 @@ mod tests {
         let tasks: Vec<_> = (0..5)
             .map(|_| {
                 let path = version_file.clone();
-                async move {
-                    check_for_update(&path, "test-originator", CURRENT_RELEASE_REPO)
-                        .await
-                        .unwrap()
-                }
+                async move { check_for_update(&path, "test-originator").await.unwrap() }
             })
             .collect();
         let results = futures::future::join_all(tasks).await;
@@ -925,12 +859,10 @@ mod tests {
             }
         });
 
-        let info = check_for_update(&version_file, "test-originator", CURRENT_RELEASE_REPO)
-            .await
-            .unwrap();
+        let info = check_for_update(&version_file, "test-originator").await.unwrap();
         assert_eq!(info.latest_version, "0.5.1");
         assert_eq!(*counter.lock().await, 1);
-        let persisted = read_version_info(&version_file, CURRENT_RELEASE_REPO)
+        let persisted = read_version_info(&version_file)
             .unwrap()
             .expect("cache rewritten");
         assert_eq!(persisted.latest_version, "0.5.1");
@@ -958,7 +890,7 @@ mod tests {
             }
         });
 
-        let err = check_for_update(&version_file, "test-originator", CURRENT_RELEASE_REPO)
+        let err = check_for_update(&version_file, "test-originator")
             .await
             .expect_err("write should fail");
         let io_err = err

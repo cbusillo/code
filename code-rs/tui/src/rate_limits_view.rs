@@ -10,6 +10,10 @@ use ratatui::prelude::*;
 use ratatui::style::Stylize;
 use std::time::Duration;
 
+fn format_u64(value: u64) -> String {
+    format_with_separators(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
 const WEEKLY_CELL: &str = "▇▇";
 const HOURLY_CELL: &str = "▓▓";
 const UNUSED_CELL: &str = "░░";
@@ -516,8 +520,8 @@ fn build_compact_tokens_line(used: u64, limit: u64) -> Line<'static> {
         Style::default().fg(colors::text()),
     ));
 
-    let used_fmt = format_with_separators(used);
-    let limit_fmt = format_with_separators(limit);
+    let used_fmt = format_u64(used);
+    let limit_fmt = format_u64(limit);
     spans.push(Span::styled(
         format!(" ({used_fmt} / {limit_fmt})"),
         Style::default().fg(colors::dim()),
@@ -534,7 +538,7 @@ fn build_compact_status_line(used: u64, limit: u64) -> Line<'static> {
             Span::styled(
                 format!(
                     "{} tokens before compact",
-                    format_with_separators(remaining)
+                    format_u64(remaining)
                 ),
                 Style::default().fg(colors::dim()),
             ),
@@ -555,7 +559,7 @@ fn build_compact_status_line(used: u64, limit: u64) -> Line<'static> {
     Line::from(vec![
         Span::raw(field_prefix("Status")),
         Span::styled(
-            format!("Exceeded by {} tokens", format_with_separators(overage)),
+            format!("Exceeded by {} tokens", format_u64(overage)),
             Style::default().fg(colors::error()),
         ),
     ])
@@ -582,8 +586,8 @@ fn build_context_tokens_line(used: u64, window: u64) -> Line<'static> {
     spans.push(Span::styled(
         format!(
             " ({} / {})",
-            format_with_separators(used),
-            format_with_separators(window)
+            format_u64(used),
+            format_u64(window)
         ),
         Style::default().fg(colors::dim()),
     ));
@@ -602,7 +606,7 @@ fn build_context_status_line(
             Span::styled(
                 format!(
                     "{} tokens before compact",
-                    format_with_separators(remaining)
+                    format_u64(remaining)
                 ),
                 Style::default().fg(colors::dim()),
             ),
@@ -622,7 +626,7 @@ fn build_context_status_line(
     let overage = used.saturating_sub(window);
     let mut message = format!(
         "Exceeded by {} tokens",
-        format_with_separators(overage)
+        format_u64(overage)
     );
     if overflow_auto_compact {
         message.push_str("; auto-compaction runs after overflow");

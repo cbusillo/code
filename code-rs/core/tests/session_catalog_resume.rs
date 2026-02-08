@@ -73,6 +73,8 @@ fn write_rollout_transcript(
             content: vec![ContentItem::InputText {
                 text: user_message.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }),
     };
 
@@ -84,6 +86,8 @@ fn write_rollout_transcript(
             content: vec![ContentItem::OutputText {
                 text: "Ack".to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }),
     };
 

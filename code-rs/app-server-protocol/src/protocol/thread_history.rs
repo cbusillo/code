@@ -6,11 +6,10 @@ use crate::protocol::v2::UserInput;
 use code_protocol::protocol::AgentReasoningEvent;
 use code_protocol::protocol::AgentReasoningRawContentEvent;
 use code_protocol::protocol::EventMsg;
+use code_protocol::protocol::ItemCompletedEvent;
+use code_protocol::protocol::ThreadRolledBackEvent;
 use code_protocol::protocol::TurnAbortedEvent;
 use code_protocol::protocol::UserMessageEvent;
-use code_protocol::plan_tool::PlanItemArg;
-use code_protocol::plan_tool::StepStatus;
-use code_protocol::plan_tool::UpdatePlanArgs;
 
 /// Convert persisted [`EventMsg`] entries into a sequence of [`Turn`] values.
 ///
@@ -57,10 +56,12 @@ impl ThreadHistoryBuilder {
             EventMsg::AgentReasoningRawContent(payload) => {
                 self.handle_agent_reasoning_raw_content(payload)
             }
+            EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
             EventMsg::TokenCount(_) => {}
             EventMsg::EnteredReviewMode(_) => {}
             EventMsg::ExitedReviewMode(_) => {}
-            EventMsg::PlanUpdate(payload) => self.handle_plan_update(payload),
+            EventMsg::ThreadRolledBack(payload) => self.handle_thread_rollback(payload),
+            EventMsg::UndoCompleted(_) => {}
             EventMsg::TurnAborted(payload) => self.handle_turn_aborted(payload),
             _ => {}
         }
@@ -126,21 +127,17 @@ impl ThreadHistoryBuilder {
         });
     }
 
-    fn handle_plan_update(&mut self, payload: &UpdatePlanArgs) {
-        if payload.plan.is_empty() {
-            return;
+    fn handle_item_completed(&mut self, payload: &ItemCompletedEvent) {
+        if let code_protocol::items::TurnItem::Plan(plan) = &payload.item {
+            if plan.text.is_empty() {
+                return;
+            }
+            let id = self.next_item_id();
+            self.ensure_turn().items.push(ThreadItem::Plan {
+                id,
+                text: plan.text.clone(),
+            });
         }
-        let text = payload
-            .plan
-            .iter()
-            .map(format_plan_item)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if text.is_empty() {
-            return;
-        }
-        let id = self.next_item_id();
-        self.ensure_turn().items.push(ThreadItem::Plan { id, text });
     }
 
     fn handle_turn_aborted(&mut self, _payload: &TurnAbortedEvent) {
@@ -148,6 +145,23 @@ impl ThreadHistoryBuilder {
             return;
         };
         turn.status = TurnStatus::Interrupted;
+    }
+
+    fn handle_thread_rollback(&mut self, payload: &ThreadRolledBackEvent) {
+        self.finish_current_turn();
+
+        let n = usize::try_from(payload.num_turns).unwrap_or(usize::MAX);
+        if n >= self.turns.len() {
+            self.turns.clear();
+        } else {
+            self.turns.truncate(self.turns.len().saturating_sub(n));
+        }
+
+        // Re-number subsequent synthetic ids so the pruned history is consistent.
+        self.next_turn_index =
+            i64::try_from(self.turns.len().saturating_add(1)).unwrap_or(i64::MAX);
+        let item_count: usize = self.turns.iter().map(|t| t.items.len()).sum();
+        self.next_item_index = i64::try_from(item_count.saturating_add(1)).unwrap_or(i64::MAX);
     }
 
     fn finish_current_turn(&mut self) {
@@ -198,7 +212,12 @@ impl ThreadHistoryBuilder {
         if !payload.message.trim().is_empty() {
             content.push(UserInput::Text {
                 text: payload.message.clone(),
-                text_elements: Vec::new(),
+                text_elements: payload
+                    .text_elements
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect(),
             });
         }
         if let Some(images) = &payload.images {
@@ -206,20 +225,10 @@ impl ThreadHistoryBuilder {
                 content.push(UserInput::Image { url: image.clone() });
             }
         }
+        for path in &payload.local_images {
+            content.push(UserInput::LocalImage { path: path.clone() });
+        }
         content
-    }
-}
-
-fn format_plan_item(item: &PlanItemArg) -> String {
-    let status = match item.status {
-        StepStatus::Pending => "pending",
-        StepStatus::InProgress => "in_progress",
-        StepStatus::Completed => "completed",
-    };
-    if item.step.is_empty() {
-        status.to_string()
-    } else {
-        format!("[{status}] {}", item.step)
     }
 }
 
@@ -247,6 +256,7 @@ mod tests {
     use code_protocol::protocol::AgentMessageEvent;
     use code_protocol::protocol::AgentReasoningEvent;
     use code_protocol::protocol::AgentReasoningRawContentEvent;
+    use code_protocol::protocol::ThreadRolledBackEvent;
     use code_protocol::protocol::TurnAbortReason;
     use code_protocol::protocol::TurnAbortedEvent;
     use code_protocol::protocol::UserMessageEvent;
@@ -257,8 +267,9 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "First turn".into(),
-                kind: None,
                 images: Some(vec!["https://example.com/one.png".into()]),
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Hi there".into(),
@@ -271,8 +282,9 @@ mod tests {
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Second turn".into(),
-                kind: None,
                 images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Reply two".into(),
@@ -344,8 +356,9 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Turn start".into(),
-                kind: None,
                 images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
             }),
             EventMsg::AgentReasoning(AgentReasoningEvent {
                 text: "first summary".into(),
@@ -389,8 +402,9 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Please do the thing".into(),
-                kind: None,
                 images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Working...".into(),
@@ -400,8 +414,9 @@ mod tests {
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Let's try again".into(),
-                kind: None,
                 images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Second attempt complete.".into(),
@@ -454,4 +469,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn drops_last_turns_on_thread_rollback() {
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "First".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A1".into(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "Second".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A2".into(),
+            }),
+            EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 1 }),
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "Third".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A3".into(),
+            }),
+        ];
+
+        let turns = build_turns_from_event_msgs(&events);
+        let expected = vec![
+            Turn {
+                id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                error: None,
+                items: vec![
+                    ThreadItem::UserMessage {
+                        id: "item-1".into(),
+                        content: vec![UserInput::Text {
+                            text: "First".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    ThreadItem::AgentMessage {
+                        id: "item-2".into(),
+                        text: "A1".into(),
+                    },
+                ],
+            },
+            Turn {
+                id: "turn-2".into(),
+                status: TurnStatus::Completed,
+                error: None,
+                items: vec![
+                    ThreadItem::UserMessage {
+                        id: "item-3".into(),
+                        content: vec![UserInput::Text {
+                            text: "Third".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    ThreadItem::AgentMessage {
+                        id: "item-4".into(),
+                        text: "A3".into(),
+                    },
+                ],
+            },
+        ];
+        assert_eq!(turns, expected);
+    }
+
+    #[test]
+    fn thread_rollback_clears_all_turns_when_num_turns_exceeds_history() {
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "One".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A1".into(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "Two".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A2".into(),
+            }),
+            EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 99 }),
+        ];
+
+        let turns = build_turns_from_event_msgs(&events);
+        assert_eq!(turns, Vec::<Turn>::new());
+    }
 }

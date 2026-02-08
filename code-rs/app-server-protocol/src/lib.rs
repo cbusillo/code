@@ -4,14 +4,6 @@ mod jsonrpc_lite;
 mod protocol;
 mod schema_fixtures;
 
-pub mod v1 {
-    pub use crate::protocol::v1::*;
-}
-
-pub mod v2 {
-    pub use crate::protocol::v2::*;
-}
-
 pub use experimental_api::*;
 pub use export::GenerateTsOptions;
 pub use export::generate_json;

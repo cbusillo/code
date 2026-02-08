@@ -25,11 +25,20 @@ use code_protocol::openai_models::default_input_modalities;
 use code_protocol::parse_command::ParsedCommand as CoreParsedCommand;
 use code_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use code_protocol::plan_tool::StepStatus as CorePlanStepStatus;
+use code_protocol::protocol::AgentStatus as CoreAgentStatus;
 use code_protocol::protocol::AskForApproval as CoreAskForApproval;
 use code_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
+use code_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
+use code_protocol::protocol::NetworkAccess as CoreNetworkAccess;
 use code_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use code_protocol::protocol::RateLimitWindow as CoreRateLimitWindow;
 use code_protocol::protocol::SessionSource as CoreSessionSource;
+use code_protocol::protocol::SkillDependencies as CoreSkillDependencies;
+use code_protocol::protocol::SkillErrorInfo as CoreSkillErrorInfo;
+use code_protocol::protocol::SkillInterface as CoreSkillInterface;
+use code_protocol::protocol::SkillMetadata as CoreSkillMetadata;
+use code_protocol::protocol::SkillScope as CoreSkillScope;
+use code_protocol::protocol::SkillToolDependency as CoreSkillToolDependency;
 use code_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use code_protocol::protocol::TokenUsage as CoreTokenUsage;
 use code_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
@@ -43,6 +52,31 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 use ts_rs::TS;
+
+// Macro to declare a camelCased API v2 enum mirroring a core enum which
+// tends to use either snake_case or kebab-case.
+macro_rules! v2_enum_from_core {
+    (
+        pub enum $Name:ident from $Src:path { $( $Variant:ident ),+ $(,)? }
+    ) => {
+        #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+        #[serde(rename_all = "camelCase")]
+        #[ts(export_to = "v2/")]
+        pub enum $Name { $( $Variant ),+ }
+
+        impl $Name {
+            pub fn to_core(self) -> $Src {
+                match self { $( $Name::$Variant => <$Src>::$Variant ),+ }
+            }
+        }
+
+        impl From<$Src> for $Name {
+            fn from(value: $Src) -> Self {
+                match value { $( <$Src>::$Variant => $Name::$Variant ),+ }
+            }
+        }
+    };
+}
 
 /// This translation layer make sure that we expose codex error code in camel case.
 ///
@@ -94,6 +128,13 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
         match value {
             CoreCodexErrorInfo::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
             CoreCodexErrorInfo::UsageLimitExceeded => CodexErrorInfo::UsageLimitExceeded,
+            CoreCodexErrorInfo::ModelCap {
+                model,
+                reset_after_seconds,
+            } => CodexErrorInfo::ModelCap {
+                model,
+                reset_after_seconds,
+            },
             CoreCodexErrorInfo::HttpConnectionFailed { http_status_code } => {
                 CodexErrorInfo::HttpConnectionFailed { http_status_code }
             }
@@ -103,6 +144,7 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
             CoreCodexErrorInfo::InternalServerError => CodexErrorInfo::InternalServerError,
             CoreCodexErrorInfo::Unauthorized => CodexErrorInfo::Unauthorized,
             CoreCodexErrorInfo::BadRequest => CodexErrorInfo::BadRequest,
+            CoreCodexErrorInfo::ThreadRollbackFailed => CodexErrorInfo::ThreadRollbackFailed,
             CoreCodexErrorInfo::SandboxError => CodexErrorInfo::SandboxError,
             CoreCodexErrorInfo::ResponseStreamDisconnected { http_status_code } => {
                 CodexErrorInfo::ResponseStreamDisconnected { http_status_code }
@@ -178,23 +220,20 @@ impl From<CoreSandboxMode> for SandboxMode {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub enum ReviewDelivery {
-    Inline,
-    Detached,
-}
+v2_enum_from_core!(
+    pub enum ReviewDelivery from code_protocol::protocol::ReviewDelivery {
+        Inline, Detached
+    }
+);
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub enum McpAuthStatus {
-    Unsupported,
-    NotLoggedIn,
-    BearerToken,
-    OAuth,
-}
+v2_enum_from_core!(
+    pub enum McpAuthStatus from code_protocol::protocol::McpAuthStatus {
+        Unsupported,
+        NotLoggedIn,
+        BearerToken,
+        OAuth
+    }
+);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -593,12 +632,11 @@ impl SandboxPolicy {
             }
             SandboxPolicy::ReadOnly => code_protocol::protocol::SandboxPolicy::ReadOnly,
             SandboxPolicy::ExternalSandbox { network_access } => {
-                code_protocol::protocol::SandboxPolicy::WorkspaceWrite {
-                    writable_roots: Vec::new(),
-                    network_access: matches!(network_access, NetworkAccess::Enabled),
-                    exclude_tmpdir_env_var: false,
-                    exclude_slash_tmp: false,
-                    allow_git_writes: true,
+                code_protocol::protocol::SandboxPolicy::ExternalSandbox {
+                    network_access: match network_access {
+                        NetworkAccess::Restricted => CoreNetworkAccess::Restricted,
+                        NetworkAccess::Enabled => CoreNetworkAccess::Enabled,
+                    },
                 }
             }
             SandboxPolicy::WorkspaceWrite {
@@ -608,7 +646,7 @@ impl SandboxPolicy {
                 exclude_slash_tmp,
                 allow_git_writes,
             } => code_protocol::protocol::SandboxPolicy::WorkspaceWrite {
-                writable_roots: writable_roots.iter().cloned().map(Into::into).collect(),
+                writable_roots: writable_roots.clone(),
                 network_access: *network_access,
                 exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
                 exclude_slash_tmp: *exclude_slash_tmp,
@@ -625,6 +663,14 @@ impl From<code_protocol::protocol::SandboxPolicy> for SandboxPolicy {
                 SandboxPolicy::DangerFullAccess
             }
             code_protocol::protocol::SandboxPolicy::ReadOnly => SandboxPolicy::ReadOnly,
+            code_protocol::protocol::SandboxPolicy::ExternalSandbox { network_access } => {
+                SandboxPolicy::ExternalSandbox {
+                    network_access: match network_access {
+                        CoreNetworkAccess::Restricted => NetworkAccess::Restricted,
+                        CoreNetworkAccess::Enabled => NetworkAccess::Enabled,
+                    },
+                }
+            }
             code_protocol::protocol::SandboxPolicy::WorkspaceWrite {
                 writable_roots,
                 network_access,
@@ -632,10 +678,7 @@ impl From<code_protocol::protocol::SandboxPolicy> for SandboxPolicy {
                 exclude_slash_tmp,
                 allow_git_writes,
             } => SandboxPolicy::WorkspaceWrite {
-                writable_roots: writable_roots
-                    .into_iter()
-                    .filter_map(|root| AbsolutePathBuf::try_from(root).ok())
-                    .collect(),
+                writable_roots,
                 network_access,
                 exclude_tmpdir_env_var,
                 exclude_slash_tmp,
@@ -674,9 +717,7 @@ pub enum CommandAction {
     Read {
         command: String,
         name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        path: Option<PathBuf>,
+        path: PathBuf,
     },
     ListFiles {
         command: String,
@@ -750,8 +791,8 @@ impl CommandAction {
             CommandAction::Read {
                 command: cmd,
                 name,
-                path: _,
-            } => CoreParsedCommand::Read { cmd, name },
+                path,
+            } => CoreParsedCommand::Read { cmd, name, path },
             CommandAction::ListFiles { command: cmd, path } => {
                 CoreParsedCommand::ListFiles { cmd, path }
             }
@@ -768,10 +809,10 @@ impl CommandAction {
 impl From<CoreParsedCommand> for CommandAction {
     fn from(value: CoreParsedCommand) -> Self {
         match value {
-            CoreParsedCommand::Read { cmd, name } => CommandAction::Read {
+            CoreParsedCommand::Read { cmd, name, path } => CommandAction::Read {
                 command: cmd,
                 name,
-                path: None,
+                path,
             },
             CoreParsedCommand::ListFiles { cmd, path } => {
                 CommandAction::ListFiles { command: cmd, path }
@@ -781,7 +822,6 @@ impl From<CoreParsedCommand> for CommandAction {
                 query,
                 path,
             },
-            CoreParsedCommand::ReadCommand { cmd } => CommandAction::Unknown { command: cmd },
             CoreParsedCommand::Unknown { cmd } => CommandAction::Unknown { command: cmd },
         }
     }
@@ -1743,6 +1783,79 @@ pub struct SkillsConfigWriteResponse {
     pub effective_enabled: bool,
 }
 
+impl From<CoreSkillMetadata> for SkillMetadata {
+    fn from(value: CoreSkillMetadata) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            short_description: value.short_description,
+            interface: value.interface.map(SkillInterface::from),
+            dependencies: value.dependencies.map(SkillDependencies::from),
+            path: value.path,
+            scope: value.scope.into(),
+            enabled: true,
+        }
+    }
+}
+
+impl From<CoreSkillInterface> for SkillInterface {
+    fn from(value: CoreSkillInterface) -> Self {
+        Self {
+            display_name: value.display_name,
+            short_description: value.short_description,
+            brand_color: value.brand_color,
+            default_prompt: value.default_prompt,
+            icon_small: value.icon_small,
+            icon_large: value.icon_large,
+        }
+    }
+}
+
+impl From<CoreSkillDependencies> for SkillDependencies {
+    fn from(value: CoreSkillDependencies) -> Self {
+        Self {
+            tools: value
+                .tools
+                .into_iter()
+                .map(SkillToolDependency::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<CoreSkillToolDependency> for SkillToolDependency {
+    fn from(value: CoreSkillToolDependency) -> Self {
+        Self {
+            r#type: value.r#type,
+            value: value.value,
+            description: value.description,
+            transport: value.transport,
+            command: value.command,
+            url: value.url,
+        }
+    }
+}
+
+impl From<CoreSkillScope> for SkillScope {
+    fn from(value: CoreSkillScope) -> Self {
+        match value {
+            CoreSkillScope::User => Self::User,
+            CoreSkillScope::Repo => Self::Repo,
+            CoreSkillScope::System => Self::System,
+            CoreSkillScope::Admin => Self::Admin,
+        }
+    }
+}
+
+impl From<CoreSkillErrorInfo> for SkillErrorInfo {
+    fn from(value: CoreSkillErrorInfo) -> Self {
+        Self {
+            path: value.path,
+            message: value.message,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -2110,10 +2223,7 @@ impl UserInput {
             UserInput::Image { url } => CoreUserInput::Image { image_url: url },
             UserInput::LocalImage { path } => CoreUserInput::LocalImage { path },
             UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
-            UserInput::Mention { name, .. } => CoreUserInput::Text {
-                text: format!("@{name}"),
-                text_elements: Vec::new(),
-            },
+            UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
         }
     }
 }
@@ -2131,6 +2241,7 @@ impl From<CoreUserInput> for UserInput {
             CoreUserInput::Image { image_url } => UserInput::Image { url: image_url },
             CoreUserInput::LocalImage { path } => UserInput::LocalImage { path },
             CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
+            CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },
             _ => unreachable!("unsupported user input variant"),
         }
     }
@@ -2405,6 +2516,37 @@ pub enum CollabAgentStatus {
 pub struct CollabAgentState {
     pub status: CollabAgentStatus,
     pub message: Option<String>,
+}
+
+impl From<CoreAgentStatus> for CollabAgentState {
+    fn from(value: CoreAgentStatus) -> Self {
+        match value {
+            CoreAgentStatus::PendingInit => Self {
+                status: CollabAgentStatus::PendingInit,
+                message: None,
+            },
+            CoreAgentStatus::Running => Self {
+                status: CollabAgentStatus::Running,
+                message: None,
+            },
+            CoreAgentStatus::Completed(message) => Self {
+                status: CollabAgentStatus::Completed,
+                message,
+            },
+            CoreAgentStatus::Errored(message) => Self {
+                status: CollabAgentStatus::Errored,
+                message: Some(message),
+            },
+            CoreAgentStatus::Shutdown => Self {
+                status: CollabAgentStatus::Shutdown,
+                message: None,
+            },
+            CoreAgentStatus::NotFound => Self {
+                status: CollabAgentStatus::NotFound,
+                message: None,
+            },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -2855,8 +2997,8 @@ impl From<CoreRateLimitSnapshot> for RateLimitSnapshot {
         Self {
             primary: value.primary.map(RateLimitWindow::from),
             secondary: value.secondary.map(RateLimitWindow::from),
-            credits: None,
-            plan_type: None,
+            credits: value.credits.map(CreditsSnapshot::from),
+            plan_type: value.plan_type,
         }
     }
 }
@@ -2876,12 +3018,8 @@ impl From<CoreRateLimitWindow> for RateLimitWindow {
     fn from(value: CoreRateLimitWindow) -> Self {
         Self {
             used_percent: value.used_percent.round() as i32,
-            window_duration_mins: value
-                .window_minutes
-                .and_then(|value| i64::try_from(value).ok()),
-            resets_at: value
-                .resets_in_seconds
-                .and_then(|value| i64::try_from(value).ok()),
+            window_duration_mins: value.window_minutes,
+            resets_at: value.resets_at,
         }
     }
 }
@@ -2893,6 +3031,16 @@ pub struct CreditsSnapshot {
     pub has_credits: bool,
     pub unlimited: bool,
     pub balance: Option<String>,
+}
+
+impl From<CoreCreditsSnapshot> for CreditsSnapshot {
+    fn from(value: CoreCreditsSnapshot) -> Self {
+        Self {
+            has_credits: value.has_credits,
+            unlimited: value.unlimited,
+            balance: value.balance,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -2962,10 +3110,29 @@ mod tests {
     use code_protocol::items::UserMessageItem;
     use code_protocol::items::WebSearchItem;
     use code_protocol::models::WebSearchAction as CoreWebSearchAction;
+    use code_protocol::protocol::NetworkAccess as CoreNetworkAccess;
     use code_protocol::user_input::UserInput as CoreUserInput;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn sandbox_policy_round_trips_external_sandbox_network_access() {
+        let v2_policy = SandboxPolicy::ExternalSandbox {
+            network_access: NetworkAccess::Enabled,
+        };
+
+        let core_policy = v2_policy.to_core();
+        assert_eq!(
+            core_policy,
+            code_protocol::protocol::SandboxPolicy::ExternalSandbox {
+                network_access: CoreNetworkAccess::Enabled,
+            }
+        );
+
+        let back_to_v2 = SandboxPolicy::from(core_policy);
+        assert_eq!(back_to_v2, v2_policy);
+    }
 
     #[test]
     fn core_turn_item_into_thread_item_converts_supported_variants() {
@@ -2985,6 +3152,10 @@ mod tests {
                 CoreUserInput::Skill {
                     name: "skill-creator".to_string(),
                     path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                },
+                CoreUserInput::Mention {
+                    name: "Demo App".to_string(),
+                    path: "app://demo-app".to_string(),
                 },
             ],
         });
@@ -3007,6 +3178,10 @@ mod tests {
                     UserInput::Skill {
                         name: "skill-creator".to_string(),
                         path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                    },
+                    UserInput::Mention {
+                        name: "Demo App".to_string(),
+                        path: "app://demo-app".to_string(),
                     },
                 ],
             }

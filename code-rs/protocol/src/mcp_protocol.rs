@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::PathBuf;
 
-use crate::config_types::ReasoningEffort;
+use crate::openai_models::ReasoningEffort;
 use crate::config_types::ReasoningSummary;
 use crate::config_types::SandboxMode;
 use crate::config_types::Verbosity;
@@ -13,12 +13,11 @@ use crate::protocol::FileChange;
 use crate::protocol::ReviewDecision;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::TurnAbortReason;
-use crate::request_user_input::RequestUserInputResponse;
 use mcp_types::JSONRPCNotification;
 use mcp_types::RequestId;
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use schemars::JsonSchema;
 use strum_macros::Display;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -76,6 +75,18 @@ impl Serialize for ConversationId {
     }
 }
 
+impl JsonSchema for ConversationId {
+    fn schema_name() -> String {
+        "ConversationId".to_string()
+    }
+
+    fn json_schema(
+        schema_gen: &mut schemars::r#gen::SchemaGenerator,
+    ) -> schemars::schema::Schema {
+        <String as JsonSchema>::json_schema(schema_gen)
+    }
+}
+
 impl<'de> Deserialize<'de> for ConversationId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -84,16 +95,6 @@ impl<'de> Deserialize<'de> for ConversationId {
         let value = String::deserialize(deserializer)?;
         let uuid = Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
         Ok(Self { uuid })
-    }
-}
-
-impl JsonSchema for ConversationId {
-    fn schema_name() -> String {
-        "ConversationId".to_string()
-    }
-
-    fn json_schema(r#gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        <String>::json_schema(r#gen)
     }
 }
 
@@ -160,20 +161,10 @@ pub enum ClientRequest {
         request_id: RequestId,
         params: SendUserMessageParams,
     },
-    UserInputAnswer {
-        #[serde(rename = "id")]
-        request_id: RequestId,
-        params: UserInputAnswerParams,
-    },
     SendUserTurn {
         #[serde(rename = "id")]
         request_id: RequestId,
         params: SendUserTurnParams,
-    },
-    SubmitOp {
-        #[serde(rename = "id")]
-        request_id: RequestId,
-        params: SubmitOpParams,
     },
     InterruptConversation {
         #[serde(rename = "id")]
@@ -653,19 +644,6 @@ pub struct SendUserTurnParams {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct SubmitOpParams {
-    pub conversation_id: ConversationId,
-    pub op: crate::protocol::Op,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitOpResponse {
-    pub submission_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
 pub struct SendUserTurnResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
@@ -683,18 +661,6 @@ pub struct InterruptConversationResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SendUserMessageResponse {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct UserInputAnswerParams {
-    pub conversation_id: ConversationId,
-    pub call_id: String,
-    pub response: RequestUserInputResponse,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct UserInputAnswerResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]

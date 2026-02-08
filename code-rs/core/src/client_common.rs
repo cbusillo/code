@@ -169,6 +169,8 @@ impl Prompt {
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text: developer_text }],
+                end_turn: None,
+                phase: None,
             });
             for message in &self.prepend_developer_messages {
                 let trimmed = message.trim();
@@ -181,6 +183,8 @@ impl Prompt {
                     content: vec![ContentItem::InputText {
                         text: trimmed.to_string(),
                     }],
+                    end_turn: None,
+                    phase: None,
                 });
             }
             if let Some(ec) = self.get_formatted_environment_context() {
@@ -196,6 +200,8 @@ impl Prompt {
                         id: None,
                         role: "user".to_string(),
                         content: vec![ContentItem::InputText { text: ec }],
+                        end_turn: None,
+                        phase: None,
                     });
                 }
             }

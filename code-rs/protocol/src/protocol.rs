@@ -10,30 +10,33 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use schemars::JsonSchema;
 use crate::ConversationId;
-use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
+use crate::ThreadId;
+use crate::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use crate::config_types::Verbosity as TextVerbosityConfig;
 use crate::custom_prompts::CustomPrompt;
-use crate::dynamic_tools::{DynamicToolCallRequest, DynamicToolResponse, DynamicToolSpec};
-use crate::model_provider_info::ModelProviderInfo;
+use crate::dynamic_tools::{DynamicToolCallRequest, DynamicToolResponse};
 use crate::skills::Skill;
 use crate::message_history::HistoryEntry;
+use crate::items::TurnItem;
 use crate::models::ContentItem;
 use crate::models::ResponseItem;
+use crate::models::WebSearchAction;
 use crate::num_format::format_with_separators;
 use crate::parse_command::ParsedCommand;
 use crate::plan_tool::UpdatePlanArgs;
 use crate::request_user_input::RequestUserInputResponse;
 use mcp_types::CallToolResult;
 use mcp_types::Tool as McpTool;
+use code_utils_absolute_path::AbsolutePathBuf;
 pub use crate::request_user_input::RequestUserInputEvent;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_with::serde_as;
+use schemars::JsonSchema;
 use strum_macros::Display;
+use tracing::error;
 use ts_rs::TS;
 
 /// Open/close tags for special user-input blocks. Used across crates to avoid
@@ -47,6 +50,8 @@ pub const ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG: &str = "<environment_context_delta
 pub const ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG: &str = "</environment_context_delta>";
 pub const BROWSER_SNAPSHOT_OPEN_TAG: &str = "<browser_snapshot>";
 pub const BROWSER_SNAPSHOT_CLOSE_TAG: &str = "</browser_snapshot>";
+pub const COLLABORATION_MODE_OPEN_TAG: &str = "<collaboration_mode>";
+pub const COLLABORATION_MODE_CLOSE_TAG: &str = "</collaboration_mode>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
 
 /// Submission Queue Entry - requests from user
@@ -58,102 +63,15 @@ pub struct Submission {
     pub op: Op,
 }
 
-/// High-level toggles for validation checks.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ValidationGroup {
-    Functional,
-    Stylistic,
-}
-
-/// Optional structured output format for `text.format` in the Responses API.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, TS)]
-pub struct TextFormat {
-    #[serde(rename = "type")]
-    pub r#type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub strict: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<Value>,
-}
-
 /// Submission operation
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 #[non_exhaustive]
 pub enum Op {
-    /// Configure the model session.
-    ConfigureSession {
-        /// Provider identifier ("openai", "openrouter", ...).
-        provider: ModelProviderInfo,
-
-        /// If not specified, server will use its default model.
-        model: String,
-
-        /// True when the model choice is explicitly set by the user.
-        #[serde(default)]
-        model_explicit: bool,
-
-        model_reasoning_effort: ReasoningEffortConfig,
-        /// Optional user-preferred reasoning effort for the chat model.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(default)]
-        preferred_model_reasoning_effort: Option<ReasoningEffortConfig>,
-        model_reasoning_summary: ReasoningSummaryConfig,
-        model_text_verbosity: TextVerbosityConfig,
-
-        /// Model instructions that are appended to the base instructions.
-        user_instructions: Option<String>,
-
-        /// Base instructions override.
-        base_instructions: Option<String>,
-
-        /// When to escalate for approval for execution
-        approval_policy: AskForApproval,
-        /// How to sandbox commands executed in the system
-        sandbox_policy: SandboxPolicy,
-        /// Disable server-side response storage (send full context each request)
-        #[serde(default)]
-        disable_response_storage: bool,
-
-        /// Optional external notifier command tokens.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(default)]
-        notify: Option<Vec<String>>,
-
-        /// Working directory treated as the session root.
-        cwd: PathBuf,
-
-        /// Path to a rollout file to resume from.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        resume_path: Option<PathBuf>,
-
-        /// Optional developer-role message to prepend to every turn for demos.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(default)]
-        demo_developer_message: Option<String>,
-
-        /// Dynamic tools to include for this session.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        dynamic_tools: Vec<DynamicToolSpec>,
-    },
-
     /// Abort current task.
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
-
-    /// Cancel running agents immediately without waiting for a tool call.
-    CancelAgents {
-        /// Agent batch identifiers to cancel.
-        #[serde(default)]
-        batch_ids: Vec<String>,
-        /// Specific agent identifiers to cancel when no batch is available.
-        #[serde(default)]
-        agent_ids: Vec<String>,
-    },
 
     /// Input from the user
     UserInput {
@@ -169,11 +87,6 @@ pub enum Op {
     QueueUserInput {
         /// User input items, see `InputItem`
         items: Vec<InputItem>,
-    },
-
-    /// Set a one-off text format to apply on the next turn.
-    SetNextTextFormat {
-        format: TextFormat,
     },
 
     /// Similar to [`Op::UserInput`], but contains additional context required
@@ -283,18 +196,6 @@ pub enum Op {
         response: DynamicToolResponse,
     },
 
-    /// Update a specific validation tool toggle for the session.
-    UpdateValidationTool {
-        name: String,
-        enable: bool,
-    },
-
-    /// Update a validation group toggle for the session.
-    UpdateValidationGroup {
-        group: ValidationGroup,
-        enable: bool,
-    },
-
     /// Append an entry to the persistent cross-session message history.
     ///
     /// Note the entry is not guaranteed to be logged if the user has
@@ -307,17 +208,6 @@ pub enum Op {
     /// Persist the full chat history snapshot for the current session.
     PersistHistorySnapshot {
         snapshot: serde_json::Value,
-    },
-
-    /// Execute a project-scoped custom command defined in configuration.
-    RunProjectCommand {
-        name: String,
-    },
-
-    /// Internally queue a developer-role message to be included in the next turn.
-    AddPendingInputDeveloper {
-        /// The developer message text to add to pending input.
-        text: String,
     },
 
     /// Request a single history entry identified by `log_id` + `offset`.
@@ -353,18 +243,8 @@ pub enum Op {
 /// Determines the conditions under which the user is consulted to approve
 /// running the command proposed by Codex.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    Display,
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display, JsonSchema,
     TS,
-    JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
@@ -391,7 +271,25 @@ pub enum AskForApproval {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, TS, JsonSchema)]
+/// Represents whether outbound network access is available to the agent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, Default, JsonSchema, TS,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum NetworkAccess {
+    #[default]
+    Restricted,
+    Enabled,
+}
+
+impl NetworkAccess {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, NetworkAccess::Enabled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovedCommandMatchKind {
     Exact,
@@ -399,7 +297,7 @@ pub enum ApprovedCommandMatchKind {
 }
 
 /// Determines execution restrictions for model shell commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Display, TS, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Display, JsonSchema, TS)]
 #[strum(serialize_all = "kebab-case")]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum SandboxPolicy {
@@ -411,6 +309,15 @@ pub enum SandboxPolicy {
     #[serde(rename = "read-only")]
     ReadOnly,
 
+    /// Indicates the process is already in an external sandbox. Allows full
+    /// disk access while honoring the provided network setting.
+    #[serde(rename = "external-sandbox")]
+    ExternalSandbox {
+        /// Whether the external sandbox permits outbound network traffic.
+        #[serde(default)]
+        network_access: NetworkAccess,
+    },
+
     /// Same as `ReadOnly` but additionally grants write access to the current
     /// working directory ("workspace").
     #[serde(rename = "workspace-write")]
@@ -418,7 +325,7 @@ pub enum SandboxPolicy {
         /// Additional folders (beyond cwd and possibly TMPDIR) that should be
         /// writable from within the sandbox.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        writable_roots: Vec<PathBuf>,
+        writable_roots: Vec<AbsolutePathBuf>,
 
         /// When set to `true`, outbound network access is allowed. `false` by
         /// default.
@@ -449,13 +356,13 @@ const fn default_true_bool() -> bool { true }
 /// read‑only even when the root is writable. This is primarily used to ensure
 /// top‑level VCS metadata directories (e.g. `.git`) under a writable root are
 /// not modified by the agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
 pub struct WritableRoot {
     /// Absolute path, by construction.
-    pub root: PathBuf,
+    pub root: AbsolutePathBuf,
 
     /// Also absolute paths, by construction.
-    pub read_only_subpaths: Vec<PathBuf>,
+    pub read_only_subpaths: Vec<AbsolutePathBuf>,
 }
 
 impl WritableRoot {
@@ -511,6 +418,7 @@ impl SandboxPolicy {
     pub fn has_full_disk_write_access(&self) -> bool {
         match self {
             SandboxPolicy::DangerFullAccess => true,
+            SandboxPolicy::ExternalSandbox { .. } => true,
             SandboxPolicy::ReadOnly => false,
             SandboxPolicy::WorkspaceWrite { .. } => false,
         }
@@ -519,6 +427,7 @@ impl SandboxPolicy {
     pub fn has_full_network_access(&self) -> bool {
         match self {
             SandboxPolicy::DangerFullAccess => true,
+            SandboxPolicy::ExternalSandbox { network_access } => network_access.is_enabled(),
             SandboxPolicy::ReadOnly => false,
             SandboxPolicy::WorkspaceWrite { network_access, .. } => *network_access,
         }
@@ -530,6 +439,7 @@ impl SandboxPolicy {
     pub fn get_writable_roots_with_cwd(&self, cwd: &Path) -> Vec<WritableRoot> {
         match self {
             SandboxPolicy::DangerFullAccess => Vec::new(),
+            SandboxPolicy::ExternalSandbox { .. } => Vec::new(),
             SandboxPolicy::ReadOnly => Vec::new(),
             SandboxPolicy::WorkspaceWrite {
                 writable_roots,
@@ -539,16 +449,28 @@ impl SandboxPolicy {
                 network_access: _,
             } => {
                 // Start from explicitly configured writable roots.
-                let mut roots: Vec<PathBuf> = writable_roots.clone();
+                let mut roots: Vec<AbsolutePathBuf> = writable_roots.clone();
 
                 // Always include defaults: cwd, /tmp (if present on Unix), and
                 // on macOS, the per-user TMPDIR unless explicitly excluded.
-                roots.push(cwd.to_path_buf());
+                match AbsolutePathBuf::from_absolute_path(cwd) {
+                    Ok(cwd) => {
+                        roots.push(cwd);
+                    }
+                    Err(err) => {
+                        error!(
+                            "Ignoring invalid cwd {:?} for sandbox writable root: {err}",
+                            cwd
+                        );
+                    }
+                }
 
                 // Include /tmp on Unix unless explicitly excluded.
                 if cfg!(unix) && !exclude_slash_tmp {
-                    let slash_tmp = PathBuf::from("/tmp");
-                    if slash_tmp.is_dir() {
+                    #[allow(clippy::expect_used)]
+                    let slash_tmp =
+                        AbsolutePathBuf::from_absolute_path("/tmp").expect("/tmp is absolute");
+                    if slash_tmp.as_path().is_dir() {
                         roots.push(slash_tmp);
                     }
                 }
@@ -565,23 +487,37 @@ impl SandboxPolicy {
                     && let Some(tmpdir) = std::env::var_os("TMPDIR")
                     && !tmpdir.is_empty()
                 {
-                    roots.push(PathBuf::from(tmpdir));
+                    match AbsolutePathBuf::from_absolute_path(PathBuf::from(&tmpdir)) {
+                        Ok(tmpdir_path) => {
+                            roots.push(tmpdir_path);
+                        }
+                        Err(err) => {
+                            error!(
+                                "Ignoring invalid TMPDIR value {tmpdir:?} for sandbox writable root: {err}",
+                            );
+                        }
+                    }
                 }
 
                 // For each root, compute subpaths that should remain read-only.
                 roots
                     .into_iter()
                     .map(|writable_root| {
-                        let mut subpaths = Vec::new();
+                        let mut subpaths: Vec<AbsolutePathBuf> = Vec::new();
                         if !allow_git_writes {
-                            let top_level_git = writable_root.join(".git");
-                            if top_level_git.is_dir() {
+                            #[allow(clippy::expect_used)]
+                            let top_level_git = writable_root
+                                .join(".git")
+                                .expect(".git is a valid relative path");
+                            if top_level_git.as_path().is_dir() {
                                 subpaths.push(top_level_git);
                             }
                         }
                         for subdir in [".agents", ".codex"] {
-                            let top_level = writable_root.join(subdir);
-                            if top_level.is_dir() {
+                            #[allow(clippy::expect_used)]
+                            let top_level =
+                                writable_root.join(subdir).expect("valid relative path");
+                            if top_level.as_path().is_dir() {
                                 subpaths.push(top_level);
                             }
                         }
@@ -598,7 +534,7 @@ impl SandboxPolicy {
 
 /// User input
 #[non_exhaustive]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text {
@@ -662,6 +598,12 @@ pub enum EventMsg {
     /// Error while executing a submission
     Error(ErrorEvent),
 
+    /// Conversation history was compacted (either automatically or manually).
+    ContextCompacted(ContextCompactedEvent),
+
+    /// Conversation history was rolled back by dropping the last N user turns.
+    ThreadRolledBack(ThreadRolledBackEvent),
+
     /// Agent has started a task
     TaskStarted(TaskStartedEvent),
 
@@ -694,6 +636,9 @@ pub enum EventMsg {
     AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent),
     /// Signaled when the model begins a new reasoning summary section (e.g., a new titled block).
     AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent),
+
+    /// Structured item completion event.
+    ItemCompleted(ItemCompletedEvent),
 
     /// Full environment context snapshot emitted to the model.
     EnvironmentContextFull(EnvironmentContextFullEvent),
@@ -738,6 +683,10 @@ pub enum EventMsg {
     ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent),
 
     BackgroundEvent(BackgroundEventEvent),
+
+    UndoStarted(UndoStartedEvent),
+
+    UndoCompleted(UndoCompletedEvent),
 
     /// Notification that a model stream experienced an error or disconnect
     /// and the system is handling it (e.g., retrying with backoff).
@@ -785,18 +734,44 @@ impl JsonSchema for EventMsg {
         "EventMsg".to_string()
     }
 
-    fn json_schema(r#gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        serde_json::Value::json_schema(r#gen)
+    fn json_schema(
+        schema_gen: &mut schemars::r#gen::SchemaGenerator,
+    ) -> schemars::schema::Schema {
+        <serde_json::Value as JsonSchema>::json_schema(schema_gen)
     }
 }
 
+/// Agent lifecycle status, derived from emitted events.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS, Default)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// Agent is waiting for initialization.
+    #[default]
+    PendingInit,
+    /// Agent is currently running.
+    Running,
+    /// Agent is done. Contains the final assistant message.
+    Completed(Option<String>),
+    /// Agent encountered an error.
+    Errored(String),
+    /// Agent has been shutdown.
+    Shutdown,
+    /// Agent is not found.
+    NotFound,
+}
+
 /// Codex errors that we expose to clients.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum CodexErrorInfo {
     ContextWindowExceeded,
     UsageLimitExceeded,
+    ModelCap {
+        model: String,
+        reset_after_seconds: Option<u64>,
+    },
     HttpConnectionFailed {
         http_status_code: Option<u16>,
     },
@@ -816,6 +791,7 @@ pub enum CodexErrorInfo {
     ResponseTooManyFailedAttempts {
         http_status_code: Option<u16>,
     },
+    ThreadRollbackFailed,
     Other,
 }
 
@@ -850,6 +826,9 @@ pub struct ReviewSnapshotInfo {
 pub struct ErrorEvent {
     pub message: String,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct ContextCompactedEvent {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct TaskCompleteEvent {
@@ -918,20 +897,31 @@ pub struct TokenCountEvent {
     pub rate_limits: Option<RateLimitSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
 pub struct RateLimitSnapshot {
     pub primary: Option<RateLimitWindow>,
     pub secondary: Option<RateLimitWindow>,
+    pub credits: Option<CreditsSnapshot>,
+    pub plan_type: Option<crate::account::PlanType>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
 pub struct RateLimitWindow {
     /// Percentage (0-100) of the window that has been consumed.
     pub used_percent: f64,
     /// Rolling window duration, in minutes.
-    pub window_minutes: Option<u64>,
-    /// Seconds until the window resets.
-    pub resets_in_seconds: Option<u64>,
+    #[ts(type = "number | null")]
+    pub window_minutes: Option<i64>,
+    /// Unix timestamp (seconds since epoch) when the window resets.
+    #[ts(type = "number | null")]
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct CreditsSnapshot {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
 }
 
 /// Payload for `ReplayHistory` containing prior `ResponseItem`s.
@@ -1019,25 +1009,26 @@ impl From<TokenUsage> for FinalOutput {
 impl fmt::Display for FinalOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let token_usage = &self.token_usage;
+        let to_i64 = |value| i64::try_from(value).unwrap_or(i64::MAX);
 
         write!(
             f,
             "Token usage: total={} input={}{} output={}{}",
-            format_with_separators(token_usage.blended_total()),
-            format_with_separators(token_usage.non_cached_input()),
+            format_with_separators(to_i64(token_usage.blended_total())),
+            format_with_separators(to_i64(token_usage.non_cached_input())),
             if token_usage.cached_input() > 0 {
                 format!(
                     " (+ {} cached)",
-                    format_with_separators(token_usage.cached_input())
+                    format_with_separators(to_i64(token_usage.cached_input()))
                 )
             } else {
                 String::new()
             },
-            format_with_separators(token_usage.output_tokens),
+            format_with_separators(to_i64(token_usage.output_tokens)),
             if token_usage.reasoning_output_tokens > 0 {
                 format!(
                     " (reasoning {})",
-                    format_with_separators(token_usage.reasoning_output_tokens)
+                    format_with_separators(to_i64(token_usage.reasoning_output_tokens))
                 )
             } else {
                 String::new()
@@ -1069,6 +1060,12 @@ pub struct UserMessageEvent {
     pub kind: Option<InputMessageKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
+    /// Local file paths sourced from `UserInput::LocalImage`.
+    #[serde(default)]
+    pub local_images: Vec<std::path::PathBuf>,
+    /// UI-defined spans within `message` used to render or persist special elements.
+    #[serde(default)]
+    pub text_elements: Vec<crate::user_input::TextElement>,
 }
 
 impl<T, U> From<(T, U)> for InputMessageKind
@@ -1143,6 +1140,19 @@ pub struct AgentReasoningDeltaEvent {
     pub delta: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ItemCompletedEvent {
+    pub thread_id: ThreadId,
+    pub turn_id: String,
+    pub item: TurnItem,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ThreadRolledBackEvent {
+    /// Number of user turns that were removed from context.
+    pub num_turns: u32,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct McpInvocation {
     /// Name of the MCP server as defined in the config.
@@ -1189,6 +1199,7 @@ pub struct WebSearchBeginEvent {
 pub struct WebSearchEndEvent {
     pub call_id: String,
     pub query: String,
+    pub action: WebSearchAction,
 }
 
 /// Response payload for `Op::GetHistory` containing the current session's
@@ -1248,7 +1259,7 @@ impl InitialHistory {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS, Default)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename_all = "lowercase")]
 pub enum SessionSource {
@@ -1262,7 +1273,7 @@ pub enum SessionSource {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum SubAgentSource {
@@ -1358,6 +1369,8 @@ impl From<CompactedItem> for ResponseItem {
             content: vec![ContentItem::OutputText {
                 text: value.message,
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 }
@@ -1408,6 +1421,13 @@ pub struct GitInfo {
     /// Repository URL (if available from remote)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDelivery {
+    Inline,
+    Detached,
 }
 
 /// Review request sent to the review session.
@@ -1573,6 +1593,19 @@ pub struct BackgroundEventEvent {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct UndoStartedEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct UndoCompletedEvent {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct StreamErrorEvent {
     pub message: String,
@@ -1634,6 +1667,28 @@ pub struct McpServerFailure {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum McpAuthStatus {
+    Unsupported,
+    NotLoggedIn,
+    BearerToken,
+    OAuth,
+}
+
+impl fmt::Display for McpAuthStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            McpAuthStatus::Unsupported => "Unsupported",
+            McpAuthStatus::NotLoggedIn => "Not logged in",
+            McpAuthStatus::BearerToken => "Bearer token",
+            McpAuthStatus::OAuth => "OAuth",
+        };
+        f.write_str(text)
+    }
+}
+
 /// Response payload for `Op::ListMcpTools`.
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct McpListToolsResponseEvent {
@@ -1655,6 +1710,110 @@ pub struct ListCustomPromptsResponseEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct ListSkillsResponseEvent {
     pub skills: Vec<Skill>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SkillScope {
+    User,
+    Repo,
+    System,
+    Admin,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillMetadata {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    /// Legacy short_description from SKILL.md. Prefer SKILL.json interface.short_description.
+    pub short_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub interface: Option<SkillInterface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dependencies: Option<SkillDependencies>,
+    pub path: PathBuf,
+    pub scope: SkillScope,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct SkillInterface {
+    #[ts(optional)]
+    pub display_name: Option<String>,
+    #[ts(optional)]
+    pub short_description: Option<String>,
+    #[ts(optional)]
+    pub icon_small: Option<PathBuf>,
+    #[ts(optional)]
+    pub icon_large: Option<PathBuf>,
+    #[ts(optional)]
+    pub brand_color: Option<String>,
+    #[ts(optional)]
+    pub default_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct SkillDependencies {
+    pub tools: Vec<SkillToolDependency>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct SkillToolDependency {
+    #[serde(rename = "type")]
+    #[ts(rename = "type")]
+    pub r#type: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillErrorInfo {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillsListEntry {
+    pub cwd: PathBuf,
+    pub skills: Vec<SkillMetadata>,
+    pub errors: Vec<SkillErrorInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct RemoteSkillSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// Response payload for `Op::ListRemoteSkills`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ListRemoteSkillsResponseEvent {
+    pub skills: Vec<RemoteSkillSummary>,
+}
+
+/// Response payload for `Op::DownloadRemoteSkill`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct RemoteSkillDownloadedEvent {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, TS)]
@@ -1684,7 +1843,9 @@ pub struct SessionConfiguredEvent {
 }
 
 /// User's decision in response to an ExecApprovalRequest.
-#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Display, TS, JsonSchema)]
+#[derive(
+    Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Display, JsonSchema, TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     /// User has approved this command and the agent should execute it.
@@ -1705,7 +1866,7 @@ pub enum ReviewDecision {
     Abort,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum FileChange {
     Add {
@@ -1768,7 +1929,7 @@ pub struct TurnAbortedEvent {
     pub reason: TurnAbortReason,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnAbortReason {
     Interrupted,

@@ -34,7 +34,6 @@ use code_cloud_tasks_client::{ApplyOutcome, CloudTaskError, CreatedTask, TaskSum
 
 use crate::app::ChatWidgetArgs;
 use crate::chrome_launch::ChromeLaunchOption;
-use crate::conversation_backend::ConversationStart;
 use crate::slash_command::SlashCommand;
 use code_protocol::models::ResponseItem;
 use code_protocol::request_user_input::RequestUserInputResponse;
@@ -590,7 +589,7 @@ pub(crate) enum AppEvent {
     /// Carries the forked conversation, trimmed prefix to replay, and composer prefill.
     JumpBackForked {
         cfg: code_core::config::Config,
-        new_conv: Redacted<ConversationStart>,
+        new_conv: Redacted<code_core::NewConversation>,
         prefix_items: Vec<ResponseItem>,
         prefill: String,
     },

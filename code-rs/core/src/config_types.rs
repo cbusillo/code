@@ -734,64 +734,6 @@ impl Default for Tui {
     }
 }
 
-/// Settings for the HTTP gateway that hosts the WebUI.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct GatewayConfig {
-    /// When true, the TUI will attempt to start the gateway if it is not already running.
-    #[serde(default)]
-    pub auto_start: bool,
-    /// Optional bind address for the gateway (host:port).
-    #[serde(default)]
-    pub bind: Option<String>,
-    /// Broker connection mode for the gateway (e.g., "auto", "off", or a socket path).
-    #[serde(default)]
-    pub broker: Option<String>,
-}
-
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            auto_start: false,
-            bind: None,
-            broker: None,
-        }
-    }
-}
-
-/// Settings for the app-server broker.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct AppServerConfig {
-    /// When true, enable the broker listener.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Optional Unix domain socket path for the broker.
-    #[serde(default)]
-    pub listen: Option<PathBuf>,
-}
-
-impl Default for AppServerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            listen: None,
-        }
-    }
-}
-
-/// Settings that control update discovery and upgrade commands.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct UpdateSettings {
-    /// Optional GitHub repo slug (owner/name) used for update checks.
-    #[serde(default)]
-    pub release_repo: Option<String>,
-    /// Optional URL to use in manual upgrade instructions.
-    #[serde(default)]
-    pub release_url: Option<String>,
-    /// Optional command (argv) to run for upgrades.
-    #[serde(default)]
-    pub upgrade_command: Option<Vec<String>>,
-}
-
 /// User acknowledgements for in-product notices (distinct from notifications).
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Notice {
@@ -1512,28 +1454,29 @@ impl Default for RetentionConfig {
     }
 }
 
-impl From<code_protocol::config_types::ReasoningEffort> for ReasoningEffort {
-    fn from(v: code_protocol::config_types::ReasoningEffort) -> Self {
+impl From<code_protocol::openai_models::ReasoningEffort> for ReasoningEffort {
+    fn from(v: code_protocol::openai_models::ReasoningEffort) -> Self {
         match v {
-            code_protocol::config_types::ReasoningEffort::Minimal => ReasoningEffort::Minimal,
-            code_protocol::config_types::ReasoningEffort::Low => ReasoningEffort::Low,
-            code_protocol::config_types::ReasoningEffort::Medium => ReasoningEffort::Medium,
-            code_protocol::config_types::ReasoningEffort::High => ReasoningEffort::High,
-            code_protocol::config_types::ReasoningEffort::XHigh => ReasoningEffort::XHigh,
+            code_protocol::openai_models::ReasoningEffort::None => ReasoningEffort::None,
+            code_protocol::openai_models::ReasoningEffort::Minimal => ReasoningEffort::Minimal,
+            code_protocol::openai_models::ReasoningEffort::Low => ReasoningEffort::Low,
+            code_protocol::openai_models::ReasoningEffort::Medium => ReasoningEffort::Medium,
+            code_protocol::openai_models::ReasoningEffort::High => ReasoningEffort::High,
+            code_protocol::openai_models::ReasoningEffort::XHigh => ReasoningEffort::XHigh,
         }
     }
 }
 
-impl From<ReasoningEffort> for code_protocol::config_types::ReasoningEffort {
+impl From<ReasoningEffort> for code_protocol::openai_models::ReasoningEffort {
     fn from(v: ReasoningEffort) -> Self {
         match v {
             ReasoningEffort::Minimal | ReasoningEffort::None => {
-                code_protocol::config_types::ReasoningEffort::Minimal
+                code_protocol::openai_models::ReasoningEffort::Minimal
             }
-            ReasoningEffort::Low => code_protocol::config_types::ReasoningEffort::Low,
-            ReasoningEffort::Medium => code_protocol::config_types::ReasoningEffort::Medium,
-            ReasoningEffort::High => code_protocol::config_types::ReasoningEffort::High,
-            ReasoningEffort::XHigh => code_protocol::config_types::ReasoningEffort::XHigh,
+            ReasoningEffort::Low => code_protocol::openai_models::ReasoningEffort::Low,
+            ReasoningEffort::Medium => code_protocol::openai_models::ReasoningEffort::Medium,
+            ReasoningEffort::High => code_protocol::openai_models::ReasoningEffort::High,
+            ReasoningEffort::XHigh => code_protocol::openai_models::ReasoningEffort::XHigh,
         }
     }
 }

@@ -20,7 +20,22 @@ inventory::collect!(ExperimentalField);
 
 /// Returns all experimental fields registered across the protocol types.
 pub fn experimental_fields() -> Vec<&'static ExperimentalField> {
-    inventory::iter::<ExperimentalField>.into_iter().collect()
+    let mut seen = std::collections::HashSet::new();
+    let mut fields = Vec::new();
+
+    for field in inventory::iter::<ExperimentalField>.into_iter() {
+        if seen.insert((field.type_name, field.field_name)) {
+            fields.push(field);
+        }
+    }
+
+    for field in crate::protocol::v2::ThreadStartParams::EXPERIMENTAL_FIELDS {
+        if seen.insert((field.type_name, field.field_name)) {
+            fields.push(field);
+        }
+    }
+
+    fields
 }
 
 /// Constructs a consistent error message for experimental gating.

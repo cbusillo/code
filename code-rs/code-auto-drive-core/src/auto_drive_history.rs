@@ -279,6 +279,8 @@ impl AutoDriveHistory {
                     summary_text
                 ),
             }],
+            end_turn: None,
+            phase: None,
         };
 
         // Replace the slice with the compact item
@@ -401,6 +403,8 @@ mod tests {
             content: vec![ContentItem::InputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -411,6 +415,8 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 

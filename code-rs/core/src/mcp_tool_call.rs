@@ -7,8 +7,11 @@ use crate::protocol::EventMsg;
 use crate::protocol::McpInvocation;
 use crate::protocol::McpToolCallBeginEvent;
 use crate::protocol::McpToolCallEndEvent;
+use code_protocol::mcp::CallToolResult as ProtocolCallToolResult;
 use code_protocol::models::FunctionCallOutputPayload;
 use code_protocol::models::ResponseInputItem;
+use mcp_types::CallToolResult as McpCallToolResult;
+use serde_json::json;
 
 /// Handles the specified tool call dispatches the appropriate
 /// `McpToolCallBegin` and `McpToolCallEnd` events to the `Session`.
@@ -50,15 +53,42 @@ pub(crate) async fn handle_mcp_tool_call(
 
     let start = Instant::now();
     // Perform the tool call.
-    let result = sess
+    let raw_result = sess
         .call_tool(&server, &tool_name, arguments_value.clone(), None)
         .await
         .map_err(|e| format!("tool call error: {e}"));
-    let tool_call_end_event = EventMsg::McpToolCallEnd(McpToolCallEndEvent { call_id: ctx.call_id.clone(), invocation, duration: start.elapsed(), result: result.clone() });
+    let tool_call_end_event = EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+        call_id: ctx.call_id.clone(),
+        invocation,
+        duration: start.elapsed(),
+        result: raw_result.clone(),
+    });
 
     notify_mcp_tool_call_event(sess, ctx, tool_call_end_event.clone()).await;
 
-    ResponseInputItem::McpToolCallOutput { call_id: ctx.call_id.clone(), result }
+    let result = raw_result.map(convert_call_tool_result);
+    ResponseInputItem::McpToolCallOutput {
+        call_id: ctx.call_id.clone(),
+        result,
+    }
+}
+
+fn convert_call_tool_result(result: McpCallToolResult) -> ProtocolCallToolResult {
+    let McpCallToolResult {
+        content,
+        structured_content,
+        is_error,
+    } = result;
+    let content = content
+        .into_iter()
+        .map(|block| serde_json::to_value(block).unwrap_or_else(|err| json!({ "error": err.to_string() })))
+        .collect();
+    ProtocolCallToolResult {
+        content,
+        structured_content,
+        is_error,
+        meta: None,
+    }
 }
 
 async fn notify_mcp_tool_call_event(sess: &Session, ctx: &ToolCallCtx, event: EventMsg) {

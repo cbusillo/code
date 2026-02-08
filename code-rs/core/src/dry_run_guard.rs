@@ -262,7 +262,6 @@ fn first_command_tokens(argv: &[String]) -> Option<Vec<String>> {
         ParsedCommand::Read { cmd, .. }
         | ParsedCommand::ListFiles { cmd, .. }
         | ParsedCommand::Search { cmd, .. }
-        | ParsedCommand::ReadCommand { cmd }
         | ParsedCommand::Unknown { cmd } => cmd,
     };
     match shlex_split(&cmd) {

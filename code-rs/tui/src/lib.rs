@@ -12,7 +12,6 @@ use code_common::model_presets::{
     HIDE_GPT_5_2_MIGRATION_PROMPT_CONFIG,
 };
 use code_core::config_edit::{self, CONFIG_KEY_EFFORT, CONFIG_KEY_MODEL};
-use code_core::AuthManager;
 use code_core::config_types::Notice;
 use code_core::config_types::ReasoningEffort;
 use code_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
@@ -23,7 +22,6 @@ use code_core::config::ConfigToml;
 use code_core::config::find_code_home;
 use code_core::config::load_config_as_toml;
 use code_core::config::load_config_as_toml_with_cli_overrides;
-use code_core::ConversationManager;
 use code_core::protocol::AskForApproval;
 use code_core::protocol::SandboxPolicy;
 use code_core::config_types::CachedTerminalBackground;
@@ -33,18 +31,15 @@ use code_core::config_types::ThemeName;
 use regex_lite::Regex;
 use code_login::AuthMode;
 use code_login::CodexAuth;
-use code_app_server::run_broker_with_manager;
 use model_migration::{migration_copy_for_key, run_model_migration_prompt, ModelMigrationOutcome};
 use code_ollama::DEFAULT_OSS_MODEL;
 use code_protocol::config_types::SandboxMode;
-use code_protocol::protocol::SessionSource;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use code_core::review_coord::{
     bump_snapshot_epoch, clear_stale_lock_if_dead, read_lock_info, try_acquire_lock,
 };
-use std::sync::Arc;
 use std::sync::Once;
 use std::sync::OnceLock;
 use tracing_appender::non_blocking;
@@ -61,7 +56,6 @@ mod account_label;
 mod bottom_pane;
 mod chrome_launch;
 mod chatwidget;
-mod conversation_backend;
 mod citation_regex;
 mod cloud_tasks_service;
 mod cli;
@@ -448,7 +442,7 @@ pub async fn run_main(
         cwd,
         model_provider: model_provider_override,
         config_profile: cli.config_profile.clone(),
-        code_linux_sandbox_exe: code_linux_sandbox_exe.clone(),
+        code_linux_sandbox_exe,
         base_instructions: None,
         include_plan_tool: Some(true),
         include_apply_patch_tool: None,
@@ -528,30 +522,13 @@ pub async fn run_main(
 
     config.demo_developer_message = cli.demo_developer_message.clone();
 
-    if cli.app_server_broker {
-        let auth_manager = AuthManager::shared_with_mode_and_originator(
-            config.code_home.clone(),
-            AuthMode::ApiKey,
-            config.responses_originator_header.clone(),
-        );
-        let conversation_manager = Arc::new(ConversationManager::new(
-            auth_manager,
-            SessionSource::Mcp,
-        ));
-        let config = Arc::new(config);
-        run_broker_with_manager(config, conversation_manager, code_linux_sandbox_exe)
-            .await
-            .map_err(|err| std::io::Error::other(format!("broker failed: {err}")))?;
-        return Ok(empty_exit_summary());
-    }
-
     let cli_model_override = cli.model.is_some()
         || cli_kv_overrides
             .iter()
             .any(|(path, _)| path == "model" || path.ends_with(".model"));
     if !cli_model_override && !cli.oss {
         let auth_mode = if config.using_chatgpt_auth {
-            AuthMode::ChatGPT
+            AuthMode::Chatgpt
         } else {
             AuthMode::ApiKey
         };
@@ -738,8 +715,6 @@ pub async fn run_main(
         None
     };
 
-    let cli_overrides = Arc::new(cli_kv_overrides.clone());
-    let config_overrides = Arc::new(overrides.clone());
     let run_result = run_ratatui_app(
         cli,
         config,
@@ -747,8 +722,6 @@ pub async fn run_main(
         startup_footer_notice,
         latest_upgrade_version,
         theme_configured_explicitly,
-        cli_overrides,
-        config_overrides,
     );
 
     if let Some(handle) = housekeeping_handle {
@@ -808,8 +781,6 @@ fn run_ratatui_app(
     startup_footer_notice: Option<String>,
     latest_upgrade_version: Option<String>,
     theme_configured_explicitly: bool,
-    cli_overrides: Arc<Vec<(String, toml::Value)>>,
-    config_overrides: Arc<ConfigOverrides>,
 ) -> color_eyre::Result<ExitSummary> {
     color_eyre::install()?;
     install_unified_panic_hook();
@@ -840,17 +811,10 @@ fn run_ratatui_app(
         order,
         timing,
         resume_picker,
-        resume_last,
-        resume_session_id,
+        resume_last: _,
+        resume_session_id: _,
         ..
     } = cli;
-    let resume_requested = resume_picker || resume_last || resume_session_id.is_some();
-    if !resume_requested && config.experimental_resume.is_some() {
-        tracing::warn!(
-            "Ignoring experimental_resume because resume was not explicitly requested"
-        );
-        config.experimental_resume = None;
-    }
     let mut app = App::new(
         config.clone(),
         prompt,
@@ -863,8 +827,6 @@ fn run_ratatui_app(
         resume_picker,
         startup_footer_notice,
         latest_upgrade_version,
-        cli_overrides,
-        config_overrides,
     );
 
     let app_result = app.run(&mut terminal);
@@ -1294,7 +1256,7 @@ pub enum LoginStatus {
 /// Determine current login status based on auth.json presence.
 pub fn get_login_status(config: &Config) -> LoginStatus {
     let code_home = config.code_home.clone();
-    match CodexAuth::from_code_home(&code_home, AuthMode::ChatGPT, &config.responses_originator_header) {
+    match CodexAuth::from_code_home(&code_home, AuthMode::Chatgpt, &config.responses_originator_header) {
         Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode),
         _ => LoginStatus::NotAuthenticated,
     }

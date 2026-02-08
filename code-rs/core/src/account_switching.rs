@@ -58,7 +58,7 @@ struct CandidateScore {
 
 fn account_has_credentials(account: &auth_accounts::StoredAccount) -> bool {
     match account.mode {
-        AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => account.tokens.is_some(),
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => account.tokens.is_some(),
         AuthMode::ApiKey => account.openai_api_key.is_some(),
     }
 }
@@ -298,7 +298,7 @@ mod tests {
         .expect("insert b");
 
         let mut state = RateLimitSwitchState::default();
-        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        state.mark_limited(&a.id, AuthMode::Chatgpt, None);
         let next = select_next_account_id(
             home.path(),
             &state,
@@ -336,7 +336,7 @@ mod tests {
             .expect("hint");
 
         let mut state = RateLimitSwitchState::default();
-        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        state.mark_limited(&a.id, AuthMode::Chatgpt, None);
         let next =
             select_next_account_id(home.path(), &state, false, now, Some(a.id.as_str()))
                 .expect("select");
@@ -372,14 +372,14 @@ mod tests {
 
         let now = fixed_now();
         let mut state = RateLimitSwitchState::default();
-        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        state.mark_limited(&a.id, AuthMode::Chatgpt, None);
 
         let next = select_next_account_id(home.path(), &state, true, now, Some(a.id.as_str()))
             .expect("select");
         assert_eq!(next.as_deref(), Some(b.id.as_str()));
 
         // After both ChatGPT accounts are exhausted, allow API key fallback.
-        state.mark_limited(&b.id, AuthMode::ChatGPT, None);
+        state.mark_limited(&b.id, AuthMode::Chatgpt, None);
         let next = select_next_account_id(home.path(), &state, true, now, Some(b.id.as_str()))
             .expect("select");
         assert_eq!(next.as_deref(), Some(api.id.as_str()));
@@ -406,7 +406,7 @@ mod tests {
         .expect("insert b");
 
         let mut state = RateLimitSwitchState::default();
-        state.mark_limited(&b.id, AuthMode::ChatGPT, None);
+        state.mark_limited(&b.id, AuthMode::Chatgpt, None);
 
         let next = select_next_account_id(
             home.path(),
@@ -448,7 +448,7 @@ mod tests {
             false,
             now,
             a.id.as_str(),
-            AuthMode::ChatGPT,
+            AuthMode::Chatgpt,
             None,
         )
         .expect("switch");

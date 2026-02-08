@@ -19,7 +19,6 @@ members = [
     "exec",
     "execpolicy",
     "file-search",
-    "gateway",
     "git-tooling",
     "linux-sandbox",
     "login",

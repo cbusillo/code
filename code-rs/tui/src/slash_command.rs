@@ -52,7 +52,6 @@ pub enum SlashCommand {
     // more frequently used commands should be listed first.
     Browser,
     Chrome,
-    Webui,
     New,
     Init,
     Compact,
@@ -104,7 +103,6 @@ impl SlashCommand {
             SlashCommand::Browser => "open internal browser",
             SlashCommand::Resume => "resume a past session for this folder",
             SlashCommand::Rename => "rename the current session",
-            SlashCommand::Webui => "open the WebUI gateway",
             SlashCommand::Plan => "create a comprehensive plan (multiple agents)",
             SlashCommand::Solve => "solve a challenging problem (multiple agents)",
             SlashCommand::Code => "perform a coding task (multiple agents)",

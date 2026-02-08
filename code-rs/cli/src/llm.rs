@@ -95,11 +95,15 @@ async fn run_llm_request(
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText { text: args.developer.clone() }],
+        end_turn: None,
+        phase: None,
     });
     input.push(ResponseItem::Message {
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text: args.message.clone() }],
+        end_turn: None,
+        phase: None,
     });
 
     // Resolve schema
@@ -132,9 +136,14 @@ async fn run_llm_request(
     prompt.set_log_tag("cli/manual_prompt");
 
     // Auth + provider
+    let preferred_auth = if config.using_chatgpt_auth {
+        AuthMode::Chatgpt
+    } else {
+        AuthMode::ApiKey
+    };
     let auth_mgr = AuthManager::shared_with_mode_and_originator(
         config.code_home.clone(),
-        AuthMode::ApiKey,
+        preferred_auth,
         config.responses_originator_header.clone(),
     );
     let provider: ModelProviderInfo = config.model_provider.clone();

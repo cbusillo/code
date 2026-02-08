@@ -80,8 +80,9 @@ pub(crate) async fn stream_chat_completions(
                 last_emitted_role = Some("assistant")
             }
             ResponseItem::FunctionCallOutput { .. } => last_emitted_role = Some("tool"),
-            ResponseItem::CompactionSummary { .. } => last_emitted_role = Some("assistant"),
-            ResponseItem::Reasoning { .. } | ResponseItem::Other => {}
+            ResponseItem::Compaction { .. } => last_emitted_role = Some("assistant"),
+            ResponseItem::Reasoning { .. } | ResponseItem::GhostSnapshot { .. } | ResponseItem::Other => {
+            }
             ResponseItem::CustomToolCall { .. } => {}
             ResponseItem::CustomToolCallOutput { .. } => {}
             ResponseItem::WebSearchCall { .. } => {}
@@ -208,9 +209,9 @@ pub(crate) async fn stream_chat_completions(
                     messages.push(json!({"role": role, "content": text}));
                 }
             }
-            ResponseItem::CompactionSummary { .. } => {
-                // Compaction summaries are only meaningful to the Responses API; omit them
-                // when translating to Chat Completions.
+            ResponseItem::Compaction { .. } | ResponseItem::GhostSnapshot { .. } => {
+                // Compaction summaries and ghost snapshots are only meaningful to the
+                // Responses API; omit them when translating to Chat Completions.
                 continue;
             }
             ResponseItem::FunctionCall {
@@ -559,6 +560,8 @@ async fn process_chat_sse<S>(
                     text: std::mem::take(assistant_text),
                 }],
                 id: current_item_id.clone(),
+                end_turn: None,
+                phase: None,
             };
             let _ = tx_event
                 .send(Ok(ResponseEvent::OutputItemDone {
@@ -883,6 +886,8 @@ async fn process_chat_sse<S>(
                                     text: std::mem::take(&mut assistant_text),
                                 }],
                                 id: current_item_id.clone(),
+                                end_turn: None,
+                                phase: None,
                             };
                             let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone { item, sequence_number: None, output_index: None })).await;
                         }
@@ -1057,6 +1062,8 @@ where
                             content: vec![code_protocol::models::ContentItem::OutputText {
                                 text: std::mem::take(&mut this.cumulative),
                             }],
+                            end_turn: None,
+                            phase: None,
                         };
                         this.pending
                             .push_back(ResponseEvent::OutputItemDone { item: aggregated_message, sequence_number: None, output_index: None });

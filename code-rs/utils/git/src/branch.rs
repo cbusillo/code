@@ -218,7 +218,16 @@ mod tests {
 
         // Create a new commit on the remote
         let remote_clone = temp.path().join("remote-clone");
-        run_git_in(temp.path(), &["clone", remote.to_str().unwrap(), remote_clone.to_str().unwrap()]);
+        run_git_in(
+            temp.path(),
+            &[
+                "clone",
+                "--branch",
+                "main",
+                remote.to_str().unwrap(),
+                remote_clone.to_str().unwrap(),
+            ],
+        );
         std::fs::write(remote_clone.join("remote.txt"), "remote\n")?;
         run_git_in(&remote_clone, &["add", "remote.txt"]);
         commit(&remote_clone, "remote commit");

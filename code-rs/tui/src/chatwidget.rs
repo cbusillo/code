@@ -53,12 +53,16 @@ use code_core::account_usage::{
 };
 use code_core::auth_accounts::{self, StoredAccount};
 use code_login::AuthManager;
-use code_login::AuthMode as McpAuthMode;
+use code_login::AuthMode;
 use code_protocol::dynamic_tools::DynamicToolResponse;
+use code_protocol::protocol::SessionSource;
 use code_protocol::num_format::format_with_separators;
 use code_core::split_command_and_args;
 use serde_json::Value as JsonValue;
-use tokio::sync::broadcast;
+
+fn format_u64(value: u64) -> String {
+    format_with_separators(i64::try_from(value).unwrap_or(i64::MAX))
+}
 
 
 mod diff_handlers;
@@ -172,6 +176,7 @@ use code_core::protocol::EnvironmentContextFullEvent;
 use code_core::protocol::InputItem;
 use code_core::protocol::McpServerFailure;
 use code_core::protocol::McpServerFailurePhase;
+use code_core::protocol::SessionConfiguredEvent;
 // MCP tool call handlers moved into chatwidget::tools
 use code_core::protocol::Op;
 use code_core::protocol::ReviewOutputEvent;
@@ -183,7 +188,7 @@ use code_core::protocol::TokenUsage;
 use code_core::protocol::TurnDiffEvent;
 use code_core::protocol::ViewImageToolCallEvent;
 use code_core::review_coord::{bump_snapshot_epoch_for, try_acquire_lock, ReviewGuard};
-use crate::conversation_backend::{ConversationBackend, ConversationStart};
+use code_core::ConversationManager;
 use code_core::codex::compact::COMPACTION_CHECKPOINT_MESSAGE;
 use crate::bottom_pane::{
     AutoActiveViewModel,
@@ -1486,7 +1491,6 @@ pub(crate) struct ChatWidget<'a> {
     app_event_tx: AppEventSender,
     code_op_tx: UnboundedSender<Op>,
     bottom_pane: BottomPane<'a>,
-    conversation_backend: ConversationBackend,
     auth_manager: Arc<AuthManager>,
     login_view_state: Option<Weak<RefCell<LoginAccountsState>>>,
     login_add_view_state: Option<Weak<RefCell<LoginAddAccountState>>>,
@@ -3154,143 +3158,71 @@ impl ChatWidget<'_> {
     fn spawn_conversation_runtime(
         &mut self,
         config: Config,
+        auth_manager: Arc<AuthManager>,
         code_op_rx: UnboundedReceiver<Op>,
     ) {
         let ticket = self.make_background_tail_ticket();
         let ticket_for_submit = ticket.clone();
         let app_event_tx_clone = self.app_event_tx.clone();
-        let conversation_backend = self.conversation_backend.clone();
 
         tokio::spawn(async move {
             let mut code_op_rx = code_op_rx;
-            match conversation_backend {
-                ConversationBackend::Local(conversation_manager) => {
-                    let auth_manager = conversation_manager.auth_manager();
-                    let resume_path = config.experimental_resume.clone();
-                    let new_conversation = match resume_path {
-                        Some(path) => conversation_manager
-                            .resume_conversation_from_rollout_with_hub(
-                                config.clone(),
-                                path,
-                                auth_manager,
-                            )
-                            .await,
-                        None => conversation_manager.new_conversation_with_hub(config).await,
-                    };
+            let conversation_manager = ConversationManager::new(
+                auth_manager.clone(),
+                SessionSource::Cli,
+            );
+            let resume_path = config.experimental_resume.clone();
+            let new_conversation = match resume_path {
+                Some(path) => conversation_manager
+                    .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
+                    .await,
+                None => conversation_manager.new_conversation(config).await,
+            };
 
-                    let new_conversation = match new_conversation {
-                        Ok(conv) => conv,
-                        Err(e) => {
-                            tracing::error!("failed to initialize conversation: {e}");
-                            app_event_tx_clone.send_background_event_with_ticket(
-                                &ticket,
-                                format!(
-                                    "❌ Failed to initialize model session: {}.\n• Ensure an OpenAI API key is set (CODE_OPENAI_API_KEY / OPENAI_API_KEY) or run `code login`.\n• Also verify config.cwd is an absolute path.",
-                                    e
-                                ),
-                            );
-                            return;
-                        }
-                    };
+            let new_conversation = match new_conversation {
+                Ok(conv) => conv,
+                Err(e) => {
+                    tracing::error!("failed to initialize conversation: {e}");
+                    app_event_tx_clone.send_background_event_with_ticket(
+                        &ticket,
+                        format!(
+                            "❌ Failed to initialize model session: {}.\n• Ensure an OpenAI API key is set (CODE_OPENAI_API_KEY / OPENAI_API_KEY) or run `code login`.\n• Also verify config.cwd is an absolute path.",
+                            e
+                        ),
+                    );
+                    return;
+                }
+            };
 
-                    let event = Event {
-                        id: new_conversation.conversation_id.to_string(),
-                        event_seq: 0,
-                        msg: EventMsg::SessionConfigured(new_conversation.session_configured),
-                        order: None,
-                    };
-                    app_event_tx_clone.send(AppEvent::CodexEvent(event));
+            let event = Event {
+                id: new_conversation.conversation_id.to_string(),
+                event_seq: 0,
+                msg: EventMsg::SessionConfigured(new_conversation.session_configured),
+                order: None,
+            };
+            app_event_tx_clone.send(AppEvent::CodexEvent(event));
 
-                    let hub = new_conversation.hub;
-                    let hub_clone = hub.clone();
-                    let app_event_tx_submit = app_event_tx_clone.clone();
-                    let ticket_for_submit = ticket_for_submit.clone();
+            let conversation = new_conversation.conversation;
+            let conversation_clone = conversation.clone();
+            let app_event_tx_submit = app_event_tx_clone.clone();
+            let ticket_for_submit = ticket_for_submit.clone();
 
-                    tokio::spawn(async move {
-                        while let Some(op) = code_op_rx.recv().await {
-                            if let Err(e) = hub_clone.submit(op).await {
-                                tracing::error!("failed to submit op: {e}");
-                                app_event_tx_submit.send_background_event_with_ticket(
-                                    &ticket_for_submit,
-                                    format!("⚠️ Failed to submit Op to core: {}", e),
-                                );
-                            }
-                        }
-                    });
-
-                    let mut events_rx = hub.subscribe();
-                    loop {
-                        match events_rx.recv().await {
-                            Ok(event) => app_event_tx_clone.send(AppEvent::CodexEvent(event)),
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                tracing::warn!("hub consumer lagged; dropped {skipped} events");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
+            tokio::spawn(async move {
+                while let Some(op) = code_op_rx.recv().await {
+                    if let Err(e) = conversation_clone.submit(op).await {
+                        tracing::error!("failed to submit op: {e}");
+                        app_event_tx_submit.send_background_event_with_ticket(
+                            &ticket_for_submit,
+                            format!("⚠️ Failed to submit Op to core: {}", e),
+                        );
                     }
                 }
-                ConversationBackend::Broker(broker_client) => {
-                    let resume_path = config.experimental_resume.clone();
-                    let conversation_start = match resume_path {
-                        Some(path) => broker_client.resume_conversation(&config, path).await,
-                        None => broker_client.new_conversation(&config).await,
-                    };
+            });
 
-                    let conversation_start = match conversation_start {
-                        Ok(start) => start,
-                        Err(err) => {
-                            tracing::error!("failed to initialize broker conversation: {err}");
-                            app_event_tx_clone.send_background_event_with_ticket(
-                                &ticket,
-                                format!("❌ Failed to initialize broker session: {err}"),
-                            );
-                            return;
-                        }
-                    };
-
-                    if let Some(session_configured) = conversation_start.session_configured {
-                        let event = Event {
-                            id: conversation_start.conversation_id.to_string(),
-                            event_seq: 0,
-                            msg: EventMsg::SessionConfigured(session_configured),
-                            order: None,
-                        };
-                        app_event_tx_clone.send(AppEvent::CodexEvent(event));
-                    }
-
-                    let broker_session = match broker_client
-                        .connect_session(
-                            conversation_start.conversation_id,
-                            app_event_tx_clone.clone(),
-                        )
-                        .await
-                    {
-                        Ok(session) => session,
-                        Err(err) => {
-                            tracing::error!("failed to connect broker session: {err}");
-                            app_event_tx_clone.send_background_event_with_ticket(
-                                &ticket,
-                                format!("❌ Failed to connect broker session: {err}"),
-                            );
-                            return;
-                        }
-                    };
-
-                    let app_event_tx_submit = app_event_tx_clone.clone();
-                    let ticket_for_submit = ticket_for_submit.clone();
-                    tokio::spawn(async move {
-                        while let Some(op) = code_op_rx.recv().await {
-                            if let Err(err) = broker_session.submit_op(op).await {
-                                tracing::error!("failed to submit op: {err}");
-                                app_event_tx_submit.send_background_event_with_ticket(
-                                    &ticket_for_submit,
-                                    format!("⚠️ Failed to submit Op to broker: {err}"),
-                                );
-                            }
-                        }
-                    });
-                }
+            while let Ok(event) = conversation.next_event().await {
+                app_event_tx_clone.send(AppEvent::CodexEvent(event));
             }
+            // (debug end notice removed)
         });
     }
 
@@ -4299,7 +4231,7 @@ impl ChatWidget<'_> {
     /// Render a single recorded ResponseItem into history without executing tools
     fn render_replay_item(&mut self, item: ResponseItem) {
         match item {
-            ResponseItem::Message { id, role, content } => {
+            ResponseItem::Message { id, role, content, .. } => {
                 let message_id = id;
                 let mut text = String::new();
                 for c in content {
@@ -5396,8 +5328,6 @@ impl ChatWidget<'_> {
         );
         self.handle_exec_begin_now(ev.clone(), &order);
         self.ensure_spinner_for_activity("exec-begin");
-        self.bottom_pane
-            .update_status_text("running command".to_string());
         if let Some((pending_end, order2, _ts)) = self
             .exec
             .pending_exec_ends
@@ -6462,8 +6392,6 @@ impl ChatWidget<'_> {
     pub(crate) fn new(
         mut config: Config,
         app_event_tx: AppEventSender,
-        conversation_backend: ConversationBackend,
-        auth_manager: Arc<AuthManager>,
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         enhanced_keys_supported: bool,
@@ -6479,6 +6407,17 @@ impl ChatWidget<'_> {
         remember_cwd_history(&config.cwd);
 
         let (code_op_tx, code_op_rx) = unbounded_channel::<Op>();
+
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
+        let auth_manager = AuthManager::shared_with_mode_and_originator(
+            config.code_home.clone(),
+            preferred_auth,
+            config.responses_originator_header.clone(),
+        );
 
         // Browser manager is now handled through the global state
         // The core session will use the same global manager when browser tools are invoked
@@ -6506,7 +6445,6 @@ impl ChatWidget<'_> {
             app_event_tx: app_event_tx.clone(),
             code_op_tx,
             bottom_pane,
-            conversation_backend: conversation_backend.clone(),
             auth_manager: auth_manager.clone(),
             login_view_state: None,
             login_add_view_state: None,
@@ -6746,7 +6684,7 @@ impl ChatWidget<'_> {
             resume_picker_loading: false,
         };
         new_widget.load_auto_review_baseline_marker();
-        new_widget.spawn_conversation_runtime(config.clone(), code_op_rx);
+        new_widget.spawn_conversation_runtime(config.clone(), auth_manager.clone(), code_op_rx);
         if let Ok(Some(active_id)) = auth_accounts::get_active_account_id(&config.code_home) {
             if let Ok(records) = account_usage::list_rate_limit_snapshots(&config.code_home) {
                 if let Some(record) = records.into_iter().find(|r| r.account_id == active_id) {
@@ -6789,7 +6727,7 @@ impl ChatWidget<'_> {
             let _ = w.history_insert_plain_state_with_key(notice_state, notice_key, "prelude");
             if connecting_mcp && !w.test_mode {
                 // Render connecting status as a separate cell with standard gutter and spacing
-                w.push_background_before_next_output("\nConnecting MCP servers…".to_string());
+                w.history_push_top_next_req(history_cell::new_connecting_mcp_status());
             }
             // Mark welcome as shown to avoid duplicating the Popular commands section
             // when SessionConfigured arrives shortly after.
@@ -6811,8 +6749,8 @@ impl ChatWidget<'_> {
     /// Construct a ChatWidget from an existing conversation (forked session).
     pub(crate) fn new_from_existing(
         config: Config,
-        conversation_start: ConversationStart,
-        conversation_backend: ConversationBackend,
+        conversation: std::sync::Arc<code_core::CodexConversation>,
+        session_configured: SessionConfiguredEvent,
         app_event_tx: AppEventSender,
         enhanced_keys_supported: bool,
         terminal_info: crate::tui::TerminalInfo,
@@ -6826,102 +6764,30 @@ impl ChatWidget<'_> {
 
         let auto_drive_variant = AutoDriveVariant::from_env();
 
-        let ConversationStart {
-            conversation_id,
-            session_configured,
-        } = conversation_start;
-
         // Forward events from existing conversation
         let app_event_tx_clone = app_event_tx.clone();
-        let conversation_backend_clone = conversation_backend.clone();
-        let session_configured_for_local = session_configured.clone();
         tokio::spawn(async move {
-            match conversation_backend_clone {
-                ConversationBackend::Local(conversation_manager) => {
-                    let Some(session_configured) = session_configured_for_local else {
-                        tracing::error!("forked session missing SessionConfigured event");
-                        return;
-                    };
-                    let hub = match conversation_manager
-                        .get_or_create_hub(
-                            conversation_id,
-                            Some(session_configured.model.clone()),
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(hub) => hub,
-                        Err(err) => {
-                            tracing::error!("failed to attach hub: {err}");
-                            return;
-                        }
-                    };
-                    // Send the provided SessionConfigured to the UI first
-                    let event = Event {
-                        id: "fork".to_string(),
-                        event_seq: 0,
-                        msg: EventMsg::SessionConfigured(session_configured),
-                        order: None,
-                    };
-                    app_event_tx_clone.send(AppEvent::CodexEvent(event));
+            // Send the provided SessionConfigured to the UI first
+            let event = Event {
+                id: "fork".to_string(),
+                event_seq: 0,
+                msg: EventMsg::SessionConfigured(session_configured),
+                order: None,
+            };
+            app_event_tx_clone.send(AppEvent::CodexEvent(event));
 
-                    let hub_clone = hub.clone();
-                    tokio::spawn(async move {
-                        while let Some(op) = code_op_rx.recv().await {
-                            let id = hub_clone.submit(op).await;
-                            if let Err(e) = id {
-                                tracing::error!("failed to submit op: {e}");
-                            }
-                        }
-                    });
-
-                    let mut events_rx = hub.subscribe();
-                    loop {
-                        match events_rx.recv().await {
-                            Ok(event) => app_event_tx_clone.send(AppEvent::CodexEvent(event)),
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                tracing::warn!("hub consumer lagged; dropped {skipped} events");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
+            let conversation_clone = conversation.clone();
+            tokio::spawn(async move {
+                while let Some(op) = code_op_rx.recv().await {
+                    let id = conversation_clone.submit(op).await;
+                    if let Err(e) = id {
+                        tracing::error!("failed to submit op: {e}");
                     }
                 }
-                ConversationBackend::Broker(broker_client) => {
-                    if let Some(session_configured) = session_configured {
-                        let event = Event {
-                            id: "fork".to_string(),
-                            event_seq: 0,
-                            msg: EventMsg::SessionConfigured(session_configured),
-                            order: None,
-                        };
-                        app_event_tx_clone.send(AppEvent::CodexEvent(event));
-                    }
+            });
 
-                    let broker_session = match broker_client
-                        .connect_session(conversation_id, app_event_tx_clone.clone())
-                        .await
-                    {
-                        Ok(session) => session,
-                        Err(err) => {
-                            tracing::error!("failed to connect broker session: {err}");
-                            return;
-                        }
-                    };
-
-                    let app_event_tx_submit = app_event_tx_clone.clone();
-                    tokio::spawn(async move {
-                        while let Some(op) = code_op_rx.recv().await {
-                            if let Err(err) = broker_session.submit_op(op).await {
-                                tracing::error!("failed to submit op: {err}");
-                                app_event_tx_submit.send_background_event_with_placement_and_order(
-                                    format!("⚠️ Failed to submit Op to broker: {err}"),
-                                    BackgroundPlacement::Tail,
-                                    None,
-                                );
-                            }
-                        }
-                    });
-                }
+            while let Ok(event) = conversation.next_event().await {
+                app_event_tx_clone.send(AppEvent::CodexEvent(event));
             }
         });
 
@@ -6940,7 +6806,6 @@ impl ChatWidget<'_> {
             app_event_tx: app_event_tx.clone(),
             code_op_tx,
             bottom_pane,
-            conversation_backend: conversation_backend.clone(),
             auth_manager: auth_manager.clone(),
             login_view_state: None,
             login_add_view_state: None,
@@ -7283,6 +7148,8 @@ impl ChatWidget<'_> {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text }],
+            end_turn: None,
+            phase: None,
         })
     }
 
@@ -7365,6 +7232,8 @@ impl ChatWidget<'_> {
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText { text }],
+            end_turn: None,
+            phase: None,
         })
     }
 
@@ -7560,6 +7429,8 @@ impl ChatWidget<'_> {
                     id: Some("auto-drive-reasoning".to_string()),
                     role: "user".to_string(),
                     content: vec![code_protocol::models::ContentItem::InputText { text }],
+                    end_turn: None,
+                    phase: None,
                 }
             } else {
                 match role {
@@ -7689,6 +7560,8 @@ impl ChatWidget<'_> {
                         id: None,
                         role: "user".to_string(),
                         content: vec![content],
+                        end_turn: None,
+                        phase: None,
                     });
                 }
                 crate::history_cell::HistoryCellType::Assistant => {
@@ -7709,6 +7582,8 @@ impl ChatWidget<'_> {
                         id: None,
                         role: "assistant".to_string(),
                         content: vec![content],
+                        end_turn: None,
+                        phase: None,
                     });
                 }
                 crate::history_cell::HistoryCellType::PlanUpdate => {
@@ -7750,6 +7625,8 @@ impl ChatWidget<'_> {
                             id: None,
                             role: "assistant".to_string(),
                             content: vec![content],
+                            end_turn: None,
+                            phase: None,
                         });
                     }
                 }
@@ -8715,7 +8592,7 @@ impl ChatWidget<'_> {
             let header = Self::account_header_lines(account_ref, snapshot_ref, summary_ref);
             let is_api_key_account = matches!(
                 account_ref.map(|acc| acc.mode),
-                Some(McpAuthMode::ApiKey)
+                Some(AuthMode::ApiKey)
             );
             let extra = Self::usage_history_lines(summary_ref, is_api_key_account);
             let display = Self::rate_limit_display_config_for_account(account_ref);
@@ -8795,7 +8672,7 @@ impl ChatWidget<'_> {
                         );
                         let is_api_key_account = matches!(
                             account.map(|acc| acc.mode),
-                            Some(McpAuthMode::ApiKey)
+                            Some(AuthMode::ApiKey)
                         );
                         let extra = Self::usage_history_lines(
                             usage_summary.as_ref(),
@@ -8805,7 +8682,7 @@ impl ChatWidget<'_> {
                     } else {
                         let is_api_key_account = matches!(
                             account.map(|acc| acc.mode),
-                            Some(McpAuthMode::ApiKey)
+                            Some(AuthMode::ApiKey)
                         );
                         let mut lines = Self::usage_history_lines(
                             usage_summary.as_ref(),
@@ -8825,7 +8702,7 @@ impl ChatWidget<'_> {
                 None => {
                     let is_api_key_account = matches!(
                         account.map(|acc| acc.mode),
-                        Some(McpAuthMode::ApiKey)
+                        Some(AuthMode::ApiKey)
                     );
                     let mut lines = Self::usage_history_lines(
                         usage_summary.as_ref(),
@@ -8875,11 +8752,11 @@ impl ChatWidget<'_> {
         let cents_part = (cents_u128 % 100) as u8;
         let dollars = (dollars_u128.min(u128::from(u64::MAX))) as u64;
         if cents_part == 0 {
-            format!("${} USD", format_with_separators(dollars))
+            format!("${} USD", format_u64(dollars))
         } else {
             format!(
                 "${}.{:02} USD",
-                format_with_separators(dollars),
+                format_u64(dollars),
                 cents_part
             )
         }
@@ -8912,8 +8789,8 @@ impl ChatWidget<'_> {
 
         let account_type = account
             .map(|acc| match acc.mode {
-                McpAuthMode::ChatGPT | McpAuthMode::ChatgptAuthTokens => "ChatGPT account",
-                McpAuthMode::ApiKey => "API key",
+                AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT account",
+                AuthMode::ApiKey => "API key",
             })
             .unwrap_or("Unknown account");
 
@@ -8923,7 +8800,7 @@ impl ChatWidget<'_> {
             .unwrap_or("Unknown");
 
         let value_style = Style::default().fg(crate::colors::text_dim());
-        let is_api_key = matches!(account.map(|acc| acc.mode), Some(McpAuthMode::ApiKey));
+        let is_api_key = matches!(account.map(|acc| acc.mode), Some(AuthMode::ApiKey));
         let totals = usage
             .map(|u| u.totals.clone())
             .unwrap_or_default();
@@ -8936,7 +8813,7 @@ impl ChatWidget<'_> {
         let total_tokens = totals.total_tokens;
 
         let cost_usd = Self::usage_cost_usd_from_totals(&totals);
-        let formatted_total = format_with_separators(total_tokens);
+        let formatted_total = format_u64(total_tokens);
         let formatted_cost = Self::format_usd(cost_usd);
         let cost_suffix = if is_api_key {
             format!("({formatted_cost})")
@@ -8963,10 +8840,10 @@ impl ChatWidget<'_> {
 
         let indent = " ".repeat(tokens_prefix.len());
         let counts = [
-            (format_with_separators(cached_input), "cached"),
-            (format_with_separators(non_cached_input), "input"),
-            (format_with_separators(output_tokens), "output"),
-            (format_with_separators(reasoning_tokens), "reasoning"),
+            (format_u64(cached_input), "cached"),
+            (format_u64(non_cached_input), "input"),
+            (format_u64(output_tokens), "output"),
+            (format_u64(reasoning_tokens), "reasoning"),
         ];
         let max_width = counts
             .iter()
@@ -9023,12 +8900,12 @@ impl ChatWidget<'_> {
         let prefix = status_content_prefix();
         let tokens_width = series
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.total_tokens).len())
+            .map(|(_, totals)| format_u64(totals.total_tokens).len())
             .max()
             .unwrap_or(0);
         let cached_width = series
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.cached_input_tokens).len())
+            .map(|(_, totals)| format_u64(totals.cached_input_tokens).len())
             .max()
             .unwrap_or(0);
         let cost_width = series
@@ -9043,10 +8920,10 @@ impl ChatWidget<'_> {
         for (dt, totals) in series.iter() {
             let label = Self::format_hour_label(*dt);
             let bar = Self::bar_segment(totals.total_tokens, max_total, WIDTH);
-            let tokens = format_with_separators(totals.total_tokens);
+            let tokens = format_u64(totals.total_tokens);
             let padding = tokens_width.saturating_sub(tokens.len());
             let formatted_tokens = format!("{space}{tokens}", space = " ".repeat(padding), tokens = tokens);
-            let cached_tokens = format_with_separators(totals.cached_input_tokens);
+            let cached_tokens = format_u64(totals.cached_input_tokens);
             let cached_padding = cached_width.saturating_sub(cached_tokens.len());
             let cached_display = format!(
                 "{space}{cached_tokens}",
@@ -9124,12 +9001,12 @@ impl ChatWidget<'_> {
         let prefix = status_content_prefix();
         let tokens_width = daily
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.total_tokens).len())
+            .map(|(_, totals)| format_u64(totals.total_tokens).len())
             .max()
             .unwrap_or(0);
         let cached_width = daily
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.cached_input_tokens).len())
+            .map(|(_, totals)| format_u64(totals.cached_input_tokens).len())
             .max()
             .unwrap_or(0);
         let cost_width = daily
@@ -9144,10 +9021,10 @@ impl ChatWidget<'_> {
         for (day, totals) in daily.iter() {
             let label = Self::format_daily_label(*day);
             let bar = Self::bar_segment(totals.total_tokens, max_total, WIDTH);
-            let tokens = format_with_separators(totals.total_tokens);
+            let tokens = format_u64(totals.total_tokens);
             let padding = tokens_width.saturating_sub(tokens.len());
             let formatted_tokens = format!("{space}{tokens}", space = " ".repeat(padding), tokens = tokens);
-            let cached_tokens = format_with_separators(totals.cached_input_tokens);
+            let cached_tokens = format_u64(totals.cached_input_tokens);
             let cached_padding = cached_width.saturating_sub(cached_tokens.len());
             let cached_display = format!(
                 "{space}{cached_tokens}",
@@ -9276,12 +9153,12 @@ impl ChatWidget<'_> {
         let prefix = status_content_prefix();
         let tokens_width = months
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.total_tokens).len())
+            .map(|(_, totals)| format_u64(totals.total_tokens).len())
             .max()
             .unwrap_or(0);
         let cached_width = months
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.cached_input_tokens).len())
+            .map(|(_, totals)| format_u64(totals.cached_input_tokens).len())
             .max()
             .unwrap_or(0);
         let cost_width = months
@@ -9296,10 +9173,10 @@ impl ChatWidget<'_> {
         for (start, totals) in months.iter() {
             let label = start.format("%b %Y").to_string();
             let bar = Self::bar_segment(totals.total_tokens, max_total, WIDTH);
-            let tokens = format_with_separators(totals.total_tokens);
+            let tokens = format_u64(totals.total_tokens);
             let padding = tokens_width.saturating_sub(tokens.len());
             let formatted_tokens = format!("{space}{tokens}", space = " ".repeat(padding), tokens = tokens);
-            let cached_tokens = format_with_separators(totals.cached_input_tokens);
+            let cached_tokens = format_u64(totals.cached_input_tokens);
             let cached_padding = cached_width.saturating_sub(cached_tokens.len());
             let cached_display = format!(
                 "{space}{cached_tokens}",
@@ -10757,7 +10634,13 @@ impl ChatWidget<'_> {
     /// Push a cell using a synthetic key at the TOP of the NEXT request.
     fn history_push_top_next_req(&mut self, cell: impl HistoryCell + 'static) {
         let key = self.next_req_key_top();
-        let _ = self.history_insert_with_key_global_tagged(Box::new(cell), key, "prelude", None);
+        let cell = Box::new(cell);
+        let tag = if matches!(cell.kind(), HistoryCellType::BackgroundEvent) {
+            "background"
+        } else {
+            "prelude"
+        };
+        let _ = self.history_insert_with_key_global_tagged(cell, key, tag, None);
     }
     fn history_replace_with_record(
         &mut self,
@@ -12877,7 +12760,6 @@ impl ChatWidget<'_> {
 
     pub(crate) fn restore_history_snapshot(&mut self, snapshot: &HistorySnapshot) {
         let perf_timer = self.perf_state.enabled.then(Instant::now);
-        let snapshot = Self::filter_system_status_snapshot(snapshot);
         let preserved_system_entries: Vec<(String, HistoryId)> = self
             .system_cell_by_id
             .iter()
@@ -12893,7 +12775,7 @@ impl ChatWidget<'_> {
             self.history_cells.len(),
             self.cell_order_seq.len()
         ));
-        self.history_state.restore(&snapshot);
+        self.history_state.restore(snapshot);
 
         self.history_render.invalidate_all();
         self.mark_render_requests_dirty();
@@ -13015,53 +12897,6 @@ impl ChatWidget<'_> {
             self.cell_order_seq.len(),
             self.system_cell_by_id.len()
         ));
-    }
-
-    fn filter_system_status_snapshot(snapshot: &HistorySnapshot) -> HistorySnapshot {
-        let mut records = Vec::with_capacity(snapshot.records.len());
-        let mut order = Vec::new();
-        let mut order_debug = Vec::new();
-
-        for (idx, record) in snapshot.records.iter().enumerate() {
-            if Self::is_system_status_record(record) {
-                continue;
-            }
-            records.push(record.clone());
-            if let Some(key) = snapshot.order.get(idx) {
-                order.push(*key);
-            }
-            if let Some(debug) = snapshot.order_debug.get(idx) {
-                order_debug.push(debug.clone());
-            }
-        }
-
-        HistorySnapshot {
-            records,
-            next_id: snapshot.next_id,
-            exec_call_lookup: HashMap::new(),
-            tool_call_lookup: HashMap::new(),
-            stream_lookup: HashMap::new(),
-            order,
-            order_debug,
-        }
-    }
-
-    fn is_system_status_record(record: &HistoryRecord) -> bool {
-        let HistoryRecord::PlainMessage(state) = record else {
-            return false;
-        };
-
-        let mut text = String::new();
-        for (idx, line) in state.lines.iter().enumerate() {
-            if idx > 0 {
-                text.push('\n');
-            }
-            for span in &line.spans {
-                text.push_str(&span.text);
-            }
-        }
-
-        text.trim_start().starts_with("== System Status ==")
     }
 
     pub(crate) fn perform_undo_restore(
@@ -14043,7 +13878,7 @@ impl ChatWidget<'_> {
             EventMsg::PlanUpdate(update) => {
                 let (plan_title, plan_active) = {
                     let title = update
-                        .name
+                        .explanation
                         .as_ref()
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
@@ -15578,7 +15413,7 @@ impl ChatWidget<'_> {
                     content: "fn main() {\n    println!(\"demo\");\n}\n",
                 }),
                 UpdatePlanArgs {
-                    name: Some("Demo Scroll Plan".to_string()),
+                    explanation: Some("Demo Scroll Plan".to_string()),
                     plan: vec![
                         PlanItemArg {
                             step: "Create reproducible builds".to_string(),
@@ -15625,7 +15460,7 @@ impl ChatWidget<'_> {
                     new_content: "pub fn release() {\n    println!(\"drafting release\");\n}\n",
                 }),
                 UpdatePlanArgs {
-                    name: Some("Release Gate Plan".to_string()),
+                    explanation: Some("Release Gate Plan".to_string()),
                     plan: vec![
                         PlanItemArg {
                             step: "Finalize changelog".to_string(),
@@ -16267,7 +16102,7 @@ impl ChatWidget<'_> {
     fn rate_limit_display_config_for_account(
         account: Option<&StoredAccount>,
     ) -> RateLimitDisplayConfig {
-        if matches!(account.map(|acc| acc.mode), Some(McpAuthMode::ApiKey)) {
+        if matches!(account.map(|acc| acc.mode), Some(AuthMode::ApiKey)) {
             RateLimitDisplayConfig {
                 show_usage_sections: false,
                 show_chart: false,
@@ -16389,7 +16224,7 @@ impl ChatWidget<'_> {
             return;
         }
 
-        match crate::updates::resolve_upgrade_resolution(&self.config) {
+        match crate::updates::resolve_upgrade_resolution() {
             crate::updates::UpgradeResolution::Command { command, display } => {
                 if command.is_empty() {
                     self.history_push_plain_state(history_cell::new_error_event(
@@ -16698,6 +16533,10 @@ impl ChatWidget<'_> {
         self.show_login_accounts_view();
     }
 
+    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
+        self.auth_manager.clone()
+    }
+
     pub(crate) fn reload_auth(&self) -> bool {
         self.auth_manager.reload()
     }
@@ -16826,7 +16665,7 @@ impl ChatWidget<'_> {
             error: None,
         }));
 
-        let resolution = crate::updates::resolve_upgrade_resolution(&self.config);
+        let resolution = crate::updates::resolve_upgrade_resolution();
         let (command, display, instructions) = match &resolution {
             crate::updates::UpgradeResolution::Command { command, display } => (
                 Some(command.clone()),
@@ -22273,9 +22112,9 @@ Have we met every part of this goal and is there no further work to do?"#
             return presets.clone();
         }
         let auth_mode = if self.config.using_chatgpt_auth {
-            Some(McpAuthMode::ChatGPT)
+            Some(AuthMode::Chatgpt)
         } else {
-            Some(McpAuthMode::ApiKey)
+            Some(AuthMode::ApiKey)
         };
         builtin_model_presets(auth_mode)
     }

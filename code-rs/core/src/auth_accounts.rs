@@ -156,7 +156,7 @@ fn touch_account(account: &mut StoredAccount, used: bool) {
 
 fn upsert_account(mut data: AccountsFile, mut new_account: StoredAccount) -> (AccountsFile, StoredAccount) {
     let existing_idx = match new_account.mode {
-        AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => new_account
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => new_account
             .tokens
             .as_ref()
             .and_then(|tokens| data.accounts.iter().position(|acc| match_chatgpt_account(acc, tokens))),
@@ -312,7 +312,7 @@ pub fn upsert_chatgpt_account(
 
     let new_account = StoredAccount {
         id: next_id(),
-        mode: AuthMode::ChatGPT,
+        mode: AuthMode::Chatgpt,
         label,
         openai_api_key: None,
         tokens: Some(tokens),

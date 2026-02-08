@@ -61,13 +61,6 @@ pub struct SessionIndexEntry {
     /// Number of messages/turns in the session
     pub message_count: usize,
 
-    /// Number of response items recorded in the session.
-    ///
-    /// Used to distinguish sessions with a replayable transcript from legacy
-    /// "event-only" sessions.
-    #[serde(default)]
-    pub response_item_count: usize,
-
     /// Number of user messages in the session
     #[serde(default)]
     pub user_message_count: usize,
@@ -277,18 +270,6 @@ impl SessionCatalog {
         Ok(true)
     }
 
-    /// Mark a session as deleted (soft delete) or restore it.
-    pub fn set_deleted(&mut self, session_id: Uuid, deleted: bool) -> io::Result<bool> {
-        let Some(entry) = self.entries.get_mut(&session_id) else {
-            return Ok(false);
-        };
-        if entry.deleted != deleted {
-            entry.deleted = deleted;
-            self.save()?;
-        }
-        Ok(true)
-    }
-
     /// Remove an entry's session_id from secondary indexes.
     fn remove_from_indexes(&mut self, session_id: &Uuid, entry: &SessionIndexEntry) {
         // Remove from cwd index
@@ -348,9 +329,6 @@ impl SessionCatalog {
                 if should_replace(&existing, &entry) {
                     if entry.nickname.is_none() {
                         entry.nickname = existing.nickname.clone();
-                    }
-                    if existing.deleted {
-                        entry.deleted = true;
                     }
                     self.remove_from_indexes(&session_id, &existing);
                     self.index_entry(entry);
@@ -469,7 +447,6 @@ async fn parse_rollout_file(
     let mut git_project_root: Option<PathBuf> = None;
     let mut session_source: Option<SessionSource> = None;
     let mut message_count = 0usize;
-    let mut response_item_count = 0usize;
     let mut user_message_count = 0usize;
     let mut last_user_snippet: Option<String> = None;
 
@@ -503,7 +480,6 @@ async fn parse_rollout_file(
             }
             RolloutItem::ResponseItem(response_item) => {
                 message_count += 1;
-                response_item_count += 1;
 
                 if let ResponseItem::Message { role, content, .. } = response_item {
                     if role.eq_ignore_ascii_case("user") {
@@ -574,7 +550,6 @@ async fn parse_rollout_file(
         model_provider: None, // TODO: extract from session if available
         session_source,
         message_count,
-        response_item_count,
         user_message_count,
         last_user_snippet,
         nickname: None,
@@ -599,10 +574,6 @@ fn should_replace(existing: &SessionIndexEntry, candidate: &SessionIndexEntry) -
         || existing.cwd_real != candidate.cwd_real
         || existing.session_source != candidate.session_source
         || existing.git_branch != candidate.git_branch
-        || existing.message_count != candidate.message_count
-        || existing.response_item_count != candidate.response_item_count
-        || existing.user_message_count != candidate.user_message_count
-        || existing.last_user_snippet != candidate.last_user_snippet
 }
 
 /// Update catalog entry for a session after new events are written.
@@ -622,7 +593,6 @@ pub async fn update_catalog_entry(
             // Re-parse file to update message count and snippet
             if let Some(updated) = parse_rollout_file(rollout_path, &code_home.join(SESSIONS_SUBDIR)).await {
                 entry.message_count = updated.message_count;
-                entry.response_item_count = updated.response_item_count;
                 entry.user_message_count = updated.user_message_count;
                 entry.last_user_snippet = updated.last_user_snippet;
             }
@@ -674,7 +644,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 0,
             user_message_count: 2,
             last_user_snippet: None,
             nickname: None,
@@ -711,7 +680,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 1,
             last_user_snippet: Some("test message".to_string()),
             nickname: None,
@@ -751,7 +719,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 1,
             last_user_snippet: None,
             nickname: None,
@@ -768,46 +735,6 @@ mod tests {
         let loaded = SessionCatalog::load(code_home)?;
         let retrieved = loaded.get(&session_id).expect("session entry");
         assert_eq!(retrieved.nickname.as_deref(), Some("Launch checklist"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_catalog_set_deleted() -> io::Result<()> {
-        let temp = TempDir::new()?;
-        let code_home = temp.path();
-
-        let session_id = Uuid::new_v4();
-        let entry = SessionIndexEntry {
-            session_id,
-            rollout_path: PathBuf::from("sessions/test-deleted.jsonl"),
-            snapshot_path: None,
-            created_at: "2025-01-01T10:00:00.000Z".to_string(),
-            last_event_at: "2025-01-01T10:05:00.000Z".to_string(),
-            cwd_real: PathBuf::from("/test"),
-            cwd_display: "/test".to_string(),
-            git_project_root: None,
-            git_branch: None,
-            model_provider: None,
-            session_source: SessionSource::Cli,
-            message_count: 0,
-            response_item_count: 0,
-            user_message_count: 0,
-            last_user_snippet: None,
-            nickname: None,
-            sync_origin_device: None,
-            sync_version: 0,
-            archived: false,
-            deleted: false,
-        };
-
-        let mut catalog = SessionCatalog::load(code_home)?;
-        catalog.upsert(entry.clone())?;
-        assert!(catalog.set_deleted(session_id, true)?);
-
-        let loaded = SessionCatalog::load(code_home)?;
-        let retrieved = loaded.get(&session_id).expect("session entry");
-        assert!(retrieved.deleted);
 
         Ok(())
     }
@@ -833,7 +760,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 1,
             last_user_snippet: None,
             nickname: None,
@@ -885,7 +811,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 2,
             last_user_snippet: Some("first message".to_string()),
             nickname: None,
@@ -936,7 +861,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 1,
             last_user_snippet: None,
             nickname: None,
@@ -981,7 +905,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 2,
             last_user_snippet: None,
             nickname: None,
@@ -1043,7 +966,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 2,
             last_user_snippet: None,
             nickname: None,
@@ -1122,7 +1044,6 @@ mod tests {
             model_provider: None,
             session_source: SessionSource::Cli,
             message_count: 5,
-            response_item_count: 5,
             user_message_count: 2,
             last_user_snippet: None,
             nickname: None,

@@ -36,10 +36,8 @@ code-common = { path = "../common", features = [
     "elapsed",
     "sandbox_summary",
 ] }
-code-app-server = { path = "../app-server" }
 code-core = { path = "../core" }
 code-file-search = { path = "../file-search" }
-code-gateway = { path = "../gateway" }
 code-git-tooling = { path = "../git-tooling" }
 code-login = { path = "../login" }
 code-ollama = { path = "../ollama" }
@@ -91,7 +89,6 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tui-input = "0.14.0"
 tui-markdown = "=0.3.3"
-toml = { workspace = true }
 unicode-segmentation = "1.12.0"
 unicode-width = "0.1"
 url = "2"

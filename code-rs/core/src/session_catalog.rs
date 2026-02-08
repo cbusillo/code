@@ -48,39 +48,55 @@ impl SessionCatalog {
     /// Query the catalog with the provided filters, returning ordered entries.
     pub async fn query(&self, query: &SessionQuery) -> Result<Vec<SessionIndexEntry>> {
         let catalog = self.load_inner().await?;
-        Ok(filter_catalog_entries(&catalog, query))
-    }
+        let mut rows = Vec::new();
 
-    /// Query the catalog without reconciling from disk.
-    /// This is faster but may lag behind external changes.
-    pub async fn query_cached(&self, query: &SessionQuery) -> Result<Vec<SessionIndexEntry>> {
-        let catalog = self.load_cached_or_index().await?;
-        Ok(filter_catalog_entries(&catalog, query))
+        let candidates: Vec<&SessionIndexEntry> = if let Some(cwd) = &query.cwd {
+            catalog.by_cwd(cwd)
+        } else if let Some(git_root) = &query.git_root {
+            catalog.by_git_root(git_root)
+        } else {
+            catalog.all_ordered()
+        };
+
+        for entry in candidates {
+            if !query.include_archived && entry.archived {
+                continue;
+            }
+            if !query.include_deleted && entry.deleted {
+                continue;
+            }
+            if let Some(cwd) = &query.cwd {
+                if &entry.cwd_real != cwd {
+                    continue;
+                }
+            }
+            if let Some(git_root) = &query.git_root {
+                if entry.git_project_root.as_ref() != Some(git_root) {
+                    continue;
+                }
+            }
+            if !query.sources.is_empty() && !query.sources.contains(&entry.session_source) {
+                continue;
+            }
+            if entry.user_message_count < query.min_user_messages {
+                continue;
+            }
+
+            rows.push(entry.clone());
+
+            if let Some(limit) = query.limit {
+                if rows.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(rows)
     }
 
     /// Find a session by UUID (prefix matches allowed, case-insensitive).
     pub async fn find_by_id(&self, id_prefix: &str) -> Result<Option<SessionIndexEntry>> {
         let catalog = self.load_inner().await?;
-        let needle = id_prefix.to_ascii_lowercase();
-
-        let entry = catalog
-            .all_ordered()
-            .into_iter()
-            .find(|entry| {
-                entry
-                    .session_id
-                    .to_string()
-                    .to_ascii_lowercase()
-                    .starts_with(&needle)
-            })
-            .cloned();
-
-        Ok(entry)
-    }
-
-    /// Find a session by UUID (prefix matches allowed, case-insensitive) without reconciling.
-    pub async fn find_by_id_cached(&self, id_prefix: &str) -> Result<Option<SessionIndexEntry>> {
-        let catalog = self.load_cached_or_index().await?;
         let needle = id_prefix.to_ascii_lowercase();
 
         let entry = catalog
@@ -124,35 +140,6 @@ impl SessionCatalog {
         Ok(updated)
     }
 
-    /// Soft delete (hide) or restore a session.
-    pub async fn set_deleted(&self, session_id: Uuid, deleted: bool) -> Result<bool> {
-        let mut catalog = self.load_inner().await?;
-        let updated = catalog
-            .set_deleted(session_id, deleted)
-            .context("failed to update session deleted flag")?;
-        if updated {
-            let mut guard = self.cache.lock().await;
-            *guard = Some(catalog);
-        }
-        Ok(updated)
-    }
-
-    /// Mark a session as archived or unarchived.
-    pub async fn set_archived(&self, session_id: Uuid, archived: bool) -> Result<bool> {
-        let mut catalog = self.load_inner().await?;
-        let Some(entry) = catalog.get(&session_id).cloned() else {
-            return Ok(false);
-        };
-        let mut updated = entry.clone();
-        updated.archived = archived;
-        catalog
-            .upsert(updated)
-            .context("failed to update session archive state")?;
-        let mut guard = self.cache.lock().await;
-        *guard = Some(catalog);
-        Ok(true)
-    }
-
     async fn load_inner(&self) -> Result<rollout_catalog::SessionCatalog> {
         {
             let mut guard = self.cache.lock().await;
@@ -180,25 +167,6 @@ impl SessionCatalog {
         *guard = Some(catalog.clone());
         Ok(catalog)
     }
-
-    async fn load_cached_or_index(&self) -> Result<rollout_catalog::SessionCatalog> {
-        {
-            let guard = self.cache.lock().await;
-            if let Some(existing) = guard.as_ref() {
-                return Ok(existing.clone());
-            }
-        }
-
-        let code_home = self.code_home.clone();
-        let catalog = task::spawn_blocking(move || rollout_catalog::SessionCatalog::load(&code_home))
-            .await
-            .context("catalog task panicked")?
-            .context("failed to load session catalog")?;
-
-        let mut guard = self.cache.lock().await;
-        *guard = Some(catalog.clone());
-        Ok(catalog)
-    }
 }
 
 /// Helper to convert an entry to an absolute rollout path.
@@ -216,53 +184,4 @@ fn catalog_cache_handle(code_home: &Path) -> SharedCatalog {
         .entry(code_home.to_path_buf())
         .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
         .clone()
-}
-
-fn filter_catalog_entries(
-    catalog: &rollout_catalog::SessionCatalog,
-    query: &SessionQuery,
-) -> Vec<SessionIndexEntry> {
-    let mut rows = Vec::new();
-    let candidates: Vec<&SessionIndexEntry> = if let Some(cwd) = &query.cwd {
-        catalog.by_cwd(cwd)
-    } else if let Some(git_root) = &query.git_root {
-        catalog.by_git_root(git_root)
-    } else {
-        catalog.all_ordered()
-    };
-
-    for entry in candidates {
-        if !query.include_archived && entry.archived {
-            continue;
-        }
-        if !query.include_deleted && entry.deleted {
-            continue;
-        }
-        if let Some(cwd) = &query.cwd {
-            if &entry.cwd_real != cwd {
-                continue;
-            }
-        }
-        if let Some(git_root) = &query.git_root {
-            if entry.git_project_root.as_ref() != Some(git_root) {
-                continue;
-            }
-        }
-        if !query.sources.is_empty() && !query.sources.contains(&entry.session_source) {
-            continue;
-        }
-        if entry.user_message_count < query.min_user_messages {
-            continue;
-        }
-
-        rows.push(entry.clone());
-
-        if let Some(limit) = query.limit {
-            if rows.len() >= limit {
-                break;
-            }
-        }
-    }
-
-    rows
 }

@@ -20,9 +20,8 @@ use crate::history::state::HistorySnapshot;
 use crate::onboarding::onboarding_screen::OnboardingScreen;
 use crate::thread_spawner;
 use crate::tui::TerminalInfo;
-use crate::conversation_backend::ConversationBackend;
 use code_core::config::Config;
-use code_login::AuthManager;
+use code_core::ConversationManager;
 use code_login::ShutdownHandle;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -190,8 +189,7 @@ pub(super) struct LoginFlowState {
 }
 
 pub(crate) struct App<'a> {
-    pub(super) conversation_backend: ConversationBackend,
-    pub(super) auth_manager: Arc<AuthManager>,
+    pub(super) _server: Arc<ConversationManager>,
     pub(super) app_event_tx: AppEventSender,
     // Split event receivers: high‑priority (input) and bulk (streaming)
     pub(super) app_event_rx_high: Receiver<AppEvent>,

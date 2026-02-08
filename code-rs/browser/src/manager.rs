@@ -1687,6 +1687,7 @@ impl BrowserManager {
                     self
                         .log_navigation_failure(url, &err, recovery_attempts, should_retry)
                         .await;
+
                     if !should_retry {
                         return Err(err);
                     }

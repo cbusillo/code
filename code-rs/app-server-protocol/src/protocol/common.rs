@@ -30,7 +30,7 @@ pub enum AuthMode {
     /// OpenAI API key provided by the caller and stored by Codex.
     ApiKey,
     /// ChatGPT OAuth managed by Codex (tokens persisted and refreshed by Codex).
-    ChatGPT,
+    Chatgpt,
     /// [UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.
     ///
     /// ChatGPT auth tokens are supplied by an external host app and are only
@@ -43,7 +43,7 @@ pub enum AuthMode {
 
 impl AuthMode {
     pub fn is_chatgpt(self) -> bool {
-        matches!(self, AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens)
+        matches!(self, AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
     }
 }
 

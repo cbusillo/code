@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
@@ -13,18 +12,14 @@ use signal_hook::consts::signal::SIGTERM;
 #[cfg(unix)]
 use signal_hook::flag;
 
-use code_core::config::{Config, ConfigOverrides};
+use code_core::config::Config;
 use code_core::ConversationManager;
-use code_gateway::run_with_broker;
-use code_gateway::run_with_manager;
 use code_login::{AuthManager, AuthMode};
 use code_protocol::protocol::SessionSource;
-use serde::{Deserialize, Serialize};
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
-use crate::conversation_backend::ConversationBackend;
 use crate::file_search::FileSearchManager;
 use crate::get_login_status;
 use crate::onboarding::onboarding_screen::{OnboardingScreen, OnboardingScreenArgs};
@@ -46,39 +41,21 @@ impl App<'_> {
         resume_picker: bool,
         startup_footer_notice: Option<String>,
         latest_upgrade_version: Option<String>,
-        cli_overrides: Arc<Vec<(String, toml::Value)>>,
-        config_overrides: Arc<ConfigOverrides>,
     ) -> Self {
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
-        let shared_config = Arc::new(config.clone());
-        let use_broker = config.app_server.enabled && cfg!(unix);
-        let conversation_backend = if use_broker {
-            maybe_start_broker(
-                shared_config.clone(),
-                cli_overrides.clone(),
-                config_overrides.clone(),
-            );
-            maybe_start_gateway(shared_config.clone(), cli_overrides.clone(), None);
-            ConversationBackend::broker(&config, cli_overrides.clone(), config_overrides.clone())
-        } else {
-            if config.app_server.enabled && !cfg!(unix) {
-                tracing::warn!("app-server broker requires unix; falling back to local mode");
-            }
-            let conversation_manager = Arc::new(ConversationManager::new(
-                auth_manager.clone(),
-                SessionSource::Cli,
-            ));
-            maybe_start_gateway(
-                shared_config,
-                cli_overrides.clone(),
-                Some(conversation_manager.clone()),
-            );
-            ConversationBackend::local(conversation_manager)
-        };
+        let conversation_manager = Arc::new(ConversationManager::new(
+            auth_manager.clone(),
+            SessionSource::Cli,
+        ));
 
         // Split queues so interactive input never waits behind bulk updates.
         let (high_tx, app_event_rx_high) = channel();
@@ -109,9 +86,9 @@ impl App<'_> {
                     .map(|auth| auth.mode)
                     .or_else(|| {
                         if remote_using_chatgpt_hint {
-                            Some(code_login::AuthMode::ChatGPT)
+                            Some(AuthMode::Chatgpt)
                         } else {
-                            Some(code_login::AuthMode::ApiKey)
+                            Some(AuthMode::ApiKey)
                         }
                     });
                 let presets = code_common::model_presets::builtin_model_presets(auth_mode);
@@ -310,8 +287,6 @@ impl App<'_> {
             let mut chat_widget = ChatWidget::new(
                 config.clone(),
                 app_event_tx.clone(),
-                conversation_backend.clone(),
-                auth_manager.clone(),
                 initial_prompt,
                 initial_images,
                 enhanced_keys_supported,
@@ -336,8 +311,7 @@ impl App<'_> {
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
         let start_in_alt = config.tui.alternate_screen;
         Self {
-            conversation_backend,
-            auth_manager,
+            _server: conversation_manager,
             app_event_tx,
             app_event_rx_high,
             app_event_rx_bulk,
@@ -377,246 +351,6 @@ impl App<'_> {
             sigterm_flag,
         }
     }
-}
-
-fn gateway_bind_addr(config: &Config) -> Option<SocketAddr> {
-    match std::env::var("CODE_GATEWAY_BIND") {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
-                return None;
-            }
-            trimmed.parse().ok()
-        }
-        Err(_) => {
-            if !config.gateway.auto_start {
-                return None;
-            }
-            config
-                .gateway
-                .bind
-                .as_deref()
-                .unwrap_or("127.0.0.1:3210")
-                .parse()
-                .ok()
-        }
-    }
-}
-
-fn gateway_broker_path(config: &Config) -> Option<PathBuf> {
-    let raw = config.gateway.broker.as_deref()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
-        return None;
-    }
-    if trimmed.eq_ignore_ascii_case("auto") {
-        return Some(config.app_server_listen_path());
-    }
-    Some(PathBuf::from(trimmed))
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BrokerStamp {
-    pid: u32,
-    version: String,
-    resume_override: bool,
-}
-
-fn broker_stamp_path(config: &Config) -> PathBuf {
-    config.code_home.join("app-server.stamp.json")
-}
-
-fn maybe_start_broker(
-    config: Arc<Config>,
-    cli_overrides: Arc<Vec<(String, toml::Value)>>,
-    config_overrides: Arc<ConfigOverrides>,
-) {
-    if crate::chatwidget::is_test_mode() {
-        return;
-    }
-    if !config.app_server.enabled {
-        return;
-    }
-
-    #[cfg(unix)]
-    tokio::spawn(async move {
-        let socket_path = config.app_server_listen_path();
-        if broker_available(&socket_path).await {
-            if broker_stamp_matches(&config).await {
-                return;
-            }
-            if restart_broker(&socket_path, &config, &cli_overrides, &config_overrides).await {
-                return;
-            }
-        }
-
-        if let Err(err) = spawn_broker_process(&cli_overrides, &config_overrides) {
-            tracing::warn!("failed to start app-server broker: {err}");
-        }
-    });
-
-    #[cfg(not(unix))]
-    {
-        let _ = (config, cli_overrides, config_overrides);
-        tracing::warn!("app-server broker is only supported on unix platforms");
-    }
-}
-
-#[cfg(unix)]
-async fn broker_available(socket_path: &Path) -> bool {
-    tokio::net::UnixStream::connect(socket_path).await.is_ok()
-}
-
-#[cfg(not(unix))]
-async fn broker_available(_socket_path: &Path) -> bool {
-    false
-}
-
-#[cfg(unix)]
-async fn broker_stamp_matches(config: &Config) -> bool {
-    let stamp_path = broker_stamp_path(config);
-    let raw = match tokio::fs::read_to_string(&stamp_path).await {
-        Ok(raw) => raw,
-        Err(err) => {
-            tracing::warn!("broker stamp missing/unreadable: {err}");
-            return false;
-        }
-    };
-    let stamp: BrokerStamp = match serde_json::from_str(&raw) {
-        Ok(stamp) => stamp,
-        Err(err) => {
-            tracing::warn!("broker stamp parse failed: {err}");
-            return false;
-        }
-    };
-
-    let expected_version = env!("CARGO_PKG_VERSION");
-    if stamp.version != expected_version {
-        tracing::warn!(
-            current = expected_version,
-            found = stamp.version,
-            "broker stamp version mismatch"
-        );
-        return false;
-    }
-
-    if stamp.resume_override {
-        tracing::warn!("broker stamp indicates resume override; restarting broker");
-        return false;
-    }
-
-    true
-}
-
-#[cfg(unix)]
-async fn restart_broker(
-    socket_path: &Path,
-    config: &Config,
-    cli_overrides: &[(String, toml::Value)],
-    config_overrides: &ConfigOverrides,
-) -> bool {
-    let stamp_path = broker_stamp_path(config);
-    let stamp = tokio::fs::read_to_string(&stamp_path)
-        .await
-        .ok()
-        .and_then(|raw| serde_json::from_str::<BrokerStamp>(&raw).ok());
-
-    if let Some(stamp) = stamp {
-        if stamp.pid > 0 {
-            unsafe {
-                libc::kill(stamp.pid as i32, libc::SIGTERM);
-            }
-        }
-    }
-
-    let _ = tokio::fs::remove_file(&stamp_path).await;
-    let _ = tokio::fs::remove_file(socket_path).await;
-
-    match spawn_broker_process(cli_overrides, config_overrides) {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::warn!("failed to restart app-server broker: {err}");
-            false
-        }
-    }
-}
-
-#[cfg(unix)]
-fn spawn_broker_process(
-    cli_overrides: &[(String, toml::Value)],
-    config_overrides: &ConfigOverrides,
-) -> std::io::Result<()> {
-    let exe_path = std::env::current_exe()?;
-    let mut command = std::process::Command::new(exe_path);
-    command.arg("--app-server-broker");
-    if let Some(profile) = &config_overrides.config_profile {
-        command.arg("--profile").arg(profile);
-    }
-    for (key, value) in cli_overrides {
-        if key == "experimental_resume" {
-            continue;
-        }
-        command.arg("-c").arg(format!("{key}={value}"));
-    }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                let _ = libc::setsid();
-                Ok(())
-            });
-        }
-    }
-
-    let _child = command.spawn()?;
-    Ok(())
-}
-
-fn maybe_start_gateway(
-    config: Arc<Config>,
-    cli_overrides: Arc<Vec<(String, toml::Value)>>,
-    conversation_manager: Option<Arc<ConversationManager>>,
-) {
-    if crate::chatwidget::is_test_mode() {
-        return;
-    }
-    let Some(bind_addr) = gateway_bind_addr(&config) else {
-        return;
-    };
-
-    tokio::spawn(async move {
-        if let Some(socket_path) = gateway_broker_path(&config) {
-            let use_broker = conversation_manager.is_none()
-                || broker_available(&socket_path).await;
-            if use_broker {
-                if let Err(err) =
-                    run_with_broker(config, cli_overrides, bind_addr, None, socket_path).await
-                {
-                    tracing::warn!("embedded gateway (broker) failed: {err}");
-                }
-                return;
-            }
-        }
-
-        let Some(conversation_manager) = conversation_manager else {
-            tracing::info!(
-                "gateway auto-start disabled while broker mode is enabled; set gateway.broker=auto to use the broker"
-            );
-            return;
-        };
-
-        if let Err(err) =
-            run_with_manager(config, cli_overrides, conversation_manager, bind_addr, None).await
-        {
-            tracing::warn!("embedded gateway failed: {err}");
-        }
-    });
 }
 
 fn should_show_onboarding(

@@ -41,6 +41,7 @@ use code_protocol::protocol::ENVIRONMENT_CONTEXT_CLOSE_TAG;
 use code_protocol::protocol::ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG;
 use code_protocol::protocol::ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG;
 use code_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
+use code_utils_absolute_path::AbsolutePathBuf;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::config_types::ClientTools;
@@ -49,7 +50,7 @@ use crate::config_types::ClientTools;
 use code_protocol::protocol::TurnAbortReason;
 use code_protocol::protocol::TurnAbortedEvent;
 use futures::prelude::*;
-use mcp_types::CallToolResult;
+use code_protocol::mcp::CallToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::oneshot;
@@ -193,7 +194,16 @@ fn to_proto_sandbox_policy(policy: SandboxPolicy) -> ProtoSandboxPolicy {
             exclude_slash_tmp,
             allow_git_writes,
         } => ProtoSandboxPolicy::WorkspaceWrite {
-            writable_roots,
+            writable_roots: writable_roots
+                .into_iter()
+                .filter_map(|root| match AbsolutePathBuf::from_absolute_path(&root) {
+                    Ok(root) => Some(root),
+                    Err(err) => {
+                        error!("Failed to absolutize writable root {}: {err}", root.display());
+                        None
+                    }
+                })
+                .collect(),
             network_access,
             exclude_tmpdir_env_var,
             exclude_slash_tmp,
@@ -460,6 +470,8 @@ fn maybe_time_budget_status_item(sess: &Session) -> Option<ResponseItem> {
         id: Some(format!("run-budget-{}", sess.id)),
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text }],
+        end_turn: None,
+        phase: None,
     })
 }
 
@@ -646,6 +658,8 @@ async fn build_turn_status_items_legacy(sess: &Session) -> Vec<ResponseItem> {
             id: None,
             role: "user".to_string(),
             content,
+            end_turn: None,
+            phase: None,
         });
     }
 
@@ -696,6 +710,8 @@ async fn build_turn_status_items_v2(sess: &Session) -> Vec<ResponseItem> {
                     id: Some(browser_stream_id),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText { text: idle_text }],
+                    end_turn: None,
+                    phase: None,
                 });
                 return items;
             } else {
@@ -784,6 +800,8 @@ async fn build_turn_status_items_v2(sess: &Session) -> Vec<ResponseItem> {
                             content: vec![ContentItem::InputImage {
                                 image_url: format!("data:{mime};base64,{encoded}"),
                             }],
+                            end_turn: None,
+                            phase: None,
                         });
                     }
                     Err(err) => warn!(
@@ -889,6 +907,8 @@ mod tests {
             content: vec![ContentItem::InputText {
                 text: "== System Status ==\n cwd: /legacy\n branch: main".to_string(),
             }],
+            end_turn: None,
+            phase: None,
         };
 
         let mut ctx = TimelineReplayContext::default();
@@ -1183,19 +1203,5 @@ impl Codex {
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
         Ok(event)
-    }
-}
-
-#[cfg(test)]
-impl Codex {
-    pub(crate) fn new_for_test(
-        tx_sub: Sender<Submission>,
-        rx_event: Receiver<Event>,
-    ) -> Self {
-        Self {
-            next_id: AtomicU64::new(0),
-            tx_sub,
-            rx_event,
-        }
     }
 }

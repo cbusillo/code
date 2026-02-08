@@ -77,7 +77,7 @@ impl OnboardingScreen {
         if show_login_screen {
             steps.push(Step::Auth(AuthModeWidget {
                 event_tx: event_tx.clone(),
-                highlighted_mode: AuthMode::ChatGPT,
+                highlighted_mode: AuthMode::Chatgpt,
                 error: None,
                 sign_in_state: SignInState::PickMode,
                 code_home: code_home.clone(),

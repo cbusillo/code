@@ -28,6 +28,10 @@ use code_core::protocol::WebSearchCompleteEvent;
 use code_protocol::num_format::format_with_separators;
 use owo_colors::OwoColorize;
 use owo_colors::Style;
+
+fn format_u64(value: u64) -> String {
+    format_with_separators(i64::try_from(value).unwrap_or(i64::MAX))
+}
 use shlex::try_join;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -247,7 +251,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     ts_println!(
                         self,
                         "tokens used: {}",
-                        format_with_separators(usage_info.total_token_usage.blended_total())
+                        format_u64(usage_info.total_token_usage.blended_total())
                     );
                 }
             }
@@ -607,8 +611,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 println!();
             }
             EventMsg::PlanUpdate(plan_update_event) => {
-                let UpdatePlanArgs { name, plan } = plan_update_event;
-                ts_println!(self, "name: {name:?}");
+                let UpdatePlanArgs { explanation, plan } = plan_update_event;
+                ts_println!(self, "explanation: {explanation:?}");
                 ts_println!(self, "plan: {plan:?}");
             }
             EventMsg::GetHistoryEntryResponse(_) => {

@@ -1207,7 +1207,7 @@ pub(super) fn handle_exec_begin_now(
 
     let has_read_command = parsed_command
         .iter()
-        .any(|p| matches!(p, ParsedCommand::ReadCommand { .. }));
+        .any(|p| matches!(p, ParsedCommand::Read { .. }));
     let mut upgraded_tool_idx = if let Some(entry) = chat
         .tools_state
         .running_custom_tools

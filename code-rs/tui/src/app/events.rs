@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
@@ -15,7 +14,7 @@ use code_core::config::add_project_allowed_command;
 use code_core::config_types::Notifications;
 use code_core::protocol::{Event, Op, SandboxPolicy};
 use code_core::SessionCatalog;
-use code_login::ServerOptions;
+use code_login::{AuthManager, AuthMode, ServerOptions};
 use portable_pty::PtySize;
 
 use crate::app_event::AppEvent;
@@ -41,96 +40,6 @@ use super::state::{
 };
 
 impl App<'_> {
-    fn gateway_bind_addr_for_ui(&self) -> Option<SocketAddr> {
-        match std::env::var("CODE_GATEWAY_BIND") {
-            Ok(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
-                    return None;
-                }
-                trimmed.parse().ok()
-            }
-            Err(_) => self
-                .config
-                .gateway
-                .bind
-                .as_deref()
-                .unwrap_or("127.0.0.1:3210")
-                .parse()
-                .ok(),
-        }
-    }
-
-    fn gateway_token_for_ui(&self) -> Option<String> {
-        if let Ok(token) = std::env::var("CODE_GATEWAY_TOKEN") {
-            if token.trim().is_empty() {
-                return Some(String::new());
-            }
-            return Some(token);
-        }
-
-        let token_path = self.config.code_home.join("gateway_token");
-        match std::fs::read_to_string(&token_path) {
-            Ok(contents) => {
-                let trimmed = contents.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) => {
-                tracing::warn!("failed to read gateway token: {err}");
-                None
-            }
-        }
-    }
-
-    fn gateway_urls_for_ui(&self) -> Option<(String, Option<String>)> {
-        let bind_addr = self.gateway_bind_addr_for_ui()?;
-        let advertised_host = if bind_addr.ip().is_unspecified() {
-            "127.0.0.1".to_string()
-        } else {
-            match bind_addr.ip() {
-                std::net::IpAddr::V6(ipv6) => format!("[{ipv6}]"),
-                std::net::IpAddr::V4(ipv4) => ipv4.to_string(),
-            }
-        };
-        let safe_url = format!("http://{advertised_host}:{}/", bind_addr.port());
-        let bootstrap_url = self.gateway_token_for_ui().and_then(|token| {
-            if token.is_empty() {
-                return None;
-            }
-            let encoded = Self::encode_cookie_value(&token);
-            Some(format!("http://{advertised_host}:{}/#token={encoded}", bind_addr.port()))
-        });
-        Some((safe_url, bootstrap_url))
-    }
-
-    fn encode_cookie_value(value: &str) -> String {
-        let mut out = String::with_capacity(value.len());
-        for byte in value.as_bytes() {
-            let ch = *byte as char;
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
-                out.push(ch);
-            } else {
-                out.push('%');
-                out.push(Self::hex_char(byte >> 4));
-                out.push(Self::hex_char(byte & 0x0f));
-            }
-        }
-        out
-    }
-
-    fn hex_char(nibble: u8) -> char {
-        match nibble & 0x0f {
-            0..=9 => (b'0' + (nibble & 0x0f)) as char,
-            10..=15 => (b'A' + ((nibble & 0x0f) - 10)) as char,
-            _ => '0',
-        }
-    }
-
     fn handle_login_mode_change(&mut self, using_chatgpt_auth: bool) {
         self.config.using_chatgpt_auth = using_chatgpt_auth;
         if let AppState::Chat { widget } = &mut self.app_state {
@@ -146,7 +55,7 @@ impl App<'_> {
             return;
         }
         let remote_tx = self.app_event_tx.clone();
-        let remote_auth_manager = self.auth_manager.clone();
+        let remote_auth_manager = self._server.auth_manager();
         let remote_provider = self.config.model_provider.clone();
         let remote_code_home = self.config.code_home.clone();
         let remote_using_chatgpt_hint = self.config.using_chatgpt_auth;
@@ -167,9 +76,9 @@ impl App<'_> {
                 .map(|auth| auth.mode)
                 .or_else(|| {
                     if remote_using_chatgpt_hint {
-                        Some(code_login::AuthMode::ChatGPT)
+                        Some(AuthMode::Chatgpt)
                     } else {
-                        Some(code_login::AuthMode::ApiKey)
+                        Some(AuthMode::ApiKey)
                     }
                 });
             let presets = code_common::model_presets::builtin_model_presets(auth_mode);
@@ -1241,8 +1150,6 @@ impl App<'_> {
                             let mut new_widget = ChatWidget::new(
                                 self.config.clone(),
                                 self.app_event_tx.clone(),
-                                self.conversation_backend.clone(),
-                                self.auth_manager.clone(),
                                 None,
                                 Vec::new(),
                                 self.enhanced_keys_supported,
@@ -1435,22 +1342,6 @@ impl App<'_> {
                                 }
                             }
                         }
-                        SlashCommand::Webui => {
-                            let urls = self.gateway_urls_for_ui();
-                            if let AppState::Chat { widget } = &mut self.app_state {
-                                let Some((safe_url, bootstrap_url)) = urls else {
-                                    widget.push_background_tail(
-                                        "WebUI gateway is disabled. Set gateway.bind (or CODE_GATEWAY_BIND) and start code-gateway.".to_string(),
-                                    );
-                                    continue;
-                                };
-                                let mut lines = vec![format!("WebUI: {safe_url}")];
-                                if let Some(url) = bootstrap_url {
-                                    lines.push(format!("WebUI (token bootstrap): {url}"));
-                                }
-                                widget.push_background_tail(lines.join("\n"));
-                            }
-                        }
                         #[cfg(debug_assertions)]
                         SlashCommand::TestApproval => {
                             use code_core::protocol::EventMsg;
@@ -1527,8 +1418,6 @@ impl App<'_> {
                         let mut new_widget = ChatWidget::new(
                             cfg,
                             self.app_event_tx.clone(),
-                            self.conversation_backend.clone(),
-                            self.auth_manager.clone(),
                             None,
                             Vec::new(),
                             self.enhanced_keys_supported,
@@ -2298,8 +2187,6 @@ impl App<'_> {
                     let mut w = ChatWidget::new(
                         config,
                         app_event_tx.clone(),
-                        self.conversation_backend.clone(),
-                        self.auth_manager.clone(),
                         initial_prompt,
                         initial_images,
                         enhanced_keys_supported,
@@ -2364,7 +2251,7 @@ impl App<'_> {
                         self.pending_jump_back_history_snapshot = history_snapshot;
 
                         // Perform the fork off the UI thread to avoid nested runtimes
-                        let conversation_backend = self.conversation_backend.clone();
+                        let server = self._server.clone();
                         let tx = self.app_event_tx.clone();
                         let prefill_clone = prefill.clone();
                         if let Err(err) = std::thread::Builder::new()
@@ -2378,7 +2265,7 @@ impl App<'_> {
                                 let cfg_for_rt = cfg.clone();
                                 let result = rt.block_on(async move {
                                     // Fallback: start a new conversation instead of forking
-                                    conversation_backend.create_conversation(cfg_for_rt).await
+                                    server.new_conversation(cfg_for_rt).await
                                 });
                                 if let Ok(new_conv) = result {
                                     tx.send(AppEvent::JumpBackForked { cfg, new_conv: crate::app_event::Redacted(new_conv), prefix_items, prefill: prefill_clone });
@@ -2393,23 +2280,25 @@ impl App<'_> {
                 }
                 AppEvent::JumpBackForked { cfg, new_conv, prefix_items, prefill } => {
                     // Replace widget with a new one bound to the forked conversation
-                    let conversation_start = new_conv.0;
+                    let session_conf = new_conv.0.session_configured.clone();
+                    let conv = new_conv.0.conversation.clone();
 
                     let mut ghost_state = self.pending_jump_back_ghost_state.take();
                     let history_snapshot = self.pending_jump_back_history_snapshot.take();
                     let emit_prefix = history_snapshot.is_none();
 
                     if let AppState::Chat { widget } = &mut self.app_state {
+                        let auth_manager = widget.auth_manager();
                         let mut new_widget = ChatWidget::new_from_existing(
                             cfg,
-                            conversation_start,
-                            self.conversation_backend.clone(),
+                            conv,
+                            session_conf,
                             self.app_event_tx.clone(),
                             self.enhanced_keys_supported,
                             self.terminal_info.clone(),
                             self.show_order_overlay,
                             self.latest_upgrade_version.clone(),
-                            self.auth_manager.clone(),
+                            auth_manager,
                             false,
                         );
                         if let Some(state) = ghost_state.take() {
@@ -2424,16 +2313,26 @@ impl App<'_> {
                         new_widget.check_for_initial_animations();
                         *widget = Box::new(new_widget);
                     } else {
+                        let preferred_auth = if cfg.using_chatgpt_auth {
+                            AuthMode::Chatgpt
+                        } else {
+                            AuthMode::ApiKey
+                        };
+                        let auth_manager = AuthManager::shared_with_mode_and_originator(
+                            cfg.code_home.clone(),
+                            preferred_auth,
+                            cfg.responses_originator_header.clone(),
+                        );
                         let mut new_widget = ChatWidget::new_from_existing(
                             cfg,
-                            conversation_start,
-                            self.conversation_backend.clone(),
+                            conv,
+                            session_conf,
                             self.app_event_tx.clone(),
                             self.enhanced_keys_supported,
                             self.terminal_info.clone(),
                             self.show_order_overlay,
                             self.latest_upgrade_version.clone(),
-                            self.auth_manager.clone(),
+                            auth_manager,
                             false,
                         );
                         if let Some(state) = ghost_state.take() {

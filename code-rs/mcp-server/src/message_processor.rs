@@ -19,7 +19,7 @@ use crate::session_store::SessionMap;
 use agent_client_protocol as acp;
 use anyhow::anyhow;
 use anyhow::Context as _;
-use code_app_server_protocol::ClientRequest;
+use code_protocol::mcp_protocol::ClientRequest;
 use code_protocol::ConversationId;
 use code_protocol::protocol::SessionSource;
 
@@ -74,9 +74,14 @@ impl MessageProcessor {
         config: Arc<Config>,
     ) -> Self {
         let outgoing = Arc::new(outgoing);
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
         let conversation_manager = Arc::new(ConversationManager::new(

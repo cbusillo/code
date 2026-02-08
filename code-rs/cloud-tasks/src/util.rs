@@ -266,7 +266,7 @@ pub async fn build_chatgpt_headers() -> HeaderMap {
     if let Ok(home) = code_core::config::find_code_home() {
         let am = code_login::AuthManager::new(
             home,
-            code_login::AuthMode::ChatGPT,
+            code_login::AuthMode::Chatgpt,
             code_core::default_client::DEFAULT_ORIGINATOR.to_string(),
         );
         if let Some(auth) = am.auth()

@@ -110,6 +110,8 @@ pub fn generate_ts_with_options(
         filter_experimental_ts(out_dir)?;
     }
 
+    strip_optional_nullable_fields_in_ts(out_dir)?;
+
     if options.generate_indices {
         generate_index_ts(out_dir)?;
         generate_index_ts(&v2_out_dir)?;
@@ -208,6 +210,165 @@ fn filter_experimental_ts(out_dir: &Path) -> Result<()> {
     filter_client_request_ts(out_dir, EXPERIMENTAL_CLIENT_METHODS)?;
     filter_experimental_type_fields_ts(out_dir, &registered_fields)?;
     remove_generated_type_files(out_dir, &experimental_method_types, "ts")?;
+    Ok(())
+}
+
+fn strip_optional_nullable_fields_in_ts(out_dir: &Path) -> Result<()> {
+    for path in ts_files_in_recursive(out_dir)? {
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if stem.ends_with("Params") {
+            continue;
+        }
+        strip_optional_nullable_fields_in_ts_file(&path)?;
+    }
+
+    Ok(())
+}
+
+fn strip_optional_nullable_fields_in_ts_file(path: &Path) -> Result<()> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut removal_indices = std::collections::BTreeSet::new();
+    let mut search_start = 0;
+    while let Some(idx) = content[search_start..].find("| null") {
+        let abs_idx = search_start + idx;
+        let line_start_idx = content[..abs_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+
+        let mut segment_start_idx = line_start_idx;
+        if let Some(rel_idx) = content[line_start_idx..abs_idx].rfind(',') {
+            segment_start_idx = segment_start_idx.max(line_start_idx + rel_idx + 1);
+        }
+        if let Some(rel_idx) = content[line_start_idx..abs_idx].rfind('{') {
+            segment_start_idx = segment_start_idx.max(line_start_idx + rel_idx + 1);
+        }
+        if let Some(rel_idx) = content[line_start_idx..abs_idx].rfind('}') {
+            segment_start_idx = segment_start_idx.max(line_start_idx + rel_idx + 1);
+        }
+
+        let mut level_brace = 0_i32;
+        let mut level_brack = 0_i32;
+        let mut level_paren = 0_i32;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escape = false;
+        let mut prop_colon_idx = None;
+        for (i, ch) in content[segment_start_idx..abs_idx].char_indices() {
+            let idx_abs = segment_start_idx + i;
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    if in_single || in_double {
+                        escape = true;
+                    }
+                }
+                '\'' => {
+                    if !in_double {
+                        in_single = !in_single;
+                    }
+                }
+                '"' => {
+                    if !in_single {
+                        in_double = !in_double;
+                    }
+                }
+                '{' if !in_single && !in_double => level_brace += 1,
+                '}' if !in_single && !in_double => level_brace -= 1,
+                '[' if !in_single && !in_double => level_brack += 1,
+                ']' if !in_single && !in_double => level_brack -= 1,
+                '(' if !in_single && !in_double => level_paren += 1,
+                ')' if !in_single && !in_double => level_paren -= 1,
+                ':' if !in_single
+                    && !in_double
+                    && level_brace == 0
+                    && level_brack == 0
+                    && level_paren == 0 =>
+                {
+                    prop_colon_idx = Some(idx_abs);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let Some(colon_idx) = prop_colon_idx else {
+            search_start = abs_idx + 5;
+            continue;
+        };
+
+        let mut field_prefix = content[segment_start_idx..colon_idx].trim();
+        if field_prefix.is_empty() {
+            search_start = abs_idx + 5;
+            continue;
+        }
+
+        if let Some(comment_idx) = field_prefix.rfind("*/") {
+            field_prefix = field_prefix[comment_idx + 2..].trim_start();
+        }
+
+        if field_prefix.is_empty() {
+            search_start = abs_idx + 5;
+            continue;
+        }
+
+        const SKIP_PREFIXES: &[&str] = &[
+            "const ",
+            "let ",
+            "var ",
+            "export const ",
+            "export let ",
+            "export var ",
+        ];
+
+        if SKIP_PREFIXES
+            .iter()
+            .any(|prefix| field_prefix.starts_with(prefix))
+        {
+            search_start = abs_idx + 5;
+            continue;
+        }
+
+        if field_prefix.contains('(') {
+            search_start = abs_idx + 5;
+            continue;
+        }
+
+        let bytes = content.as_bytes();
+        let mut cursor = colon_idx;
+        while cursor > segment_start_idx {
+            cursor -= 1;
+            let ch = bytes[cursor] as char;
+            if ch.is_whitespace() {
+                continue;
+            }
+            if ch == '?' {
+                removal_indices.insert(cursor);
+            }
+            break;
+        }
+
+        search_start = abs_idx + 5;
+    }
+
+    if removal_indices.is_empty() {
+        return Ok(());
+    }
+
+    let mut updated = String::with_capacity(content.len());
+    for (idx, ch) in content.char_indices() {
+        if !removal_indices.contains(&idx) {
+            updated.push(ch);
+        }
+    }
+
+    if updated != content {
+        fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+
     Ok(())
 }
 

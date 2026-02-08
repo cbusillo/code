@@ -2,6 +2,7 @@ use crate::models::WebSearchAction;
 use crate::protocol::AgentMessageEvent;
 use crate::protocol::AgentReasoningEvent;
 use crate::protocol::AgentReasoningRawContentEvent;
+use crate::protocol::ContextCompactedEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::InputMessageKind;
 use crate::protocol::UserMessageEvent;
@@ -77,6 +78,10 @@ impl ContextCompactionItem {
             id: uuid::Uuid::new_v4().to_string(),
         }
     }
+
+    pub fn as_legacy_event(&self) -> EventMsg {
+        EventMsg::ContextCompacted(ContextCompactedEvent {})
+    }
 }
 
 impl Default for ContextCompactionItem {
@@ -101,6 +106,8 @@ impl UserMessageItem {
             kind: Some(InputMessageKind::from(("user", message.as_str()))),
             message,
             images: Some(self.image_urls()),
+            local_images: self.local_image_paths(),
+            text_elements: self.text_elements(),
         })
     }
 
@@ -211,6 +218,7 @@ impl WebSearchItem {
         EventMsg::WebSearchEnd(WebSearchEndEvent {
             call_id: self.id.clone(),
             query: self.query.clone(),
+            action: self.action.clone(),
         })
     }
 }
@@ -234,7 +242,7 @@ impl TurnItem {
             TurnItem::Plan(_) => Vec::new(),
             TurnItem::WebSearch(item) => vec![item.as_legacy_event()],
             TurnItem::Reasoning(item) => item.as_legacy_events(show_raw_agent_reasoning),
-            TurnItem::ContextCompaction(_) => Vec::new(),
+            TurnItem::ContextCompaction(item) => vec![item.as_legacy_event()],
         }
     }
 }

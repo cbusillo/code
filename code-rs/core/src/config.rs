@@ -6,12 +6,10 @@ use std::collections::HashMap;
 use crate::config_types::AutoDriveSettings;
 use crate::config_types::AllowedCommand;
 use crate::config_types::AllowedCommandMatchKind;
-use crate::config_types::AppServerConfig;
 use crate::config_types::BrowserConfig;
 use crate::config_types::ClientTools;
 use crate::config_types::Notice;
 use crate::config_types::History;
-use crate::config_types::GatewayConfig;
 use crate::config_types::GithubConfig;
 use crate::config_types::ValidationConfig;
 use crate::config_types::McpServerConfig;
@@ -27,7 +25,6 @@ use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::TextVerbosity;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
-use crate::config_types::UpdateSettings;
 use crate::config_types::ConfirmGuardConfig;
 use crate::config_types::Personality;
 use crate::config_types::DEFAULT_OTEL_ENVIRONMENT;
@@ -235,9 +232,6 @@ pub struct Config {
     /// never upgraded automatically.
     pub auto_upgrade_enabled: bool,
 
-    /// Update configuration for release discovery and upgrade commands.
-    pub updates: UpdateSettings,
-
     /// User-provided instructions from AGENTS.md.
     pub user_instructions: Option<String>,
 
@@ -330,12 +324,6 @@ pub struct Config {
 
     /// Collection of settings that are specific to the TUI.
     pub tui: Tui,
-
-    /// HTTP gateway settings for the WebUI.
-    pub gateway: GatewayConfig,
-
-    /// App-server broker settings.
-    pub app_server: AppServerConfig,
 
     /// Shared Auto Drive defaults.
     pub auto_drive: AutoDriveSettings,
@@ -457,13 +445,6 @@ impl Config {
             .with_overrides(overrides)
             .load()
     }
-
-    pub fn app_server_listen_path(&self) -> PathBuf {
-        self.app_server
-            .listen
-            .clone()
-            .unwrap_or_else(|| self.code_home.join("app-server.sock"))
-    }
 }
 
 pub fn load_config_as_toml_with_cli_overrides(
@@ -558,10 +539,6 @@ pub struct ConfigToml {
     #[serde(default, deserialize_with = "deserialize_option_bool_from_maybe_string")]
     pub auto_upgrade_enabled: Option<bool>,
 
-    /// Optional update configuration for release discovery and upgrade commands.
-    #[serde(default)]
-    pub updates: Option<UpdateSettings>,
-
     /// Optional external command to spawn for end-user notifications.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
@@ -619,12 +596,6 @@ pub struct ConfigToml {
 
     /// Collection of settings that are specific to the TUI.
     pub tui: Option<Tui>,
-
-    /// HTTP gateway settings for the WebUI.
-    pub gateway: Option<GatewayConfig>,
-
-    /// App-server broker settings.
-    pub app_server: Option<AppServerConfig>,
 
     /// Auto Drive behavioral defaults.
     pub auto_drive: Option<AutoDriveSettings>,
@@ -1410,7 +1381,6 @@ impl Config {
                 .or(disable_response_storage)
                 .unwrap_or(false),
             auto_upgrade_enabled: cfg.auto_upgrade_enabled.unwrap_or(false),
-            updates: cfg.updates.unwrap_or_default(),
             notify: cfg.notify,
             notices: cfg.notice.unwrap_or_default(),
             user_instructions,
@@ -1444,8 +1414,6 @@ impl Config {
             history,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             tui: cfg.tui.clone().unwrap_or_default(),
-            gateway: cfg.gateway.clone().unwrap_or_default(),
-            app_server: cfg.app_server.clone().unwrap_or_default(),
             auto_drive,
             auto_drive_use_chat_model,
             code_linux_sandbox_exe,
@@ -1529,7 +1497,7 @@ impl Config {
         use crate::CodexAuth;
         
         // Prefer ChatGPT when both ChatGPT tokens and an API key are present.
-        match CodexAuth::from_code_home(code_home, AuthMode::ChatGPT, "code_cli_rs") {
+        match CodexAuth::from_code_home(code_home, AuthMode::Chatgpt, "code_cli_rs") {
             Ok(Some(auth)) => auth.mode.is_chatgpt(),
             _ => false,
         }

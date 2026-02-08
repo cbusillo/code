@@ -8,7 +8,7 @@ use code_protocol::protocol::RolloutItem;
 pub(crate) fn should_persist_rollout_item(item: &RolloutItem) -> bool {
     match item {
         RolloutItem::ResponseItem(item) => should_persist_response_item(item),
-        RolloutItem::Event(ev) => event_msg_from_protocol(&ev.msg)
+        RolloutItem::Event(event) => event_msg_from_protocol(&event.msg)
             .is_some_and(|msg| should_persist_event_msg(&msg)),
         // Always persist session meta
         RolloutItem::SessionMeta(_) => true,
@@ -28,8 +28,9 @@ pub(crate) fn should_persist_response_item(item: &ResponseItem) -> bool {
         | ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::CustomToolCall { .. }
         | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::CompactionSummary { .. }
-        | ResponseItem::WebSearchCall { .. } => true,
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::GhostSnapshot { .. } => true,
         ResponseItem::Other => false,
     }
 }

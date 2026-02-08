@@ -282,6 +282,8 @@ impl From<EnvironmentContext> for ResponseItem {
             content: vec![ContentItem::InputText {
                 text: ec.serialize_to_xml(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 }
@@ -734,6 +736,8 @@ fn snapshot_to_response_item(
                 ENVIRONMENT_CONTEXT_OPEN_TAG, json, ENVIRONMENT_CONTEXT_CLOSE_TAG
             ),
         }],
+        end_turn: None,
+        phase: None,
     })
 }
 
@@ -751,6 +755,8 @@ fn delta_to_response_item(
                 ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG, json, ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG
             ),
         }],
+        end_turn: None,
+        phase: None,
     })
 }
 
@@ -768,6 +774,8 @@ fn browser_snapshot_to_response_item(
                 BROWSER_SNAPSHOT_OPEN_TAG, json, BROWSER_SNAPSHOT_CLOSE_TAG
             ),
         }],
+        end_turn: None,
+        phase: None,
     })
 }
 

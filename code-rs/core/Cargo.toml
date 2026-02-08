@@ -21,6 +21,7 @@ bytes = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 chardetng = { workspace = true }
 code-apply-patch = { workspace = true }
+code-utils-absolute-path = { workspace = true }
 code-file-search = { workspace = true }
 code-protocol = { workspace = true }
 code-rmcp-client = { workspace = true }

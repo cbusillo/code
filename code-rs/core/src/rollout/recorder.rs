@@ -337,7 +337,7 @@ impl RolloutRecorder {
             match serde_json::from_value::<RolloutLine>(v.clone()) {
                 Ok(rollout_line) => match rollout_line.item {
                     RolloutItem::SessionMeta(session_meta_line) => {
-                        tracing::debug!(
+                        tracing::error!(
                             "Parsed conversation ID from rollout file: {:?}",
                             session_meta_line.meta.id
                         );
@@ -365,6 +365,8 @@ impl RolloutRecorder {
                                     id: Some(ev.id.clone()),
                                     role: "user".to_string(),
                                     content,
+                                    end_turn: None,
+                                    phase: None,
                                 }));
                             }
                             ProtoEventMsg::AgentMessage(_) => items.push(RolloutItem::Event(ev)),

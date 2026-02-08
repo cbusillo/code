@@ -2,12 +2,11 @@ use std::path::PathBuf;
 
 use crate::code_message_processor::CodexMessageProcessor;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
-use crate::jsonrpc_compat::to_mcp_request_id;
 use crate::outgoing_message::OutgoingMessageSender;
 use code_app_server_protocol::AuthMode;
-use code_app_server_protocol::ClientInfo;
-use code_app_server_protocol::ClientRequest;
-use code_app_server_protocol::InitializeResponse;
+use code_protocol::mcp_protocol::ClientInfo;
+use code_protocol::mcp_protocol::ClientRequest;
+use code_protocol::mcp_protocol::InitializeResponse;
 use code_protocol::protocol::SessionSource;
 
 use code_core::AuthManager;
@@ -38,9 +37,14 @@ impl MessageProcessor {
         config: Arc<Config>,
     ) -> Self {
         let outgoing = Arc::new(outgoing);
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
         let conversation_manager = Arc::new(ConversationManager::new(
@@ -73,7 +77,6 @@ impl MessageProcessor {
                 // Handle Initialize internally so CodexMessageProcessor does not have to concern
                 // itself with the `initialized` bool.
                 ClientRequest::Initialize { request_id, params } => {
-                    let request_id = to_mcp_request_id(request_id);
                     if self.initialized {
                         let error = JSONRPCErrorError {
                             code: INVALID_REQUEST_ERROR_CODE,

@@ -38,9 +38,14 @@ pub async fn run_main(opts: ProtoCli) -> anyhow::Result<()> {
 
     let config = Config::load_with_cli_overrides(overrides_vec, ConfigOverrides::default())?;
     // Use conversation_manager API to start a conversation
+    let preferred_auth = if config.using_chatgpt_auth {
+        code_login::AuthMode::Chatgpt
+    } else {
+        code_login::AuthMode::ApiKey
+    };
     let auth_manager = AuthManager::shared_with_mode_and_originator(
         config.code_home.clone(),
-        code_login::AuthMode::ApiKey,
+        preferred_auth,
         config.responses_originator_header.clone(),
     );
     let conversation_manager = ConversationManager::new(auth_manager.clone(), SessionSource::Cli);

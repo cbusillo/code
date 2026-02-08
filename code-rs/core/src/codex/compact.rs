@@ -55,7 +55,7 @@ const COMPACT_STREAM_TIMEOUT: Duration = Duration::from_secs(120);
 ///     .services
 ///     .auth_manager
 ///     .auth()
-///     .is_some_and(|auth| auth.mode == AuthMode::ChatGPT)
+///     .is_some_and(|auth| auth.mode == AuthMode::Chatgpt)
 ///     && session.enabled(Feature::RemoteCompaction).await
 /// ```
 pub(super) async fn should_use_remote_compact_task(session: &Session) -> bool {
@@ -141,6 +141,8 @@ pub fn make_compaction_summary_message(
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text }],
+        end_turn: None,
+        phase: None,
     }
 }
 
@@ -600,7 +602,7 @@ pub fn sanitize_items_for_compact(items: Vec<ResponseItem>) -> Vec<ResponseItem>
     items
         .into_iter()
         .filter_map(|item| match item {
-            ResponseItem::Message { id, role, content } => {
+            ResponseItem::Message { id, role, content, .. } => {
                 let mut filtered_content = Vec::with_capacity(content.len());
                 for content_item in content {
                     match content_item {
@@ -637,6 +639,8 @@ pub fn sanitize_items_for_compact(items: Vec<ResponseItem>) -> Vec<ResponseItem>
                         id,
                         role,
                         content: filtered_content,
+                        end_turn: None,
+                        phase: None,
                     })
                 }
             }
@@ -789,6 +793,8 @@ pub(crate) fn build_emergency_compacted_history(
         content: vec![ContentItem::InputText {
             text: warning_message.to_string(),
         }],
+        end_turn: None,
+        phase: None,
     });
     history
 }
@@ -956,6 +962,8 @@ mod tests {
                 content: vec![ContentItem::OutputText {
                     text: "ignored".to_string(),
                 }],
+                end_turn: None,
+                phase: None,
             },
             ResponseItem::Message {
                 id: Some("user".to_string()),
@@ -968,6 +976,8 @@ mod tests {
                         text: "second".to_string(),
                     },
                 ],
+                end_turn: None,
+                phase: None,
             },
             ResponseItem::Other,
         ];
@@ -987,6 +997,8 @@ mod tests {
                     text: "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\ndo things\n</INSTRUCTIONS>"
                         .to_string(),
                 }],
+                end_turn: None,
+                phase: None,
             },
             ResponseItem::Message {
                 id: None,
@@ -994,6 +1006,8 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: "<ENVIRONMENT_CONTEXT>cwd=/tmp</ENVIRONMENT_CONTEXT>".to_string(),
                 }],
+                end_turn: None,
+                phase: None,
             },
             ResponseItem::Message {
                 id: None,
@@ -1001,6 +1015,8 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: "real user message".to_string(),
                 }],
+                end_turn: None,
+                phase: None,
             },
         ];
 
@@ -1019,6 +1035,8 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: format!("Message #{idx} {}", "x".repeat(1024)),
                 }],
+                end_turn: None,
+                phase: None,
             });
         }
 
@@ -1060,6 +1078,8 @@ mod tests {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text: big.clone() }],
+            end_turn: None,
+            phase: None,
         }];
         let snippets = collect_compaction_snippets(&snippet_source);
         let history = build_compacted_history(Vec::new(), &snippets, "SUMMARY");
@@ -1090,6 +1110,8 @@ mod tests {
                         text: "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\ntest\n</INSTRUCTIONS>"
                             .to_string(),
                     }],
+                    end_turn: None,
+                    phase: None,
                 },
             ResponseItem::Message {
                 id: None,
@@ -1097,6 +1119,8 @@ mod tests {
                 content: vec![ContentItem::InputText {
                     text: "<ENVIRONMENT_CONTEXT>cwd=/tmp</ENVIRONMENT_CONTEXT>".to_string(),
                 }],
+                end_turn: None,
+                phase: None,
             },
         ];
 

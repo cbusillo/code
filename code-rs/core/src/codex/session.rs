@@ -1,4 +1,5 @@
 use super::*;
+use mcp_types::CallToolResult;
 use serde_json::Value;
 use code_protocol::dynamic_tools::DynamicToolResponse;
 use code_protocol::dynamic_tools::DynamicToolSpec;
@@ -528,6 +529,8 @@ impl Session {
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText { text }],
+            end_turn: None,
+            phase: None,
         };
         self.record_conversation_items(&[message]).await;
     }
@@ -1357,7 +1360,7 @@ impl Session {
                 true
             })
             .map(|item| {
-                if let ResponseItem::Message { id, role, content } = item {
+                if let ResponseItem::Message { id, role, content, .. } = item {
                     if role == "user" {
                         // Filter out ephemeral content from user messages
                         let mut filtered_content: Vec<ContentItem> = Vec::new();
@@ -1390,10 +1393,18 @@ impl Session {
                             id,
                             role,
                             content: filtered_content,
+                            end_turn: None,
+                            phase: None,
                         }
                     } else {
                         // Keep assistant messages unchanged
-                        ResponseItem::Message { id, role, content }
+                        ResponseItem::Message {
+                            id,
+                            role,
+                            content,
+                            end_turn: None,
+                            phase: None,
+                        }
                     }
                 } else {
                     item
@@ -1767,6 +1778,8 @@ impl Session {
                             content: vec![ContentItem::InputText {
                                 text: user_msg_event.message.clone(),
                             }],
+                            end_turn: None,
+                            phase: None,
                         };
                         process_rollout_env_item(&mut replay_ctx, &response_item);
                         history.push(response_item);
@@ -1775,8 +1788,6 @@ impl Session {
                 _ => {}
             }
         }
-
-        history.retain(|item| !is_system_status_message(item));
 
         if replay_ctx.timeline.baseline().is_none() {
             if let Some(snapshot) = replay_ctx.legacy_baseline.clone() {
@@ -1959,29 +1970,6 @@ impl Session {
             warn!("failed to spawn notifier '{}': {e}", notify_command[0]);
         }
     }
-}
-
-fn is_system_status_message(item: &ResponseItem) -> bool {
-    let ResponseItem::Message { content, .. } = item else {
-        return false;
-    };
-
-    let mut text = String::new();
-    for entry in content {
-        match entry {
-            ContentItem::InputText { text: snippet }
-            | ContentItem::OutputText { text: snippet } => {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(snippet);
-            }
-            _ => {}
-        }
-    }
-
-    let trimmed = text.trim();
-    trimmed.starts_with("== System Status ==")
 }
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct CleanupStats {

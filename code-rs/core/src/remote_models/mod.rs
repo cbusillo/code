@@ -310,7 +310,7 @@ impl RemoteModelsManager {
             if matches!(
                 auth,
                 Some(CodexAuth {
-                    mode: AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens,
+                    mode: AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens,
                     ..
                 })
             ) {
@@ -427,7 +427,12 @@ fn map_truncation_policy(
     }
 }
 
-/// Build a client version string that remains wire-compatible with hosted models.
+/// Convert the build's version triple into a whole semver string.
 fn format_client_version_to_whole() -> String {
-    code_version::wire_compatible_version().to_string()
+    format!(
+        "{}.{}.{}",
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR"),
+        env!("CARGO_PKG_VERSION_PATCH")
+    )
 }

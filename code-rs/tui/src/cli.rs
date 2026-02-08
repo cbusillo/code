@@ -77,10 +77,6 @@ pub struct Cli {
     #[clap(long = "debug", short = 'd', default_value_t = false)]
     pub debug: bool,
 
-    /// Run the app-server broker daemon and exit.
-    #[arg(long = "app-server-broker", hide = true, default_value_t = false)]
-    pub app_server_broker: bool,
-
     /// Override the compaction prompt text for this session.
     #[arg(long = "compact-prompt", value_name = "TEXT")]
     pub compact_prompt_override: Option<String>,

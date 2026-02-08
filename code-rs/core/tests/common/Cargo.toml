@@ -1,0 +1,24 @@
+[package]
+name = "core_test_support"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+code-core = { workspace = true }
+code-protocol = { workspace = true }
+code-utils-absolute-path = { workspace = true }
+code-utils-cargo-bin = { workspace = true }
+futures = { workspace = true }
+regex-lite = { workspace = true }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["net", "time"] }
+tokio-tungstenite = { workspace = true }
+wiremock = { workspace = true }
+zstd = { workspace = true }

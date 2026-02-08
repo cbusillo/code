@@ -35,6 +35,8 @@ mod tests {
             content: vec![ContentItem::InputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -46,6 +48,8 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -67,6 +71,8 @@ mod tests {
             );
         } else {
             panic!("Expected Message variant");
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -105,6 +111,8 @@ mod tests {
                 !text.contains("environment_context_delta"),
                 "First emission should not be delta"
             );
+            end_turn: None,
+            phase: None,
         }
 
         // Second emission with same context should be None (no change)
@@ -138,6 +146,8 @@ mod tests {
                 text.contains("environment_context_delta"),
                 "Third emission should be delta"
             );
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -158,6 +168,8 @@ mod tests {
                         }
                     });
                 }
+                end_turn: None,
+                phase: None,
             }
             false
         };
@@ -202,6 +214,8 @@ mod tests {
                         }
                     });
                 }
+                end_turn: None,
+                phase: None,
             }
             false
         };
@@ -257,6 +271,8 @@ mod tests {
                         }
                     });
                 }
+                end_turn: None,
+                phase: None,
             }
             false
         };

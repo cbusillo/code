@@ -3,7 +3,6 @@
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use code_common::CliConfigOverrides;
 use code_core::config::Config;
@@ -25,15 +24,10 @@ use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 
 pub mod code_message_processor;
-mod broker;
 mod error_code;
 mod fuzzy_file_search;
-mod jsonrpc_compat;
 mod message_processor;
 pub mod outgoing_message;
-
-pub use broker::run_broker;
-pub use broker::run_broker_with_manager;
 
 
 /// Size of the bounded channels used to communicate between tasks. The value
@@ -91,14 +85,14 @@ pub async fn run_main(
         .map_err(|e| {
             std::io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}"))
         })?;
-    let config = Arc::new(config);
+
     // Task: process incoming messages.
     let processor_handle = tokio::spawn({
         let outgoing_message_sender = OutgoingMessageSender::new(outgoing_tx);
         let mut processor = MessageProcessor::new(
             outgoing_message_sender,
             code_linux_sandbox_exe,
-            config.clone(),
+            std::sync::Arc::new(config),
         );
         async move {
             while let Some(msg) = incoming_rx.recv().await {

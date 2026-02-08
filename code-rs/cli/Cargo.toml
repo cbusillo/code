@@ -24,6 +24,7 @@ code-arg0 = { workspace = true }
 code-chatgpt = { workspace = true }
 code-common = { workspace = true, features = ["cli"] }
 code-core = { workspace = true }
+code-app-server-test-client = { workspace = true }
 code-exec = { workspace = true }
 code-login = { workspace = true }
 code-mcp-server = { workspace = true }
