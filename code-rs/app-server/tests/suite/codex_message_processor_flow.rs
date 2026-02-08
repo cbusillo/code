@@ -298,7 +298,7 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
         ExecCommandApprovalParams {
             conversation_id,
             call_id: "call1".to_string(),
-            command: format_with_current_shell("python3 -c 'print(42)'"),
+            command: format_with_current_shell("python3 -c 'print(42)'").await,
             cwd: working_directory.clone(),
             reason: None,
             parsed_cmd: vec![ParsedCommand::Unknown {
@@ -506,7 +506,7 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
         exec_begin.cwd, second_cwd,
         "exec turn should run from updated cwd"
     );
-    let expected_command = format_with_current_shell("echo second turn");
+    let expected_command = format_with_current_shell("echo second turn").await;
     assert_eq!(
         exec_begin.command, expected_command,
         "exec turn should run expected command"
@@ -543,4 +543,3 @@ stream_max_retries = 0
         ),
     )
 }
-

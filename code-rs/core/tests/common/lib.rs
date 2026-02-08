@@ -77,21 +77,25 @@ pub fn sandbox_network_env_var() -> &'static str {
     code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
 }
 
-pub fn format_with_current_shell(command: &str) -> Vec<String> {
-    code_core::shell::default_user_shell().derive_exec_args(command, true)
+pub async fn format_with_current_shell(command: &str) -> Vec<String> {
+    let command_args = shlex::split(command).unwrap_or_else(|| vec![command.to_string()]);
+    let shell = code_core::shell::default_user_shell().await;
+    shell
+        .format_default_shell_invocation(command_args.clone())
+        .unwrap_or(command_args)
 }
 
-pub fn format_with_current_shell_display(command: &str) -> String {
-    let args = format_with_current_shell(command);
+pub async fn format_with_current_shell_display(command: &str) -> String {
+    let args = format_with_current_shell(command).await;
     shlex::try_join(args.iter().map(String::as_str)).expect("serialize current shell command")
 }
 
-pub fn format_with_current_shell_non_login(command: &str) -> Vec<String> {
-    code_core::shell::default_user_shell().derive_exec_args(command, false)
+pub async fn format_with_current_shell_non_login(command: &str) -> Vec<String> {
+    shlex::split(command).unwrap_or_else(|| vec![command.to_string()])
 }
 
-pub fn format_with_current_shell_display_non_login(command: &str) -> String {
-    let args = format_with_current_shell_non_login(command);
+pub async fn format_with_current_shell_display_non_login(command: &str) -> String {
+    let args = format_with_current_shell_non_login(command).await;
     shlex::try_join(args.iter().map(String::as_str))
         .expect("serialize current shell command without login")
 }
