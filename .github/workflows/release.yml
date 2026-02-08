@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [ webui-main ]
     # Ignore common non-release paths, but DO NOT ignore release.yml so that
     # edits to this workflow can intentionally trigger a new release run.
     paths-ignore:
