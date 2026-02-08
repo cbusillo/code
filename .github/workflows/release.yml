@@ -31,40 +31,18 @@ permissions:
 
 env:
   DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
+  RELEASE_NOTES: 'false'
+  PUBLISH_NPM: 'false'
 
 jobs:
   npm-auth-check:
-    name: Validate npm auth
+    name: Release gate (no-op)
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 5
-    # Fail fast if npm auth is not usable; downstream jobs should not continue.
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - name: Setup Node.js for auth check
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-      - name: Validate npm authentication (must fail fast if missing/invalid)
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN is missing. Create a granular automation token with publish + bypass-2FA: https://docs.npmjs.com/creating-and-viewing-access-tokens#creating-access-tokens ; add/update the secret: https://github.com/organizations/just-every/settings/secrets/actions/NPM_TOKEN" >&2
-            exit 1
-          fi
-
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-
-          if npm whoami >/dev/null 2>&1; then
-            echo "npm auth ok"
-          else
-            echo "::error::npm auth failed (npm whoami). Ensure NPM_TOKEN is a granular/automation token with publish rights to @just-every/*, bypass 2FA enabled: https://docs.npmjs.com/creating-and-viewing-access-tokens#creating-access-tokens ; update the secret: https://github.com/organizations/just-every/settings/secrets/actions/NPM_TOKEN" >&2
-            exit 1
-          fi
+      - name: Publish to npm disabled
+        run: echo "NPM publish disabled for release workflow."
 
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
@@ -514,7 +492,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Start local OpenAI proxy for release (hardened)
-        if: env.OPENAI_API_KEY != ''
+        if: env.RELEASE_NOTES == 'true' && env.OPENAI_API_KEY != ''
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -699,12 +677,12 @@ jobs:
       #  - Update CHANGELOG.md with a new section for vNEW_VERSION
       #  - Write rich release notes to docs/release-notes/RELEASE_NOTES.md
       - name: Install zstd (CHANGELOG generation)
-        if: runner.os == 'Linux' && env.OPENAI_API_KEY != ''
+        if: env.RELEASE_NOTES == 'true' && runner.os == 'Linux' && env.OPENAI_API_KEY != ''
         shell: bash
         run: sudo apt-get update -qq && sudo apt-get install -y zstd
 
       - name: Generate CHANGELOG + release notes (Code)
-        if: env.OPENAI_API_KEY != ''
+        if: env.RELEASE_NOTES == 'true' && env.OPENAI_API_KEY != ''
         shell: bash
         env:
           NEW_VERSION: ${{ needs.determine-version.outputs.version }}
@@ -886,6 +864,7 @@ jobs:
           fi
 
       - name: Enforce [skip ci] on notes-only commit
+        if: env.RELEASE_NOTES == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -908,7 +887,7 @@ jobs:
           fi
 
       - name: Fallback release notes from CHANGELOG (no OPENAI_API_KEY)
-        if: env.OPENAI_API_KEY == ''
+        if: env.RELEASE_NOTES == 'true' && env.OPENAI_API_KEY == ''
         shell: bash
         env:
           NEW_VERSION: ${{ needs.determine-version.outputs.version }}
@@ -923,6 +902,7 @@ jobs:
           fi
 
       - name: Assert release notes exist
+        if: env.RELEASE_NOTES == 'true'
         shell: bash
         run: |
           test -s docs/release-notes/RELEASE_NOTES.md || { echo "docs/release-notes/RELEASE_NOTES.md missing" >&2; exit 1; }
@@ -931,6 +911,10 @@ jobs:
         id: should_publish
         shell: bash
         run: |
+          if [ "${PUBLISH_NPM}" != "true" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
@@ -984,6 +968,7 @@ jobs:
           git push origin --tags || true
 
       - name: Verify release notes header matches version
+        if: env.RELEASE_NOTES == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -994,7 +979,8 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: Release v${{ steps.version.outputs.version }}
-          body_path: docs/release-notes/RELEASE_NOTES.md
+          body: |
+            Automated release from webui-main.
           files: |
             release-assets/*
         env:
@@ -1039,6 +1025,7 @@ jobs:
           git push -u origin HEAD:main
 
       - name: Publish per-target npm binary packages (last)
+        if: env.PUBLISH_NPM == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         shell: bash
