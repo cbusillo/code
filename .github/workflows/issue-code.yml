@@ -32,7 +32,7 @@ jobs:
       RUSTUP_HOME: ${{ github.workspace }}/.cargo-home/rustup
       RUST_WORKSPACE_DIR: code-rs
       CARGO_TARGET_DIR: ${{ github.workspace }}/code-rs/target
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
       PROTECTED_GLOBS: |
         .github/**
         .gitmodules

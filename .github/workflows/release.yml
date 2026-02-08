@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [ webui-main ]
     # Ignore common non-release paths, but DO NOT ignore release.yml so that
     # edits to this workflow can intentionally trigger a new release run.
     paths-ignore:
@@ -28,6 +28,9 @@ permissions:
   issues: write
   pull-requests: write
   statuses: write
+
+env:
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
 
 jobs:
   npm-auth-check:
@@ -944,22 +947,22 @@ jobs:
         run: |
           set -euo pipefail
           # First attempt a simple push
-          if git push origin main; then
+          if git push origin "${DEFAULT_BRANCH}"; then
             git push origin --tags || true
             exit 0
           fi
           echo "Push rejected (non-fast-forward). Attempting fetch + fast-forward..."
           git fetch origin --tags
-          # Try fast-forward only; succeeds when our HEAD is descendant of origin/main
-          if git merge --ff-only origin/main; then
+          # Try fast-forward only; succeeds when our HEAD is descendant of origin/${DEFAULT_BRANCH}
+          if git merge --ff-only "origin/${DEFAULT_BRANCH}"; then
             echo "Fast-forward merge succeeded; retrying push."
-            git push origin main
+            git push origin "${DEFAULT_BRANCH}"
             git push origin --tags || true
             exit 0
           fi
           echo "Non-FF merge required; applying merge-with-policy fallback."
           # Non-interactive merge that prefers our current changes, but adopts remote for workflow files.
-          git merge --no-ff --no-commit origin/main || true
+          git merge --no-ff --no-commit "origin/${DEFAULT_BRANCH}" || true
           if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             # Default to ours for all files
             git checkout --ours . || true
@@ -972,10 +975,10 @@ jobs:
               esac
             done < <(git ls-files --unmerged | cut -f2 | sort -u)
             git add -A
-            git commit -m "Merge origin/main: adopt remote workflow changes; keep release changes [skip ci]"
+            git commit -m "Merge origin/${DEFAULT_BRANCH}: adopt remote workflow changes; keep release changes [skip ci]"
           fi
           echo "Retrying push after policy merge..."
-          git push origin main
+          git push origin "${DEFAULT_BRANCH}"
           git push origin --tags || true
 
       - name: Verify release notes header matches version

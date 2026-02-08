@@ -97,7 +97,7 @@ jobs:
         env:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
         run: |
           set -euo pipefail
@@ -148,7 +148,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         with:
           github-token: ${{ secrets.CODE_GH_PAT || github.token }}
           script: |
@@ -207,7 +207,7 @@ jobs:
         env:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
         run: |
           set -euo pipefail
@@ -397,7 +397,7 @@ jobs:
         env:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         run: |
           set -euo pipefail
           set -x
@@ -475,7 +475,7 @@ jobs:
       - name: Carry forward merge branch (merge default into it)
         if: steps.check_upstream.outputs.skip != 'true'
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         run: |
           set -euo pipefail
           # Bring local refs up to date
@@ -497,7 +497,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         with:
           github-token: ${{ secrets.CODE_GH_PAT || github.token }}
           script: |
@@ -507,7 +507,7 @@ jobs:
             // Close any open PR that targets upstream-merge; we mirror default directly.
             const prs = await github.rest.pulls.list({ owner, repo, state: 'open', base });
             for (const pr of prs.data) {
-              await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body: 'Closing: this repo auto-mirrors the default branch into upstream-merge. Please target `main` instead.' });
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body: 'Closing: this repo auto-mirrors the default branch into upstream-merge. Please target `webui-main` instead.' });
               await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
               core.notice(`Closed PR #${pr.number} targeting ${base}.`);
             }
@@ -519,7 +519,7 @@ jobs:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
           GH_TOKEN: ${{ secrets.CODE_GH_PAT || github.token }}
           MERGE_MODE: ${{ steps.prep.outputs.merge_mode || 'one-shot' }}
           OURS_GLOBS: |
@@ -691,7 +691,7 @@ jobs:
         if: steps.check_upstream.outputs.skip != 'true' && steps.verify.outputs.failed == 'true'
         env:
           GH_TOKEN: ${{ secrets.CODE_GH_PAT || github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
           MAX_REMEDIATION_ATTEMPTS: ${{ env.MAX_REMEDIATION_ATTEMPTS || '3' }}
         run: |
@@ -787,7 +787,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CODE_GH_PAT || github.token }}
           REPO: ${{ github.repository }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         run: |
           set -euo pipefail
           OWNER=${REPO%%/*}
@@ -841,7 +841,7 @@ jobs:
       - name: Branding report (guide-only) and perma-deleted guard
         if: steps.check_upstream.outputs.skip != 'true'
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         run: |
           set -euo pipefail
           # Guide-only branding report: detect user-visible 'Codex' strings under TUI/CLI affected by this merge.
@@ -905,7 +905,7 @@ jobs:
       - name: TUI invariants guard (strict stream ordering keys)
         if: steps.check_upstream.outputs.skip != 'true'
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         run: |
           set -euo pipefail
           # Only run if upstream delta touched TUI
@@ -1007,7 +1007,7 @@ jobs:
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         with:
           github-token: ${{ secrets.CODE_GH_PAT || github.token }}
           script: |
@@ -1071,7 +1071,7 @@ jobs:
           MERGE_BRANCH: ${{ env.MERGE_BRANCH }}
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           UPSTREAM_BRANCH: ${{ env.UPSTREAM_BRANCH }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'webui-main' }}
         with:
           github-token: ${{ secrets.CODE_GH_PAT || github.token }}
           script: |

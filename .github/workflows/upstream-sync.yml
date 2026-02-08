@@ -17,7 +17,7 @@ name: Upstream Sync (Mirror + PR)
       mirror_branch:
         description: 'Mirror branch on this fork'
         required: false
-        default: 'main'
+        default: 'webui-main'
       webui_branch:
         description: 'Branch that carries WebUI changes'
         required: false
@@ -50,7 +50,7 @@ jobs:
       UPSTREAM_BRANCH: >-
         ${{ inputs.upstream_branch || 'main' }}
       MIRROR_BRANCH: >-
-        ${{ inputs.mirror_branch || 'main' }}
+        ${{ inputs.mirror_branch || 'webui-main' }}
       WEBUI_BRANCH: >-
         ${{ inputs.webui_branch || 'webui-main' }}
       VERSION_FILE: >-
