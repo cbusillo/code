@@ -28,7 +28,6 @@ use code_app_server_protocol::TurnCompletedNotification;
 use code_app_server_protocol::TurnStartParams;
 use code_app_server_protocol::TurnStartResponse;
 use code_app_server_protocol::UserInput as V2UserInput;
-use code_core::auth::AuthCredentialsStoreMode;
 use app_test_support::Feature;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
@@ -157,7 +156,6 @@ async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
-        AuthCredentialsStoreMode::File,
     )?;
 
     let server_base_url = format!("{}/v1", server.uri());

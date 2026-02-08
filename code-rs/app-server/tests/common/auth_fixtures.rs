@@ -7,9 +7,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::DateTime;
 use chrono::Utc;
 use code_app_server_protocol::AuthMode;
-use code_core::auth::AuthCredentialsStoreMode;
 use code_core::auth::AuthDotJson;
-use code_core::auth::save_auth;
+use code_core::auth::get_auth_file;
+use code_core::auth::write_auth_json;
 use code_core::token_data::TokenData;
 use code_core::token_data::parse_id_token;
 use serde_json::json;
@@ -145,7 +145,6 @@ pub fn encode_id_token(claims: &ChatGptIdTokenClaims) -> Result<String> {
 pub fn write_chatgpt_auth(
     codex_home: &Path,
     fixture: ChatGptAuthFixture,
-    cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> Result<()> {
     let id_token_raw = encode_id_token(&fixture.claims)?;
     let id_token = parse_id_token(&id_token_raw).context("parse id token")?;
@@ -165,6 +164,5 @@ pub fn write_chatgpt_auth(
         last_refresh,
     };
 
-    save_auth(codex_home, &auth, cli_auth_credentials_store_mode).context("write auth.json")
+    write_auth_json(&get_auth_file(codex_home), &auth).context("write auth.json")
 }
-

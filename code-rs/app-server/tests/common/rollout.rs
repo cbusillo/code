@@ -1,5 +1,5 @@
 use anyhow::Result;
-use code_protocol::ThreadId;
+use code_protocol::ConversationId;
 use code_protocol::protocol::GitInfo;
 use code_protocol::protocol::SessionMeta;
 use code_protocol::protocol::SessionMetaLine;
@@ -56,13 +56,13 @@ pub fn create_fake_rollout_with_source(
     filename_ts: &str,
     meta_rfc3339: &str,
     preview: &str,
-    model_provider: Option<&str>,
+    _model_provider: Option<&str>,
     git_info: Option<GitInfo>,
     source: SessionSource,
 ) -> Result<String> {
     let uuid = Uuid::new_v4();
     let uuid_str = uuid.to_string();
-    let conversation_id = ThreadId::from_string(&uuid_str)?;
+    let conversation_id = ConversationId::from_string(&uuid_str)?;
 
     let file_path = rollout_path(codex_home, filename_ts, &uuid_str);
     let dir = file_path
@@ -73,15 +73,12 @@ pub fn create_fake_rollout_with_source(
     // Build JSONL lines
     let meta = SessionMeta {
         id: conversation_id,
-        forked_from_id: None,
         timestamp: meta_rfc3339.to_string(),
         cwd: PathBuf::from("/"),
         originator: "codex".to_string(),
         cli_version: "0.0.0".to_string(),
+        instructions: None,
         source,
-        model_provider: model_provider.map(str::to_string),
-        base_instructions: None,
-        dynamic_tools: None,
     };
     let payload = serde_json::to_value(SessionMetaLine {
         meta,
@@ -133,12 +130,12 @@ pub fn create_fake_rollout_with_text_elements(
     meta_rfc3339: &str,
     preview: &str,
     text_elements: Vec<serde_json::Value>,
-    model_provider: Option<&str>,
+    _model_provider: Option<&str>,
     git_info: Option<GitInfo>,
 ) -> Result<String> {
     let uuid = Uuid::new_v4();
     let uuid_str = uuid.to_string();
-    let conversation_id = ThreadId::from_string(&uuid_str)?;
+    let conversation_id = ConversationId::from_string(&uuid_str)?;
 
     // sessions/YYYY/MM/DD derived from filename_ts (YYYY-MM-DDThh-mm-ss)
     let year = &filename_ts[0..4];
@@ -152,15 +149,12 @@ pub fn create_fake_rollout_with_text_elements(
     // Build JSONL lines
     let meta = SessionMeta {
         id: conversation_id,
-        forked_from_id: None,
         timestamp: meta_rfc3339.to_string(),
         cwd: PathBuf::from("/"),
         originator: "codex".to_string(),
         cli_version: "0.0.0".to_string(),
+        instructions: None,
         source: SessionSource::Cli,
-        model_provider: model_provider.map(str::to_string),
-        base_instructions: None,
-        dynamic_tools: None,
     };
     let payload = serde_json::to_value(SessionMetaLine {
         meta,
@@ -200,4 +194,3 @@ pub fn create_fake_rollout_with_text_elements(
     fs::write(file_path, lines.join("\n") + "\n")?;
     Ok(uuid_str)
 }
-

@@ -19,7 +19,6 @@ use code_app_server_protocol::AppsListParams;
 use code_app_server_protocol::AppsListResponse;
 use code_app_server_protocol::JSONRPCResponse;
 use code_app_server_protocol::RequestId;
-use code_core::auth::AuthCredentialsStoreMode;
 use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::JsonObject;
@@ -103,7 +102,6 @@ async fn list_apps_returns_connectors_with_accessible_flags() -> Result<()> {
             .account_id("account-123")
             .chatgpt_user_id("user-123")
             .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -190,7 +188,6 @@ async fn list_apps_paginates_results() -> Result<()> {
             .account_id("account-123")
             .chatgpt_user_id("user-123")
             .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -398,4 +395,3 @@ connectors = true
         ),
     )
 }
-

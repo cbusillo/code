@@ -28,7 +28,6 @@ use code_app_server_protocol::ServerNotification;
 use code_app_server_protocol::ServerRequest;
 use code_app_server_protocol::TurnCompletedNotification;
 use code_app_server_protocol::TurnStatus;
-use code_core::auth::AuthCredentialsStoreMode;
 use code_login::login_with_api_key;
 use code_protocol::account::PlanType as AccountPlanType;
 use core_test_support::responses;
@@ -100,11 +99,7 @@ async fn logout_account_removes_auth_and_notifies() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
 
-    login_with_api_key(
-        codex_home.path(),
-        "sk-test-key",
-        AuthCredentialsStoreMode::File,
-    )?;
+    login_with_api_key(codex_home.path(), "sk-test-key")?;
     assert!(codex_home.path().join("auth.json").exists());
 
     let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
@@ -1167,7 +1162,6 @@ async fn get_account_with_chatgpt() -> Result<()> {
         ChatGptAuthFixture::new("access-chatgpt")
             .email("user@example.com")
             .plan_type("pro"),
-        AuthCredentialsStoreMode::File,
     )?;
 
     let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;

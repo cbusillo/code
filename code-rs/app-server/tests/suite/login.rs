@@ -8,7 +8,6 @@ use code_app_server_protocol::JSONRPCResponse;
 use code_app_server_protocol::LoginChatGptResponse;
 use code_app_server_protocol::LogoutChatGptResponse;
 use code_app_server_protocol::RequestId;
-use code_core::auth::AuthCredentialsStoreMode;
 use code_login::login_with_api_key;
 use serial_test::serial;
 use std::path::Path;
@@ -43,11 +42,7 @@ stream_max_retries = 0
 async fn logout_chatgpt_removes_auth() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path())?;
-    login_with_api_key(
-        codex_home.path(),
-        "sk-test-key",
-        AuthCredentialsStoreMode::File,
-    )?;
+    login_with_api_key(codex_home.path(), "sk-test-key")?;
     assert!(codex_home.path().join("auth.json").exists());
 
     let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;

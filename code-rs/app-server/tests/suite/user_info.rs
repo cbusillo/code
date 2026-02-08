@@ -6,7 +6,6 @@ use app_test_support::write_chatgpt_auth;
 use code_app_server_protocol::JSONRPCResponse;
 use code_app_server_protocol::RequestId;
 use code_app_server_protocol::UserInfoResponse;
-use code_core::auth::AuthCredentialsStoreMode;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -23,7 +22,6 @@ async fn user_info_returns_email_from_auth_json() -> Result<()> {
         ChatGptAuthFixture::new("access")
             .refresh_token("refresh")
             .email("user@example.com"),
-        AuthCredentialsStoreMode::File,
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -44,4 +42,3 @@ async fn user_info_returns_email_from_auth_json() -> Result<()> {
     assert_eq!(received, expected);
     Ok(())
 }
-

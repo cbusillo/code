@@ -10,7 +10,6 @@ use code_app_server_protocol::LoginApiKeyParams;
 use code_app_server_protocol::RateLimitSnapshot;
 use code_app_server_protocol::RateLimitWindow;
 use code_app_server_protocol::RequestId;
-use code_core::auth::AuthCredentialsStoreMode;
 use code_protocol::account::PlanType as AccountPlanType;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -87,7 +86,6 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
         ChatGptAuthFixture::new("chatgpt-token")
             .account_id("account-123")
             .plan_type("pro"),
-        AuthCredentialsStoreMode::File,
     )?;
 
     let server = MockServer::start().await;
@@ -182,4 +180,3 @@ fn write_chatgpt_base_url(codex_home: &Path, base_url: &str) -> std::io::Result<
     let config_toml = codex_home.join("config.toml");
     std::fs::write(config_toml, format!("chatgpt_base_url = \"{base_url}\"\n"))
 }
-
