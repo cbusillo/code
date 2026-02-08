@@ -2313,14 +2313,9 @@ impl App<'_> {
                         new_widget.check_for_initial_animations();
                         *widget = Box::new(new_widget);
                     } else {
-                        let preferred_auth = if cfg.using_chatgpt_auth {
-                            AuthMode::Chatgpt
-                        } else {
-                            AuthMode::ApiKey
-                        };
                         let auth_manager = AuthManager::shared_with_mode_and_originator(
                             cfg.code_home.clone(),
-                            preferred_auth,
+                            AuthMode::ApiKey,
                             cfg.responses_originator_header.clone(),
                         );
                         let mut new_widget = ChatWidget::new_from_existing(

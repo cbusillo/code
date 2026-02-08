@@ -42,14 +42,9 @@ impl App<'_> {
         startup_footer_notice: Option<String>,
         latest_upgrade_version: Option<String>,
     ) -> Self {
-        let preferred_auth = if config.using_chatgpt_auth {
-            AuthMode::Chatgpt
-        } else {
-            AuthMode::ApiKey
-        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            preferred_auth,
+            AuthMode::ApiKey,
             config.responses_originator_header.clone(),
         );
         let conversation_manager = Arc::new(ConversationManager::new(

@@ -8,8 +8,7 @@ use code_app_server_protocol::RequestId;
 use code_app_server_protocol::ThreadStartParams;
 use code_app_server_protocol::ThreadStartResponse;
 use code_app_server_protocol::ThreadStartedNotification;
-use code_core::config::set_project_trust_level;
-use code_protocol::config_types::TrustLevel;
+use code_core::config::set_project_trusted;
 use code_protocol::openai_models::ReasoningEffort;
 use std::path::Path;
 use tempfile::TempDir;
@@ -88,7 +87,7 @@ async fn thread_start_respects_project_config_from_cwd() -> Result<()> {
 model_reasoning_effort = "high"
 "#,
     )?;
-    set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
+    set_project_trusted(codex_home.path(), workspace.path())?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -136,4 +135,3 @@ stream_max_retries = 0
         ),
     )
 }
-

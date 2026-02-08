@@ -1759,6 +1759,8 @@ where
                     message: user_message.to_string(),
                     kind: None,
                     images: None,
+                    local_images: Vec::new(),
+                    text_elements: Vec::new(),
                 }),
             }),
         };

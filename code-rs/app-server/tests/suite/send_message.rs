@@ -22,13 +22,14 @@ use code_protocol::models::ContentItem;
 use code_protocol::models::DeveloperInstructions;
 use code_protocol::models::ResponseItem;
 use code_protocol::protocol::AskForApproval;
-use code_protocol::protocol::RawResponseItemEvent;
 use code_protocol::protocol::RolloutItem;
 use code_protocol::protocol::RolloutLine;
 use code_protocol::protocol::SandboxPolicy;
 use code_protocol::protocol::TurnContextItem;
 use core_test_support::responses;
+use multimap::MultiMap;
 use pretty_assertions::assert_eq;
+use serde::Deserialize;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -408,6 +409,12 @@ stream_max_retries = 0
 }
 
 #[expect(clippy::expect_used)]
+#[derive(Deserialize)]
+struct RawResponseItemEvent {
+    item: ResponseItem,
+}
+
+#[expect(clippy::expect_used)]
 async fn read_raw_response_item(mcp: &mut McpProcess, conversation_id: ThreadId) -> ResponseItem {
     // TODO: Switch to rawResponseItem/completed once we migrate to app server v2 in codex web.
     loop {
@@ -468,15 +475,20 @@ fn assert_instructions_message(item: &ResponseItem) {
     }
 }
 
+fn empty_exec_policy() -> Policy {
+    Policy::new(MultiMap::new(), Vec::new(), Vec::new()).expect("empty policy")
+}
+
 fn assert_permissions_message(item: &ResponseItem) {
     match item {
         ResponseItem::Message { role, content, .. } => {
             assert_eq!(role, "developer");
             let texts = content_texts(content);
+            let exec_policy = empty_exec_policy();
             let expected = DeveloperInstructions::from_policy(
                 &SandboxPolicy::DangerFullAccess,
                 AskForApproval::Never,
-                &Policy::empty(),
+                &exec_policy,
                 false,
                 &PathBuf::from("/tmp"),
             )
@@ -564,10 +576,9 @@ fn append_rollout_turn_context(path: &Path, timestamp: &str, model: &str) -> std
             approval_policy: AskForApproval::Never,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             model: model.to_string(),
-            personality: None,
-            collaboration_mode: None,
             effort: None,
             summary: ReasoningSummary::Auto,
+            base_instructions: None,
             user_instructions: None,
             developer_instructions: None,
             final_output_json_schema: None,

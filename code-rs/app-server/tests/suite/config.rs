@@ -9,12 +9,12 @@ use code_app_server_protocol::RequestId;
 use code_app_server_protocol::SandboxSettings;
 use code_app_server_protocol::Tools;
 use code_app_server_protocol::UserSavedConfig;
-use code_core::protocol::AskForApproval;
 use code_protocol::config_types::ForcedLoginMethod;
 use code_protocol::config_types::ReasoningSummary;
 use code_protocol::config_types::SandboxMode;
 use code_protocol::config_types::Verbosity;
 use code_protocol::openai_models::ReasoningEffort;
+use code_protocol::protocol::AskForApproval;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::path::Path;
@@ -156,4 +156,3 @@ async fn get_config_toml_empty() -> Result<()> {
     assert_eq!(config, expected);
     Ok(())
 }
-

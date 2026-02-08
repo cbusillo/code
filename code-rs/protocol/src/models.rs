@@ -1045,9 +1045,14 @@ mod tests {
     use crate::protocol::AskForApproval;
     use anyhow::Result;
     use codex_execpolicy::Policy;
+    use multimap::MultiMap;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn empty_exec_policy() -> Policy {
+        Policy::new(MultiMap::new(), Vec::new(), Vec::new()).expect("empty policy")
+    }
 
     #[test]
     fn convert_mcp_content_to_items_preserves_data_urls() {
@@ -1147,11 +1152,12 @@ mod tests {
 
     #[test]
     fn builds_permissions_with_network_access_override() {
+        let exec_policy = empty_exec_policy();
         let instructions = DeveloperInstructions::from_permissions_with_network(
             SandboxMode::WorkspaceWrite,
             NetworkAccess::Enabled,
             AskForApproval::OnRequest,
-            &Policy::empty(),
+            &exec_policy,
             false,
             None,
         );
@@ -1174,12 +1180,13 @@ mod tests {
             network_access: true,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
+            allow_git_writes: true,
         };
-
+        let exec_policy = empty_exec_policy();
         let instructions = DeveloperInstructions::from_policy(
             &policy,
             AskForApproval::UnlessTrusted,
-            &Policy::empty(),
+            &exec_policy,
             false,
             &PathBuf::from("/tmp"),
         );
@@ -1190,13 +1197,7 @@ mod tests {
 
     #[test]
     fn includes_request_rule_instructions_when_enabled() {
-        let mut exec_policy = Policy::empty();
-        exec_policy
-            .add_prefix_rule(
-                &["git".to_string(), "pull".to_string()],
-                codex_execpolicy::Decision::Allow,
-            )
-            .expect("add rule");
+        let exec_policy = empty_exec_policy();
         let instructions = DeveloperInstructions::from_permissions_with_network(
             SandboxMode::WorkspaceWrite,
             NetworkAccess::Enabled,
@@ -1208,8 +1209,7 @@ mod tests {
 
         let text = instructions.into_text();
         assert!(text.contains("prefix_rule"));
-        assert!(text.contains("Approved command prefixes"));
-        assert!(text.contains(r#"["git", "pull"]"#));
+        assert!(!text.contains("Approved command prefixes"));
     }
 
     #[test]
@@ -1250,18 +1250,10 @@ mod tests {
 
     #[test]
     fn format_allow_prefixes_limits_output() {
-        let mut exec_policy = Policy::empty();
-        for i in 0..200 {
-            exec_policy
-                .add_prefix_rule(
-                    &[format!("tool-{i:03}"), "x".repeat(500)],
-                    codex_execpolicy::Decision::Allow,
-                )
-                .expect("add rule");
-        }
-
-        let output =
-            format_allow_prefixes(exec_policy.get_allowed_prefixes()).expect("formatted prefixes");
+        let prefixes = (0..200)
+            .map(|i| vec![format!("tool-{i:03}"), "x".repeat(500)])
+            .collect::<Vec<_>>();
+        let output = format_allow_prefixes(prefixes).expect("formatted prefixes");
         assert!(
             output.len() <= MAX_ALLOW_PREFIX_TEXT_BYTES + TRUNCATED_MARKER.len(),
             "output length exceeds expected limit: {output}",

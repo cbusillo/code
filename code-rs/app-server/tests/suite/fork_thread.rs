@@ -10,7 +10,7 @@ use code_app_server_protocol::NewConversationParams; // reused for overrides sha
 use code_app_server_protocol::RequestId;
 use code_app_server_protocol::ServerNotification;
 use code_app_server_protocol::SessionConfiguredNotification;
-use code_core::protocol::EventMsg;
+use code_protocol::protocol::EventMsg;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -138,4 +138,3 @@ async fn fork_conversation_creates_new_rollout() -> Result<()> {
 
     Ok(())
 }
-

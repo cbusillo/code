@@ -8,7 +8,7 @@ use code_app_server_protocol::ThreadArchiveResponse;
 use code_app_server_protocol::ThreadStartParams;
 use code_app_server_protocol::ThreadStartResponse;
 use code_core::ARCHIVED_SESSIONS_SUBDIR;
-use code_core::find_thread_path_by_id_str;
+use code_core::find_conversation_path_by_id_str;
 use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -39,7 +39,7 @@ async fn thread_archive_moves_rollout_into_archived_directory() -> Result<()> {
     assert!(!thread.id.is_empty());
 
     // Locate the rollout path recorded for this thread id.
-    let rollout_path = find_thread_path_by_id_str(codex_home.path(), &thread.id)
+    let rollout_path = find_conversation_path_by_id_str(codex_home.path(), &thread.id)
         .await?
         .expect("expected rollout path for thread id to exist");
     assert!(
@@ -91,4 +91,3 @@ approval_policy = "never"
 sandbox_mode = "read-only"
 "#
 }
-

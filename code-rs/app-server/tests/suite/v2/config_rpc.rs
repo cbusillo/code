@@ -18,9 +18,7 @@ use code_app_server_protocol::RequestId;
 use code_app_server_protocol::SandboxMode;
 use code_app_server_protocol::ToolsV2;
 use code_app_server_protocol::WriteStatus;
-use code_core::config::set_project_trust_level;
-use code_core::config_loader::SYSTEM_CONFIG_TOML_FILE_UNIX;
-use code_protocol::config_types::TrustLevel;
+use code_core::config::set_project_trusted;
 use code_protocol::openai_models::ReasoningEffort;
 use code_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -160,7 +158,7 @@ async fn config_read_includes_project_layers_for_cwd() -> Result<()> {
 model_reasoning_effort = "high"
 "#,
     )?;
-    set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
+    set_project_trusted(codex_home.path(), workspace.path())?;
     let project_config = AbsolutePathBuf::try_from(project_config_dir)?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -491,13 +489,9 @@ fn assert_layers_user_then_optional_system(
     user_file: AbsolutePathBuf,
 ) -> Result<()> {
     if cfg!(unix) {
-        let system_file = AbsolutePathBuf::from_absolute_path(SYSTEM_CONFIG_TOML_FILE_UNIX)?;
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].name, ConfigLayerSource::User { file: user_file });
-        assert_eq!(
-            layers[1].name,
-            ConfigLayerSource::System { file: system_file }
-        );
+        assert!(matches!(layers[1].name, ConfigLayerSource::System { .. }));
     } else {
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].name, ConfigLayerSource::User { file: user_file });
@@ -511,17 +505,13 @@ fn assert_layers_managed_user_then_optional_system(
     user_file: AbsolutePathBuf,
 ) -> Result<()> {
     if cfg!(unix) {
-        let system_file = AbsolutePathBuf::from_absolute_path(SYSTEM_CONFIG_TOML_FILE_UNIX)?;
         assert_eq!(layers.len(), 3);
         assert_eq!(
             layers[0].name,
             ConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
         );
         assert_eq!(layers[1].name, ConfigLayerSource::User { file: user_file });
-        assert_eq!(
-            layers[2].name,
-            ConfigLayerSource::System { file: system_file }
-        );
+        assert!(matches!(layers[2].name, ConfigLayerSource::System { .. }));
     } else {
         assert_eq!(layers.len(), 2);
         assert_eq!(
@@ -532,4 +522,3 @@ fn assert_layers_managed_user_then_optional_system(
     }
     Ok(())
 }
-

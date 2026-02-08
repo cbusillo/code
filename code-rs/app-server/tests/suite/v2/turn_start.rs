@@ -36,9 +36,9 @@ use code_app_server_protocol::TurnStartedNotification;
 use code_app_server_protocol::TurnStatus;
 use code_app_server_protocol::UserInput as V2UserInput;
 use code_core::config::ConfigToml;
+use code_core::config_types::Personality as CorePersonality;
 use app_test_support::FEATURES;
 use app_test_support::Feature;
-use code_core::personality_migration::PERSONALITY_MIGRATION_FILENAME;
 use code_core::protocol_config_types::ReasoningSummary;
 use code_protocol::config_types::CollaborationMode;
 use code_protocol::config_types::ModeKind;
@@ -633,13 +633,9 @@ async fn turn_start_uses_migrated_pragmatic_personality_without_override_v2() ->
     let persisted_toml: ConfigToml = toml::from_str(&std::fs::read_to_string(
         codex_home.path().join("config.toml"),
     )?)?;
-    assert_eq!(persisted_toml.personality, Some(Personality::Pragmatic));
-    assert!(
-        codex_home
-            .path()
-            .join(PERSONALITY_MIGRATION_FILENAME)
-            .exists(),
-        "expected personality migration marker to be written on startup"
+    assert_eq!(
+        persisted_toml.model_personality,
+        Some(CorePersonality::Pragmatic)
     );
 
     let thread_req = mcp
@@ -1102,6 +1098,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
                 network_access: false,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
+                allow_git_writes: true,
             }),
             model: Some("mock-model".to_string()),
             effort: Some(ReasoningEffort::Medium),

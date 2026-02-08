@@ -136,14 +136,9 @@ async fn run_llm_request(
     prompt.set_log_tag("cli/manual_prompt");
 
     // Auth + provider
-    let preferred_auth = if config.using_chatgpt_auth {
-        AuthMode::Chatgpt
-    } else {
-        AuthMode::ApiKey
-    };
     let auth_mgr = AuthManager::shared_with_mode_and_originator(
         config.code_home.clone(),
-        preferred_auth,
+        AuthMode::ApiKey,
         config.responses_originator_header.clone(),
     );
     let provider: ModelProviderInfo = config.model_provider.clone();

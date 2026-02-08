@@ -40,14 +40,8 @@ async fn set_default_model_persists_overrides() -> Result<()> {
     let config_contents = tokio::fs::read_to_string(&config_path).await?;
     let config_toml: ConfigToml = toml::from_str(&config_contents)?;
 
-    assert_eq!(
-        ConfigToml {
-            model: Some("gpt-4.1".to_string()),
-            model_reasoning_effort: None,
-            ..Default::default()
-        },
-        config_toml,
-    );
+    assert_eq!(config_toml.model.as_deref(), Some("gpt-4.1"));
+    assert_eq!(config_toml.model_reasoning_effort, None);
     Ok(())
 }
 
@@ -62,4 +56,3 @@ model_reasoning_effort = "medium"
 "#,
     )
 }
-

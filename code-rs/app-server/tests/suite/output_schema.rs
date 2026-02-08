@@ -9,10 +9,10 @@ use code_app_server_protocol::NewConversationResponse;
 use code_app_server_protocol::RequestId;
 use code_app_server_protocol::SendUserTurnParams;
 use code_app_server_protocol::SendUserTurnResponse;
-use code_core::protocol::AskForApproval;
-use code_core::protocol::SandboxPolicy;
 use code_protocol::config_types::ReasoningSummary;
 use code_protocol::openai_models::ReasoningEffort;
+use code_protocol::protocol::AskForApproval;
+use code_protocol::protocol::SandboxPolicy;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -283,4 +283,3 @@ stream_max_retries = 0
         ),
     )
 }
-

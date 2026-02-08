@@ -51,6 +51,8 @@ fn write_event_only_session(path: &Path, cwd: &Path) {
             message: "restore me".to_string(),
             kind: None,
             images: None,
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
         }),
     };
     let event_line = RolloutLine {

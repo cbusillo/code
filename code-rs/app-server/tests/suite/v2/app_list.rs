@@ -23,7 +23,6 @@ use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::JsonObject;
 use rmcp::model::ListToolsResult;
-use rmcp::model::Meta;
 use rmcp::model::ServerCapabilities;
 use rmcp::model::ServerInfo;
 use rmcp::model::Tool;
@@ -294,7 +293,6 @@ impl ServerHandler for AppListMcpServer {
             Ok(ListToolsResult {
                 tools: (*tools).clone(),
                 next_cursor: None,
-                meta: None,
             })
         }
     }
@@ -360,7 +358,7 @@ async fn list_directory_connectors(
     }
 }
 
-fn connector_tool(connector_id: &str, connector_name: &str) -> Result<Tool> {
+fn connector_tool(connector_id: &str, _connector_name: &str) -> Result<Tool> {
     let schema: JsonObject = serde_json::from_value(json!({
         "type": "object",
         "additionalProperties": false
@@ -372,12 +370,6 @@ fn connector_tool(connector_id: &str, connector_name: &str) -> Result<Tool> {
     );
     tool.annotations = Some(ToolAnnotations::new().read_only(true));
 
-    let mut meta = Meta::new();
-    meta.0
-        .insert("connector_id".to_string(), json!(connector_id));
-    meta.0
-        .insert("connector_name".to_string(), json!(connector_name));
-    tool.meta = Some(meta);
     Ok(tool)
 }
 

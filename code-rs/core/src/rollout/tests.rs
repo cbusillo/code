@@ -149,6 +149,8 @@ fn write_session_file(
                 message: format!("Message {i}"),
                 kind: None,
                 images: None,
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
             }),
         };
         let line = RolloutLine {
@@ -210,6 +212,8 @@ async fn test_resume_reconstruct_history_drops_user_events() {
             message: "hi there".to_string(),
             kind: None,
             images: None,
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
         }),
     };
     serde_json::to_writer(&mut writer, &RolloutLine {

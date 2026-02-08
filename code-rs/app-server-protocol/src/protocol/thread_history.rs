@@ -267,6 +267,7 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "First turn".into(),
+                kind: None,
                 images: Some(vec!["https://example.com/one.png".into()]),
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -282,6 +283,7 @@ mod tests {
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Second turn".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -356,6 +358,7 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Turn start".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -402,6 +405,7 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Please do the thing".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -414,6 +418,7 @@ mod tests {
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Let's try again".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -474,6 +479,7 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "First".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -483,6 +489,7 @@ mod tests {
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Second".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -493,6 +500,7 @@ mod tests {
             EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 1 }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Third".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -549,6 +557,7 @@ mod tests {
         let events = vec![
             EventMsg::UserMessage(UserMessageEvent {
                 message: "One".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
@@ -558,6 +567,7 @@ mod tests {
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Two".into(),
+                kind: None,
                 images: None,
                 text_elements: Vec::new(),
                 local_images: Vec::new(),

@@ -9,15 +9,17 @@ use code_app_server_protocol::ThreadStartParams;
 use code_app_server_protocol::ThreadStartResponse;
 use code_app_server_protocol::ThreadUnarchiveParams;
 use code_app_server_protocol::ThreadUnarchiveResponse;
-use code_core::find_archived_thread_path_by_id_str;
-use code_core::find_thread_path_by_id_str;
+use code_core::ARCHIVED_SESSIONS_SUBDIR;
+use code_core::find_conversation_path_by_id_str;
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 use tempfile::TempDir;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -42,7 +44,7 @@ async fn thread_unarchive_moves_rollout_back_into_sessions_directory() -> Result
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
 
-    let rollout_path = find_thread_path_by_id_str(codex_home.path(), &thread.id)
+    let rollout_path = find_conversation_path_by_id_str(codex_home.path(), &thread.id)
         .await?
         .expect("expected rollout path for thread id to exist");
 
@@ -120,3 +122,45 @@ sandbox_mode = "read-only"
 "#
 }
 
+async fn find_archived_thread_path_by_id_str(
+    code_home: &Path,
+    id_str: &str,
+) -> Result<Option<PathBuf>> {
+    if Uuid::parse_str(id_str).is_err() {
+        return Ok(None);
+    }
+
+    let root = code_home.join(ARCHIVED_SESSIONS_SUBDIR);
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let mut stack = vec![root];
+    let mut fallback = None;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !name.contains(id_str) {
+                continue;
+            }
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+            {
+                return Ok(Some(path));
+            }
+            fallback = Some(path);
+        }
+    }
+
+    Ok(fallback)
+}

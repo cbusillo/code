@@ -21,15 +21,15 @@ use code_app_server_protocol::SendUserMessageResponse;
 use code_app_server_protocol::SendUserTurnParams;
 use code_app_server_protocol::SendUserTurnResponse;
 use code_app_server_protocol::ServerRequest;
-use code_core::protocol::AskForApproval;
-use code_core::protocol::SandboxPolicy;
 use code_core::protocol_config_types::ReasoningSummary;
 use code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use code_protocol::config_types::SandboxMode;
 use code_protocol::openai_models::ReasoningEffort;
 use code_protocol::parse_command::ParsedCommand;
+use code_protocol::protocol::AskForApproval;
 use code_protocol::protocol::Event;
 use code_protocol::protocol::EventMsg;
+use code_protocol::protocol::SandboxPolicy;
 use pretty_assertions::assert_eq;
 use std::env;
 use std::path::Path;
@@ -447,6 +447,7 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
                 network_access: false,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,
+                allow_git_writes: true,
             },
             model: model.clone(),
             effort: Some(ReasoningEffort::Medium),

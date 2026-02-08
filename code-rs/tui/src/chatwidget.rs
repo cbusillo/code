@@ -6408,14 +6408,9 @@ impl ChatWidget<'_> {
 
         let (code_op_tx, code_op_rx) = unbounded_channel::<Op>();
 
-        let preferred_auth = if config.using_chatgpt_auth {
-            AuthMode::Chatgpt
-        } else {
-            AuthMode::ApiKey
-        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            preferred_auth,
+            AuthMode::ApiKey,
             config.responses_originator_header.clone(),
         );
 
@@ -32380,6 +32375,7 @@ use code_core::protocol::OrderMeta;
                 parsed_cmd: vec![ParsedCommand::Read {
                     cmd: "cat foo.txt".to_string(),
                     name: "foo.txt".to_string(),
+                    path: std::path::PathBuf::from("foo.txt"),
                 }],
             }),
             order: Some(order.clone()),

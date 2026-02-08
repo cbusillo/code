@@ -12,7 +12,7 @@ use code_app_server_protocol::NewConversationResponse;
 use code_app_server_protocol::RequestId;
 use code_app_server_protocol::SendUserMessageParams;
 use code_app_server_protocol::SendUserMessageResponse;
-use code_core::protocol::TurnAbortReason;
+use code_protocol::protocol::TurnAbortReason;
 use core_test_support::skip_if_no_network;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -161,4 +161,3 @@ stream_max_retries = 0
         ),
     )
 }
-

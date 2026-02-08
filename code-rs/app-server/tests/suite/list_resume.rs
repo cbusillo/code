@@ -12,9 +12,9 @@ use code_app_server_protocol::ResumeConversationParams;
 use code_app_server_protocol::ResumeConversationResponse;
 use code_app_server_protocol::ServerNotification;
 use code_app_server_protocol::SessionConfiguredNotification;
-use code_core::protocol::EventMsg;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
+use code_protocol::protocol::EventMsg;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -438,4 +438,3 @@ async fn list_conversations_fetches_through_filtered_pages() -> Result<()> {
 
     Ok(())
 }
-

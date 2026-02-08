@@ -15,7 +15,7 @@ use code_app_server_protocol::ThreadListResponse;
 use code_app_server_protocol::ThreadSortKey;
 use code_app_server_protocol::ThreadSourceKind;
 use code_core::ARCHIVED_SESSIONS_SUBDIR;
-use code_protocol::ThreadId;
+use code_protocol::ConversationId;
 use code_protocol::protocol::GitInfo as CoreGitInfo;
 use code_protocol::protocol::SessionSource as CoreSessionSource;
 use code_protocol::protocol::SubAgentSource;
@@ -357,7 +357,7 @@ async fn thread_list_filters_by_source_kind_subagent_thread_spawn() -> Result<()
         None,
     )?;
 
-    let parent_thread_id = ThreadId::from_string(&Uuid::new_v4().to_string())?;
+    let parent_thread_id = ConversationId::from(Uuid::new_v4());
     let subagent_id = create_fake_rollout_with_source(
         codex_home.path(),
         "2025-02-01T11-00-00",
@@ -397,7 +397,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
 
-    let parent_thread_id = ThreadId::from_string(&Uuid::new_v4().to_string())?;
+    let parent_thread_id = ConversationId::from(Uuid::new_v4());
 
     let review_id = create_fake_rollout_with_source(
         codex_home.path(),
@@ -1118,4 +1118,3 @@ async fn thread_list_invalid_cursor_returns_error() -> Result<()> {
 
     Ok(())
 }
-

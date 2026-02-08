@@ -54,6 +54,8 @@ axum = { workspace = true, default-features = false, features = [
 ] }
 base64 = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
+multimap = { workspace = true }
 os_info = { workspace = true }
 pretty_assertions = { workspace = true }
 rmcp = { version = "0.7.0", default-features = false, features = [
@@ -61,7 +63,9 @@ rmcp = { version = "0.7.0", default-features = false, features = [
     "transport-streamable-http-server",
 ] }
 serial_test = { workspace = true }
+tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
+toml = { workspace = true }
 uuid = { workspace = true }
 wiremock = { workspace = true }
 shlex = { workspace = true }
