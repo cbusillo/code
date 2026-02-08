@@ -311,6 +311,27 @@ enum DebugCommand {
 
     /// Run a command under Landlock+seccomp (Linux only).
     Landlock(LandlockCommand),
+
+    /// Tooling: helps debug the app server.
+    AppServer(DebugAppServerCommand),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAppServerCommand {
+    #[command(subcommand)]
+    subcommand: DebugAppServerSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DebugAppServerSubcommand {
+    /// Send message to app server V2.
+    SendMessageV2(DebugAppServerSendMessageV2Command),
+}
+
+#[derive(Debug, Parser)]
+struct DebugAppServerSendMessageV2Command {
+    #[arg(value_name = "USER_MESSAGE", required = true)]
+    user_message: String,
 }
 
 #[derive(Debug, Parser)]
@@ -595,6 +616,9 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
                 )
                 .await?;
             }
+            DebugCommand::AppServer(cmd) => {
+                run_debug_app_server_command(cmd)?;
+            }
         },
         Some(Subcommand::Apply(mut apply_cli)) => {
             prepend_config_flags(
@@ -636,6 +660,15 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
     }
 
     Ok(())
+}
+
+fn run_debug_app_server_command(cmd: DebugAppServerCommand) -> anyhow::Result<()> {
+    match cmd.subcommand {
+        DebugAppServerSubcommand::SendMessageV2(cmd) => {
+            let code_bin = std::env::current_exe()?;
+            code_app_server_test_client::send_message_v2(&code_bin, &[], cmd.user_message, &None)
+        }
+    }
 }
 
 /// Prepend root-level overrides so they have lower precedence than
@@ -1738,6 +1771,8 @@ where
                 content: vec![ContentItem::InputText {
                     text: user_message.to_string(),
                 }],
+                end_turn: None,
+                phase: None,
             }),
         };
 
@@ -1749,6 +1784,8 @@ where
                 content: vec![ContentItem::OutputText {
                     text: format!("Ack: {}", user_message),
                 }],
+                end_turn: None,
+                phase: None,
             }),
         };
 

@@ -528,7 +528,7 @@ pub async fn run_main(
             .any(|(path, _)| path == "model" || path.ends_with(".model"));
     if !cli_model_override && !cli.oss {
         let auth_mode = if config.using_chatgpt_auth {
-            AuthMode::ChatGPT
+            AuthMode::Chatgpt
         } else {
             AuthMode::ApiKey
         };
@@ -1256,7 +1256,7 @@ pub enum LoginStatus {
 /// Determine current login status based on auth.json presence.
 pub fn get_login_status(config: &Config) -> LoginStatus {
     let code_home = config.code_home.clone();
-    match CodexAuth::from_code_home(&code_home, AuthMode::ChatGPT, &config.responses_originator_header) {
+    match CodexAuth::from_code_home(&code_home, AuthMode::Chatgpt, &config.responses_originator_header) {
         Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode),
         _ => LoginStatus::NotAuthenticated,
     }

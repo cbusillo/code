@@ -73,6 +73,8 @@ fn write_rollout(
             content: vec![ContentItem::InputText {
                 text: user_text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }),
     };
 
@@ -84,6 +86,8 @@ fn write_rollout(
             content: vec![ContentItem::OutputText {
                 text: format!("Ack: {}", user_text),
             }],
+            end_turn: None,
+            phase: None,
         }),
     };
 

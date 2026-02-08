@@ -1,47 +1,10 @@
 use crate::bash::try_parse_bash;
 use crate::bash::try_parse_word_only_commands_sequence;
 use crate::util::is_shell_like_executable;
-use serde::Deserialize;
-use serde::Serialize;
+pub use code_protocol::parse_command::ParsedCommand;
 use shlex::split as shlex_split;
 use shlex::try_join as shlex_try_join;
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub enum ParsedCommand {
-    Read {
-        cmd: String,
-        name: String,
-    },
-    ListFiles {
-        cmd: String,
-        path: Option<String>,
-    },
-    Search {
-        cmd: String,
-        query: Option<String>,
-        path: Option<String>,
-    },
-    ReadCommand {
-        cmd: String,
-    },
-    Unknown {
-        cmd: String,
-    },
-}
-
-// Convert core's parsed command enum into the protocol's simplified type so
-// events can carry the canonical representation across process boundaries.
-impl From<ParsedCommand> for code_protocol::parse_command::ParsedCommand {
-    fn from(v: ParsedCommand) -> Self {
-        use code_protocol::parse_command::ParsedCommand as P;
-        match v {
-            ParsedCommand::Read { cmd, name } => P::Read { cmd, name },
-            ParsedCommand::ListFiles { cmd, path } => P::ListFiles { cmd, path },
-            ParsedCommand::Search { cmd, query, path } => P::Search { cmd, query, path },
-            ParsedCommand::ReadCommand { cmd } => P::ReadCommand { cmd },
-            ParsedCommand::Unknown { cmd } => P::Unknown { cmd },
-        }
-    }
-}
+use std::path::PathBuf;
 
 fn shlex_join(tokens: &[String]) -> String {
     shlex_try_join(tokens.iter().map(|s| s.as_str()))
@@ -1494,7 +1457,7 @@ fn parse_bash_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
                 commands = commands
                     .into_iter()
                     .map(|pc| match pc {
-                        ParsedCommand::Read { name, cmd, .. } => {
+                        ParsedCommand::Read { name, cmd, path } => {
                             if had_connectors {
                                 let has_pipe = script_tokens.iter().any(|t| t == "|");
                                 let has_sed_n = script_tokens.windows(2).any(|w| {
@@ -1505,17 +1468,20 @@ fn parse_bash_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
                                     ParsedCommand::Read {
                                         cmd: script.clone(),
                                         name,
+                                        path,
                                     }
                                 } else {
                                     ParsedCommand::Read {
                                         cmd: cmd.clone(),
                                         name,
+                                        path,
                                     }
                                 }
                             } else {
                                 ParsedCommand::Read {
                                     cmd: shlex_join(&script_tokens),
                                     name,
+                                    path,
                                 }
                             }
                         }
@@ -1787,7 +1753,7 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                     return ParsedCommand::Search { cmd, query, path };
                 }
                 if git_command_is_read_only(sub, rest) {
-                    return ParsedCommand::ReadCommand { cmd };
+                    return ParsedCommand::Unknown { cmd };
                 }
             }
             ParsedCommand::Unknown { cmd }
@@ -1863,10 +1829,12 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 tail
             };
             if effective_tail.len() == 1 {
-                let name = short_display_path(&effective_tail[0]);
+                let path = effective_tail[0].clone();
+                let name = short_display_path(&path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
                     name,
+                    path: PathBuf::from(path),
                 }
             } else {
                 ParsedCommand::Unknown {
@@ -1901,10 +1869,12 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                     i += 1;
                 }
                 if let Some(p) = candidates.into_iter().find(|p| !p.starts_with('-')) {
-                    let name = short_display_path(p);
+                    let path = p.clone();
+                    let name = short_display_path(&path);
                     return ParsedCommand::Read {
                         cmd: shlex_join(main_cmd),
                         name,
+                        path: PathBuf::from(path),
                     };
                 }
             }
@@ -1943,10 +1913,12 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                     i += 1;
                 }
                 if let Some(p) = candidates.into_iter().find(|p| !p.starts_with('-')) {
-                    let name = short_display_path(p);
+                    let path = p.clone();
+                    let name = short_display_path(&path);
                     return ParsedCommand::Read {
                         cmd: shlex_join(main_cmd),
                         name,
+                        path: PathBuf::from(path),
                     };
                 }
             }
@@ -1958,10 +1930,12 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
             // Avoid treating option values as paths (e.g., nl -s "  ").
             let candidates = skip_flag_values(tail, &["-s", "-w", "-v", "-i", "-b"]);
             if let Some(p) = candidates.into_iter().find(|p| !p.starts_with('-')) {
-                let name = short_display_path(p);
+                let path = p.clone();
+                let name = short_display_path(&path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
                     name,
+                    path: PathBuf::from(path),
                 }
             } else {
                 ParsedCommand::Unknown {
@@ -1976,10 +1950,12 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 && is_valid_sed_n_arg(tail.get(1).map(|s| s.as_str())) =>
         {
             if let Some(path) = tail.get(2) {
-                let name = short_display_path(path);
+                let path = path.clone();
+                let name = short_display_path(&path);
                 ParsedCommand::Read {
                     cmd: shlex_join(main_cmd),
                     name,
+                    path: PathBuf::from(path),
                 }
             } else {
                 ParsedCommand::Unknown {

@@ -1,4 +1,5 @@
 use super::*;
+use mcp_types::CallToolResult;
 use serde_json::Value;
 use code_protocol::dynamic_tools::DynamicToolResponse;
 use code_protocol::dynamic_tools::DynamicToolSpec;
@@ -528,6 +529,8 @@ impl Session {
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText { text }],
+            end_turn: None,
+            phase: None,
         };
         self.record_conversation_items(&[message]).await;
     }
@@ -1357,7 +1360,7 @@ impl Session {
                 true
             })
             .map(|item| {
-                if let ResponseItem::Message { id, role, content } = item {
+                if let ResponseItem::Message { id, role, content, .. } = item {
                     if role == "user" {
                         // Filter out ephemeral content from user messages
                         let mut filtered_content: Vec<ContentItem> = Vec::new();
@@ -1390,10 +1393,18 @@ impl Session {
                             id,
                             role,
                             content: filtered_content,
+                            end_turn: None,
+                            phase: None,
                         }
                     } else {
                         // Keep assistant messages unchanged
-                        ResponseItem::Message { id, role, content }
+                        ResponseItem::Message {
+                            id,
+                            role,
+                            content,
+                            end_turn: None,
+                            phase: None,
+                        }
                     }
                 } else {
                     item
@@ -1427,7 +1438,7 @@ impl Session {
             .and_then(|manager| manager.auth())
             .map(|auth| auth.mode);
         let sanitize_encrypted_reasoning =
-            !current_auth_mode.is_some_and(AuthMode::is_chatgpt);
+            !current_auth_mode.is_some_and(|mode| mode.is_chatgpt());
 
         if sanitize_encrypted_reasoning {
             let mut stripped = 0usize;
@@ -1767,6 +1778,8 @@ impl Session {
                             content: vec![ContentItem::InputText {
                                 text: user_msg_event.message.clone(),
                             }],
+                            end_turn: None,
+                            phase: None,
                         };
                         process_rollout_env_item(&mut replay_ctx, &response_item);
                         history.push(response_item);

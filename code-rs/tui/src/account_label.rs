@@ -1,5 +1,5 @@
 use code_core::auth_accounts::StoredAccount;
-use code_protocol::mcp_protocol::AuthMode;
+use code_login::AuthMode;
 
 const KEY_SUFFIX_LEN: usize = 8;
 
@@ -10,7 +10,7 @@ pub(crate) fn account_display_label(account: &StoredAccount) -> String {
         let trimmed = label.trim();
         if !trimmed.is_empty() {
             match account.mode {
-                AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => {
+                AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
                     let default_email = account
                         .tokens
                         .as_ref()
@@ -30,7 +30,7 @@ pub(crate) fn account_display_label(account: &StoredAccount) -> String {
     }
 
     match account.mode {
-        AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => account
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => account
             .tokens
             .as_ref()
             .and_then(|tokens| tokens.id_token.email.clone())
@@ -53,7 +53,7 @@ pub(crate) fn key_suffix(text: &str) -> String {
 /// Returns an ordering priority for accounts. ChatGPT accounts should appear first.
 pub(crate) fn account_mode_priority(mode: AuthMode) -> u8 {
     match mode {
-        AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => 0,
+        AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => 0,
         AuthMode::ApiKey => 1,
     }
 }

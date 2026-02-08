@@ -65,7 +65,7 @@ impl KeyboardHandler for AuthModeWidget {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.highlighted_mode = AuthMode::ChatGPT;
+                self.highlighted_mode = AuthMode::Chatgpt;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.highlighted_mode = AuthMode::ApiKey;
@@ -76,7 +76,7 @@ impl KeyboardHandler for AuthModeWidget {
             KeyCode::Char('2') => self.verify_api_key(),
             KeyCode::Enter => match self.sign_in_state {
                 SignInState::PickMode => match self.highlighted_mode {
-                    AuthMode::ChatGPT => self.start_chatgpt_login(),
+                    AuthMode::Chatgpt => self.start_chatgpt_login(),
                     AuthMode::ChatgptAuthTokens => self.start_chatgpt_login(),
                     AuthMode::ApiKey => self.verify_api_key(),
                 },
@@ -132,12 +132,12 @@ impl AuthModeWidget {
         // preferred auth method, show a brief explanation.
         if let LoginStatus::AuthMode(current) = self.login_status {
             let is_chatgpt = |mode: AuthMode| {
-                matches!(mode, AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens)
+                matches!(mode, AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
             };
             if is_chatgpt(current) != is_chatgpt(self.preferred_auth_method) {
                 let to_label = |mode: AuthMode| match mode {
                     AuthMode::ApiKey => "API key",
-                    AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => "ChatGPT",
+                    AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT",
                 };
                 let msg = format!(
                     "  You’re currently using {} while your preferred method is {}.",
@@ -185,7 +185,7 @@ impl AuthModeWidget {
         };
         let chatgpt_label = if matches!(
             self.login_status,
-            LoginStatus::AuthMode(AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens)
+            LoginStatus::AuthMode(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
         ) {
             "Continue using ChatGPT"
         } else {
@@ -194,7 +194,7 @@ impl AuthModeWidget {
 
         lines.extend(create_mode_item(
             0,
-            AuthMode::ChatGPT,
+            AuthMode::Chatgpt,
             chatgpt_label,
             "Usage included with Plus, Pro, and Team plans",
         ));
@@ -337,7 +337,7 @@ impl AuthModeWidget {
         // just proceed to the success message flow.
         if matches!(
             self.login_status,
-            LoginStatus::AuthMode(AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens)
+            LoginStatus::AuthMode(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
         ) {
             self.apply_chatgpt_login_side_effects();
             self.sign_in_state = SignInState::ChatGptSuccess;
@@ -391,7 +391,7 @@ impl AuthModeWidget {
     }
 
     pub(crate) fn apply_chatgpt_login_side_effects(&mut self) {
-        self.login_status = LoginStatus::AuthMode(AuthMode::ChatGPT);
+        self.login_status = LoginStatus::AuthMode(AuthMode::Chatgpt);
         if let Ok(mut args) = self.chat_widget_args.lock() {
             args.config.using_chatgpt_auth = true;
             if args

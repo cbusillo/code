@@ -203,7 +203,7 @@ pub async fn run_main(cli: Cli, _code_linux_sandbox_exe: Option<PathBuf>) -> any
             .map(|home| {
                 code_login::AuthManager::new(
                     home,
-                    code_login::AuthMode::ChatGPT,
+                    code_login::AuthMode::Chatgpt,
                     code_core::default_client::DEFAULT_ORIGINATOR.to_string(),
                 )
             })
@@ -1540,7 +1540,7 @@ async fn run_submit(args: crate::cli::SubmitArgs) -> anyhow::Result<()> {
             .map(|home| {
                 code_login::AuthManager::new(
                     home,
-                    code_login::AuthMode::ChatGPT,
+                    code_login::AuthMode::Chatgpt,
                     code_core::default_client::DEFAULT_ORIGINATOR.to_string(),
                 )
             })

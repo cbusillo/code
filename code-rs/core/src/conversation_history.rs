@@ -72,9 +72,10 @@ fn is_api_message(message: &ResponseItem) -> bool {
         | ResponseItem::CustomToolCall { .. }
         | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::CompactionSummary { .. }
+        | ResponseItem::Compaction { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::WebSearchCall { .. } => true,
+        ResponseItem::GhostSnapshot { .. } => false,
         ResponseItem::Other => false,
     }
 }
@@ -91,6 +92,8 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -101,6 +104,8 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -114,6 +119,8 @@ mod tests {
             content: vec![ContentItem::OutputText {
                 text: "ignored".to_string(),
             }],
+            end_turn: None,
+            phase: None,
         };
         h.record_items([&system, &ResponseItem::Other]);
 
@@ -132,6 +139,8 @@ mod tests {
                     content: vec![ContentItem::OutputText {
                         text: "hi".to_string()
                     }]
+                    end_turn: None,
+                    phase: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -139,6 +148,8 @@ mod tests {
                     content: vec![ContentItem::OutputText {
                         text: "hello".to_string()
                     }]
+                    end_turn: None,
+                    phase: None,
                 }
             ]
         );

@@ -365,6 +365,8 @@ impl RolloutRecorder {
                                     id: Some(ev.id.clone()),
                                     role: "user".to_string(),
                                     content,
+                                    end_turn: None,
+                                    phase: None,
                                 }));
                             }
                             ProtoEventMsg::AgentMessage(_) => items.push(RolloutItem::Event(ev)),

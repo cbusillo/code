@@ -279,7 +279,6 @@ pub(crate) fn exec_render_parts_parsed_with_meta(
                     (None, None) => ("Search".to_string(), cmd.clone()),
                 }
             }
-            ParsedCommand::ReadCommand { cmd } => ("Run".to_string(), cmd.clone()),
             // Upstream variants not present in our core parser are ignored or treated as generic runs
             ParsedCommand::Unknown { cmd } => {
                 // Suppress separator helpers like `echo ---` which are used
@@ -2123,7 +2122,6 @@ fn new_parsed_command(
                     (None, None) => ("Search".to_string(), cmd.clone()),
                 }
             }
-            ParsedCommand::ReadCommand { cmd } => ("Run".to_string(), cmd.clone()),
             // Upstream-only variants handled as generic runs in this fork
             ParsedCommand::Unknown { cmd } => {
                 let t = cmd.trim();

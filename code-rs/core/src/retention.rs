@@ -523,6 +523,8 @@ mod tests {
             content: vec![ContentItem::InputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -533,6 +535,8 @@ mod tests {
             content: vec![ContentItem::InputImage {
                 image_url: tag.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 

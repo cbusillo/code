@@ -107,7 +107,7 @@ pub(crate) fn map_response_item_to_event_messages(
             events
         }
 
-        ResponseItem::CompactionSummary { .. } => Vec::new(),
+        ResponseItem::Compaction { .. } | ResponseItem::GhostSnapshot { .. } => Vec::new(),
 
         ResponseItem::Reasoning {
             summary, content, ..
@@ -222,6 +222,8 @@ mod tests {
                     image_url: img2.clone(),
                 },
             ],
+            end_turn: None,
+            phase: None,
         };
 
         let events = map_response_item_to_event_messages(&item, false);
@@ -247,6 +249,8 @@ mod tests {
                     ENVIRONMENT_CONTEXT_CLOSE_TAG
                 ),
             }],
+            end_turn: None,
+            phase: None,
         };
 
         let events = map_response_item_to_event_messages(&item, false);
@@ -281,6 +285,8 @@ mod tests {
                     ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG
                 ),
             }],
+            end_turn: None,
+            phase: None,
         };
 
         let events = map_response_item_to_event_messages(&item, false);
@@ -317,6 +323,8 @@ mod tests {
                     BROWSER_SNAPSHOT_CLOSE_TAG
                 ),
             }],
+            end_turn: None,
+            phase: None,
         };
 
         let events = map_response_item_to_event_messages(&item, false);

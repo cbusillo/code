@@ -76,9 +76,9 @@ impl App<'_> {
                 .map(|auth| auth.mode)
                 .or_else(|| {
                     if remote_using_chatgpt_hint {
-                        Some(code_protocol::mcp_protocol::AuthMode::ChatGPT)
+                        Some(AuthMode::Chatgpt)
                     } else {
-                        Some(code_protocol::mcp_protocol::AuthMode::ApiKey)
+                        Some(AuthMode::ApiKey)
                     }
                 });
             let presets = code_common::model_presets::builtin_model_presets(auth_mode);
@@ -2313,9 +2313,14 @@ impl App<'_> {
                         new_widget.check_for_initial_animations();
                         *widget = Box::new(new_widget);
                     } else {
+                        let preferred_auth = if cfg.using_chatgpt_auth {
+                            AuthMode::Chatgpt
+                        } else {
+                            AuthMode::ApiKey
+                        };
                         let auth_manager = AuthManager::shared_with_mode_and_originator(
                             cfg.code_home.clone(),
-                            AuthMode::ApiKey,
+                            preferred_auth,
                             cfg.responses_originator_header.clone(),
                         );
                         let mut new_widget = ChatWidget::new_from_existing(

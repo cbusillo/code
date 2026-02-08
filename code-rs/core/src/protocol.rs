@@ -9,6 +9,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use mcp_types::CallToolResult;
 use serde::de::DeserializeOwned;
@@ -660,22 +662,47 @@ where
     serde_json::from_value(json).ok()
 }
 
+fn unix_timestamp_seconds() -> Option<i64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+}
+
+fn reset_after_seconds_to_resets_at(reset_after_seconds: Option<u64>) -> Option<i64> {
+    let now = unix_timestamp_seconds()?;
+    let delta = i64::try_from(reset_after_seconds?).ok()?;
+    now.checked_add(delta)
+}
+
+fn resets_at_to_reset_after_seconds(resets_at: Option<i64>) -> Option<u64> {
+    let now = unix_timestamp_seconds()?;
+    let delta = resets_at?.checked_sub(now)?;
+    u64::try_from(delta).ok()
+}
+
+fn window_minutes_to_i64(minutes: u64) -> Option<i64> {
+    i64::try_from(minutes).ok()
+}
+
 fn rate_limit_snapshot_to_protocol(
     snapshot: &RateLimitSnapshotEvent,
 ) -> code_protocol::protocol::RateLimitSnapshot {
     let primary = code_protocol::protocol::RateLimitWindow {
         used_percent: snapshot.primary_used_percent,
-        window_minutes: Some(snapshot.primary_window_minutes),
-        resets_in_seconds: snapshot.primary_reset_after_seconds,
+        window_minutes: window_minutes_to_i64(snapshot.primary_window_minutes),
+        resets_at: reset_after_seconds_to_resets_at(snapshot.primary_reset_after_seconds),
     };
     let secondary = code_protocol::protocol::RateLimitWindow {
         used_percent: snapshot.secondary_used_percent,
-        window_minutes: Some(snapshot.secondary_window_minutes),
-        resets_in_seconds: snapshot.secondary_reset_after_seconds,
+        window_minutes: window_minutes_to_i64(snapshot.secondary_window_minutes),
+        resets_at: reset_after_seconds_to_resets_at(snapshot.secondary_reset_after_seconds),
     };
     code_protocol::protocol::RateLimitSnapshot {
         primary: Some(primary),
         secondary: Some(secondary),
+        credits: None,
+        plan_type: None,
     }
 }
 
@@ -698,20 +725,22 @@ fn rate_limit_snapshot_from_protocol(
         .primary
         .as_ref()
         .and_then(|window| window.window_minutes)
+        .and_then(|minutes| u64::try_from(minutes).ok())
         .unwrap_or(0);
     let primary_reset_after_seconds = snapshot
         .primary
         .as_ref()
-        .and_then(|window| window.resets_in_seconds);
+        .and_then(|window| resets_at_to_reset_after_seconds(window.resets_at));
     let secondary_window_minutes = snapshot
         .secondary
         .as_ref()
         .and_then(|window| window.window_minutes)
+        .and_then(|minutes| u64::try_from(minutes).ok())
         .unwrap_or(0);
     let secondary_reset_after_seconds = snapshot
         .secondary
         .as_ref()
-        .and_then(|window| window.resets_in_seconds);
+        .and_then(|window| resets_at_to_reset_after_seconds(window.resets_at));
 
     let ratio_percent = match (primary_window_minutes, secondary_window_minutes) {
         (0, _) | (_, 0) => f64::NAN,

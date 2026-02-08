@@ -1408,6 +1408,8 @@ async fn exit_review_mode(
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text: developer_text.clone() }],
+        end_turn: None,
+        phase: None,
     };
 
     session
@@ -1729,7 +1731,7 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
                         ) => {
                             items_to_record_in_conversation_history.push(item.clone());
                             let output =
-                                convert_call_tool_result_to_function_call_output_payload(&result);
+                                convert_call_tool_result_to_function_call_output_payload(result);
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
@@ -2309,6 +2311,8 @@ async fn run_turn(
                                 id: None,
                                 role: "user".to_string(),
                                 content: vec![ContentItem::InputText { text: hint }],
+                                end_turn: None,
+                                phase: None,
                             });
                         }
                     }
@@ -2846,8 +2850,8 @@ async fn handle_response_item(
             }
             None
         }
-        ResponseItem::CompactionSummary { .. } => {
-            // Keep compaction summaries in history; no user-visible event to emit.
+        ResponseItem::Compaction { .. } | ResponseItem::GhostSnapshot { .. } => {
+            // Keep compaction summaries and ghost snapshots in history; no user-visible event.
             None
         }
         ResponseItem::Reasoning {
@@ -11616,6 +11620,8 @@ mod cleanup_tests {
             content: vec![ContentItem::InputText {
                 text: text.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -11626,6 +11632,8 @@ mod cleanup_tests {
             content: vec![ContentItem::InputImage {
                 image_url: tag.to_string(),
             }],
+            end_turn: None,
+            phase: None,
         }
     }
 
@@ -11723,6 +11731,8 @@ mod cleanup_tests {
             content: vec![ContentItem::OutputText {
                 text: "response".to_string(),
             }],
+            end_turn: None,
+            phase: None,
         };
         let history = vec![user.clone(), assistant.clone()];
 

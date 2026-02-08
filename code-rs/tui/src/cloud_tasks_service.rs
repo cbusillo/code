@@ -220,7 +220,7 @@ async fn load_config() -> Result<CloudTasksConfig> {
         .context("determine codex home directory")?;
     let auth_manager = AuthManager::new(
         code_home,
-        AuthMode::ChatGPT,
+        AuthMode::Chatgpt,
         code_core::default_client::DEFAULT_ORIGINATOR.to_string(),
     );
     let auth = auth_manager

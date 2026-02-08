@@ -141,7 +141,7 @@ pub(crate) fn explore_record_push_from_parsed(
             _ => None,
         }),
         ExecAction::Run => parsed.iter().find_map(|p| match p {
-            ParsedCommand::ReadCommand { cmd } => {
+            ParsedCommand::Unknown { cmd } => {
                 if let Some(summary) = build_count_summary(cmd, cwd, session_root) {
                     return Some(ExploreSummary::Count {
                         target: summary.target,

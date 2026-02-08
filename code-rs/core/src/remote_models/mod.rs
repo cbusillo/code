@@ -310,7 +310,7 @@ impl RemoteModelsManager {
             if matches!(
                 auth,
                 Some(CodexAuth {
-                    mode: AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens,
+                    mode: AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens,
                     ..
                 })
             ) {

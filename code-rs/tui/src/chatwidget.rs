@@ -54,12 +54,15 @@ use code_core::account_usage::{
 use code_core::auth_accounts::{self, StoredAccount};
 use code_login::AuthManager;
 use code_login::AuthMode;
-use code_protocol::mcp_protocol::AuthMode as McpAuthMode;
 use code_protocol::dynamic_tools::DynamicToolResponse;
 use code_protocol::protocol::SessionSource;
 use code_protocol::num_format::format_with_separators;
 use code_core::split_command_and_args;
 use serde_json::Value as JsonValue;
+
+fn format_u64(value: u64) -> String {
+    format_with_separators(i64::try_from(value).unwrap_or(i64::MAX))
+}
 
 
 mod diff_handlers;
@@ -4228,7 +4231,7 @@ impl ChatWidget<'_> {
     /// Render a single recorded ResponseItem into history without executing tools
     fn render_replay_item(&mut self, item: ResponseItem) {
         match item {
-            ResponseItem::Message { id, role, content } => {
+            ResponseItem::Message { id, role, content, .. } => {
                 let message_id = id;
                 let mut text = String::new();
                 for c in content {
@@ -6405,9 +6408,14 @@ impl ChatWidget<'_> {
 
         let (code_op_tx, code_op_rx) = unbounded_channel::<Op>();
 
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
 
@@ -7140,6 +7148,8 @@ impl ChatWidget<'_> {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text }],
+            end_turn: None,
+            phase: None,
         })
     }
 
@@ -7222,6 +7232,8 @@ impl ChatWidget<'_> {
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText { text }],
+            end_turn: None,
+            phase: None,
         })
     }
 
@@ -7417,6 +7429,8 @@ impl ChatWidget<'_> {
                     id: Some("auto-drive-reasoning".to_string()),
                     role: "user".to_string(),
                     content: vec![code_protocol::models::ContentItem::InputText { text }],
+                    end_turn: None,
+                    phase: None,
                 }
             } else {
                 match role {
@@ -7546,6 +7560,8 @@ impl ChatWidget<'_> {
                         id: None,
                         role: "user".to_string(),
                         content: vec![content],
+                        end_turn: None,
+                        phase: None,
                     });
                 }
                 crate::history_cell::HistoryCellType::Assistant => {
@@ -7566,6 +7582,8 @@ impl ChatWidget<'_> {
                         id: None,
                         role: "assistant".to_string(),
                         content: vec![content],
+                        end_turn: None,
+                        phase: None,
                     });
                 }
                 crate::history_cell::HistoryCellType::PlanUpdate => {
@@ -7607,6 +7625,8 @@ impl ChatWidget<'_> {
                             id: None,
                             role: "assistant".to_string(),
                             content: vec![content],
+                            end_turn: None,
+                            phase: None,
                         });
                     }
                 }
@@ -8572,7 +8592,7 @@ impl ChatWidget<'_> {
             let header = Self::account_header_lines(account_ref, snapshot_ref, summary_ref);
             let is_api_key_account = matches!(
                 account_ref.map(|acc| acc.mode),
-                Some(McpAuthMode::ApiKey)
+                Some(AuthMode::ApiKey)
             );
             let extra = Self::usage_history_lines(summary_ref, is_api_key_account);
             let display = Self::rate_limit_display_config_for_account(account_ref);
@@ -8652,7 +8672,7 @@ impl ChatWidget<'_> {
                         );
                         let is_api_key_account = matches!(
                             account.map(|acc| acc.mode),
-                            Some(McpAuthMode::ApiKey)
+                            Some(AuthMode::ApiKey)
                         );
                         let extra = Self::usage_history_lines(
                             usage_summary.as_ref(),
@@ -8662,7 +8682,7 @@ impl ChatWidget<'_> {
                     } else {
                         let is_api_key_account = matches!(
                             account.map(|acc| acc.mode),
-                            Some(McpAuthMode::ApiKey)
+                            Some(AuthMode::ApiKey)
                         );
                         let mut lines = Self::usage_history_lines(
                             usage_summary.as_ref(),
@@ -8682,7 +8702,7 @@ impl ChatWidget<'_> {
                 None => {
                     let is_api_key_account = matches!(
                         account.map(|acc| acc.mode),
-                        Some(McpAuthMode::ApiKey)
+                        Some(AuthMode::ApiKey)
                     );
                     let mut lines = Self::usage_history_lines(
                         usage_summary.as_ref(),
@@ -8732,11 +8752,11 @@ impl ChatWidget<'_> {
         let cents_part = (cents_u128 % 100) as u8;
         let dollars = (dollars_u128.min(u128::from(u64::MAX))) as u64;
         if cents_part == 0 {
-            format!("${} USD", format_with_separators(dollars))
+            format!("${} USD", format_u64(dollars))
         } else {
             format!(
                 "${}.{:02} USD",
-                format_with_separators(dollars),
+                format_u64(dollars),
                 cents_part
             )
         }
@@ -8769,8 +8789,8 @@ impl ChatWidget<'_> {
 
         let account_type = account
             .map(|acc| match acc.mode {
-                McpAuthMode::ChatGPT | McpAuthMode::ChatgptAuthTokens => "ChatGPT account",
-                McpAuthMode::ApiKey => "API key",
+                AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => "ChatGPT account",
+                AuthMode::ApiKey => "API key",
             })
             .unwrap_or("Unknown account");
 
@@ -8780,7 +8800,7 @@ impl ChatWidget<'_> {
             .unwrap_or("Unknown");
 
         let value_style = Style::default().fg(crate::colors::text_dim());
-        let is_api_key = matches!(account.map(|acc| acc.mode), Some(McpAuthMode::ApiKey));
+        let is_api_key = matches!(account.map(|acc| acc.mode), Some(AuthMode::ApiKey));
         let totals = usage
             .map(|u| u.totals.clone())
             .unwrap_or_default();
@@ -8793,7 +8813,7 @@ impl ChatWidget<'_> {
         let total_tokens = totals.total_tokens;
 
         let cost_usd = Self::usage_cost_usd_from_totals(&totals);
-        let formatted_total = format_with_separators(total_tokens);
+        let formatted_total = format_u64(total_tokens);
         let formatted_cost = Self::format_usd(cost_usd);
         let cost_suffix = if is_api_key {
             format!("({formatted_cost})")
@@ -8820,10 +8840,10 @@ impl ChatWidget<'_> {
 
         let indent = " ".repeat(tokens_prefix.len());
         let counts = [
-            (format_with_separators(cached_input), "cached"),
-            (format_with_separators(non_cached_input), "input"),
-            (format_with_separators(output_tokens), "output"),
-            (format_with_separators(reasoning_tokens), "reasoning"),
+            (format_u64(cached_input), "cached"),
+            (format_u64(non_cached_input), "input"),
+            (format_u64(output_tokens), "output"),
+            (format_u64(reasoning_tokens), "reasoning"),
         ];
         let max_width = counts
             .iter()
@@ -8880,12 +8900,12 @@ impl ChatWidget<'_> {
         let prefix = status_content_prefix();
         let tokens_width = series
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.total_tokens).len())
+            .map(|(_, totals)| format_u64(totals.total_tokens).len())
             .max()
             .unwrap_or(0);
         let cached_width = series
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.cached_input_tokens).len())
+            .map(|(_, totals)| format_u64(totals.cached_input_tokens).len())
             .max()
             .unwrap_or(0);
         let cost_width = series
@@ -8900,10 +8920,10 @@ impl ChatWidget<'_> {
         for (dt, totals) in series.iter() {
             let label = Self::format_hour_label(*dt);
             let bar = Self::bar_segment(totals.total_tokens, max_total, WIDTH);
-            let tokens = format_with_separators(totals.total_tokens);
+            let tokens = format_u64(totals.total_tokens);
             let padding = tokens_width.saturating_sub(tokens.len());
             let formatted_tokens = format!("{space}{tokens}", space = " ".repeat(padding), tokens = tokens);
-            let cached_tokens = format_with_separators(totals.cached_input_tokens);
+            let cached_tokens = format_u64(totals.cached_input_tokens);
             let cached_padding = cached_width.saturating_sub(cached_tokens.len());
             let cached_display = format!(
                 "{space}{cached_tokens}",
@@ -8981,12 +9001,12 @@ impl ChatWidget<'_> {
         let prefix = status_content_prefix();
         let tokens_width = daily
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.total_tokens).len())
+            .map(|(_, totals)| format_u64(totals.total_tokens).len())
             .max()
             .unwrap_or(0);
         let cached_width = daily
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.cached_input_tokens).len())
+            .map(|(_, totals)| format_u64(totals.cached_input_tokens).len())
             .max()
             .unwrap_or(0);
         let cost_width = daily
@@ -9001,10 +9021,10 @@ impl ChatWidget<'_> {
         for (day, totals) in daily.iter() {
             let label = Self::format_daily_label(*day);
             let bar = Self::bar_segment(totals.total_tokens, max_total, WIDTH);
-            let tokens = format_with_separators(totals.total_tokens);
+            let tokens = format_u64(totals.total_tokens);
             let padding = tokens_width.saturating_sub(tokens.len());
             let formatted_tokens = format!("{space}{tokens}", space = " ".repeat(padding), tokens = tokens);
-            let cached_tokens = format_with_separators(totals.cached_input_tokens);
+            let cached_tokens = format_u64(totals.cached_input_tokens);
             let cached_padding = cached_width.saturating_sub(cached_tokens.len());
             let cached_display = format!(
                 "{space}{cached_tokens}",
@@ -9133,12 +9153,12 @@ impl ChatWidget<'_> {
         let prefix = status_content_prefix();
         let tokens_width = months
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.total_tokens).len())
+            .map(|(_, totals)| format_u64(totals.total_tokens).len())
             .max()
             .unwrap_or(0);
         let cached_width = months
             .iter()
-            .map(|(_, totals)| format_with_separators(totals.cached_input_tokens).len())
+            .map(|(_, totals)| format_u64(totals.cached_input_tokens).len())
             .max()
             .unwrap_or(0);
         let cost_width = months
@@ -9153,10 +9173,10 @@ impl ChatWidget<'_> {
         for (start, totals) in months.iter() {
             let label = start.format("%b %Y").to_string();
             let bar = Self::bar_segment(totals.total_tokens, max_total, WIDTH);
-            let tokens = format_with_separators(totals.total_tokens);
+            let tokens = format_u64(totals.total_tokens);
             let padding = tokens_width.saturating_sub(tokens.len());
             let formatted_tokens = format!("{space}{tokens}", space = " ".repeat(padding), tokens = tokens);
-            let cached_tokens = format_with_separators(totals.cached_input_tokens);
+            let cached_tokens = format_u64(totals.cached_input_tokens);
             let cached_padding = cached_width.saturating_sub(cached_tokens.len());
             let cached_display = format!(
                 "{space}{cached_tokens}",
@@ -10614,7 +10634,13 @@ impl ChatWidget<'_> {
     /// Push a cell using a synthetic key at the TOP of the NEXT request.
     fn history_push_top_next_req(&mut self, cell: impl HistoryCell + 'static) {
         let key = self.next_req_key_top();
-        let _ = self.history_insert_with_key_global_tagged(Box::new(cell), key, "prelude", None);
+        let cell = Box::new(cell);
+        let tag = if matches!(cell.kind(), HistoryCellType::BackgroundEvent) {
+            "background"
+        } else {
+            "prelude"
+        };
+        let _ = self.history_insert_with_key_global_tagged(cell, key, tag, None);
     }
     fn history_replace_with_record(
         &mut self,
@@ -13852,7 +13878,7 @@ impl ChatWidget<'_> {
             EventMsg::PlanUpdate(update) => {
                 let (plan_title, plan_active) = {
                     let title = update
-                        .name
+                        .explanation
                         .as_ref()
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
@@ -15387,7 +15413,7 @@ impl ChatWidget<'_> {
                     content: "fn main() {\n    println!(\"demo\");\n}\n",
                 }),
                 UpdatePlanArgs {
-                    name: Some("Demo Scroll Plan".to_string()),
+                    explanation: Some("Demo Scroll Plan".to_string()),
                     plan: vec![
                         PlanItemArg {
                             step: "Create reproducible builds".to_string(),
@@ -15434,7 +15460,7 @@ impl ChatWidget<'_> {
                     new_content: "pub fn release() {\n    println!(\"drafting release\");\n}\n",
                 }),
                 UpdatePlanArgs {
-                    name: Some("Release Gate Plan".to_string()),
+                    explanation: Some("Release Gate Plan".to_string()),
                     plan: vec![
                         PlanItemArg {
                             step: "Finalize changelog".to_string(),
@@ -16076,7 +16102,7 @@ impl ChatWidget<'_> {
     fn rate_limit_display_config_for_account(
         account: Option<&StoredAccount>,
     ) -> RateLimitDisplayConfig {
-        if matches!(account.map(|acc| acc.mode), Some(McpAuthMode::ApiKey)) {
+        if matches!(account.map(|acc| acc.mode), Some(AuthMode::ApiKey)) {
             RateLimitDisplayConfig {
                 show_usage_sections: false,
                 show_chart: false,
@@ -22086,9 +22112,9 @@ Have we met every part of this goal and is there no further work to do?"#
             return presets.clone();
         }
         let auth_mode = if self.config.using_chatgpt_auth {
-            Some(McpAuthMode::ChatGPT)
+            Some(AuthMode::Chatgpt)
         } else {
-            Some(McpAuthMode::ApiKey)
+            Some(AuthMode::ApiKey)
         };
         builtin_model_presets(auth_mode)
     }

@@ -52,7 +52,7 @@ use code_protocol::mcp_protocol::InputItem as WireInputItem;
 use code_protocol::mcp_protocol::InterruptConversationParams;
 use code_protocol::mcp_protocol::InterruptConversationResponse;
 // Unused login-related and diff param imports removed
-use code_protocol::mcp_protocol::GitDiffToRemoteResponse;
+use code_app_server_protocol::GitDiffToRemoteResponse;
 use code_protocol::mcp_protocol::NewConversationParams;
 use code_protocol::mcp_protocol::NewConversationResponse;
 use code_protocol::mcp_protocol::RemoveConversationListenerParams;

@@ -168,7 +168,9 @@ impl ImageOutputCell {
             lines.push(format!("Type: {mime}"));
         }
         if let Some(byte_len) = record.byte_len {
-            let size = format_with_separators(u64::from(byte_len));
+            let size = format_with_separators(
+                i64::try_from(u64::from(byte_len)).unwrap_or(i64::MAX),
+            );
             lines.push(format!("Size: {size} bytes"));
         }
         if let Some(alt) = record

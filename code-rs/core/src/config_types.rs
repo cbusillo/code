@@ -1454,28 +1454,29 @@ impl Default for RetentionConfig {
     }
 }
 
-impl From<code_protocol::config_types::ReasoningEffort> for ReasoningEffort {
-    fn from(v: code_protocol::config_types::ReasoningEffort) -> Self {
+impl From<code_protocol::openai_models::ReasoningEffort> for ReasoningEffort {
+    fn from(v: code_protocol::openai_models::ReasoningEffort) -> Self {
         match v {
-            code_protocol::config_types::ReasoningEffort::Minimal => ReasoningEffort::Minimal,
-            code_protocol::config_types::ReasoningEffort::Low => ReasoningEffort::Low,
-            code_protocol::config_types::ReasoningEffort::Medium => ReasoningEffort::Medium,
-            code_protocol::config_types::ReasoningEffort::High => ReasoningEffort::High,
-            code_protocol::config_types::ReasoningEffort::XHigh => ReasoningEffort::XHigh,
+            code_protocol::openai_models::ReasoningEffort::None => ReasoningEffort::None,
+            code_protocol::openai_models::ReasoningEffort::Minimal => ReasoningEffort::Minimal,
+            code_protocol::openai_models::ReasoningEffort::Low => ReasoningEffort::Low,
+            code_protocol::openai_models::ReasoningEffort::Medium => ReasoningEffort::Medium,
+            code_protocol::openai_models::ReasoningEffort::High => ReasoningEffort::High,
+            code_protocol::openai_models::ReasoningEffort::XHigh => ReasoningEffort::XHigh,
         }
     }
 }
 
-impl From<ReasoningEffort> for code_protocol::config_types::ReasoningEffort {
+impl From<ReasoningEffort> for code_protocol::openai_models::ReasoningEffort {
     fn from(v: ReasoningEffort) -> Self {
         match v {
             ReasoningEffort::Minimal | ReasoningEffort::None => {
-                code_protocol::config_types::ReasoningEffort::Minimal
+                code_protocol::openai_models::ReasoningEffort::Minimal
             }
-            ReasoningEffort::Low => code_protocol::config_types::ReasoningEffort::Low,
-            ReasoningEffort::Medium => code_protocol::config_types::ReasoningEffort::Medium,
-            ReasoningEffort::High => code_protocol::config_types::ReasoningEffort::High,
-            ReasoningEffort::XHigh => code_protocol::config_types::ReasoningEffort::XHigh,
+            ReasoningEffort::Low => code_protocol::openai_models::ReasoningEffort::Low,
+            ReasoningEffort::Medium => code_protocol::openai_models::ReasoningEffort::Medium,
+            ReasoningEffort::High => code_protocol::openai_models::ReasoningEffort::High,
+            ReasoningEffort::XHigh => code_protocol::openai_models::ReasoningEffort::XHigh,
         }
     }
 }
