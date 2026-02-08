@@ -68,7 +68,7 @@ mod tests {
     fn git_status_is_read_command() {
         assert_parsed(
             &vec_str(&["git", "status"]),
-            vec![ParsedCommand::ReadCommand {
+            vec![ParsedCommand::Unknown {
                 cmd: "git status".to_string(),
             }],
         );
@@ -79,7 +79,7 @@ mod tests {
         let inner = "git status | wc -l";
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
-            vec![ParsedCommand::ReadCommand {
+            vec![ParsedCommand::Unknown {
                 cmd: "git status".to_string(),
             }],
         );
@@ -93,6 +93,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "chatwidget.rs".to_string(),
+                path: PathBuf::from("code-rs/tui/src/chatwidget.rs"),
             }],
         );
     }
@@ -101,7 +102,7 @@ mod tests {
     fn git_diff_staged_is_read_command() {
         assert_parsed(
             &vec_str(&["git", "--no-pager", "diff", "--staged", "--stat"]),
-            vec![ParsedCommand::ReadCommand {
+            vec![ParsedCommand::Unknown {
                 cmd: "git --no-pager diff --staged --stat".to_string(),
             }],
         );
@@ -111,7 +112,7 @@ mod tests {
     fn git_branch_listing_is_read_command() {
         assert_parsed(
             &vec_str(&["git", "branch"]),
-            vec![ParsedCommand::ReadCommand {
+            vec![ParsedCommand::Unknown {
                 cmd: "git branch".to_string(),
             }],
         );
@@ -121,7 +122,7 @@ mod tests {
     fn git_branch_list_with_pattern_is_read_command() {
         assert_parsed(
             &vec_str(&["git", "branch", "--list", "feature/*"]),
-            vec![ParsedCommand::ReadCommand {
+            vec![ParsedCommand::Unknown {
                 cmd: "git branch --list feature/*".to_string(),
             }],
         );
@@ -131,7 +132,7 @@ mod tests {
     fn git_branch_list_with_spaced_pattern_keeps_quotes() {
         assert_parsed(
             &vec_str(&["git", "branch", "--list", "feature name/*"]),
-            vec![ParsedCommand::ReadCommand {
+            vec![ParsedCommand::Unknown {
                 cmd: "git branch --list 'feature name/*'".to_string(),
             }],
         );
@@ -342,6 +343,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "README.md".to_string(),
+                path: PathBuf::from("webview/README.md"),
             }],
         );
     }
@@ -353,6 +355,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "cat foo.txt".to_string(),
                 name: "foo.txt".to_string(),
+                path: PathBuf::from("foo.txt"),
             }],
         );
     }
@@ -381,6 +384,7 @@ mod tests {
                 ParsedCommand::Read {
                     cmd: "cat foo.txt".to_string(),
                     name: "foo.txt".to_string(),
+                    path: PathBuf::from("foo.txt"),
                 },
                 ParsedCommand::Unknown {
                     cmd: "cd foo".to_string(),
@@ -409,6 +413,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "Cargo.toml".to_string(),
+                path: PathBuf::from("Cargo.toml"),
             }],
         );
     }
@@ -421,6 +426,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "Cargo.toml".to_string(),
+                path: PathBuf::from("tui/Cargo.toml"),
             }],
         );
     }
@@ -433,6 +439,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "README.md".to_string(),
+                path: PathBuf::from("README.md"),
             }],
         );
     }
@@ -446,6 +453,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "README.md".to_string(),
+                path: PathBuf::from("README.md"),
             }]
         );
     }
@@ -462,6 +470,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "sed -n '1,5p' README.md".to_string(),
                 name: "README.md".to_string(),
+                path: PathBuf::from("README.md"),
             }],
         );
     }
@@ -631,6 +640,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "parse_command.rs".to_string(),
+                path: PathBuf::from("core/src/parse_command.rs"),
             }],
         );
     }
@@ -643,6 +653,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: inner.to_string(),
                 name: "history_cell.rs".to_string(),
+                path: PathBuf::from("tui/src/history_cell.rs"),
             }],
         );
     }
@@ -656,6 +667,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "cat -- ansi-escape/Cargo.toml".to_string(),
                 name: "Cargo.toml".to_string(),
+                path: PathBuf::from("ansi-escape/Cargo.toml"),
             }],
         );
     }
@@ -685,6 +697,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "sed -n '260,640p' exec/src/event_processor_with_human_output.rs".to_string(),
                 name: "event_processor_with_human_output.rs".to_string(),
+                path: PathBuf::from("exec/src/event_processor_with_human_output.rs"),
             }],
         );
     }
@@ -844,6 +857,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: r#"cat "pkg\\src\\main.rs""#.to_string(),
                 name: "main.rs".to_string(),
+                path: PathBuf::from("pkg\\src\\main.rs"),
             }],
         );
     }
@@ -855,6 +869,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "head -n50 Cargo.toml".to_string(),
                 name: "Cargo.toml".to_string(),
+                path: PathBuf::from("Cargo.toml"),
             }],
         );
     }
@@ -885,6 +900,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "tail -n+10 README.md".to_string(),
                 name: "README.md".to_string(),
+                path: PathBuf::from("README.md"),
             }],
         );
     }
@@ -921,6 +937,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "cat -- ./-strange-file-name".to_string(),
                 name: "-strange-file-name".to_string(),
+                path: PathBuf::from("./-strange-file-name"),
             }],
         );
 
@@ -930,6 +947,7 @@ mod tests {
             vec![ParsedCommand::Read {
                 cmd: "sed -n '12,20p' Cargo.toml".to_string(),
                 name: "Cargo.toml".to_string(),
+                path: PathBuf::from("Cargo.toml"),
             }],
         );
     }
