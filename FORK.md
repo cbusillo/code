@@ -1,33 +1,41 @@
-# Fork policy
+# Fork Policy (Every Code)
 
-This repository tracks upstream closely, but we carry a long-running fork branch.
+## Branch roles
 
-## Branches
+- `main`: mirror of upstream `just-every/code` `main`. No fork-only commits.
+  No release workflow.
+- `webui-main`: fork release branch and GitHub default. Contains fork-only
+  patches. Release workflow triggers here.
+- `app-server-v2`: feature branch for v2 app-server changes. Keep PR-ready for
+  upstream.
+- `fix/gpt-5.3-codex`: patch branch for the gpt-5.3 auth preference fix. Keep
+  PR-ready for upstream.
 
-- `main` mirrors upstream (`upstream/main`). Keep it fast-forward only.
-- `webui-main` is the fork’s default branch; fork-only changes land here.
-- Sync upstream into the fork via merge-only: merge `origin/main` into
-  `webui-main` (do not rebase).
+## Updating `webui-main`
 
-## Releases (fork)
+- Merge (no rebase) from upstream `main` or `origin/main` as needed.
+- Merge or cherry-pick fork patches from feature branches.
+- Run `./build-fast.sh` before pushing; use `./pre-release.sh` for release
+  preflight.
 
-- Workflow: `Release` (`.github/workflows/release.yml`).
-- Trigger: push to `webui-main`.
-- Do not release from `main` (mirror only).
+## Release workflow
 
-### Version scheme
+- The Release workflow must trigger only on pushes/tags to `webui-main`.
+- It must not trigger on `main`.
 
-We stay aligned with upstream versions while allowing fork-only patch releases.
+## Versioning
 
-- Upstream version: `vX.Y.Z`
-- Fork patch releases: `vX.Y.Z.N` (extra decimal), where `N` starts at `1`.
-
-Examples:
-
-- Upstream `v0.6.59` → fork patches `v0.6.59.1`, `v0.6.59.2`, …
+- Track upstream versions.
+- Fork patch releases append an extra decimal: `vX.Y.Z.N` (N starts at 1).
+- Example: upstream `v0.6.59` -> fork `v0.6.59.1`.
 
 ## Monitoring
 
-`scripts/wait-for-gh-run.sh` uses the current repo by default.
+- Use `scripts/wait-for-gh-run.sh` to follow Release runs.
+- For the fork, set `GH_REPO=cbusillo/code`.
 
-- When monitoring the fork from a local checkout, set `GH_REPO=cbusillo/code`.
+## Auth/model note
+
+- `gpt-5.3-codex` requires ChatGPT auth in this fork. If you see
+  “model does not exist or you do not have access,” confirm
+  `using_chatgpt_auth` and stored ChatGPT credentials.

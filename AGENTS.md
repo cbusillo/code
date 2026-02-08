@@ -58,7 +58,8 @@ Examples:
 
 ## How to Git Push
 
-See `FORK.md` for fork branch + release policy.
+See `FORK.md` for fork branch + release policy. `webui-main` is the release
+branch; `main` mirrors upstream.
 
 ### Merge-and-Push Policy (Do Not Rebase)
 
