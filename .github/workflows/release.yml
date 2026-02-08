@@ -16,6 +16,7 @@ on:
       - 'CHANGELOG.md'
       - 'docs/release-notes/**'
       - 'codex-cli/package.json'
+  workflow_dispatch: {}
 
 concurrency:
   group: release-${{ github.ref }}
