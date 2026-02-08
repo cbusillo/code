@@ -1362,6 +1362,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "code-app-server-protocol",
  "code-common",
  "code-core",
  "code-mcp-types",
