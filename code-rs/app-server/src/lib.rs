@@ -26,6 +26,7 @@ use crate::outgoing_message::OutgoingMessageSender;
 pub mod code_message_processor;
 mod error_code;
 mod fuzzy_file_search;
+mod jsonrpc_compat;
 mod message_processor;
 pub mod outgoing_message;
 

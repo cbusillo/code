@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use crate::ConversationId;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -234,7 +235,20 @@ pub enum Op {
 
 /// Determines the conditions under which the user is consulted to approve
 /// running the command proposed by Codex.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display, TS)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Display,
+    TS,
+    JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum AskForApproval {
@@ -260,7 +274,7 @@ pub enum AskForApproval {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, TS)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, TS, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovedCommandMatchKind {
     Exact,
@@ -268,7 +282,7 @@ pub enum ApprovedCommandMatchKind {
 }
 
 /// Determines execution restrictions for model shell commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Display, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Display, TS, JsonSchema)]
 #[strum(serialize_all = "kebab-case")]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum SandboxPolicy {
@@ -647,6 +661,16 @@ pub enum EventMsg {
 
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
+}
+
+impl JsonSchema for EventMsg {
+    fn schema_name() -> String {
+        "EventMsg".to_string()
+    }
+
+    fn json_schema(r#gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        serde_json::Value::json_schema(r#gen)
+    }
 }
 
 /// Codex errors that we expose to clients.
@@ -1107,7 +1131,7 @@ impl InitialHistory {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename_all = "lowercase")]
 pub enum SessionSource {
@@ -1121,7 +1145,7 @@ pub enum SessionSource {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum SubAgentSource {
@@ -1543,7 +1567,7 @@ pub struct SessionConfiguredEvent {
 }
 
 /// User's decision in response to an ExecApprovalRequest.
-#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Display, TS)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Display, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     /// User has approved this command and the agent should execute it.
@@ -1564,7 +1588,7 @@ pub enum ReviewDecision {
     Abort,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileChange {
     Add {
@@ -1627,7 +1651,7 @@ pub struct TurnAbortedEvent {
     pub reason: TurnAbortReason,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnAbortReason {
     Interrupted,

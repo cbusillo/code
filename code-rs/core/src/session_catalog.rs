@@ -140,6 +140,22 @@ impl SessionCatalog {
         Ok(updated)
     }
 
+    /// Mark a session as archived or unarchived.
+    pub async fn set_archived(&self, session_id: Uuid, archived: bool) -> Result<bool> {
+        let mut catalog = self.load_inner().await?;
+        let Some(entry) = catalog.get(&session_id).cloned() else {
+            return Ok(false);
+        };
+        let mut updated = entry.clone();
+        updated.archived = archived;
+        catalog
+            .upsert(updated)
+            .context("failed to update session archive state")?;
+        let mut guard = self.cache.lock().await;
+        *guard = Some(catalog);
+        Ok(true)
+    }
+
     async fn load_inner(&self) -> Result<rollout_catalog::SessionCatalog> {
         {
             let mut guard = self.cache.lock().await;

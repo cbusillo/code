@@ -70,7 +70,6 @@ use crate::git_worktree;
 use crate::protocol::ApprovedCommandMatchKind;
 use crate::protocol::WebSearchBeginEvent;
 use crate::protocol::WebSearchCompleteEvent;
-use code_protocol::mcp_protocol::AuthMode;
 use crate::account_usage;
 use crate::auth_accounts;
 use crate::agent_defaults::{agent_model_spec, default_agent_configs, enabled_agent_model_specs};

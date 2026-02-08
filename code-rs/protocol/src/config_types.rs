@@ -9,7 +9,18 @@ use crate::protocol::AskForApproval;
 
 /// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning
 #[derive(
-    Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, TS, EnumIter,
+    Debug,
+    Serialize,
+    Deserialize,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Display,
+    TS,
+    EnumIter,
+    JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -27,7 +38,7 @@ pub enum ReasoningEffort {
 /// A summary of the reasoning performed by the model. This can be useful for
 /// debugging and understanding the model's reasoning process.
 /// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#reasoning-summaries
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, TS)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ReasoningSummary {
@@ -72,7 +83,7 @@ pub enum Personality {
     Pragmatic,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Default, Serialize, Display, TS)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Default, Serialize, Display, JsonSchema, TS)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum SandboxMode {
@@ -85,6 +96,79 @@ pub enum SandboxMode {
 
     #[serde(rename = "danger-full-access")]
     DangerFullAccess,
+}
+
+/// Initial collaboration mode to use when the TUI starts.
+#[derive(
+    Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, TS, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ModeKind {
+    Plan,
+    #[serde(rename = "default")]
+    #[strum(serialize = "default")]
+    Default,
+}
+
+/// Settings for a collaboration mode.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct Settings {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub developer_instructions: Option<String>,
+}
+
+/// Collaboration mode for a Codex session.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, TS, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationMode {
+    pub mode: ModeKind,
+    pub settings: Settings,
+}
+
+/// A mask for collaboration mode settings, allowing partial updates.
+/// All fields except `name` are optional, enabling selective updates.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CollaborationModeMask {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub mode: Option<ModeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub developer_instructions: Option<Option<String>>,
+}
+
+#[derive(
+    Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, TS, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum WebSearchMode {
+    Disabled,
+    Cached,
+    Live,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ForcedLoginMethod {
+    Chatgpt,
+    Api,
 }
 
 /// Collection of common configuration options that a user can define as a unit

@@ -9,7 +9,7 @@ on:
       upstream_repo:
         description: 'Upstream repo (owner/name)'
         required: false
-        default: 'openai/codex'
+        default: 'just-every/code'
       upstream_branch:
         description: 'Upstream branch'
         required: false
@@ -28,7 +28,7 @@ permissions:
   pull-requests: write
 
 env:
-  UPSTREAM_REPO: ${{ inputs.upstream_repo || 'openai/codex' }}
+  UPSTREAM_REPO: ${{ inputs.upstream_repo || 'just-every/code' }}
   UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
   MERGE_BRANCH: upstream-merge
   # Controls whether we auto-close an existing upstream-merge PR when the run
@@ -529,6 +529,8 @@ jobs:
             AGENTS.md
             README.md
             CHANGELOG.md
+            code-rs/webui/**
+            code-rs/gateway/src/assets/**
         run: |
           set -euo pipefail
           SAFE_PATH="$PATH"; SAFE_HOME="$HOME"

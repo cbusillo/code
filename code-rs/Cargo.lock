@@ -339,6 +339,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -896,6 +902,7 @@ name = "code-app-server"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "code-app-server-protocol",
  "code-arg0",
  "code-common",
  "code-core",
@@ -906,6 +913,7 @@ dependencies = [
  "code-utils-json-to-toml",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -916,8 +924,36 @@ dependencies = [
 name = "code-app-server-protocol"
 version = "0.0.0"
 dependencies = [
- "code-mcp-types",
+ "anyhow",
+ "clap",
+ "code-experimental-api-macros",
  "code-protocol",
+ "code-utils-absolute-path",
+ "code-utils-cargo-bin",
+ "inventory",
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "similar",
+ "strum_macros 0.27.2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "code-app-server-test-client"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "code-app-server-protocol",
+ "code-protocol",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -953,6 +989,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "code-app-server-protocol",
  "code-common",
  "code-core",
  "code-git-tooling",
@@ -1290,6 +1327,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-experimental-api-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
+]
+
+[[package]]
 name = "code-file-search"
 version = "0.0.0"
 dependencies = [
@@ -1300,6 +1346,22 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "code-git"
+version = "0.0.0"
+dependencies = [
+ "assert_matches",
+ "once_cell",
+ "pretty_assertions",
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.17",
+ "ts-rs",
+ "walkdir",
 ]
 
 [[package]]
@@ -1451,7 +1513,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "code-execpolicy",
+ "code-git",
  "code-mcp-types",
+ "code-utils-absolute-path",
+ "code-utils-image",
  "icu_decimal",
  "icu_locale_core",
  "mime_guess",
@@ -1589,6 +1655,50 @@ dependencies = [
  "uuid",
  "vt100",
  "which",
+]
+
+[[package]]
+name = "code-utils-absolute-path"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "path-absolutize",
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
+]
+
+[[package]]
+name = "code-utils-cache"
+version = "0.0.0"
+dependencies = [
+ "lru 0.13.0",
+ "sha1",
+ "tokio",
+]
+
+[[package]]
+name = "code-utils-cargo-bin"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "runfiles",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "code-utils-image"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "code-utils-cache",
+ "image 0.25.8",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]
@@ -3687,6 +3797,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "227748d55f2f0ab4735d87fd623798cb6b664512fe979705f829c9f81c934465"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4917,7 +5036,7 @@ dependencies = [
  "indoc",
  "instability",
  "itertools 0.13.0",
- "lru",
+ "lru 0.12.5",
  "paste",
  "strum 0.26.3",
  "unicode-segmentation",
@@ -5253,6 +5372,11 @@ dependencies = [
  "syn 2.0.108",
  "unicode-ident",
 ]
+
+[[package]]
+name = "runfiles"
+version = "0.1.0"
+source = "git+https://github.com/dzbarsky/rules_rust?rev=b56cbaa8465e74127f1ea216f813cd377295ad81#b56cbaa8465e74127f1ea216f813cd377295ad81"
 
 [[package]]
 name = "rustc-demangle"
