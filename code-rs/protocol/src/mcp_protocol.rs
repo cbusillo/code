@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::PathBuf;
 
-use crate::config_types::ReasoningEffort;
+use crate::openai_models::ReasoningEffort;
 use crate::config_types::ReasoningSummary;
 use crate::config_types::SandboxMode;
 use crate::config_types::Verbosity;
@@ -17,6 +17,7 @@ use mcp_types::JSONRPCNotification;
 use mcp_types::RequestId;
 use serde::Deserialize;
 use serde::Serialize;
+use schemars::JsonSchema;
 use strum_macros::Display;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -71,6 +72,18 @@ impl Serialize for ConversationId {
         S: serde::Serializer,
     {
         serializer.collect_str(&self.uuid)
+    }
+}
+
+impl JsonSchema for ConversationId {
+    fn schema_name() -> String {
+        "ConversationId".to_string()
+    }
+
+    fn json_schema(
+        schema_gen: &mut schemars::r#gen::SchemaGenerator,
+    ) -> schemars::schema::Schema {
+        <String as JsonSchema>::json_schema(schema_gen)
     }
 }
 

@@ -12,6 +12,10 @@ workspace = true
 
 [dependencies]
 base64 = { workspace = true }
+code-execpolicy = { workspace = true }
+code-git = { workspace = true }
+code-utils-absolute-path = { workspace = true }
+code-utils-image = { workspace = true }
 icu_decimal = { workspace = true }
 icu_locale_core = { workspace = true }
 mcp-types = { workspace = true }
@@ -38,4 +42,4 @@ pretty_assertions = { workspace = true }
 
 [package.metadata.cargo-shear]
 # Required because the not imported as strum_macros in non-nightly builds.
-ignored = ["strum"]
+ignored = ["strum_macros"]

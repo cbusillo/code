@@ -5,29 +5,26 @@ use strum_macros::Display;
 use strum_macros::EnumIter;
 use ts_rs::TS;
 
+pub use crate::openai_models::ReasoningEffort;
 use crate::protocol::AskForApproval;
-
-/// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning
-#[derive(
-    Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, TS, EnumIter,
-)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
-pub enum ReasoningEffort {
-    /// Minimal reasoning effort.
-    /// Note: serde alias "none" removed to avoid ts-rs warning during TS export.
-    Minimal,
-    Low,
-    #[default]
-    Medium,
-    High,
-    XHigh,
-}
 
 /// A summary of the reasoning performed by the model. This can be useful for
 /// debugging and understanding the model's reasoning process.
 /// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#reasoning-summaries
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Display, TS)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    TS,
+    JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ReasoningSummary {
@@ -72,7 +69,20 @@ pub enum Personality {
     Pragmatic,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Default, Serialize, Display, TS)]
+#[derive(
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Display,
+    TS,
+    JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum SandboxMode {
@@ -87,6 +97,47 @@ pub enum SandboxMode {
     DangerFullAccess,
 }
 
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    TS,
+    JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ForcedLoginMethod {
+    Chatgpt,
+    Api,
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    TS,
+    JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum WebSearchMode {
+    Disabled,
+    Cached,
+    Live,
+}
+
 /// Collection of common configuration options that a user can define as a unit
 /// in `config.toml`. Currently only a subset of the fields are supported.
 #[derive(Deserialize, Debug, Clone, PartialEq, Serialize, TS)]
@@ -95,4 +146,214 @@ pub struct ConfigProfile {
     pub model: Option<String>,
     pub approval_policy: Option<AskForApproval>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Alternate screen mode for the TUI. If alternate screen is enabled, the
+/// terminal will be cleared and restored when Codex exits.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema, TS, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AlternateScreenMode {
+    /// Auto-detect: disable alternate screen in Zellij, enable elsewhere.
+    #[default]
+    Auto,
+    /// Always use alternate screen (original behavior).
+    Always,
+    /// Never use alternate screen (inline mode only).
+    Never,
+}
+
+/// Initial collaboration mode to use when the TUI starts.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema, TS, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeKind {
+    Plan,
+    #[default]
+    #[serde(
+        alias = "code",
+        alias = "pair_programming",
+        alias = "execute",
+        alias = "custom"
+    )]
+    Default,
+    #[doc(hidden)]
+    #[serde(skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    PairProgramming,
+    #[doc(hidden)]
+    #[serde(skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    Execute,
+}
+
+pub const TUI_VISIBLE_COLLABORATION_MODES: [ModeKind; 2] = [ModeKind::Default, ModeKind::Plan];
+
+impl ModeKind {
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Plan => "Plan",
+            Self::Default => "Default",
+            Self::PairProgramming => "Pair Programming",
+            Self::Execute => "Execute",
+        }
+    }
+
+    pub const fn is_tui_visible(self) -> bool {
+        matches!(self, Self::Plan | Self::Default)
+    }
+
+    pub const fn allows_request_user_input(self) -> bool {
+        matches!(self, Self::Plan)
+    }
+}
+
+/// Collaboration mode for a Codex session.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+pub struct CollaborationMode {
+    pub mode: ModeKind,
+    pub settings: Settings,
+}
+
+impl CollaborationMode {
+    /// Returns a reference to the settings.
+    fn settings_ref(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn model(&self) -> &str {
+        self.settings_ref().model.as_str()
+    }
+
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.settings_ref().reasoning_effort
+    }
+
+    /// Updates the collaboration mode with new model and/or effort values.
+    ///
+    /// - `model`: `Some(s)` to update the model, `None` to keep the current model
+    /// - `effort`: `Some(Some(e))` to set effort to `e`, `Some(None)` to clear effort, `None` to keep current effort
+    /// - `developer_instructions`: `Some(Some(s))` to set instructions, `Some(None)` to clear them, `None` to keep current
+    ///
+    /// Returns a new `CollaborationMode` with updated values, preserving the mode.
+    pub fn with_updates(
+        &self,
+        model: Option<String>,
+        effort: Option<Option<ReasoningEffort>>,
+        developer_instructions: Option<Option<String>>,
+    ) -> Self {
+        let settings = self.settings_ref();
+        let updated_settings = Settings {
+            model: model.unwrap_or_else(|| settings.model.clone()),
+            reasoning_effort: effort.unwrap_or(settings.reasoning_effort),
+            developer_instructions: developer_instructions
+                .unwrap_or_else(|| settings.developer_instructions.clone()),
+        };
+
+        CollaborationMode {
+            mode: self.mode,
+            settings: updated_settings,
+        }
+    }
+
+    /// Applies a mask to this collaboration mode, returning a new collaboration mode
+    /// with the mask values applied. Fields in the mask that are `Some` will override
+    /// the corresponding fields, while `None` values will preserve the original values.
+    ///
+    /// The `name` field in the mask is ignored as it's metadata for the mask itself.
+    pub fn apply_mask(&self, mask: &CollaborationModeMask) -> Self {
+        let settings = self.settings_ref();
+        CollaborationMode {
+            mode: mask.mode.unwrap_or(self.mode),
+            settings: Settings {
+                model: mask.model.clone().unwrap_or_else(|| settings.model.clone()),
+                reasoning_effort: mask.reasoning_effort.unwrap_or(settings.reasoning_effort),
+                developer_instructions: mask
+                    .developer_instructions
+                    .clone()
+                    .unwrap_or_else(|| settings.developer_instructions.clone()),
+            },
+        }
+    }
+}
+
+/// Settings for a collaboration mode.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema, TS)]
+pub struct Settings {
+    pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub developer_instructions: Option<String>,
+}
+
+/// A mask for collaboration mode settings, allowing partial updates.
+/// All fields except `name` are optional, enabling selective updates.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema, TS)]
+pub struct CollaborationModeMask {
+    pub name: String,
+    pub mode: Option<ModeKind>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    pub developer_instructions: Option<Option<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn apply_mask_can_clear_optional_fields() {
+        let mode = CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: "gpt-5.2-codex".to_string(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                developer_instructions: Some("stay focused".to_string()),
+            },
+        };
+        let mask = CollaborationModeMask {
+            name: "Clear".to_string(),
+            mode: None,
+            model: None,
+            reasoning_effort: Some(None),
+            developer_instructions: Some(None),
+        };
+
+        let expected = CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: "gpt-5.2-codex".to_string(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        };
+        assert_eq!(expected, mode.apply_mask(&mask));
+    }
+
+    #[test]
+    fn mode_kind_deserializes_alias_values_to_default() {
+        for alias in ["code", "pair_programming", "execute", "custom"] {
+            let json = format!("\"{alias}\"");
+            let mode: ModeKind = serde_json::from_str(&json).expect("deserialize mode");
+            assert_eq!(ModeKind::Default, mode);
+        }
+    }
+
+    #[test]
+    fn tui_visible_collaboration_modes_match_mode_kind_visibility() {
+        let expected = [ModeKind::Default, ModeKind::Plan];
+        assert_eq!(expected, TUI_VISIBLE_COLLABORATION_MODES);
+
+        for mode in TUI_VISIBLE_COLLABORATION_MODES {
+            assert!(mode.is_tui_visible());
+        }
+
+        assert!(!ModeKind::PairProgramming.is_tui_visible());
+        assert!(!ModeKind::Execute.is_tui_visible());
+    }
 }
