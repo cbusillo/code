@@ -6405,9 +6405,14 @@ impl ChatWidget<'_> {
 
         let (code_op_tx, code_op_rx) = unbounded_channel::<Op>();
 
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::ChatGPT
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
 
