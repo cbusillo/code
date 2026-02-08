@@ -6,11 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use code_common::CliConfigOverrides;
-use code_core::AuthManager;
-use code_core::ConversationManager;
 use code_core::config::Config;
 use code_core::config::ConfigOverrides;
-use code_protocol::protocol::SessionSource;
 
 use mcp_types::JSONRPCMessage;
 use tokio::io::AsyncBufReadExt;
@@ -31,6 +28,7 @@ pub mod code_message_processor;
 mod broker;
 mod error_code;
 mod fuzzy_file_search;
+mod jsonrpc_compat;
 mod message_processor;
 pub mod outgoing_message;
 
@@ -94,16 +92,6 @@ pub async fn run_main(
             std::io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}"))
         })?;
     let config = Arc::new(config);
-    let auth_manager = AuthManager::shared_with_mode_and_originator(
-        config.code_home.clone(),
-        code_protocol::mcp_protocol::AuthMode::ApiKey,
-        config.responses_originator_header.clone(),
-    );
-    let conversation_manager = Arc::new(ConversationManager::new(
-        auth_manager,
-        SessionSource::Mcp,
-    ));
-
     // Task: process incoming messages.
     let processor_handle = tokio::spawn({
         let outgoing_message_sender = OutgoingMessageSender::new(outgoing_tx);
@@ -111,7 +99,6 @@ pub async fn run_main(
             outgoing_message_sender,
             code_linux_sandbox_exe,
             config.clone(),
-            conversation_manager.clone(),
         );
         async move {
             while let Some(msg) = incoming_rx.recv().await {

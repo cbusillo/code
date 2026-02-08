@@ -17,7 +17,7 @@ pub fn generate_ts(out_dir: &Path, prettier: Option<&Path>) -> Result<()> {
 
     // Generate TS bindings
     mcp_types::InitializeResult::export_all_to(out_dir)?;
-    code_app_server_protocol::ConversationId::export_all_to(out_dir)?;
+    code_protocol::ConversationId::export_all_to(out_dir)?;
     code_app_server_protocol::InputItem::export_all_to(out_dir)?;
     code_app_server_protocol::ClientRequest::export_all_to(out_dir)?;
     code_app_server_protocol::ServerRequest::export_all_to(out_dir)?;
@@ -29,8 +29,8 @@ pub fn generate_ts(out_dir: &Path, prettier: Option<&Path>) -> Result<()> {
     code_app_server_protocol::RemoveConversationSubscriptionResponse::export_all_to(out_dir)?;
     code_app_server_protocol::SendUserMessageParams::export_all_to(out_dir)?;
     code_app_server_protocol::SendUserMessageResponse::export_all_to(out_dir)?;
-    code_app_server_protocol::UserInputAnswerParams::export_all_to(out_dir)?;
-    code_app_server_protocol::UserInputAnswerResponse::export_all_to(out_dir)?;
+    code_protocol::mcp_protocol::UserInputAnswerParams::export_all_to(out_dir)?;
+    code_protocol::mcp_protocol::UserInputAnswerResponse::export_all_to(out_dir)?;
     code_app_server_protocol::SendUserTurnParams::export_all_to(out_dir)?;
     code_app_server_protocol::SendUserTurnResponse::export_all_to(out_dir)?;
     code_app_server_protocol::InterruptConversationParams::export_all_to(out_dir)?;

@@ -124,9 +124,9 @@ fn run_refresh(
             }
             None => {
                 let auth_mode = if config.using_chatgpt_auth {
-                    code_protocol::mcp_protocol::AuthMode::ChatGPT
+                    code_login::AuthMode::ChatGPT
                 } else {
-                    code_protocol::mcp_protocol::AuthMode::ApiKey
+                    code_login::AuthMode::ApiKey
                 };
                 (
                     AuthManager::shared_with_mode_and_originator(

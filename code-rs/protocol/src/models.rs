@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use base64::Engine;
 use mcp_types::CallToolResult;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -146,6 +147,16 @@ pub enum ResponseItem {
     Other,
 }
 
+impl JsonSchema for ResponseItem {
+    fn schema_name() -> String {
+        "ResponseItem".to_string()
+    }
+
+    fn json_schema(r#gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        serde_json::Value::json_schema(r#gen)
+    }
+}
+
 fn should_serialize_reasoning_content(content: &Option<Vec<ReasoningItemContent>>) -> bool {
     match content {
         Some(content) => !content
@@ -206,7 +217,7 @@ pub struct LocalShellExecAction {
     pub user: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSearchAction {
     Search {

@@ -16,6 +16,7 @@ use crate::protocol::TurnAbortReason;
 use crate::request_user_input::RequestUserInputResponse;
 use mcp_types::JSONRPCNotification;
 use mcp_types::RequestId;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use strum_macros::Display;
@@ -83,6 +84,16 @@ impl<'de> Deserialize<'de> for ConversationId {
         let value = String::deserialize(deserializer)?;
         let uuid = Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
         Ok(Self { uuid })
+    }
+}
+
+impl JsonSchema for ConversationId {
+    fn schema_name() -> String {
+        "ConversationId".to_string()
+    }
+
+    fn json_schema(r#gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        <String>::json_schema(r#gen)
     }
 }
 

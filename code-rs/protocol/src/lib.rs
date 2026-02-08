@@ -1,6 +1,10 @@
+pub mod account;
+pub mod approvals;
 pub mod config_types;
 pub mod custom_prompts;
 pub mod dynamic_tools;
+pub mod items;
+pub mod mcp;
 pub mod skills;
 pub mod mcp_protocol;
 pub mod message_history;
@@ -13,4 +17,6 @@ pub mod plan_tool;
 pub mod protocol;
 pub mod request_user_input;
 pub mod user_input;
+mod thread_id;
 pub use mcp_protocol::ConversationId;
+pub use thread_id::ThreadId;

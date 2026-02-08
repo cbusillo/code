@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 code-arg0 = { workspace = true }
 code-common = { workspace = true, features = ["cli"] }
 code-core = { workspace = true }
+code-app-server-protocol = { workspace = true }
 code-file-search = { workspace = true }
 code-login = { workspace = true }
 code-protocol = { workspace = true }
@@ -28,6 +29,7 @@ code-utils-json-to-toml = { workspace = true }
 mcp-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "io-util",

@@ -249,9 +249,9 @@ fn run_guided_loop(
             .context("loading config")?,
     };
     let preferred_auth = if cfg.using_chatgpt_auth {
-        code_protocol::mcp_protocol::AuthMode::ChatGPT
+        code_login::AuthMode::ChatGPT
     } else {
-        code_protocol::mcp_protocol::AuthMode::ApiKey
+        code_login::AuthMode::ApiKey
     };
     let auth_mgr = AuthManager::shared_with_mode_and_originator(
         cfg.code_home.clone(),

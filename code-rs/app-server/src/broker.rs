@@ -2,6 +2,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use code_app_server_protocol::AuthMode;
 use code_common::CliConfigOverrides;
 use code_core::AuthManager;
 use code_core::ConversationManager;
@@ -39,7 +40,7 @@ pub async fn run_broker(
     let config = Arc::new(config);
     let auth_manager = AuthManager::shared_with_mode_and_originator(
         config.code_home.clone(),
-        code_protocol::mcp_protocol::AuthMode::ApiKey,
+        AuthMode::ApiKey,
         config.responses_originator_header.clone(),
     );
     let conversation_manager = Arc::new(ConversationManager::new(
@@ -144,7 +145,7 @@ async fn prepare_socket_path(path: &Path) -> io::Result<()> {
 async fn handle_connection(
     stream: UnixStream,
     config: Arc<Config>,
-    conversation_manager: Arc<ConversationManager>,
+    _conversation_manager: Arc<ConversationManager>,
     code_linux_sandbox_exe: Option<PathBuf>,
 ) -> io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
@@ -156,7 +157,6 @@ async fn handle_connection(
         outgoing_sender,
         code_linux_sandbox_exe,
         config,
-        conversation_manager,
     );
 
     let writer_task = tokio::spawn(async move {

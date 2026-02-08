@@ -1,7 +1,7 @@
 use chrono::SecondsFormat;
 use chrono::Utc;
 use code_app_server_protocol::AuthMode;
-use code_app_server_protocol::ConversationId;
+use code_protocol::ConversationId;
 use code_protocol::config_types::ReasoningEffort;
 use code_protocol::config_types::ReasoningSummary;
 use code_protocol::models::ResponseItem;

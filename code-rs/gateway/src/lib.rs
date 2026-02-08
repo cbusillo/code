@@ -33,12 +33,13 @@ use code_protocol::dynamic_tools::{
 };
 use code_protocol::mcp_protocol::{
     AddConversationListenerParams, AddConversationSubscriptionResponse, ApplyPatchApprovalResponse,
-    AuthMode, ClientInfo, ClientRequest, DynamicToolCallResponse,
-    ExecCommandApprovalResponse, InitializeParams, InputItem as WireInputItem,
-    InterruptConversationParams, ListConversationsParams, ListConversationsResponse,
-    NewConversationParams, NewConversationResponse, ResumeConversationParams,
-    ResumeConversationResponse, SendUserMessageParams, ServerRequest, UserInputAnswerParams,
+    ClientInfo, ClientRequest, DynamicToolCallResponse, ExecCommandApprovalResponse,
+    InitializeParams, InputItem as WireInputItem, InterruptConversationParams,
+    ListConversationsParams, ListConversationsResponse, NewConversationParams,
+    NewConversationResponse, ResumeConversationParams, ResumeConversationResponse,
+    SendUserMessageParams, ServerRequest, UserInputAnswerParams,
 };
+use code_app_server_protocol::AuthMode;
 use code_protocol::protocol::{AskForApproval, ReviewDecision as WireReviewDecision, SessionSource};
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
