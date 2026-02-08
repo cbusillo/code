@@ -467,6 +467,11 @@ async fn broker_available(socket_path: &Path) -> bool {
     tokio::net::UnixStream::connect(socket_path).await.is_ok()
 }
 
+#[cfg(not(unix))]
+async fn broker_available(_socket_path: &Path) -> bool {
+    false
+}
+
 #[cfg(unix)]
 async fn broker_stamp_matches(config: &Config) -> bool {
     let stamp_path = broker_stamp_path(config);
