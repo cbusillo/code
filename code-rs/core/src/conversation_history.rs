@@ -138,7 +138,7 @@ mod tests {
                     role: "user".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "hi".to_string()
-                    }]
+                    }],
                     end_turn: None,
                     phase: None,
                 },
@@ -147,7 +147,7 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "hello".to_string()
-                    }]
+                    }],
                     end_turn: None,
                     phase: None,
                 }
