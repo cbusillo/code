@@ -11,9 +11,9 @@ This repository tracks upstream closely, but we carry a long-running fork branch
 
 ## Releases (fork)
 
-- Workflow: `Release (Fork)` (`.github/workflows/release-fork.yml`).
-- Trigger: push a tag matching `v*`.
-- Tags must point at the desired `webui-main` commit (not at `main`).
+- Workflow: `Release` (`.github/workflows/release.yml`).
+- Trigger: push to `webui-main`.
+- Do not release from `main` (mirror only).
 
 ### Version scheme
 

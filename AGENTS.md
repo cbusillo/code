@@ -13,7 +13,7 @@ Completion/build step
 - Policy: All errors AND all warnings must be fixed before you’re done. Treat any compiler warning as a failure and address it (rename unused vars with `_`, remove `mut`, delete dead code, etc.).
 - Do not run additional format/lint/test commands on completion (e.g., `just fmt`, `just fix`, `cargo test`) unless explicitly requested for a specific task.
 - ***NEVER run rustfmt***
-- Before pushing to `main`, run `./pre-release.sh` to mirror the release preflight (dev-fast build, CLI smokes, workspace nextest).
+- Before pushing to `webui-main`, run `./pre-release.sh` to mirror the release preflight (dev-fast build, CLI smokes, workspace nextest).
 
 Optional regression checks (recommended when touching the Rust workspace):
 
@@ -65,7 +65,7 @@ See `FORK.md` for fork branch + release policy.
 When the user asks you to "push" local work:
 
 - Never rebase in this flow. Do not use `git pull --rebase` or attempt to replay local commits.
-- Prefer a simple merge of `origin/main` into the current branch, keeping our local history intact.
+- Prefer a simple merge of `origin/webui-main` into the current branch, keeping our local history intact.
 - If the remote only has trivial release metadata changes (e.g., `codex-cli/package.json` version bumps), adopt the remote version for those files and keep ours for everything else unless the user specifies otherwise.
 - If in doubt or if conflicts touch non-trivial areas, pause and ask before resolving.
 
@@ -75,7 +75,7 @@ Quick procedure (merge-only):
   - Review: `git --no-pager diff --stat` and `git --no-pager diff`
   - Stage + commit: `git add -A && git commit -m "<descriptive message of local changes>"`
 - Fetch remote: `git fetch origin`
-- Merge without auto-commit: `git merge --no-ff --no-commit origin/main` (stops before committing so you can choose sides)
+- Merge without auto-commit: `git merge --no-ff --no-commit origin/webui-main` (stops before committing so you can choose sides)
 - Resolve policy:
   - Default to ours: `git checkout --ours .`
   - Take remote for trivial package/version files as needed, e.g.: `git checkout --theirs codex-cli/package.json`
@@ -139,7 +139,7 @@ This architecture separates concerns between execution logic (core), UI state ma
 ### Monitor Release Workflows After Pushing
 
 - Use `scripts/wait-for-gh-run.sh` to follow GitHub Actions releases without spamming manual `gh` commands.
-- Typical release check right after a push: `scripts/wait-for-gh-run.sh --workflow Release --branch main`.
+- Typical release check right after a push: `scripts/wait-for-gh-run.sh --workflow Release --branch webui-main`.
 - If you already know the run ID (e.g., from webhook output), run `scripts/wait-for-gh-run.sh --run <run-id>`.
 - Adjust the poll cadence via `--interval <seconds>` (defaults to 8). The script exits 0 on success and 1 on failure, so it can gate local automation.
 - Pass `--failure-logs` to automatically dump logs for any job that does not finish successfully.
