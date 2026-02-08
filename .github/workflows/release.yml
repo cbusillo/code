@@ -538,6 +538,8 @@ jobs:
           while IFS= read -r -d '' f; do
             cp "$f" release-assets/
           done < <(find artifacts -type f -name 'code-*' -print0)
+          cp scripts/install.sh release-assets/install.sh
+          chmod +x release-assets/install.sh
           # Show what we collected
           ls -la release-assets/ || true
 
