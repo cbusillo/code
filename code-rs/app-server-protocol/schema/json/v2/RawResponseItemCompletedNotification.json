@@ -65,69 +65,10 @@
         }
       ]
     },
-    "FunctionCallOutputBody": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/FunctionCallOutputContentItem"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "FunctionCallOutputContentItem": {
-      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
-      "oneOf": [
-        {
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "input_text"
-              ],
-              "title": "InputTextFunctionCallOutputContentItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "text",
-            "type"
-          ],
-          "title": "InputTextFunctionCallOutputContentItem",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "image_url": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "input_image"
-              ],
-              "title": "InputImageFunctionCallOutputContentItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "image_url",
-            "type"
-          ],
-          "title": "InputImageFunctionCallOutputContentItem",
-          "type": "object"
-        }
-      ]
-    },
     "FunctionCallOutputPayload": {
-      "description": "The payload we send back to OpenAI when reporting a tool call result.\n\n`body` serializes directly as the wire value for `function_call_output.output`. `success` remains internal metadata for downstream handling.",
       "properties": {
-        "body": {
-          "$ref": "#/definitions/FunctionCallOutputBody"
+        "content": {
+          "type": "string"
         },
         "success": {
           "type": [
@@ -137,7 +78,7 @@
         }
       },
       "required": [
-        "body"
+        "content"
       ],
       "type": "object"
     },

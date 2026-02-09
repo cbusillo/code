@@ -19,40 +19,47 @@
         {
           "description": "No restrictions whatsoever. Use with caution.",
           "properties": {
-            "type": {
+            "mode": {
               "enum": [
                 "danger-full-access"
               ],
-              "title": "DangerFullAccessSandboxPolicyType",
+              "title": "ModeSandboxPolicyMode",
               "type": "string"
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "DangerFullAccessSandboxPolicy",
+          "title": "ModeSandboxPolicy",
           "type": "object"
         },
         {
           "description": "Read-only access to the entire file-system.",
           "properties": {
-            "type": {
+            "mode": {
               "enum": [
                 "read-only"
               ],
-              "title": "ReadOnlySandboxPolicyType",
+              "title": "ModeSandboxPolicy2Mode",
               "type": "string"
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "ReadOnlySandboxPolicy",
+          "title": "ModeSandboxPolicy2",
           "type": "object"
         },
         {
           "description": "Indicates the process is already in an external sandbox. Allows full disk access while honoring the provided network setting.",
           "properties": {
+            "mode": {
+              "enum": [
+                "external-sandbox"
+              ],
+              "title": "ModeSandboxPolicy3Mode",
+              "type": "string"
+            },
             "network_access": {
               "allOf": [
                 {
@@ -61,24 +68,22 @@
               ],
               "default": "restricted",
               "description": "Whether the external sandbox permits outbound network traffic."
-            },
-            "type": {
-              "enum": [
-                "external-sandbox"
-              ],
-              "title": "ExternalSandboxSandboxPolicyType",
-              "type": "string"
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "ExternalSandboxSandboxPolicy",
+          "title": "ModeSandboxPolicy3",
           "type": "object"
         },
         {
           "description": "Same as `ReadOnly` but additionally grants write access to the current working directory (\"workspace\").",
           "properties": {
+            "allow_git_writes": {
+              "default": true,
+              "description": "When true, do not protect the top-level `.git` folder under a writable root. Defaults to true to match historical behavior that permits Git writes.",
+              "type": "boolean"
+            },
             "exclude_slash_tmp": {
               "default": false,
               "description": "When set to `true`, will NOT include the `/tmp` among the default writable roots on UNIX. Defaults to `false`.",
@@ -89,17 +94,17 @@
               "description": "When set to `true`, will NOT include the per-user `TMPDIR` environment variable among the default writable roots. Defaults to `false`.",
               "type": "boolean"
             },
+            "mode": {
+              "enum": [
+                "workspace-write"
+              ],
+              "title": "ModeSandboxPolicy4Mode",
+              "type": "string"
+            },
             "network_access": {
               "default": false,
               "description": "When set to `true`, outbound network access is allowed. `false` by default.",
               "type": "boolean"
-            },
-            "type": {
-              "enum": [
-                "workspace-write"
-              ],
-              "title": "WorkspaceWriteSandboxPolicyType",
-              "type": "string"
             },
             "writable_roots": {
               "description": "Additional folders (beyond cwd and possibly TMPDIR) that should be writable from within the sandbox.",
@@ -110,9 +115,9 @@
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "WorkspaceWriteSandboxPolicy",
+          "title": "ModeSandboxPolicy4",
           "type": "object"
         }
       ]

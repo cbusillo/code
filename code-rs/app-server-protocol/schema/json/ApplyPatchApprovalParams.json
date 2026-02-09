@@ -4,67 +4,78 @@
     "FileChange": {
       "oneOf": [
         {
+          "additionalProperties": false,
           "properties": {
-            "content": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "add"
+            "add": {
+              "properties": {
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content"
               ],
-              "title": "AddFileChangeType",
-              "type": "string"
+              "type": "object"
             }
           },
           "required": [
-            "content",
-            "type"
+            "add"
           ],
           "title": "AddFileChange",
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "properties": {
-            "content": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "delete"
+            "delete": {
+              "properties": {
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content"
               ],
-              "title": "DeleteFileChangeType",
-              "type": "string"
+              "type": "object"
             }
           },
           "required": [
-            "content",
-            "type"
+            "delete"
           ],
           "title": "DeleteFileChange",
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "properties": {
-            "move_path": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "enum": [
-                "update"
+            "update": {
+              "properties": {
+                "move_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "new_content": {
+                  "type": "string"
+                },
+                "original_content": {
+                  "type": "string"
+                },
+                "unified_diff": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "new_content",
+                "original_content",
+                "unified_diff"
               ],
-              "title": "UpdateFileChangeType",
-              "type": "string"
-            },
-            "unified_diff": {
-              "type": "string"
+              "type": "object"
             }
           },
           "required": [
-            "type",
-            "unified_diff"
+            "update"
           ],
           "title": "UpdateFileChange",
           "type": "object"

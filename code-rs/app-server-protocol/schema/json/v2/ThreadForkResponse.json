@@ -339,6 +339,9 @@
       ],
       "type": "string"
     },
+    "ConversationId": {
+      "type": "string"
+    },
     "FileUpdateChange": {
       "properties": {
         "diff": {
@@ -559,6 +562,10 @@
         },
         {
           "properties": {
+            "allowGitWrites": {
+              "default": false,
+              "type": "boolean"
+            },
             "excludeSlashTmp": {
               "default": false,
               "type": "boolean"
@@ -640,7 +647,7 @@
                   "type": "integer"
                 },
                 "parent_thread_id": {
-                  "$ref": "#/definitions/ThreadId"
+                  "$ref": "#/definitions/ConversationId"
                 }
               },
               "required": [
@@ -771,9 +778,6 @@
         "updatedAt"
       ],
       "type": "object"
-    },
-    "ThreadId": {
-      "type": "string"
     },
     "ThreadItem": {
       "oneOf": [

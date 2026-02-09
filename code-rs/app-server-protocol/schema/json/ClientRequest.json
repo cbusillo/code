@@ -501,69 +501,10 @@
       },
       "type": "object"
     },
-    "FunctionCallOutputBody": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/FunctionCallOutputContentItem"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "FunctionCallOutputContentItem": {
-      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
-      "oneOf": [
-        {
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "input_text"
-              ],
-              "title": "InputTextFunctionCallOutputContentItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "text",
-            "type"
-          ],
-          "title": "InputTextFunctionCallOutputContentItem",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "image_url": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "input_image"
-              ],
-              "title": "InputImageFunctionCallOutputContentItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "image_url",
-            "type"
-          ],
-          "title": "InputImageFunctionCallOutputContentItem",
-          "type": "object"
-        }
-      ]
-    },
     "FunctionCallOutputPayload": {
-      "description": "The payload we send back to OpenAI when reporting a tool call result.\n\n`body` serializes directly as the wire value for `function_call_output.output`. `success` remains internal metadata for downstream handling.",
       "properties": {
-        "body": {
-          "$ref": "#/definitions/FunctionCallOutputBody"
+        "content": {
+          "type": "string"
         },
         "success": {
           "type": [
@@ -573,7 +514,7 @@
         }
       },
       "required": [
-        "body"
+        "content"
       ],
       "type": "object"
     },
@@ -1921,6 +1862,10 @@
         },
         {
           "properties": {
+            "allowGitWrites": {
+              "default": false,
+              "type": "boolean"
+            },
             "excludeSlashTmp": {
               "default": false,
               "type": "boolean"
@@ -1962,40 +1907,47 @@
         {
           "description": "No restrictions whatsoever. Use with caution.",
           "properties": {
-            "type": {
+            "mode": {
               "enum": [
                 "danger-full-access"
               ],
-              "title": "DangerFullAccessSandboxPolicy2Type",
+              "title": "ModeSandboxPolicy2Mode",
               "type": "string"
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "DangerFullAccessSandboxPolicy2",
+          "title": "ModeSandboxPolicy2",
           "type": "object"
         },
         {
           "description": "Read-only access to the entire file-system.",
           "properties": {
-            "type": {
+            "mode": {
               "enum": [
                 "read-only"
               ],
-              "title": "ReadOnlySandboxPolicy2Type",
+              "title": "ModeSandboxPolicy22Mode",
               "type": "string"
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "ReadOnlySandboxPolicy2",
+          "title": "ModeSandboxPolicy22",
           "type": "object"
         },
         {
           "description": "Indicates the process is already in an external sandbox. Allows full disk access while honoring the provided network setting.",
           "properties": {
+            "mode": {
+              "enum": [
+                "external-sandbox"
+              ],
+              "title": "ModeSandboxPolicy23Mode",
+              "type": "string"
+            },
             "network_access": {
               "allOf": [
                 {
@@ -2004,24 +1956,22 @@
               ],
               "default": "restricted",
               "description": "Whether the external sandbox permits outbound network traffic."
-            },
-            "type": {
-              "enum": [
-                "external-sandbox"
-              ],
-              "title": "ExternalSandboxSandboxPolicy2Type",
-              "type": "string"
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "ExternalSandboxSandboxPolicy2",
+          "title": "ModeSandboxPolicy23",
           "type": "object"
         },
         {
           "description": "Same as `ReadOnly` but additionally grants write access to the current working directory (\"workspace\").",
           "properties": {
+            "allow_git_writes": {
+              "default": true,
+              "description": "When true, do not protect the top-level `.git` folder under a writable root. Defaults to true to match historical behavior that permits Git writes.",
+              "type": "boolean"
+            },
             "exclude_slash_tmp": {
               "default": false,
               "description": "When set to `true`, will NOT include the `/tmp` among the default writable roots on UNIX. Defaults to `false`.",
@@ -2032,17 +1982,17 @@
               "description": "When set to `true`, will NOT include the per-user `TMPDIR` environment variable among the default writable roots. Defaults to `false`.",
               "type": "boolean"
             },
+            "mode": {
+              "enum": [
+                "workspace-write"
+              ],
+              "title": "ModeSandboxPolicy24Mode",
+              "type": "string"
+            },
             "network_access": {
               "default": false,
               "description": "When set to `true`, outbound network access is allowed. `false` by default.",
               "type": "boolean"
-            },
-            "type": {
-              "enum": [
-                "workspace-write"
-              ],
-              "title": "WorkspaceWriteSandboxPolicy2Type",
-              "type": "string"
             },
             "writable_roots": {
               "description": "Additional folders (beyond cwd and possibly TMPDIR) that should be writable from within the sandbox.",
@@ -2053,9 +2003,9 @@
             }
           },
           "required": [
-            "type"
+            "mode"
           ],
-          "title": "WorkspaceWriteSandboxPolicy2",
+          "title": "ModeSandboxPolicy24",
           "type": "object"
         }
       ]

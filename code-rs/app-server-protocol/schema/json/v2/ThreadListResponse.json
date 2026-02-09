@@ -326,6 +326,9 @@
       ],
       "type": "string"
     },
+    "ConversationId": {
+      "type": "string"
+    },
     "FileUpdateChange": {
       "properties": {
         "diff": {
@@ -513,7 +516,7 @@
                   "type": "integer"
                 },
                 "parent_thread_id": {
-                  "$ref": "#/definitions/ThreadId"
+                  "$ref": "#/definitions/ConversationId"
                 }
               },
               "required": [
@@ -644,9 +647,6 @@
         "updatedAt"
       ],
       "type": "object"
-    },
-    "ThreadId": {
-      "type": "string"
     },
     "ThreadItem": {
       "oneOf": [

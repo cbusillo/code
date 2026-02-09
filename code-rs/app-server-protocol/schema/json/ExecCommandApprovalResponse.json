@@ -12,31 +12,6 @@
           "type": "string"
         },
         {
-          "additionalProperties": false,
-          "description": "User has approved this command and wants to apply the proposed execpolicy amendment so future matching commands are permitted.",
-          "properties": {
-            "approved_execpolicy_amendment": {
-              "properties": {
-                "proposed_execpolicy_amendment": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "proposed_execpolicy_amendment"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "approved_execpolicy_amendment"
-          ],
-          "title": "ApprovedExecpolicyAmendmentReviewDecision",
-          "type": "object"
-        },
-        {
           "description": "User has approved this command and wants to automatically approve any future identical instances (`command` and `cwd` match exactly) for the remainder of the session.",
           "enum": [
             "approved_for_session"

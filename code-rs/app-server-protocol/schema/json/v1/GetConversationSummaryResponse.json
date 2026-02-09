@@ -24,6 +24,9 @@
       },
       "type": "object"
     },
+    "ConversationId": {
+      "type": "string"
+    },
     "ConversationSummary": {
       "properties": {
         "cliVersion": {
@@ -127,7 +130,7 @@
                   "type": "integer"
                 },
                 "parent_thread_id": {
-                  "$ref": "#/definitions/ThreadId"
+                  "$ref": "#/definitions/ConversationId"
                 }
               },
               "required": [
