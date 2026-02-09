@@ -80,9 +80,27 @@ pub fn sandbox_network_env_var() -> &'static str {
 pub async fn format_with_current_shell(command: &str) -> Vec<String> {
     let command_args = shlex::split(command).unwrap_or_else(|| vec![command.to_string()]);
     let shell = code_core::shell::default_user_shell().await;
-    shell
+    let mut formatted = shell
         .format_default_shell_invocation(command_args.clone())
-        .unwrap_or(command_args)
+        .unwrap_or(command_args);
+
+    // Match runtime exec normalization on bash shells, which prepends `set +m;`
+    // to non-interactive scripts to suppress job-control noise.
+    if let [program, flag, script] = formatted.as_mut_slice() {
+        let is_bash = std::path::Path::new(program)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower == "bash" || lower == "bash.exe"
+            });
+        if is_bash && flag == "-lc" && !script.trim_start().starts_with("set +m") {
+            let original = script.clone();
+            *script = format!("set +m; {original}");
+        }
+    }
+
+    formatted
 }
 
 pub async fn format_with_current_shell_display(command: &str) -> String {
