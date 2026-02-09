@@ -1,6 +1,6 @@
 use anyhow::Result;
 use app_test_support::McpProcess;
-use app_test_support::create_fake_rollout;
+use app_test_support::create_fake_rollout_with_source;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
 use code_app_server_protocol::JSONRPCNotification;
@@ -13,6 +13,7 @@ use code_app_server_protocol::ThreadItem;
 use code_app_server_protocol::ThreadStartedNotification;
 use code_app_server_protocol::TurnStatus;
 use code_app_server_protocol::UserInput;
+use code_protocol::protocol::SessionSource as CoreSessionSource;
 use pretty_assertions::assert_eq;
 use std::path::Path;
 use tempfile::TempDir;
@@ -27,13 +28,14 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     create_config_toml(codex_home.path(), &server.uri())?;
 
     let preview = "Saved user message";
-    let conversation_id = create_fake_rollout(
+    let conversation_id = create_fake_rollout_with_source(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         preview,
         Some("mock_provider"),
         None,
+        CoreSessionSource::VSCode,
     )?;
 
     let original_path = codex_home
@@ -140,4 +142,3 @@ stream_max_retries = 0
         ),
     )
 }
-

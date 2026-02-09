@@ -22,6 +22,7 @@ use code_app_server_protocol::CollaborationModeListParams;
 use code_app_server_protocol::ConfigBatchWriteParams;
 use code_app_server_protocol::ConfigReadParams;
 use code_app_server_protocol::ConfigValueWriteParams;
+use code_app_server_protocol::CommandExecParams;
 use code_app_server_protocol::ExperimentalFeatureListParams;
 use code_app_server_protocol::FeedbackUploadParams;
 use code_app_server_protocol::ForkConversationParams;
@@ -37,8 +38,10 @@ use code_app_server_protocol::JSONRPCNotification;
 use code_app_server_protocol::JSONRPCRequest;
 use code_app_server_protocol::JSONRPCResponse;
 use code_app_server_protocol::ListConversationsParams;
+use code_app_server_protocol::ListMcpServerStatusParams;
 use code_app_server_protocol::LoginAccountParams;
 use code_app_server_protocol::LoginApiKeyParams;
+use code_app_server_protocol::McpServerOauthLoginParams;
 use code_app_server_protocol::MockExperimentalMethodParams;
 use code_app_server_protocol::ModelListParams;
 use code_app_server_protocol::NewConversationParams;
@@ -50,6 +53,10 @@ use code_app_server_protocol::SendUserMessageParams;
 use code_app_server_protocol::SendUserTurnParams;
 use code_app_server_protocol::ServerRequest;
 use code_app_server_protocol::SetDefaultModelParams;
+use code_app_server_protocol::SkillsConfigWriteParams;
+use code_app_server_protocol::SkillsListParams;
+use code_app_server_protocol::SkillsRemoteReadParams;
+use code_app_server_protocol::SkillsRemoteWriteParams;
 use code_app_server_protocol::ThreadArchiveParams;
 use code_app_server_protocol::ThreadCompactStartParams;
 use code_app_server_protocol::ThreadForkParams;
@@ -350,6 +357,74 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("feedback/upload", params).await
+    }
+
+    /// Send a `skills/list` JSON-RPC request.
+    pub async fn send_skills_list_request(
+        &mut self,
+        params: SkillsListParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("skills/list", params).await
+    }
+
+    /// Send a `skills/config/write` JSON-RPC request.
+    pub async fn send_skills_config_write_request(
+        &mut self,
+        params: SkillsConfigWriteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("skills/config/write", params).await
+    }
+
+    /// Send a `skills/remote/read` JSON-RPC request.
+    pub async fn send_skills_remote_read_request(
+        &mut self,
+        params: SkillsRemoteReadParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("skills/remote/read", params).await
+    }
+
+    /// Send a `skills/remote/write` JSON-RPC request.
+    pub async fn send_skills_remote_write_request(
+        &mut self,
+        params: SkillsRemoteWriteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("skills/remote/write", params).await
+    }
+
+    /// Send a `config/mcpServer/reload` JSON-RPC request.
+    pub async fn send_mcp_server_refresh_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request("config/mcpServer/reload", None).await
+    }
+
+    /// Send a `mcpServerStatus/list` JSON-RPC request.
+    pub async fn send_mcp_server_status_list_request(
+        &mut self,
+        params: ListMcpServerStatusParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("mcpServerStatus/list", params).await
+    }
+
+    /// Send a `mcpServer/oauth/login` JSON-RPC request.
+    pub async fn send_mcp_server_oauth_login_request(
+        &mut self,
+        params: McpServerOauthLoginParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("mcpServer/oauth/login", params).await
+    }
+
+    /// Send a `command/exec` JSON-RPC request.
+    pub async fn send_command_exec_request(
+        &mut self,
+        params: CommandExecParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("command/exec", params).await
     }
 
     /// Send a `userInfo` JSON-RPC request.
@@ -842,4 +917,3 @@ impl McpProcess {
         }
     }
 }
-

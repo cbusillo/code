@@ -67,11 +67,12 @@ pub(crate) async fn run_fuzzy_file_search(
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.clone());
+                    let score = normalize_legacy_score(m.score, m.indices.as_ref());
                     let result = FuzzyFileSearchResult {
                         root: root.clone(),
                         path,
                         file_name,
-                        score: m.score,
+                        score,
                         indices: m.indices,
                     };
                     files.push(result);
@@ -93,4 +94,27 @@ pub(crate) async fn run_fuzzy_file_search(
     >(|f| f.score, |f| f.path.as_str()));
 
     files
+}
+
+fn normalize_legacy_score(score: u32, indices: Option<&Vec<u32>>) -> u32 {
+    let Some(indices) = indices else {
+        return score;
+    };
+    let Some(first) = indices.first().copied() else {
+        return score;
+    };
+    if first >= 4 {
+        return score;
+    }
+
+    let gaps = indices
+        .windows(2)
+        .filter(|pair| pair[1] > pair[0].saturating_add(1))
+        .count();
+    let gap_penalty = u32::try_from(gaps).unwrap_or(u32::MAX);
+    let prefix_bonus = 4_u32
+        .saturating_sub(first)
+        .saturating_sub(gap_penalty);
+
+    score.saturating_sub(prefix_bonus)
 }

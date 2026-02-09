@@ -489,9 +489,14 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
         std::process::exit(1);
     }
 
+    let preferred_auth = if config.using_chatgpt_auth {
+        code_app_server_protocol::AuthMode::Chatgpt
+    } else {
+        code_app_server_protocol::AuthMode::ApiKey
+    };
     let auth_manager = AuthManager::shared_with_mode_and_originator(
         config.code_home.clone(),
-        code_app_server_protocol::AuthMode::ApiKey,
+        preferred_auth,
         config.responses_originator_header.clone(),
     );
     let conversation_manager = ConversationManager::new(auth_manager.clone(), SessionSource::Exec);
@@ -2943,6 +2948,7 @@ mod tests {
             cli_version: "0.0.0-test".to_string(),
             instructions: None,
             source,
+            model_provider: None,
         };
 
         let session_line = RolloutLine {

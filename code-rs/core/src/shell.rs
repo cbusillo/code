@@ -116,7 +116,16 @@ fn format_shell_invocation_with_rc(
         .or_else(|| shlex::try_join(command.iter().map(String::as_str)).ok())?;
 
     let rc_command = if std::path::Path::new(rc_path).exists() {
-        format!("source {rc_path} && ({joined})")
+        if joined.contains('\n') {
+            let mut wrapped = format!("source {rc_path} && (\n{joined}");
+            if !joined.ends_with('\n') {
+                wrapped.push('\n');
+            }
+            wrapped.push(')');
+            wrapped
+        } else {
+            format!("source {rc_path} && ({joined})")
+        }
     } else {
         joined
     };
@@ -374,6 +383,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_with_profile_bash_heredoc_execution() {
+        use std::collections::HashMap;
+
+        use crate::exec::ExecParams;
+        use crate::exec::SandboxType;
+        use crate::exec::process_exec_tool_call;
+        use crate::protocol::SandboxPolicy;
+
+        let shell_path = "/bin/bash";
+        let temp_home = tempfile::tempdir().unwrap();
+        let bashrc_path = temp_home.path().join(".bashrc");
+        std::fs::write(&bashrc_path, "").unwrap();
+
+        let shell = Shell::Bash(BashShell {
+            shell_path: shell_path.to_string(),
+            bashrc_path: bashrc_path.to_str().unwrap().to_string(),
+        });
+
+        let heredoc_script = "cat <<'EOF'\nhello\nEOF".to_string();
+        let actual_cmd = shell
+            .format_default_shell_invocation(vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                heredoc_script,
+            ])
+            .unwrap();
+
+        let wrapped_script = &actual_cmd[2];
+        assert!(wrapped_script.contains("\nEOF\n)"));
+
+        let output = process_exec_tool_call(
+            ExecParams {
+                command: actual_cmd,
+                cwd: PathBuf::from(temp_home.path()),
+                timeout_ms: None,
+                env: HashMap::from([(
+                    "HOME".to_string(),
+                    temp_home.path().to_str().unwrap().to_string(),
+                )]),
+                with_escalated_permissions: None,
+                justification: None,
+            },
+            SandboxType::None,
+            &SandboxPolicy::DangerFullAccess,
+            temp_home.path(),
+            &None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.exit_code, 0, "output: {output:?}");
+        assert_eq!(output.stdout.text, "hello\n", "output: {output:?}");
     }
 }
 

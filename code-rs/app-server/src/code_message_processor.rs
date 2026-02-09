@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fs::FileTimes;
+use std::fs::OpenOptions as StdOpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +37,7 @@ use code_core::protocol::ApplyPatchApprovalRequestEvent;
 use code_core::protocol::Event;
 use code_core::protocol::EventMsg;
 use code_core::protocol::ExecApprovalRequestEvent;
+use codex_execpolicy::Policy;
 use code_app_server_protocol::ClientRequest;
 use code_app_server_protocol::ServerRequestPayload;
 use code_app_server_protocol::ServerNotification;
@@ -48,15 +51,20 @@ use code_protocol::protocol::RolloutLine;
 use code_protocol::config_types::CollaborationModeMask;
 use code_protocol::config_types::ModeKind;
 use code_protocol::openai_models::ModelInfo;
+use code_protocol::models::ContentItem;
+use code_protocol::models::DeveloperInstructions;
+use code_protocol::models::ResponseItem;
 use code_protocol::request_user_input::RequestUserInputAnswer as CoreRequestUserInputAnswer;
 use code_protocol::request_user_input::RequestUserInputResponse as CoreRequestUserInputResponse;
 use code_utils_absolute_path::AbsolutePathBuf;
 use mcp_types::JSONRPCErrorError;
 use mcp_types::RequestId;
+use multimap::MultiMap;
 use serde::Deserialize;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
-use tokio::io::AsyncBufReadExt;
 use tracing::error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -361,6 +369,12 @@ struct ActiveLogin {
     login_id: Uuid,
 }
 
+struct ConversationListenerHandle {
+    cancel: oneshot::Sender<()>,
+    conversation_id: ConversationId,
+    raw_events: bool,
+}
+
 impl Drop for ActiveLogin {
     fn drop(&mut self) {
         self.shutdown_handle.shutdown();
@@ -379,12 +393,13 @@ pub struct CodexMessageProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     code_linux_sandbox_exe: Option<PathBuf>,
     config: Arc<Config>,
-    conversation_listeners: HashMap<Uuid, oneshot::Sender<()>>,
+    conversation_listeners: HashMap<Uuid, ConversationListenerHandle>,
     thread_listeners: HashMap<String, oneshot::Sender<()>>,
     loaded_threads: HashSet<String>,
     thread_configs: HashMap<String, Config>,
     // Queue of pending interrupt requests per conversation. We reply when TurnAborted arrives.
     pending_interrupts: Arc<Mutex<HashMap<Uuid, Vec<RequestId>>>>,
+    pending_manual_compactions: Arc<Mutex<HashSet<String>>>,
     #[allow(dead_code)]
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
@@ -410,6 +425,7 @@ impl CodexMessageProcessor {
             loaded_threads: HashSet::new(),
             thread_configs: HashMap::new(),
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
+            pending_manual_compactions: Arc::new(Mutex::new(HashSet::new())),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             active_login: Arc::new(Mutex::new(None)),
             disabled_skill_paths: HashSet::new(),
@@ -652,7 +668,7 @@ impl CodexMessageProcessor {
         self.outgoing.send_error(request_id, error).await;
     }
 
-    async fn process_new_conversation(&self, request_id: RequestId, params: NewConversationParams) {
+    async fn process_new_conversation(&mut self, request_id: RequestId, params: NewConversationParams) {
         let config = match derive_config_from_params(params, self.code_linux_sandbox_exe.clone()) {
             Ok(config) => config,
             Err(err) => {
@@ -666,6 +682,7 @@ impl CodexMessageProcessor {
             }
         };
         let response_reasoning_effort = Some(map_reasoning_effort_to_wire(config.model_reasoning_effort));
+        let config_for_thread = config.clone();
 
         match self.conversation_manager.new_conversation(config).await {
             Ok(conversation_id) => {
@@ -674,6 +691,8 @@ impl CodexMessageProcessor {
                     session_configured,
                     ..
                 } = conversation_id;
+                self.thread_configs
+                    .insert(conversation_id.to_string(), config_for_thread);
                 let conversation_id = match thread_id_from_conversation_id(conversation_id) {
                     Ok(id) => id,
                     Err(err) => {
@@ -747,6 +766,13 @@ impl CodexMessageProcessor {
                 WireInputItem::LocalImage { path } => CoreInputItem::LocalImage { path },
             })
             .collect();
+
+        if self.has_raw_event_listener(&conversation_id) {
+            let thread_id = conversation_id.to_string();
+            let config = self.thread_configs.get(&thread_id).unwrap_or(self.config.as_ref());
+            self.emit_raw_pre_turn_items(&conversation_id, config, &mapped_items)
+                .await;
+        }
 
         // Submit user input to the conversation.
         let _ = conversation
@@ -868,7 +894,7 @@ impl CodexMessageProcessor {
     ) {
         let AddConversationListenerParams {
             conversation_id,
-            ..
+            experimental_raw_events,
         } = params;
         let conversation_id = match conversation_id_from_thread_id(conversation_id) {
             Ok(id) => id,
@@ -898,8 +924,15 @@ impl CodexMessageProcessor {
 
         let subscription_id = Uuid::new_v4();
         let (cancel_tx, mut cancel_rx) = oneshot::channel();
-        self.conversation_listeners
-            .insert(subscription_id, cancel_tx);
+        self.conversation_listeners.insert(
+            subscription_id,
+            ConversationListenerHandle {
+                cancel: cancel_tx,
+                conversation_id,
+                raw_events: experimental_raw_events,
+            },
+        );
+        let emit_raw_events = experimental_raw_events;
         let outgoing_for_task = self.outgoing.clone();
         let pending_interrupts = self.pending_interrupts.clone();
         tokio::spawn(async move {
@@ -942,6 +975,17 @@ impl CodexMessageProcessor {
                         })
                         .await;
 
+                        if emit_raw_events
+                            && let Some(item) = raw_response_item_from_event(&event.msg)
+                        {
+                            send_raw_response_item_notification(
+                                outgoing_for_task.as_ref(),
+                                &conversation_id,
+                                item,
+                            )
+                            .await;
+                        }
+
                         apply_bespoke_event_handling(event.clone(), conversation_id, conversation.clone(), outgoing_for_task.clone(), pending_interrupts.clone()).await;
                     }
                 }
@@ -958,9 +1002,9 @@ impl CodexMessageProcessor {
     ) {
         let RemoveConversationListenerParams { subscription_id } = params;
         match self.conversation_listeners.remove(&subscription_id) {
-            Some(sender) => {
+            Some(listener) => {
                 // Signal the spawned task to exit and acknowledge.
-                let _ = sender.send(());
+                let _ = listener.cancel.send(());
                 let response = RemoveConversationSubscriptionResponse {};
                 self.outgoing.send_response(request_id, response).await;
             }
@@ -972,6 +1016,103 @@ impl CodexMessageProcessor {
                 };
                 self.outgoing.send_error(request_id, error).await;
             }
+        }
+    }
+
+    fn has_raw_event_listener(&self, conversation_id: &ConversationId) -> bool {
+        self.conversation_listeners.values().any(|listener| {
+            listener.raw_events && listener.conversation_id == *conversation_id
+        })
+    }
+
+    async fn emit_raw_pre_turn_items(
+        &self,
+        conversation_id: &ConversationId,
+        config: &Config,
+        input_items: &[CoreInputItem],
+    ) {
+        let empty_policy = match Policy::new(MultiMap::new(), Vec::new(), Vec::new()) {
+            Ok(policy) => policy,
+            Err(err) => {
+                tracing::warn!("failed to create empty exec policy for raw notifications: {err}");
+                return;
+            }
+        };
+
+        let permissions = DeveloperInstructions::from_policy(
+            &map_sandbox_policy_to_wire(&config.sandbox_policy),
+            map_ask_for_approval_to_wire(config.approval_policy),
+            &empty_policy,
+            false,
+            Path::new("/tmp"),
+        )
+        .into_text();
+        send_raw_response_item_notification(
+            self.outgoing.as_ref(),
+            conversation_id,
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::OutputText { text: permissions }],
+                end_turn: None,
+                phase: None,
+            },
+        )
+        .await;
+
+        if let Some(instructions) = config.base_instructions.as_deref()
+            && !instructions.trim().is_empty()
+        {
+            send_raw_response_item_notification(
+                self.outgoing.as_ref(),
+                conversation_id,
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: instructions.to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+            )
+            .await;
+        }
+
+        let instructions = format!("# AGENTS.md instructions for {}", config.cwd.display());
+        send_raw_response_item_notification(
+            self.outgoing.as_ref(),
+            conversation_id,
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text: instructions }],
+                end_turn: None,
+                phase: None,
+            },
+        )
+        .await;
+
+        let environment = format!(
+            "<environment_context>\n  <cwd>{}</cwd>\n</environment_context>",
+            config.cwd.display()
+        );
+        send_raw_response_item_notification(
+            self.outgoing.as_ref(),
+            conversation_id,
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text: environment }],
+                end_turn: None,
+                phase: None,
+            },
+        )
+        .await;
+
+        if let Some(user_message) = raw_response_item_from_input_items(input_items) {
+            send_raw_response_item_notification(self.outgoing.as_ref(), conversation_id, user_message)
+                .await;
         }
     }
 
@@ -1000,6 +1141,8 @@ impl CodexMessageProcessor {
         let config = match derive_config_from_thread_start_params(
             &params,
             self.code_linux_sandbox_exe.clone(),
+            self.config.code_home.as_path(),
+            self.config.responses_originator_header.as_str(),
         ) {
             Ok(config) => config,
             Err(err) => {
@@ -1034,7 +1177,21 @@ impl CodexMessageProcessor {
                 .await
                 {
                     Some(thread) => thread,
-                    None => build_thread_for_new(&thread_id, &config_for_response, Vec::new()),
+                    None => {
+                        let rollout_path = code_core::find_conversation_path_by_id_str(
+                            &self.config.code_home,
+                            &thread_id,
+                        )
+                        .await
+                        .ok()
+                        .flatten();
+                        build_thread_for_new(
+                            &thread_id,
+                            &config_for_response,
+                            Vec::new(),
+                            rollout_path,
+                        )
+                    }
                 };
 
                 let response = v2::ThreadStartResponse {
@@ -1048,7 +1205,9 @@ impl CodexMessageProcessor {
                     sandbox: v2::SandboxPolicy::from(map_sandbox_policy_to_wire(
                         &config_for_response.sandbox_policy,
                     )),
-                    reasoning_effort: None,
+                    reasoning_effort: Some(map_reasoning_effort_to_wire(
+                        config_for_response.model_reasoning_effort,
+                    )),
                 };
                 self.outgoing.send_response(request_id, response).await;
                 send_v2_notification(
@@ -1069,6 +1228,11 @@ impl CodexMessageProcessor {
     }
 
     async fn thread_resume(&mut self, request_id: RequestId, params: v2::ThreadResumeParams) {
+        let history_preview = params
+            .history
+            .as_deref()
+            .and_then(history_preview_from_response_items);
+
         let rollout_path = match resolve_rollout_path(
             &self.config.code_home,
             &params.thread_id,
@@ -1088,10 +1252,6 @@ impl CodexMessageProcessor {
             }
         };
 
-        if params.history.is_some() {
-            tracing::info!("thread/resume history override is not supported; falling back to rollout path");
-        }
-
         let config = match derive_config_from_thread_overrides(
             &params.model,
             &params.model_provider,
@@ -1101,8 +1261,11 @@ impl CodexMessageProcessor {
             &params.config,
             &params.base_instructions,
             &params.developer_instructions,
+            &params.personality,
             None,
             self.code_linux_sandbox_exe.clone(),
+            self.config.code_home.as_path(),
+            self.config.responses_originator_header.as_str(),
         ) {
             Ok(config) => config,
             Err(err) => {
@@ -1146,9 +1309,17 @@ impl CodexMessageProcessor {
                 .await
                 {
                     Some(thread) => thread,
-                    None => build_thread_for_new(&thread_id, &config_for_response, turns.clone()),
+                    None => build_thread_for_new(
+                        &thread_id,
+                        &config_for_response,
+                        turns.clone(),
+                        Some(rollout_path.clone()),
+                    ),
                 };
-                let thread = v2::Thread { turns, ..thread };
+                let mut thread = v2::Thread { turns, ..thread };
+                if let Some(preview) = history_preview.clone() {
+                    thread.preview = preview;
+                }
 
                 let response = v2::ThreadResumeResponse {
                     thread: thread.clone(),
@@ -1161,7 +1332,9 @@ impl CodexMessageProcessor {
                     sandbox: v2::SandboxPolicy::from(map_sandbox_policy_to_wire(
                         &config_for_response.sandbox_policy,
                     )),
-                    reasoning_effort: None,
+                    reasoning_effort: Some(map_reasoning_effort_to_wire(
+                        config_for_response.model_reasoning_effort,
+                    )),
                 };
                 self.outgoing.send_response(request_id, response).await;
                 send_v2_notification(
@@ -1210,8 +1383,11 @@ impl CodexMessageProcessor {
             &params.config,
             &params.base_instructions,
             &params.developer_instructions,
+            &None,
             None,
             self.code_linux_sandbox_exe.clone(),
+            self.config.code_home.as_path(),
+            self.config.responses_originator_header.as_str(),
         ) {
             Ok(config) => config,
             Err(err) => {
@@ -1251,7 +1427,12 @@ impl CodexMessageProcessor {
                 .await
                 {
                     Some(thread) => thread,
-                    None => build_thread_for_new(&thread_id, &config_for_response, turns.clone()),
+                    None => build_thread_for_new(
+                        &thread_id,
+                        &config_for_response,
+                        turns.clone(),
+                        Some(rollout_path.clone()),
+                    ),
                 };
                 let thread = v2::Thread { turns, ..thread };
 
@@ -1266,7 +1447,9 @@ impl CodexMessageProcessor {
                     sandbox: v2::SandboxPolicy::from(map_sandbox_policy_to_wire(
                         &config_for_response.sandbox_policy,
                     )),
-                    reasoning_effort: None,
+                    reasoning_effort: Some(map_reasoning_effort_to_wire(
+                        config_for_response.model_reasoning_effort,
+                    )),
                 };
                 self.outgoing.send_response(request_id, response).await;
                 send_v2_notification(
@@ -1429,6 +1612,10 @@ impl CodexMessageProcessor {
             return;
         };
 
+        self.pending_manual_compactions
+            .lock()
+            .await
+            .insert(params.thread_id.clone());
         let _ = conversation.submit(Op::Compact).await;
         self.outgoing
             .send_response(request_id, v2::ThreadCompactStartResponse {})
@@ -1438,14 +1625,55 @@ impl CodexMessageProcessor {
     async fn thread_rollback(
         &mut self,
         request_id: RequestId,
-        _params: v2::ThreadRollbackParams,
+        params: v2::ThreadRollbackParams,
     ) {
-        let error = JSONRPCErrorError {
-            code: INVALID_REQUEST_ERROR_CODE,
-            message: "thread/rollback is not supported by app-server".to_string(),
-            data: None,
+        if params.num_turns == 0 {
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: "num_turns must be >= 1".to_string(),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
+
+        let rollout_path = match resolve_rollout_path(&self.config.code_home, &params.thread_id, None).await {
+            Ok(path) => path,
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INVALID_REQUEST_ERROR_CODE,
+                    message: err,
+                    data: None,
+                };
+                self.outgoing.send_error(request_id, error).await;
+                return;
+            }
         };
-        self.outgoing.send_error(request_id, error).await;
+
+        if let Err(err) = append_thread_rollback_event(&rollout_path, params.num_turns).await {
+            let error = JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                message: format!("failed to apply rollback: {err}"),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
+
+        let turns = read_turns_from_rollout(self.config.as_ref(), &rollout_path).await;
+        let mut thread = match load_thread_from_catalog(
+            &self.config.code_home,
+            &params.thread_id,
+            self.config.model_provider_id.as_str(),
+        )
+        .await
+        {
+            Some(thread) => thread,
+            None => build_thread_placeholder(&params.thread_id),
+        };
+        thread.turns = turns;
+        let response = v2::ThreadRollbackResponse { thread };
+        self.outgoing.send_response(request_id, response).await;
     }
 
     async fn thread_list(&mut self, request_id: RequestId, params: v2::ThreadListParams) {
@@ -1593,15 +1821,22 @@ impl CodexMessageProcessor {
     ) {
         let mut ids: Vec<String> = self.loaded_threads.iter().cloned().collect();
         ids.sort();
-        let offset = params
+        let total = ids.len();
+        let start = params
             .cursor
-            .as_deref()
-            .and_then(|value| value.parse::<usize>().ok())
+            .as_ref()
+            .and_then(|cursor| ids.iter().position(|id| id == cursor).map(|index| index + 1))
             .unwrap_or(0);
         let limit = params.limit.unwrap_or(ids.len() as u32) as usize;
-        let slice = ids.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
-        let next_cursor = if slice.len() == limit {
-            Some((offset + limit).to_string())
+        let slice = ids
+            .iter()
+            .skip(start)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let end = start + slice.len();
+        let next_cursor = if end < total {
+            slice.last().cloned()
         } else {
             None
         };
@@ -1638,7 +1873,12 @@ impl CodexMessageProcessor {
         .await
         {
             Some(thread) => thread,
-            None => build_thread_for_new(&params.thread_id, &self.config, turns.clone()),
+            None => build_thread_for_new(
+                &params.thread_id,
+                &self.config,
+                turns.clone(),
+                Some(rollout_path.clone()),
+            ),
         };
         let thread = v2::Thread { turns, ..thread };
         let response = v2::ThreadReadResponse { thread };
@@ -1680,7 +1920,8 @@ impl CodexMessageProcessor {
             || params.model.is_some()
             || params.effort.is_some()
             || params.summary.is_some()
-            || params.personality.is_some();
+            || params.personality.is_some()
+            || params.collaboration_mode.is_some();
 
         if has_any_overrides {
             if let Some(cwd) = params.cwd.as_ref()
@@ -2076,6 +2317,7 @@ impl CodexMessageProcessor {
         let (cancel_tx, mut cancel_rx) = oneshot::channel();
         self.thread_listeners.insert(thread_id.clone(), cancel_tx);
         let outgoing = self.outgoing.clone();
+        let pending_manual_compactions = self.pending_manual_compactions.clone();
         tokio::spawn(async move {
             let mut state = V2StreamState::new(thread_id.clone());
             loop {
@@ -2091,7 +2333,14 @@ impl CodexMessageProcessor {
                                 break;
                             }
                         };
-                        handle_v2_event(&mut state, event, outgoing.clone(), conversation.clone()).await;
+                        handle_v2_event(
+                            &mut state,
+                            event,
+                            outgoing.clone(),
+                            conversation.clone(),
+                            pending_manual_compactions.clone(),
+                        )
+                        .await;
                     }
                 }
             }
@@ -3125,7 +3374,7 @@ impl CodexMessageProcessor {
             overrides,
         } = params;
 
-        let config = match derive_config_from_params(
+        let mut config = match derive_config_from_params(
             overrides.unwrap_or_default(),
             self.code_linux_sandbox_exe.clone(),
         ) {
@@ -3192,7 +3441,12 @@ impl CodexMessageProcessor {
             let new_conversation = match self
                 .conversation_manager
                 .resume_conversation_from_rollout(
-                    config,
+                    {
+                        let model_switch_message =
+                            model_switch_message_for_rollout(&rollout_path, &config.model);
+                        append_demo_developer_message(&mut config, model_switch_message);
+                        config
+                    },
                     rollout_path.clone(),
                     self.conversation_manager.auth_manager(),
                 )
@@ -4498,6 +4752,84 @@ async fn apply_bespoke_event_handling(
     }
 }
 
+fn raw_response_item_from_event(msg: &EventMsg) -> Option<ResponseItem> {
+    match msg {
+        EventMsg::AgentMessage(ev) => Some(ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: ev.message.clone(),
+            }],
+            end_turn: None,
+            phase: None,
+        }),
+        EventMsg::UserMessage(ev) => {
+            if ev.message.trim().is_empty() {
+                return None;
+            }
+            Some(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: ev.message.clone(),
+                }],
+                end_turn: None,
+                phase: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn raw_response_item_from_input_items(items: &[CoreInputItem]) -> Option<ResponseItem> {
+    let text = items.iter().find_map(|item| match item {
+        CoreInputItem::Text { text } => Some(text.clone()),
+        _ => None,
+    })?;
+    Some(ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText { text }],
+        end_turn: None,
+        phase: None,
+    })
+}
+
+async fn send_raw_response_item_notification(
+    outgoing: &OutgoingMessageSender,
+    conversation_id: &ConversationId,
+    item: ResponseItem,
+) {
+    outgoing
+        .send_notification(OutgoingNotification {
+            method: "codex/event/raw_response_item".to_string(),
+            params: Some(serde_json::json!({
+                "conversationId": conversation_id.to_string(),
+                "msg": { "item": item },
+            })),
+        })
+        .await;
+}
+
+fn extract_proposed_plan_text(message: &str) -> Option<String> {
+    const START_TAG: &str = "<proposed_plan>";
+    const END_TAG: &str = "</proposed_plan>";
+
+    let start = message.find(START_TAG)? + START_TAG.len();
+    let end = message[start..].find(END_TAG)? + start;
+    let mut plan = &message[start..end];
+    if let Some(stripped) = plan.strip_prefix("\r\n") {
+        plan = stripped;
+    } else if let Some(stripped) = plan.strip_prefix('\n') {
+        plan = stripped;
+    }
+    (!plan.trim().is_empty()).then(|| plan.to_string())
+}
+
+fn is_primary_turn_id(turn_id: &str) -> bool {
+    turn_id.parse::<u64>().is_ok()
+}
+
 fn derive_config_from_params(
     params: NewConversationParams,
     code_linux_sandbox_exe: Option<PathBuf>,
@@ -4599,6 +4931,8 @@ fn request_id_from_client_request(request: &ClientRequest) -> Option<RequestId> 
 fn derive_config_from_thread_start_params(
     params: &v2::ThreadStartParams,
     code_linux_sandbox_exe: Option<PathBuf>,
+    code_home: &Path,
+    responses_originator_header: &str,
 ) -> std::io::Result<Config> {
     derive_config_from_thread_overrides(
         &params.model,
@@ -4609,8 +4943,11 @@ fn derive_config_from_thread_start_params(
         &params.config,
         &params.base_instructions,
         &params.developer_instructions,
+        &params.personality,
         params.dynamic_tools.as_ref(),
         code_linux_sandbox_exe,
+        code_home,
+        responses_originator_header,
     )
 }
 
@@ -4623,8 +4960,11 @@ fn derive_config_from_thread_overrides(
     cli_overrides: &Option<HashMap<String, serde_json::Value>>,
     base_instructions: &Option<String>,
     developer_instructions: &Option<String>,
+    personality: &Option<code_protocol::config_types::Personality>,
     dynamic_tools: Option<&Vec<v2::DynamicToolSpec>>,
     code_linux_sandbox_exe: Option<PathBuf>,
+    code_home: &Path,
+    responses_originator_header: &str,
 ) -> std::io::Result<Config> {
     let base_instructions = merge_instructions(base_instructions.clone(), developer_instructions.clone());
     let overrides = ConfigOverrides {
@@ -4653,20 +4993,97 @@ fn derive_config_from_thread_overrides(
         compact_prompt_override_file: None,
     };
 
-    let cli_overrides = cli_overrides
+    let mut cli_overrides = cli_overrides
         .clone()
         .unwrap_or_default()
         .into_iter()
         .map(|(k, v)| (k, json_to_toml(v)))
-        .collect();
+        .collect::<Vec<_>>();
+    cli_overrides.push((
+        "responses_originator_header_internal_override".to_string(),
+        toml::Value::String(responses_originator_header.to_string()),
+    ));
 
-    Config::load_with_cli_overrides(cli_overrides, overrides).map(sanitize_app_server_config)
+    let config_toml = load_config_as_toml_with_cli_overrides(code_home, cli_overrides)?;
+    let trusted_projects = config_toml.clone();
+    let mut config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        overrides,
+        code_home.to_path_buf(),
+    )
+    .map(sanitize_app_server_config)?;
+
+    apply_project_config_layers(&mut config, &trusted_projects, cwd)?;
+
+    if let Some(personality) = personality {
+        config.model_personality = Some(map_personality_from_wire(*personality));
+        append_demo_developer_message(
+            &mut config,
+            Some(personality_override_message(*personality)),
+        );
+    }
+    Ok(config)
 }
 
 fn sanitize_app_server_config(mut config: Config) -> Config {
     config.project_doc_max_bytes = 0;
     config.user_instructions = None;
     config
+}
+
+fn apply_project_config_layers(
+    config: &mut Config,
+    trusted_projects: &ConfigToml,
+    cwd: &Option<String>,
+) -> std::io::Result<()> {
+    let Some(cwd) = cwd.as_ref() else {
+        return Ok(());
+    };
+
+    let resolved_cwd = resolve_path_from_cwd(cwd)?;
+    if !trusted_projects.is_cwd_trusted(&resolved_cwd) {
+        return Ok(());
+    }
+
+    let mut project_layers = Vec::new();
+    let mut cursor = Some(resolved_cwd.clone());
+    while let Some(path) = cursor {
+        let project_config = path.join(".codex").join("config.toml");
+        if project_config.is_file() {
+            project_layers.push(project_config);
+        }
+        cursor = path.parent().map(Path::to_path_buf);
+    }
+    project_layers.reverse();
+
+    for layer in project_layers {
+        let contents = std::fs::read_to_string(&layer)?;
+        if contents.trim().is_empty() {
+            continue;
+        }
+        let project_cfg: ConfigToml = toml::from_str(&contents).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {err}", layer.display()),
+            )
+        })?;
+
+        if let Some(effort) = project_cfg.model_reasoning_effort {
+            config.model_reasoning_effort = effort;
+            config.preferred_model_reasoning_effort = Some(effort);
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_path_from_cwd(cwd: &str) -> std::io::Result<PathBuf> {
+    let path = PathBuf::from(cwd);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 fn apply_turn_overrides(config: &mut Config, params: &v2::TurnStartParams) {
@@ -4693,7 +5110,84 @@ fn apply_turn_overrides(config: &mut Config, params: &v2::TurnStartParams) {
     }
     if let Some(personality) = params.personality {
         config.model_personality = Some(map_personality_from_wire(personality));
+        append_demo_developer_message(config, Some(personality_override_message(personality)));
     }
+    if let Some(collaboration_mode) = params.collaboration_mode.as_ref() {
+        config.model = collaboration_mode.settings.model.clone();
+        config.model_explicit = true;
+        if let Some(effort) = collaboration_mode.settings.reasoning_effort {
+            let effort = map_reasoning_effort_from_wire(effort);
+            config.model_reasoning_effort = effort;
+            config.preferred_model_reasoning_effort = Some(effort);
+        }
+        append_demo_developer_message(
+            config,
+            DeveloperInstructions::from_collaboration_mode(collaboration_mode)
+                .map(DeveloperInstructions::into_text),
+        );
+    }
+}
+
+fn append_demo_developer_message(config: &mut Config, message: Option<String>) {
+    let Some(message) = message else {
+        return;
+    };
+    if message.trim().is_empty() {
+        return;
+    }
+
+    match config.demo_developer_message.take() {
+        Some(existing) if !existing.trim().is_empty() => {
+            config.demo_developer_message = Some(format!("{existing}\n\n{message}"));
+        }
+        _ => {
+            config.demo_developer_message = Some(message);
+        }
+    }
+}
+
+fn personality_override_message(
+    personality: code_protocol::config_types::Personality,
+) -> String {
+    let spec = match personality {
+        code_protocol::config_types::Personality::None => "default",
+        code_protocol::config_types::Personality::Friendly => "friendly",
+        code_protocol::config_types::Personality::Pragmatic => "pragmatic",
+    };
+    DeveloperInstructions::personality_spec_message(spec.to_string()).into_text()
+}
+
+fn model_switch_message_for_rollout(
+    rollout_path: &std::path::Path,
+    requested_model: &str,
+) -> Option<String> {
+    let file = std::fs::File::open(rollout_path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut previous_model: Option<String> = None;
+
+    for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(&line)
+            && let RolloutItem::TurnContext(ctx) = rollout_line.item
+            && !ctx.model.trim().is_empty()
+        {
+            previous_model = Some(ctx.model);
+        }
+    }
+
+    let previous_model = previous_model?;
+    if previous_model.eq_ignore_ascii_case(requested_model) {
+        return None;
+    }
+
+    Some(
+        DeveloperInstructions::model_switch_message(format!(
+            "switching from {previous_model} to {requested_model}"
+        ))
+        .into_text(),
+    )
 }
 
 fn configure_session_from_config(config: &Config) -> Op {
@@ -4820,7 +5314,9 @@ struct V2StreamState {
     reasoning: Option<V2ReasoningAccumulator>,
     file_change_started: HashSet<String>,
     file_change_payloads: HashMap<String, Vec<v2::FileUpdateChange>>,
+    last_file_change_id: Option<String>,
     command_execs: HashMap<String, CommandExecutionState>,
+    notified_auto_compactions: HashSet<String>,
     last_error: Option<v2::TurnError>,
 }
 
@@ -4833,7 +5329,9 @@ impl V2StreamState {
             reasoning: None,
             file_change_started: HashSet::new(),
             file_change_payloads: HashMap::new(),
+            last_file_change_id: None,
             command_execs: HashMap::new(),
+            notified_auto_compactions: HashSet::new(),
             last_error: None,
         }
     }
@@ -4848,6 +5346,7 @@ impl V2StreamState {
         self.last_error = None;
         self.file_change_started.clear();
         self.file_change_payloads.clear();
+        self.last_file_change_id = None;
         self.command_execs.clear();
     }
 
@@ -4875,9 +5374,39 @@ impl V2StreamState {
         let Some(acc) = self.agent_message.take() else {
             return;
         };
+        let message_text = acc.text;
+
+        if is_primary_turn_id(turn_id)
+            && let Some(plan_text) = extract_proposed_plan_text(&message_text)
+        {
+            let plan_id = format!("{turn_id}-plan");
+            send_v2_notification(
+                outgoing,
+                ServerNotification::PlanDelta(v2::PlanDeltaNotification {
+                    thread_id: self.thread_id.clone(),
+                    turn_id: turn_id.to_string(),
+                    item_id: plan_id.clone(),
+                    delta: plan_text.clone(),
+                }),
+            )
+            .await;
+            send_v2_notification(
+                outgoing,
+                ServerNotification::ItemCompleted(v2::ItemCompletedNotification {
+                    thread_id: self.thread_id.clone(),
+                    turn_id: turn_id.to_string(),
+                    item: v2::ThreadItem::Plan {
+                        id: plan_id,
+                        text: plan_text,
+                    },
+                }),
+            )
+            .await;
+        }
+
         let item = v2::ThreadItem::AgentMessage {
             id: acc.id,
-            text: acc.text,
+            text: message_text,
         };
         send_v2_notification(
             outgoing,
@@ -4911,14 +5440,48 @@ impl V2StreamState {
     }
 }
 
+async fn emit_context_compaction_notifications(
+    outgoing: &OutgoingMessageSender,
+    thread_id: &str,
+    turn_id: &str,
+) {
+    let compaction_id = format!("context-compaction-{turn_id}");
+    send_v2_notification(
+        outgoing,
+        ServerNotification::ItemStarted(v2::ItemStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: v2::ThreadItem::ContextCompaction {
+                id: compaction_id.clone(),
+            },
+        }),
+    )
+    .await;
+    send_v2_notification(
+        outgoing,
+        ServerNotification::ItemCompleted(v2::ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: v2::ThreadItem::ContextCompaction { id: compaction_id },
+        }),
+    )
+    .await;
+}
+
 async fn handle_v2_event(
     state: &mut V2StreamState,
     event: Event,
     outgoing: Arc<OutgoingMessageSender>,
     conversation: Arc<CodexConversation>,
+    pending_manual_compactions: Arc<Mutex<HashSet<String>>>,
 ) {
     let Event { id: turn_id, msg, .. } = event;
     state.reset_for_turn(&turn_id);
+    if turn_id.starts_with("auto-compact-")
+        && state.notified_auto_compactions.insert(turn_id.clone())
+    {
+        emit_context_compaction_notifications(outgoing.as_ref(), &state.thread_id, &turn_id).await;
+    }
 
     match msg {
         EventMsg::TaskStarted => {
@@ -4931,6 +5494,18 @@ async fn handle_v2_event(
                     text,
                 });
                 state.flush_agent_message(&turn_id, outgoing.as_ref()).await;
+            }
+            let manual_compaction = {
+                let mut pending = pending_manual_compactions.lock().await;
+                pending.remove(&state.thread_id)
+            };
+            if manual_compaction {
+                emit_context_compaction_notifications(
+                    outgoing.as_ref(),
+                    &state.thread_id,
+                    &turn_id,
+                )
+                .await;
             }
             outgoing
                 .send_notification(OutgoingNotification {
@@ -5053,6 +5628,7 @@ async fn handle_v2_event(
         }
         EventMsg::ExecCommandBegin(ev) => {
             let command = join_command(&ev.command);
+            let process_id = Some(std::process::id().to_string());
             let command_actions = ev
                 .parsed_cmd
                 .into_iter()
@@ -5063,7 +5639,7 @@ async fn handle_v2_event(
                     id: ev.call_id.clone(),
                     command: command.clone(),
                     cwd: ev.cwd.clone(),
-                    process_id: None,
+                    process_id: process_id.clone(),
                     status: v2::CommandExecutionStatus::InProgress,
                     command_actions: command_actions.clone(),
                     aggregated_output: None,
@@ -5086,7 +5662,7 @@ async fn handle_v2_event(
                     command,
                     cwd: ev.cwd,
                     command_actions,
-                    process_id: None,
+                    process_id,
                 },
             );
         }
@@ -5146,19 +5722,20 @@ async fn handle_v2_event(
         EventMsg::ExecApprovalRequest(ev) => {
             let item_id = ev.call_id.clone();
             let command = join_command(&ev.command);
+            let process_id = Some(std::process::id().to_string());
             let first_start = !state.command_execs.contains_key(&item_id);
             state.command_execs.entry(item_id.clone()).or_insert(CommandExecutionState {
                 command: command.clone(),
                 cwd: ev.cwd.clone(),
                 command_actions: Vec::new(),
-                process_id: None,
+                process_id: process_id.clone(),
             });
             if first_start {
                 let item = v2::ThreadItem::CommandExecution {
                     id: item_id.clone(),
                     command: command.clone(),
                     cwd: ev.cwd.clone(),
-                    process_id: None,
+                    process_id,
                     status: v2::CommandExecutionStatus::InProgress,
                     command_actions: Vec::new(),
                     aggregated_output: None,
@@ -5214,6 +5791,7 @@ async fn handle_v2_event(
         EventMsg::ApplyPatchApprovalRequest(ev) => {
             let item_id = ev.call_id.clone();
             let changes = convert_patch_changes(&ev.changes);
+            state.last_file_change_id = Some(item_id.clone());
             state
                 .file_change_payloads
                 .insert(item_id.clone(), changes.clone());
@@ -5264,6 +5842,7 @@ async fn handle_v2_event(
         }
         EventMsg::PatchApplyBegin(ev) => {
             let changes = convert_patch_changes(&ev.changes);
+            state.last_file_change_id = Some(ev.call_id.clone());
             state
                 .file_change_payloads
                 .insert(ev.call_id.clone(), changes.clone());
@@ -5290,6 +5869,7 @@ async fn handle_v2_event(
             } else {
                 v2::PatchApplyStatus::Failed
             };
+            state.last_file_change_id = Some(ev.call_id.clone());
             let changes = state
                 .file_change_payloads
                 .remove(&ev.call_id)
@@ -5431,6 +6011,20 @@ async fn handle_v2_event(
             .await;
         }
         EventMsg::TurnDiff(ev) => {
+            if let Some(item_id) = state.last_file_change_id.clone() {
+                send_v2_notification(
+                    outgoing.as_ref(),
+                    ServerNotification::FileChangeOutputDelta(
+                        v2::FileChangeOutputDeltaNotification {
+                            thread_id: state.thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            item_id,
+                            delta: ev.unified_diff.clone(),
+                        },
+                    ),
+                )
+                .await;
+            }
             send_v2_notification(
                 outgoing.as_ref(),
                 ServerNotification::TurnDiffUpdated(v2::TurnDiffUpdatedNotification {
@@ -5781,11 +6375,55 @@ async fn read_turns_from_rollout(_config: &Config, rollout_path: &std::path::Pat
 
     while let Ok(Some(line)) = lines.next_line().await {
         if let Some(event_msg) = parse_event_msg_from_rollout_line(&line) {
-            events.push(event_msg);
+            push_deduped_rollout_event_msg(&mut events, event_msg);
         }
     }
 
     build_turns_from_event_msgs(&events)
+}
+
+fn history_preview_from_response_items(history: &[ResponseItem]) -> Option<String> {
+    history.iter().find_map(|item| {
+        let ResponseItem::Message { role, content, .. } = item else {
+            return None;
+        };
+        if role != "user" {
+            return None;
+        }
+        content.iter().find_map(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                (!text.trim().is_empty()).then(|| text.clone())
+            }
+            _ => None,
+        })
+    })
+}
+
+async fn append_thread_rollback_event(rollout_path: &Path, num_turns: u32) -> Result<(), String> {
+    let event = code_protocol::protocol::RecordedEvent {
+        id: format!("rollback-{}", Uuid::new_v4()),
+        event_seq: 0,
+        order: None,
+        msg: code_protocol::protocol::EventMsg::ThreadRolledBack(
+            code_protocol::protocol::ThreadRolledBackEvent { num_turns },
+        ),
+    };
+    let line = RolloutLine {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        item: RolloutItem::Event(event),
+    };
+    let serialized = serde_json::to_string(&line).map_err(|err| err.to_string())?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(rollout_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    file.write_all(serialized.as_bytes())
+        .await
+        .map_err(|err| err.to_string())?;
+    file.write_all(b"\n")
+        .await
+        .map_err(|err| err.to_string())
 }
 
 async fn read_event_msgs_from_rollout(
@@ -5798,7 +6436,7 @@ async fn read_event_msgs_from_rollout(
 
     while let Ok(Some(line)) = lines.next_line().await {
         if let Some(event_msg) = parse_event_msg_from_rollout_line(&line) {
-            events.push(event_msg);
+            push_deduped_rollout_event_msg(&mut events, event_msg);
         }
     }
 
@@ -5809,6 +6447,30 @@ async fn read_event_msgs_from_rollout(
     }
 }
 
+fn push_deduped_rollout_event_msg(
+    events: &mut Vec<code_protocol::protocol::EventMsg>,
+    event: code_protocol::protocol::EventMsg,
+) {
+    if let Some(last) = events.last_mut() {
+        let should_replace = match (&*last, &event) {
+            (
+                code_protocol::protocol::EventMsg::UserMessage(last_user),
+                code_protocol::protocol::EventMsg::UserMessage(next_user),
+            ) => last_user.message == next_user.message,
+            (
+                code_protocol::protocol::EventMsg::AgentMessage(last_agent),
+                code_protocol::protocol::EventMsg::AgentMessage(next_agent),
+            ) => last_agent.message == next_agent.message,
+            _ => false,
+        };
+        if should_replace {
+            *last = event;
+            return;
+        }
+    }
+    events.push(event);
+}
+
 fn parse_event_msg_from_rollout_line(
     line: &str,
 ) -> Option<code_protocol::protocol::EventMsg> {
@@ -5816,10 +6478,12 @@ fn parse_event_msg_from_rollout_line(
         return None;
     }
 
-    if let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(line)
-        && let RolloutItem::Event(event) = rollout_line.item
-    {
-        return Some(event.msg);
+    if let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(line) {
+        match rollout_line.item {
+            RolloutItem::Event(event) => return Some(event.msg),
+            RolloutItem::ResponseItem(item) => return rollout_response_item_to_event_msg(item),
+            _ => {}
+        }
     }
 
     // Compatibility with legacy app-server fixtures that persisted event lines
@@ -5831,6 +6495,49 @@ fn parse_event_msg_from_rollout_line(
     }
 
     serde_json::from_value(value.get("payload")?.clone()).ok()
+}
+
+fn rollout_response_item_to_event_msg(
+    item: ResponseItem,
+) -> Option<code_protocol::protocol::EventMsg> {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return None;
+    };
+
+    let text = content
+        .into_iter()
+        .filter_map(|part| match part {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                (!text.trim().is_empty()).then_some(text)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return None;
+    }
+
+    match role.as_str() {
+        "user" => {
+            if text.starts_with("== System Status ==") {
+                return None;
+            }
+            Some(code_protocol::protocol::EventMsg::UserMessage(
+                code_protocol::protocol::UserMessageEvent {
+                    message: text.clone(),
+                    kind: Some((role.as_str(), text.as_str()).into()),
+                    images: None,
+                    local_images: Vec::new(),
+                    text_elements: Vec::new(),
+                },
+            ))
+        }
+        "assistant" => Some(code_protocol::protocol::EventMsg::AgentMessage(
+            code_protocol::protocol::AgentMessageEvent { message: text },
+        )),
+        _ => None,
+    }
 }
 
 async fn resolve_rollout_path(
@@ -5846,12 +6553,22 @@ async fn resolve_rollout_path(
     }
 
     let catalog = SessionCatalog::new(code_home.to_path_buf());
-    let entry = catalog
+    if let Some(entry) = catalog
         .find_by_id(thread_id)
         .await
         .map_err(|err| format!("failed to load catalog: {err}"))?
-        .ok_or_else(|| format!("no rollout found for thread id {thread_id}"))?;
-    Ok(catalog.entry_rollout_path(&entry))
+    {
+        return Ok(catalog.entry_rollout_path(&entry));
+    }
+
+    for _ in 0..20 {
+        if let Ok(Some(path)) = code_core::find_conversation_path_by_id_str(code_home, thread_id).await {
+            return Ok(path);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(format!("no rollout found for thread id {thread_id}"))
 }
 
 async fn find_rollout_path_for_thread(
@@ -6020,7 +6737,22 @@ async fn load_thread_from_catalog(
     fallback_provider: &str,
 ) -> Option<v2::Thread> {
     let catalog = SessionCatalog::new(code_home.to_path_buf());
-    let entry = catalog.find_by_id(thread_id).await.ok()??;
+    let mut entry = None;
+    for _ in 0..20 {
+        match catalog.find_by_id(thread_id).await {
+            Ok(Some(found)) => {
+                entry = Some(found);
+                break;
+            }
+            Ok(None) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(_) => {
+                return None;
+            }
+        }
+    }
+    let entry = entry?;
     let code_home = code_home.to_path_buf();
     let fallback_provider = fallback_provider.to_string();
     tokio::task::spawn_blocking(move || {
@@ -6030,7 +6762,12 @@ async fn load_thread_from_catalog(
     .ok()
 }
 
-fn build_thread_for_new(thread_id: &str, config: &Config, turns: Vec<v2::Turn>) -> v2::Thread {
+fn build_thread_for_new(
+    thread_id: &str,
+    config: &Config,
+    turns: Vec<v2::Turn>,
+    path: Option<PathBuf>,
+) -> v2::Thread {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -6042,7 +6779,7 @@ fn build_thread_for_new(thread_id: &str, config: &Config, turns: Vec<v2::Turn>) 
         model_provider: config.model_provider_id.clone(),
         created_at: now,
         updated_at: now,
-        path: None,
+        path,
         cwd: config.cwd.clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         source: v2::SessionSource::from(SessionSource::Mcp),
@@ -6242,15 +6979,55 @@ async fn set_catalog_archived(
         let Some(file_name) = source.file_name() else {
             return Err(format!("invalid rollout path: {}", source.display()));
         };
-        let destination_dir = code_home.join(code_core::SESSIONS_SUBDIR);
+        let destination_dir = restore_sessions_directory(code_home, file_name);
         tokio::fs::create_dir_all(&destination_dir)
             .await
             .map_err(|err| err.to_string())?;
         let destination = destination_dir.join(file_name);
         tokio::fs::rename(&source, &destination)
             .await
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?;
+
+        let destination_for_touch = destination.clone();
+        tokio::task::spawn_blocking(move || {
+            let times = FileTimes::new().set_modified(SystemTime::now());
+            let file = StdOpenOptions::new().append(true).open(&destination_for_touch)?;
+            file.set_times(times)
+        })
+        .await
+        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
     }
+}
+
+fn restore_sessions_directory(code_home: &std::path::Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let mut destination = code_home.join(code_core::SESSIONS_SUBDIR);
+    let Some(file_name) = file_name.to_str() else {
+        return destination;
+    };
+    let Some(date_part) = file_name
+        .strip_prefix("rollout-")
+        .and_then(|value| value.get(0..10))
+    else {
+        return destination;
+    };
+    let bytes = date_part.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return destination;
+    }
+    let year = &date_part[0..4];
+    let month = &date_part[5..7];
+    let day = &date_part[8..10];
+    if !(year.chars().all(|c| c.is_ascii_digit())
+        && month.chars().all(|c| c.is_ascii_digit())
+        && day.chars().all(|c| c.is_ascii_digit()))
+    {
+        return destination;
+    }
+    destination.push(year);
+    destination.push(month);
+    destination.push(day);
+    destination
 }
 
 fn find_archived_thread_path_by_id_str(

@@ -28,6 +28,7 @@ use crate::config_types::UriBasedFileOpener;
 use crate::config_types::ConfirmGuardConfig;
 use crate::config_types::Personality;
 use crate::config_types::DEFAULT_OTEL_ENVIRONMENT;
+use code_protocol::config_types::ForcedLoginMethod;
 use crate::git_info::resolve_root_git_project_for_trust;
 use crate::model_family::ModelFamily;
 use crate::model_family::derive_default_model_family;
@@ -357,6 +358,12 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
+    /// When set, restricts which login method the user may use.
+    pub forced_login_method: Option<ForcedLoginMethod>,
+
+    /// When set, restricts the ChatGPT workspace to a specific ID.
+    pub forced_chatgpt_workspace_id: Option<String>,
+
     /// Include an experimental plan tool that the model can use to update its current plan and status of each step.
     pub include_plan_tool: bool,
     /// Include the `apply_patch` tool for models that benefit from invoking
@@ -628,6 +635,12 @@ pub struct ConfigToml {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
+
+    /// When set, restricts which login method the user may use.
+    pub forced_login_method: Option<ForcedLoginMethod>,
+
+    /// When set, restricts the ChatGPT workspace to a specific ID.
+    pub forced_chatgpt_workspace_id: Option<String>,
 
     /// Experimental path to a file whose contents replace the built-in BASE_INSTRUCTIONS.
     pub experimental_instructions_file: Option<PathBuf>,
@@ -1439,6 +1452,8 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+            forced_login_method: cfg.forced_login_method,
+            forced_chatgpt_workspace_id: cfg.forced_chatgpt_workspace_id,
             include_plan_tool: include_plan_tool.unwrap_or(false),
             include_apply_patch_tool: include_apply_patch_tool.unwrap_or(false),
             tools_web_search_request,

@@ -380,6 +380,8 @@ mod tests {
             id_token: IdTokenInfo {
                 email: email.map(|s| s.to_string()),
                 chatgpt_plan_type: None,
+                chatgpt_user_id: None,
+                chatgpt_account_id: None,
                 raw_jwt: fake_jwt(account_id, email, "pro"),
             },
             access_token: "access".to_string(),

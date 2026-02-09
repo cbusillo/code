@@ -68,16 +68,53 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
+        if payload.message.starts_with("== System Status ==") {
+            return;
+        }
+        let incoming_content = self.build_user_inputs(payload);
+        if let Some(turn) = self.current_turn.as_mut()
+            && let [ThreadItem::UserMessage { content, .. }] = turn.items.as_mut_slice()
+            && primary_user_text(content) == primary_user_text(&incoming_content)
+        {
+            *content = incoming_content;
+            return;
+        }
         self.finish_current_turn();
         let mut turn = self.new_turn();
         let id = self.next_item_id();
-        let content = self.build_user_inputs(payload);
-        turn.items.push(ThreadItem::UserMessage { id, content });
+        turn.items.push(ThreadItem::UserMessage {
+            id,
+            content: incoming_content,
+        });
         self.current_turn = Some(turn);
     }
 
     fn handle_agent_message(&mut self, text: String) {
         if text.is_empty() {
+            return;
+        }
+
+        if self.current_turn.is_none() && !self.turns.is_empty() {
+            if self
+                .turns
+                .last()
+                .and_then(|turn| turn.items.last())
+                .and_then(thread_item_agent_text)
+                .is_some_and(|existing| existing == text)
+            {
+                return;
+            }
+
+            let id = self.next_item_id();
+            if let Some(turn) = self.turns.last_mut() {
+                turn.items.push(ThreadItem::AgentMessage { id, text });
+            }
+            return;
+        }
+
+        if let Some(ThreadItem::AgentMessage { text: existing, .. }) = self.ensure_turn().items.last()
+            && existing == &text
+        {
             return;
         }
 
@@ -229,6 +266,20 @@ impl ThreadHistoryBuilder {
             content.push(UserInput::LocalImage { path: path.clone() });
         }
         content
+    }
+}
+
+fn primary_user_text(content: &[UserInput]) -> Option<&str> {
+    content.iter().find_map(|item| match item {
+        UserInput::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn thread_item_agent_text(item: &ThreadItem) -> Option<&str> {
+    match item {
+        ThreadItem::AgentMessage { text, .. } => Some(text),
+        _ => None,
     }
 }
 
@@ -580,5 +631,56 @@ mod tests {
 
         let turns = build_turns_from_event_msgs(&events);
         assert_eq!(turns, Vec::<Turn>::new());
+    }
+
+    #[test]
+    fn rollback_followed_by_duplicate_stray_agent_message_does_not_create_new_turn() {
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "First".into(),
+                kind: None,
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Done".into(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "Second".into(),
+                kind: None,
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Done".into(),
+            }),
+            EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 1 }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Done".into(),
+            }),
+        ];
+
+        let turns = build_turns_from_event_msgs(&events);
+        let expected = vec![Turn {
+            id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            error: None,
+            items: vec![
+                ThreadItem::UserMessage {
+                    id: "item-1".into(),
+                    content: vec![UserInput::Text {
+                        text: "First".into(),
+                        text_elements: Vec::new(),
+                    }],
+                },
+                ThreadItem::AgentMessage {
+                    id: "item-2".into(),
+                    text: "Done".into(),
+                },
+            ],
+        }];
+        assert_eq!(turns, expected);
     }
 }

@@ -56,7 +56,7 @@ pub fn create_fake_rollout_with_source(
     filename_ts: &str,
     meta_rfc3339: &str,
     preview: &str,
-    _model_provider: Option<&str>,
+    model_provider: Option<&str>,
     git_info: Option<GitInfo>,
     source: SessionSource,
 ) -> Result<String> {
@@ -79,6 +79,7 @@ pub fn create_fake_rollout_with_source(
         cli_version: "0.0.0".to_string(),
         instructions: None,
         source,
+        model_provider: model_provider.map(str::to_string),
     };
     let payload = serde_json::to_value(SessionMetaLine {
         meta,
@@ -104,11 +105,17 @@ pub fn create_fake_rollout_with_source(
         .to_string(),
         json!({
             "timestamp": meta_rfc3339,
-            "type":"event_msg",
+            "type":"event",
             "payload": {
-                "type":"user_message",
-                "message": preview,
-                "kind": "plain"
+                "id": "event-1",
+                "event_seq": 0,
+                "msg": {
+                    "type":"user_message",
+                    "message": preview,
+                    "kind": "plain",
+                    "local_images": [],
+                    "text_elements": []
+                }
             }
         })
         .to_string(),
@@ -130,7 +137,7 @@ pub fn create_fake_rollout_with_text_elements(
     meta_rfc3339: &str,
     preview: &str,
     text_elements: Vec<serde_json::Value>,
-    _model_provider: Option<&str>,
+    model_provider: Option<&str>,
     git_info: Option<GitInfo>,
 ) -> Result<String> {
     let uuid = Uuid::new_v4();
@@ -155,6 +162,7 @@ pub fn create_fake_rollout_with_text_elements(
         cli_version: "0.0.0".to_string(),
         instructions: None,
         source: SessionSource::Cli,
+        model_provider: model_provider.map(str::to_string),
     };
     let payload = serde_json::to_value(SessionMetaLine {
         meta,
@@ -180,12 +188,17 @@ pub fn create_fake_rollout_with_text_elements(
         .to_string(),
         json!( {
             "timestamp": meta_rfc3339,
-            "type":"event_msg",
+            "type":"event",
             "payload": {
-                "type":"user_message",
-                "message": preview,
-                "text_elements": text_elements,
-                "local_images": []
+                "id": "event-1",
+                "event_seq": 0,
+                "msg": {
+                    "type":"user_message",
+                    "message": preview,
+                    "kind": "plain",
+                    "text_elements": text_elements,
+                    "local_images": []
+                }
             }
         })
         .to_string(),

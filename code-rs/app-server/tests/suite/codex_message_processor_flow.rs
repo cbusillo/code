@@ -143,6 +143,20 @@ async fn test_codex_jsonrpc_conversation_flow() -> Result<()> {
     )
     .expect("task_started should deserialize to Event");
 
+    let request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let ServerRequest::ExecCommandApproval { request_id, .. } = request else {
+        panic!("expected ExecCommandApproval request, got: {request:?}");
+    };
+    mcp.send_response(
+        request_id,
+        serde_json::json!({ "decision": code_core::protocol::ReviewDecision::Approved }),
+    )
+    .await?;
+
     // Verify the task_finished notification for this turn is received.
     // Note this also ensures that the final request to the server was made.
     let task_finished_notification: JSONRPCNotification = loop {

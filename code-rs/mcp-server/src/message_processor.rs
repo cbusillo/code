@@ -19,7 +19,6 @@ use crate::session_store::SessionMap;
 use agent_client_protocol as acp;
 use anyhow::anyhow;
 use anyhow::Context as _;
-use code_protocol::mcp_protocol::ClientRequest;
 use code_protocol::ConversationId;
 use code_protocol::protocol::SessionSource;
 
@@ -34,6 +33,7 @@ use code_core::model_family::{derive_default_model_family, find_family_for_model
 use code_core::protocol::Submission;
 use code_core::protocol::Op;
 use code_app_server_protocol::AuthMode;
+use code_app_server_protocol::ClientRequest as AppServerClientRequest;
 use mcp_types::CallToolRequestParams;
 use mcp_types::CallToolResult;
 use mcp_types::ClientRequest as McpClientRequest;
@@ -74,9 +74,14 @@ impl MessageProcessor {
         config: Arc<Config>,
     ) -> Self {
         let outgoing = Arc::new(outgoing);
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
         let conversation_manager = Arc::new(ConversationManager::new(
@@ -106,7 +111,8 @@ impl MessageProcessor {
 
     pub(crate) async fn process_request(&mut self, request: JSONRPCRequest) {
         if let Ok(request_json) = serde_json::to_value(request.clone()) {
-            if let Ok(code_request) = serde_json::from_value::<ClientRequest>(request_json) {
+            if let Ok(code_request) = serde_json::from_value::<AppServerClientRequest>(request_json)
+            {
                 // If the request is a Codex request, handle it with the Codex
                 // message processor.
                 self.code_message_processor

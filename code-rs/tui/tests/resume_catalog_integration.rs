@@ -41,6 +41,7 @@ fn write_rollout(
         cli_version: "0.0.0-test".to_string(),
         instructions: None,
         source,
+        model_provider: None,
     };
 
     let session_line = RolloutLine {
@@ -201,6 +202,7 @@ fn resume_picker_excludes_current_path_and_empty_sessions() {
         cli_version: "0.0.0-test".to_string(),
         instructions: None,
         source: SessionSource::Cli,
+        model_provider: None,
     };
     let session_line = RolloutLine {
         timestamp: session_meta.timestamp.clone(),

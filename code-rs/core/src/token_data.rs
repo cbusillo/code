@@ -39,6 +39,8 @@ pub struct IdTokenInfo {
     /// (e.g., "free", "plus", "pro", "business", "enterprise", "edu").
     /// (Note: values may vary by backend.)
     pub(crate) chatgpt_plan_type: Option<PlanType>,
+    pub chatgpt_user_id: Option<String>,
+    pub chatgpt_account_id: Option<String>,
     pub raw_jwt: String,
 }
 
@@ -48,6 +50,10 @@ impl IdTokenInfo {
             PlanType::Known(plan) => format!("{plan:?}"),
             PlanType::Unknown(s) => s.clone(),
         })
+    }
+
+    pub fn get_chatgpt_account_id(&self) -> Option<String> {
+        self.chatgpt_account_id.clone()
     }
 }
 
@@ -91,6 +97,12 @@ struct IdClaims {
 struct AuthClaims {
     #[serde(default)]
     chatgpt_plan_type: Option<PlanType>,
+    #[serde(default)]
+    chatgpt_user_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    chatgpt_account_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -126,10 +138,17 @@ pub fn parse_id_token(id_token: &str) -> Result<IdTokenInfo, IdTokenInfoError> {
         );
     }
     let IdClaims { email, auth } = claims;
+    let chatgpt_plan_type = auth.as_ref().and_then(|a| a.chatgpt_plan_type.clone());
+    let chatgpt_user_id = auth
+        .as_ref()
+        .and_then(|a| a.chatgpt_user_id.clone().or_else(|| a.user_id.clone()));
+    let chatgpt_account_id = auth.and_then(|a| a.chatgpt_account_id);
 
     Ok(IdTokenInfo {
         email,
-        chatgpt_plan_type: auth.and_then(|a| a.chatgpt_plan_type),
+        chatgpt_plan_type,
+        chatgpt_user_id,
+        chatgpt_account_id,
         raw_jwt: id_token.to_string(),
     })
 }

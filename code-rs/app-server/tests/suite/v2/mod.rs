@@ -2,6 +2,7 @@ mod account;
 mod analytics;
 mod app_list;
 mod collaboration_mode_list;
+mod compat_endpoints;
 mod compaction;
 mod config_rpc;
 mod connection_handling_websocket;
@@ -26,4 +27,3 @@ mod thread_start;
 mod thread_unarchive;
 mod turn_interrupt;
 mod turn_start;
-

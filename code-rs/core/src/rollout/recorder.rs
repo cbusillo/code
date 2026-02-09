@@ -158,6 +158,7 @@ impl RolloutRecorder {
                         cli_version: env!("CARGO_PKG_VERSION").to_string(),
                         instructions,
                         source,
+                        model_provider: Some(config.model_provider_id.clone()),
                     }),
                 )
             }
@@ -337,10 +338,6 @@ impl RolloutRecorder {
             match serde_json::from_value::<RolloutLine>(v.clone()) {
                 Ok(rollout_line) => match rollout_line.item {
                     RolloutItem::SessionMeta(session_meta_line) => {
-                        tracing::error!(
-                            "Parsed conversation ID from rollout file: {:?}",
-                            session_meta_line.meta.id
-                        );
                         conversation_id = Some(session_meta_line.meta.id);
                         items.push(RolloutItem::SessionMeta(session_meta_line));
                     }

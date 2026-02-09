@@ -75,17 +75,12 @@ impl ConversationManager {
         let CodexSpawnOk {
             codex,
             init_id: _,
-            session_id,
+            session_id: _,
         } = Codex::spawn_with_auth_manager(config, Some(auth_manager.clone())).await?;
-        let conversation_id: code_protocol::ConversationId = session_id.into();
-        self.finalize_spawn(codex, conversation_id).await
+        self.finalize_spawn(codex).await
     }
 
-    async fn finalize_spawn(
-        &self,
-        codex: Codex,
-        conversation_id: ConversationId,
-    ) -> CodexResult<NewConversation> {
+    async fn finalize_spawn(&self, codex: Codex) -> CodexResult<NewConversation> {
         // The first event must be `SessionInitialized`. Validate and forward it
         // to the caller so that they can display it in the conversation
         // history.
@@ -100,6 +95,7 @@ impl ConversationManager {
                 return Err(CodexErr::SessionConfiguredNotFirstEvent);
             }
         };
+        let conversation_id: ConversationId = session_configured.session_id.into();
 
         let conversation = Arc::new(CodexConversation::new(codex));
         self.conversations
@@ -136,10 +132,9 @@ impl ConversationManager {
         let CodexSpawnOk {
             codex,
             init_id: _,
-            session_id,
+            session_id: _,
         } = Codex::spawn_with_auth_manager(config, Some(auth_manager.clone())).await?;
-        let conversation_id: code_protocol::ConversationId = session_id.into();
-        self.finalize_spawn(codex, conversation_id).await
+        self.finalize_spawn(codex).await
     }
 
     /// Removes the conversation from the manager's internal map, though the
@@ -175,19 +170,33 @@ impl ConversationManager {
         // Otherwise, create a temporary rollout with the truncated items and resume from it.
         let convo_id = code_protocol::ConversationId::new();
         let instructions = config.user_instructions.clone();
+        let rollout_items = history.get_rollout_items();
+        let session_source = rollout_items
+            .iter()
+            .find_map(|item| {
+                if let RolloutItem::SessionMeta(meta) = item {
+                    Some(meta.meta.source.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| self.session_source.clone());
         let recorder = RolloutRecorder::new(
             &config,
             crate::rollout::recorder::RolloutRecorderParams::new(
                 convo_id,
                 instructions,
-                self.session_source.clone(),
+                session_source,
             ),
         )
         .await
         .map_err(|e| CodexErr::Io(e))?;
 
         // Persist rollout items to seed the resumed conversation.
-        let rollout_items = history.get_rollout_items();
+        let rollout_items: Vec<RolloutItem> = rollout_items
+            .into_iter()
+            .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+            .collect();
         if !rollout_items.is_empty() {
             recorder
                 .record_items(&rollout_items)
@@ -202,10 +211,9 @@ impl ConversationManager {
         let CodexSpawnOk {
             codex,
             init_id: _,
-            session_id,
+            session_id: _,
         } = Codex::spawn_with_auth_manager(config, Some(self.auth_manager.clone())).await?;
-        let conversation_id: code_protocol::ConversationId = session_id.into();
-        self.finalize_spawn(codex, conversation_id).await
+        self.finalize_spawn(codex).await
     }
 }
 

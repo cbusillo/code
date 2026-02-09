@@ -4550,6 +4550,7 @@ impl ChatWidget<'_> {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn reasoning_preview(lines: &[Line<'static>]) -> String {
         const MAX_LINES: usize = 3;
         const MAX_CHARS: usize = 120;
@@ -6408,9 +6409,14 @@ impl ChatWidget<'_> {
 
         let (code_op_tx, code_op_rx) = unbounded_channel::<Op>();
 
+        let preferred_auth = if config.using_chatgpt_auth {
+            AuthMode::Chatgpt
+        } else {
+            AuthMode::ApiKey
+        };
         let auth_manager = AuthManager::shared_with_mode_and_originator(
             config.code_home.clone(),
-            AuthMode::ApiKey,
+            preferred_auth,
             config.responses_originator_header.clone(),
         );
 
@@ -39110,6 +39116,7 @@ impl WidgetRef for &ChatWidget<'_> {
         } else {
             None
         };
+        #[cfg(debug_assertions)]
         #[derive(Debug)]
         struct HeightMismatch {
             history_id: HistoryId,
@@ -39119,6 +39126,7 @@ impl WidgetRef for &ChatWidget<'_> {
             preview: String,
         }
 
+        #[cfg(debug_assertions)]
         let mut height_mismatches: Vec<HeightMismatch> = Vec::new();
         let is_collapsed_reasoning_at = |idx: usize| {
             if idx >= request_count {
@@ -39584,6 +39592,7 @@ impl WidgetRef for &ChatWidget<'_> {
 
         drop(ps_ref);
 
+        #[cfg(debug_assertions)]
         if let Some(first) = height_mismatches.first() {
             for mismatch in &height_mismatches {
                 tracing::error!(

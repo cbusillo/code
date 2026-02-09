@@ -41,6 +41,7 @@ fn write_rollout_transcript(
         cli_version: "0.0.0-test".to_string(),
         instructions: None,
         source,
+        model_provider: None,
     };
 
     let session_line = RolloutLine {

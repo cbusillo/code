@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Utc;
 use reqwest::StatusCode;
@@ -44,6 +45,31 @@ pub enum RefreshTokenErrorKind {
 pub struct RefreshTokenError {
     pub kind: RefreshTokenErrorKind,
     pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalAuthTokens {
+    pub access_token: String,
+    pub id_token: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalAuthRefreshReason {
+    Unauthorized,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalAuthRefreshContext {
+    pub reason: ExternalAuthRefreshReason,
+    pub previous_account_id: Option<String>,
+}
+
+#[async_trait]
+pub trait ExternalAuthRefresher: Send + Sync {
+    async fn refresh(
+        &self,
+        context: ExternalAuthRefreshContext,
+    ) -> std::io::Result<ExternalAuthTokens>;
 }
 
 impl RefreshTokenError {
@@ -248,6 +274,15 @@ impl CodexAuth {
     pub fn get_plan_type(&self) -> Option<String> {
         self.get_current_token_data()
             .and_then(|t| t.id_token.chatgpt_plan_type.as_ref().map(|p| p.as_string()))
+    }
+
+    pub fn get_email(&self) -> Option<String> {
+        self.get_current_token_data()
+            .and_then(|t| t.id_token.email.clone())
+    }
+
+    pub fn api_key(&self) -> Option<String> {
+        self.api_key.clone()
     }
 
     fn get_current_auth_json(&self) -> Option<AuthDotJson> {
@@ -973,6 +1008,10 @@ mod tests {
                     id_token: IdTokenInfo {
                         email: Some("user@example.com".to_string()),
                         chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Pro)),
+                        chatgpt_user_id: Some("user-12345".to_string()),
+                        chatgpt_account_id: Some(
+                            "bc3618e3-489d-4d49-9362-1561dc53ba53".to_string(),
+                        ),
                         raw_jwt: fake_jwt,
                     },
                     access_token: "test-access-token".to_string(),
@@ -1026,6 +1065,10 @@ mod tests {
                     id_token: IdTokenInfo {
                         email: Some("user@example.com".to_string()),
                         chatgpt_plan_type: Some(PlanType::Known(KnownPlan::Pro)),
+                        chatgpt_user_id: Some("user-12345".to_string()),
+                        chatgpt_account_id: Some(
+                            "bc3618e3-489d-4d49-9362-1561dc53ba53".to_string(),
+                        ),
                         raw_jwt: fake_jwt,
                     },
                     access_token: "test-access-token".to_string(),
@@ -1296,12 +1339,23 @@ mod tests {
 /// External modifications to `auth.json` will NOT be observed until
 /// `reload()` is called explicitly. This matches the design goal of avoiding
 /// different parts of the program seeing inconsistent auth data mid‑run.
-#[derive(Debug)]
 pub struct AuthManager {
     code_home: PathBuf,
     originator: String,
     inner: RwLock<CachedAuth>,
+    external_auth_refresher: RwLock<Option<Arc<dyn ExternalAuthRefresher>>>,
     enable_code_api_key_env: bool,
+}
+
+impl std::fmt::Debug for AuthManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthManager")
+            .field("code_home", &self.code_home)
+            .field("originator", &self.originator)
+            .field("inner", &self.inner)
+            .field("enable_code_api_key_env", &self.enable_code_api_key_env)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AuthManager {
@@ -1326,6 +1380,7 @@ impl AuthManager {
                 preferred_auth_mode: effective_mode,
                 auth,
             }),
+            external_auth_refresher: RwLock::new(None),
             enable_code_api_key_env: true,
         }
     }
@@ -1341,6 +1396,7 @@ impl AuthManager {
             code_home: PathBuf::new(),
             originator: "code_cli_rs".to_string(),
             inner: RwLock::new(cached),
+            external_auth_refresher: RwLock::new(None),
             enable_code_api_key_env: false,
         })
     }
@@ -1354,8 +1410,22 @@ impl AuthManager {
                 preferred_auth_mode,
                 auth: Some(auth),
             }),
+            external_auth_refresher: RwLock::new(None),
             enable_code_api_key_env: false,
         })
+    }
+
+    pub fn set_external_auth(&self, auth: CodexAuth) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.preferred_auth_mode = auth.mode;
+            guard.auth = Some(auth);
+        }
+    }
+
+    pub fn set_external_auth_refresher(&self, refresher: Arc<dyn ExternalAuthRefresher>) {
+        if let Ok(mut guard) = self.external_auth_refresher.write() {
+            *guard = Some(refresher);
+        }
     }
 
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
@@ -1431,6 +1501,51 @@ impl AuthManager {
             Some(a) => a,
             None => return Ok(None),
         };
+
+        if auth.mode == AuthMode::ChatgptAuthTokens {
+            let previous_account_id = auth
+                .get_token_data()
+                .await
+                .ok()
+                .and_then(|tokens| tokens.id_token.chatgpt_account_id);
+            let refresher = self
+                .external_auth_refresher
+                .read()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .ok_or_else(|| {
+                    RefreshTokenError::permanent(
+                        "ChatGPT auth tokens are managed externally and cannot be refreshed.",
+                    )
+                })?;
+            let refreshed_tokens = refresher
+                .refresh(ExternalAuthRefreshContext {
+                    reason: ExternalAuthRefreshReason::Unauthorized,
+                    previous_account_id,
+                })
+                .await
+                .map_err(|err| RefreshTokenError::permanent(err.to_string()))?;
+
+            let id_token = parse_id_token(&refreshed_tokens.id_token)
+                .map_err(|err| RefreshTokenError::permanent(format!("invalid id token: {err}")))?;
+            let auth_dot_json = AuthDotJson {
+                auth_mode: Some(AuthMode::ChatgptAuthTokens),
+                openai_api_key: None,
+                tokens: Some(TokenData {
+                    id_token,
+                    access_token: refreshed_tokens.access_token.clone(),
+                    refresh_token: String::new(),
+                    account_id: None,
+                }),
+                last_refresh: Some(Utc::now()),
+            };
+            let auth_file = get_auth_file(&self.code_home);
+            write_auth_json(&auth_file, &auth_dot_json)
+                .map_err(|err| RefreshTokenError::permanent(err.to_string()))?;
+            self.reload();
+            return Ok(Some(refreshed_tokens.access_token));
+        }
+
         match auth.refresh_token().await {
             Ok(token) => {
                 // Reload to pick up persisted changes.

@@ -294,7 +294,7 @@ client_request_definitions! {
     },
 
     McpServerRefresh => "config/mcpServer/reload" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v2::McpServerRefreshResponse,
     },
 
@@ -314,12 +314,12 @@ client_request_definitions! {
     },
 
     LogoutAccount => "account/logout" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v2::LogoutAccountResponse,
     },
 
     GetAccountRateLimits => "account/rateLimits/read" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v2::GetAccountRateLimitsResponse,
     },
 
@@ -348,7 +348,7 @@ client_request_definitions! {
     },
 
     ConfigRequirementsRead => "configRequirements/read" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v2::ConfigRequirementsReadResponse,
     },
 
@@ -414,7 +414,7 @@ client_request_definitions! {
         response: v1::LoginApiKeyResponse,
     },
     LoginChatGpt {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v1::LoginChatGptResponse,
     },
     // DEPRECATED in favor of CancelLoginAccount
@@ -423,7 +423,7 @@ client_request_definitions! {
         response: v1::CancelLoginChatGptResponse,
     },
     LogoutChatGpt {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v1::LogoutChatGptResponse,
     },
     /// DEPRECATED in favor of GetAccount
@@ -432,7 +432,7 @@ client_request_definitions! {
         response: v1::GetAuthStatusResponse,
     },
     GetUserSavedConfig {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v1::GetUserSavedConfigResponse,
     },
     SetDefaultModel {
@@ -440,11 +440,11 @@ client_request_definitions! {
         response: v1::SetDefaultModelResponse,
     },
     GetUserAgent {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v1::GetUserAgentResponse,
     },
     UserInfo {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        params: #[ts(type = "undefined")] #[serde(default)] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         response: v1::UserInfoResponse,
     },
     FuzzyFileSearch {

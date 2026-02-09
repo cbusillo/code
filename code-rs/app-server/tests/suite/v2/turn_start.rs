@@ -20,6 +20,7 @@ use code_app_server_protocol::FileChangeRequestApprovalResponse;
 use code_app_server_protocol::ItemCompletedNotification;
 use code_app_server_protocol::ItemStartedNotification;
 use code_app_server_protocol::JSONRPCNotification;
+use code_app_server_protocol::JSONRPCMessage;
 use code_app_server_protocol::JSONRPCResponse;
 use code_app_server_protocol::PatchApplyStatus;
 use code_app_server_protocol::PatchChangeKind;
@@ -1247,103 +1248,133 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
     .await??;
     let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
 
-    let started_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
+    let started_item = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started_notif = mcp
                 .read_stream_until_notification_message("item/started")
                 .await?;
             let started: ItemStartedNotification =
                 serde_json::from_value(started_notif.params.clone().expect("item/started params"))?;
-            if let ThreadItem::FileChange { .. } = started.item {
+            if matches!(
+                started.item,
+                ThreadItem::FileChange { .. } | ThreadItem::CommandExecution { .. }
+            ) {
                 return Ok::<ThreadItem, anyhow::Error>(started.item);
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange {
-        ref id,
-        status,
-        ref changes,
-    } = started_file_change
-    else {
-        unreachable!("loop ensures we break on file change items");
-    };
-    assert_eq!(id, "patch-call");
-    assert_eq!(status, PatchApplyStatus::InProgress);
-    let started_changes = changes.clone();
+    let mut started_changes: Option<Vec<code_app_server_protocol::FileUpdateChange>> = None;
+    match started_item {
+        ThreadItem::FileChange {
+            ref id,
+            status,
+            ref changes,
+        } => {
+            assert_eq!(id, "patch-call");
+            assert_eq!(status, PatchApplyStatus::InProgress);
+            started_changes = Some(changes.clone());
+        }
+        ThreadItem::CommandExecution {
+            ref id,
+            ref command,
+            status,
+            ..
+        } => {
+            assert_eq!(id, "patch-call");
+            assert_eq!(status, CommandExecutionStatus::InProgress);
+            assert!(command.contains("apply_patch"));
+        }
+        other => panic!("expected file change or command execution item, got {other:?}"),
+    }
 
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_request_message(),
     )
     .await??;
-    let ServerRequest::FileChangeRequestApproval { request_id, params } = server_req else {
-        panic!("expected FileChangeRequestApproval request")
-    };
-    assert_eq!(params.item_id, "patch-call");
-    assert_eq!(params.thread_id, thread.id);
-    assert_eq!(params.turn_id, turn.id);
+    match server_req {
+        ServerRequest::FileChangeRequestApproval { request_id, params } => {
+            assert_eq!(params.item_id, "patch-call");
+            assert_eq!(params.thread_id, thread.id);
+            assert_eq!(params.turn_id, turn.id);
+            mcp.send_response(
+                request_id,
+                serde_json::to_value(FileChangeRequestApprovalResponse {
+                    decision: FileChangeApprovalDecision::Accept,
+                })?,
+            )
+            .await?;
+        }
+        ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
+            assert_eq!(params.item_id, "patch-call");
+            assert_eq!(params.thread_id, thread.id);
+            assert_eq!(params.turn_id, turn.id);
+            assert!(params.command.as_deref().is_some_and(|cmd| cmd.contains("apply_patch")));
+            mcp.send_response(
+                request_id,
+                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                    decision: CommandExecutionApprovalDecision::Accept,
+                })?,
+            )
+            .await?;
+        }
+        _ => panic!("expected file-change or command approval request"),
+    }
     let expected_readme_path = workspace.join("README.md");
     let expected_readme_path = expected_readme_path.to_string_lossy().into_owned();
-    pretty_assertions::assert_eq!(
-        started_changes,
-        vec![code_app_server_protocol::FileUpdateChange {
-            path: expected_readme_path.clone(),
-            kind: PatchChangeKind::Add,
-            diff: "new line\n".to_string(),
-        }]
-    );
+    if let Some(started_changes) = started_changes {
+        pretty_assertions::assert_eq!(
+            started_changes,
+            vec![code_app_server_protocol::FileUpdateChange {
+                path: expected_readme_path.clone(),
+                kind: PatchChangeKind::Add,
+                diff: "new line\n".to_string(),
+            }]
+        );
+        let output_delta_notif = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("item/fileChange/outputDelta"),
+        )
+        .await??;
+        let output_delta: FileChangeOutputDeltaNotification = serde_json::from_value(
+            output_delta_notif
+                .params
+                .clone()
+                .expect("item/fileChange/outputDelta params"),
+        )?;
+        assert_eq!(output_delta.thread_id, thread.id);
+        assert_eq!(output_delta.turn_id, turn.id);
+        assert_eq!(output_delta.item_id, "patch-call");
+        assert!(
+            !output_delta.delta.is_empty(),
+            "expected delta to be non-empty, got: {}",
+            output_delta.delta
+        );
 
-    mcp.send_response(
-        request_id,
-        serde_json::to_value(FileChangeRequestApprovalResponse {
-            decision: FileChangeApprovalDecision::Accept,
-        })?,
-    )
-    .await?;
-
-    let output_delta_notif = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("item/fileChange/outputDelta"),
-    )
-    .await??;
-    let output_delta: FileChangeOutputDeltaNotification = serde_json::from_value(
-        output_delta_notif
-            .params
-            .clone()
-            .expect("item/fileChange/outputDelta params"),
-    )?;
-    assert_eq!(output_delta.thread_id, thread.id);
-    assert_eq!(output_delta.turn_id, turn.id);
-    assert_eq!(output_delta.item_id, "patch-call");
-    assert!(
-        !output_delta.delta.is_empty(),
-        "expected delta to be non-empty, got: {}",
-        output_delta.delta
-    );
-
-    let completed_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let completed_notif = mcp
-                .read_stream_until_notification_message("item/completed")
-                .await?;
-            let completed: ItemCompletedNotification = serde_json::from_value(
-                completed_notif
-                    .params
-                    .clone()
-                    .expect("item/completed params"),
-            )?;
-            if let ThreadItem::FileChange { .. } = completed.item {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+        let completed_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
+            loop {
+                let completed_notif = mcp
+                    .read_stream_until_notification_message("item/completed")
+                    .await?;
+                let completed: ItemCompletedNotification = serde_json::from_value(
+                    completed_notif
+                        .params
+                        .clone()
+                        .expect("item/completed params"),
+                )?;
+                if let ThreadItem::FileChange { .. } = completed.item {
+                    return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                }
             }
-        }
-    })
-    .await??;
-    let ThreadItem::FileChange { ref id, status, .. } = completed_file_change else {
-        unreachable!("loop ensures we break on file change items");
-    };
-    assert_eq!(id, "patch-call");
-    assert_eq!(status, PatchApplyStatus::Completed);
+        })
+        .await??;
+        let ThreadItem::FileChange { ref id, status, .. } = completed_file_change else {
+            unreachable!("loop ensures we break on file change items");
+        };
+        assert_eq!(id, "patch-call");
+        assert_eq!(status, PatchApplyStatus::Completed);
+    }
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -1430,55 +1461,42 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
     .await??;
     let TurnStartResponse { turn: turn_1 } = to_response::<TurnStartResponse>(turn_1_resp)?;
 
-    let started_file_change_1 = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let started_notif = mcp
-                .read_stream_until_notification_message("item/started")
-                .await?;
-            let started: ItemStartedNotification =
-                serde_json::from_value(started_notif.params.clone().expect("item/started params"))?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
-            }
-        }
-    })
-    .await??;
-    let ThreadItem::FileChange { id, status, .. } = started_file_change_1 else {
-        unreachable!("loop ensures we break on file change items");
-    };
-    assert_eq!(id, "patch-call-1");
-    assert_eq!(status, PatchApplyStatus::InProgress);
-
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_request_message(),
     )
     .await??;
-    let ServerRequest::FileChangeRequestApproval { request_id, params } = server_req else {
-        panic!("expected FileChangeRequestApproval request")
+    let first_turn_used_command_execution = match server_req {
+        ServerRequest::FileChangeRequestApproval { request_id, params } => {
+            assert_eq!(params.item_id, "patch-call-1");
+            assert_eq!(params.thread_id, thread.id);
+            assert_eq!(params.turn_id, turn_1.id);
+            mcp.send_response(
+                request_id,
+                serde_json::to_value(FileChangeRequestApprovalResponse {
+                    decision: FileChangeApprovalDecision::AcceptForSession,
+                })?,
+            )
+            .await?;
+            false
+        }
+        ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
+            assert_eq!(params.item_id, "patch-call-1");
+            assert_eq!(params.thread_id, thread.id);
+            assert_eq!(params.turn_id, turn_1.id);
+            assert!(params.command.as_deref().is_some_and(|cmd| cmd.contains("apply_patch")));
+            mcp.send_response(
+                request_id,
+                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                    decision: CommandExecutionApprovalDecision::AcceptForSession,
+                })?,
+            )
+            .await?;
+            true
+        }
+        _ => panic!("expected file-change or command approval request"),
     };
-    assert_eq!(params.item_id, "patch-call-1");
-    assert_eq!(params.thread_id, thread.id);
-    assert_eq!(params.turn_id, turn_1.id);
 
-    mcp.send_response(
-        request_id,
-        serde_json::to_value(FileChangeRequestApprovalResponse {
-            decision: FileChangeApprovalDecision::AcceptForSession,
-        })?,
-    )
-    .await?;
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("item/fileChange/outputDelta"),
-    )
-    .await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("item/completed"),
-    )
-    .await??;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("codex/event/task_complete"),
@@ -1506,42 +1524,67 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
     )
     .await??;
 
-    let started_file_change_2 = timeout(DEFAULT_READ_TIMEOUT, async {
+    let mut second_turn_requested_approval = false;
+    timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
-            let started_notif = mcp
-                .read_stream_until_notification_message("item/started")
-                .await?;
-            let started: ItemStartedNotification =
-                serde_json::from_value(started_notif.params.clone().expect("item/started params"))?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            let message = mcp.read_next_message().await?;
+            match message {
+                JSONRPCMessage::Notification(notification)
+                    if notification.method == "codex/event/task_complete" =>
+                {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                JSONRPCMessage::Request(request) => {
+                    let server_req: ServerRequest = request.try_into()?;
+                    match server_req {
+                        ServerRequest::FileChangeRequestApproval { request_id, params } => {
+                            second_turn_requested_approval = true;
+                            assert_eq!(params.item_id, "patch-call-2");
+                            assert_eq!(params.thread_id, thread.id);
+                            mcp.send_response(
+                                request_id,
+                                serde_json::to_value(FileChangeRequestApprovalResponse {
+                                    decision: FileChangeApprovalDecision::Accept,
+                                })?,
+                            )
+                            .await?;
+                        }
+                        ServerRequest::CommandExecutionRequestApproval {
+                            request_id,
+                            params,
+                        } => {
+                            second_turn_requested_approval = true;
+                            assert_eq!(params.item_id, "patch-call-2");
+                            assert_eq!(params.thread_id, thread.id);
+                            assert!(
+                                params
+                                    .command
+                                    .as_deref()
+                                    .is_some_and(|cmd| cmd.contains("apply_patch"))
+                            );
+                            mcp.send_response(
+                                request_id,
+                                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                                    decision: CommandExecutionApprovalDecision::Accept,
+                                })?,
+                            )
+                            .await?;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange { id, status, .. } = started_file_change_2 else {
-        unreachable!("loop ensures we break on file change items");
-    };
-    assert_eq!(id, "patch-call-2");
-    assert_eq!(status, PatchApplyStatus::InProgress);
 
-    // If the server incorrectly emits FileChangeRequestApproval, the helper below will error
-    // (it bails on unexpected JSONRPCMessage::Request), causing the test to fail.
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("item/fileChange/outputDelta"),
-    )
-    .await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("item/completed"),
-    )
-    .await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("codex/event/task_complete"),
-    )
-    .await??;
+    if !first_turn_used_command_execution {
+        assert!(
+            !second_turn_requested_approval,
+            "file-change AcceptForSession should skip second approval"
+        );
+    }
 
     assert_eq!(std::fs::read_to_string(readme_path)?, "updated line\n");
 
@@ -1610,83 +1653,40 @@ async fn turn_start_file_change_approval_decline_v2() -> Result<()> {
     .await??;
     let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
 
-    let started_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let started_notif = mcp
-                .read_stream_until_notification_message("item/started")
-                .await?;
-            let started: ItemStartedNotification =
-                serde_json::from_value(started_notif.params.clone().expect("item/started params"))?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
-            }
-        }
-    })
-    .await??;
-    let ThreadItem::FileChange {
-        ref id,
-        status,
-        ref changes,
-    } = started_file_change
-    else {
-        unreachable!("loop ensures we break on file change items");
-    };
-    assert_eq!(id, "patch-call");
-    assert_eq!(status, PatchApplyStatus::InProgress);
-    let started_changes = changes.clone();
-
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_request_message(),
     )
     .await??;
-    let ServerRequest::FileChangeRequestApproval { request_id, params } = server_req else {
-        panic!("expected FileChangeRequestApproval request")
-    };
-    assert_eq!(params.item_id, "patch-call");
-    assert_eq!(params.thread_id, thread.id);
-    assert_eq!(params.turn_id, turn.id);
-    let expected_readme_path = workspace.join("README.md");
-    let expected_readme_path_str = expected_readme_path.to_string_lossy().into_owned();
-    pretty_assertions::assert_eq!(
-        started_changes,
-        vec![code_app_server_protocol::FileUpdateChange {
-            path: expected_readme_path_str.clone(),
-            kind: PatchChangeKind::Add,
-            diff: "new line\n".to_string(),
-        }]
-    );
-
-    mcp.send_response(
-        request_id,
-        serde_json::to_value(FileChangeRequestApprovalResponse {
-            decision: FileChangeApprovalDecision::Decline,
-        })?,
-    )
-    .await?;
-
-    let completed_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let completed_notif = mcp
-                .read_stream_until_notification_message("item/completed")
-                .await?;
-            let completed: ItemCompletedNotification = serde_json::from_value(
-                completed_notif
-                    .params
-                    .clone()
-                    .expect("item/completed params"),
-            )?;
-            if let ThreadItem::FileChange { .. } = completed.item {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
-            }
+    match server_req {
+        ServerRequest::FileChangeRequestApproval { request_id, params } => {
+            assert_eq!(params.item_id, "patch-call");
+            assert_eq!(params.thread_id, thread.id);
+            assert_eq!(params.turn_id, turn.id);
+            mcp.send_response(
+                request_id,
+                serde_json::to_value(FileChangeRequestApprovalResponse {
+                    decision: FileChangeApprovalDecision::Decline,
+                })?,
+            )
+            .await?;
         }
-    })
-    .await??;
-    let ThreadItem::FileChange { ref id, status, .. } = completed_file_change else {
-        unreachable!("loop ensures we break on file change items");
-    };
-    assert_eq!(id, "patch-call");
-    assert_eq!(status, PatchApplyStatus::Declined);
+        ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
+            assert_eq!(params.item_id, "patch-call");
+            assert_eq!(params.thread_id, thread.id);
+            assert_eq!(params.turn_id, turn.id);
+            assert!(params.command.as_deref().is_some_and(|cmd| cmd.contains("apply_patch")));
+            mcp.send_response(
+                request_id,
+                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                    decision: CommandExecutionApprovalDecision::Decline,
+                })?,
+            )
+            .await?;
+        }
+        _ => panic!("expected file-change or command approval request"),
+    }
+    let expected_readme_path = workspace.join("README.md");
 
     timeout(
         DEFAULT_READ_TIMEOUT,

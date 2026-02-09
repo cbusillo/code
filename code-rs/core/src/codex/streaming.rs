@@ -3120,7 +3120,7 @@ async fn handle_function_call(
 ) -> ResponseInputItem {
     let ctx = ToolCallCtx::new(sub_id.clone(), call_id.clone(), seq_hint, output_index);
     match name.as_str() {
-        "container.exec" | "shell" => {
+        "container.exec" | "shell" | "shell_command" | "exec_command" => {
             let params = match parse_container_exec_arguments(arguments, sess, &call_id) {
                 Ok(params) => params,
                 Err(output) => {
@@ -6005,20 +6005,64 @@ fn parse_container_exec_arguments(
     let parsed: std::result::Result<serde_json::Value, serde_json::Error> =
         serde_json::from_str(&arguments);
 
-    match parsed
-        .and_then(|mut value| {
+    match parsed {
+        Ok(mut value) => {
             if value.get("sandbox_permissions").is_none() {
                 let needs_escalated = value
                     .get("with_escalated_permissions")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if needs_escalated {
-                    value["sandbox_permissions"] = serde_json::json!(SandboxPermissions::RequireEscalated);
+                    value["sandbox_permissions"] =
+                        serde_json::json!(SandboxPermissions::RequireEscalated);
                 }
             }
-            serde_json::from_value::<ShellToolCallParams>(value)
-        }) {
-        Ok(shell_tool_call_params) => Ok(to_exec_params(shell_tool_call_params, sess)),
+
+            if let Ok(shell_tool_call_params) =
+                serde_json::from_value::<ShellToolCallParams>(value.clone())
+            {
+                return Ok(to_exec_params(shell_tool_call_params, sess));
+            }
+
+            if let Ok(shell_command_params) =
+                serde_json::from_value::<code_protocol::models::ShellCommandToolCallParams>(
+                    value.clone(),
+                )
+            {
+                let shell_tool_call_params = ShellToolCallParams {
+                    command: parse_shellish_command(&shell_command_params.command, sess),
+                    workdir: shell_command_params.workdir,
+                    timeout_ms: shell_command_params.timeout_ms,
+                    sandbox_permissions: shell_command_params.sandbox_permissions,
+                    prefix_rule: shell_command_params.prefix_rule,
+                    justification: shell_command_params.justification,
+                };
+                return Ok(to_exec_params(shell_tool_call_params, sess));
+            }
+
+            if let Ok(exec_command_params) =
+                serde_json::from_value::<crate::exec_command::ExecCommandParams>(value)
+            {
+                let shell_tool_call_params = ShellToolCallParams {
+                    command: parse_shellish_command(&exec_command_params.cmd, sess),
+                    workdir: exec_command_params.workdir,
+                    timeout_ms: Some(exec_command_params.yield_time_ms),
+                    sandbox_permissions: exec_command_params.sandbox_permissions,
+                    prefix_rule: None,
+                    justification: exec_command_params.justification,
+                };
+                return Ok(to_exec_params(shell_tool_call_params, sess));
+            }
+
+            let output = ResponseInputItem::FunctionCallOutput {
+                call_id: call_id.to_string(),
+                output: FunctionCallOutputPayload {
+                    content: "failed to parse function arguments".to_string(),
+                    success: None,
+                },
+            };
+            Err(Box::new(output))
+        }
         Err(e) => {
             // allow model to re-sample
             let output = ResponseInputItem::FunctionCallOutput {
@@ -6031,6 +6075,33 @@ fn parse_container_exec_arguments(
             Err(Box::new(output))
         }
     }
+}
+
+fn parse_shellish_command(command: &str, sess: &Session) -> Vec<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let command = if should_preserve_shell_syntax(trimmed) {
+        vec!["bash".to_string(), "-lc".to_string(), trimmed.to_string()]
+    } else {
+        shlex::split(trimmed).unwrap_or_else(|| vec![trimmed.to_string()])
+    };
+
+    sess.user_shell
+        .format_default_shell_invocation(command.clone())
+        .unwrap_or(command)
+}
+
+fn should_preserve_shell_syntax(command: &str) -> bool {
+    command.contains('\n')
+        || command.contains('\r')
+        || command.contains("<<")
+        || command.contains('|')
+        || command.contains("&&")
+        || command.contains("||")
+        || command.contains(';')
 }
 
 fn agent_tool_failure(ctx: &ToolCallCtx, message: impl Into<String>) -> ResponseInputItem {
@@ -8530,7 +8601,7 @@ async fn handle_container_exec_with_params(
             params.with_escalated_permissions.unwrap_or(false),
         )
     };
-    let command_for_display = params.command.clone();
+    let command_for_display = maybe_run_with_user_profile(params.clone(), sess).command;
     let harness_summary_json: Option<String> = None;
 
     let sandbox_type = match safety {
@@ -8561,7 +8632,7 @@ async fn handle_container_exec_with_params(
                 .request_command_approval(
                     sub_id.clone(),
                     call_id.clone(),
-                    params.command.clone(),
+                    command_for_display.clone(),
                     params.cwd.clone(),
                     params.justification.clone(),
                 )

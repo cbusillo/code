@@ -129,6 +129,7 @@ fn write_session_file(
         cli_version: "test_version".to_string(),
         instructions: None,
         source: source.unwrap_or_default(),
+        model_provider: None,
     };
     let session_meta_line = RolloutLine {
         timestamp: ts_str.to_string(),
@@ -193,6 +194,7 @@ async fn test_resume_reconstruct_history_drops_user_events() {
         cli_version: "0.0.0-test".to_string(),
         instructions: Some("explain async/await".to_string()),
         source: SessionSource::Cli,
+        model_provider: None,
     };
     serde_json::to_writer(&mut writer, &RolloutLine {
         timestamp: session_meta.timestamp.clone(),

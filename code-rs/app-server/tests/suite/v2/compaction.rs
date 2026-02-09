@@ -81,7 +81,7 @@ async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()>
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_thread(&mut mcp).await?;
-    for message in ["first", "second", "third"] {
+    for message in ["first", "second"] {
         send_turn_and_wait(&mut mcp, &thread_id, message).await?;
     }
 
@@ -170,7 +170,7 @@ async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_thread(&mut mcp).await?;
-    for message in ["first", "second", "third"] {
+    for message in ["first", "second"] {
         send_turn_and_wait(&mut mcp, &thread_id, message).await?;
     }
 

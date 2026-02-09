@@ -22,6 +22,7 @@ code-chatgpt = { workspace = true }
 code-common = { workspace = true, features = ["cli"] }
 code-core = { workspace = true }
 code-app-server-protocol = { workspace = true }
+code-execpolicy = { workspace = true }
 code-file-search = { workspace = true }
 code-login = { workspace = true }
 code-rmcp-client = { workspace = true }
@@ -29,6 +30,7 @@ code-protocol = { workspace = true }
 code-utils-absolute-path = { workspace = true }
 code-utils-json-to-toml = { workspace = true }
 futures = { workspace = true }
+multimap = { workspace = true }
 # We should only be using mcp-types for JSON-RPC types: it would be nice to
 # split this out into a separate crate at some point.
 mcp-types = { workspace = true }

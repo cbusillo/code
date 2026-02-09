@@ -541,7 +541,7 @@ impl ModelClient {
         let want_format = prompt.text_format.clone().or_else(|| {
             prompt.output_schema.as_ref().map(|schema| crate::client_common::TextFormat {
                 r#type: "json_schema".to_string(),
-                name: Some("code_output_schema".to_string()),
+                name: Some("codex_output_schema".to_string()),
                 strict: Some(true),
                 schema: Some(schema.clone()),
             })
@@ -924,7 +924,7 @@ impl ModelClient {
         let want_format = prompt.text_format.clone().or_else(|| {
             prompt.output_schema.as_ref().map(|schema| crate::client_common::TextFormat {
                 r#type: "json_schema".to_string(),
-                name: Some("code_output_schema".to_string()),
+                name: Some("codex_output_schema".to_string()),
                 strict: Some(true),
                 schema: Some(schema.clone()),
             })
@@ -968,6 +968,7 @@ impl ModelClient {
 
         let mut attempt = 0;
         let max_retries = self.provider.request_max_retries();
+        let mut auth_refresh_attempted = false;
         let mut request_id = String::new();
         let mut rate_limit_switch_state = crate::account_switching::RateLimitSwitchState::default();
 
@@ -1032,6 +1033,7 @@ impl ModelClient {
             let payload_body = serde_json::to_string(&payload_json)?;
 
             let mut auth_refresh_error: Option<RefreshTokenError> = None;
+            let mut auth_refreshed = false;
 
             // Always fetch the latest auth in case a prior attempt refreshed the token.
             let auth = auth_manager.as_ref().and_then(|m| m.auth());
@@ -1236,7 +1238,16 @@ impl ModelClient {
                     if status == StatusCode::UNAUTHORIZED {
                         if let Some(manager) = auth_manager.as_ref() {
                             match manager.refresh_token_classified().await {
-                                Ok(Some(_)) => {}
+                                Ok(Some(_)) => {
+                                    if auth_refresh_attempted {
+                                        auth_refresh_error = Some(RefreshTokenError::permanent(
+                                            "Authentication refresh did not recover from unauthorized response.",
+                                        ));
+                                    } else {
+                                        auth_refresh_attempted = true;
+                                        auth_refreshed = true;
+                                    }
+                                }
                                 Ok(None) => {
                                     auth_refresh_error = Some(RefreshTokenError::permanent(
                                         AUTH_REQUIRED_MESSAGE,
@@ -1465,6 +1476,12 @@ impl ModelClient {
                     }
 
                     if status == StatusCode::UNAUTHORIZED {
+                        if auth_refreshed {
+                            // External auth refresh should force a retry even when
+                            // provider retry limits are 0.
+                            attempt = 0;
+                            continue;
+                        }
                         if let Some(error) =
                             map_unauthorized_outcome(auth.is_some(), auth_refresh_error.as_ref())
                         {

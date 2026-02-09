@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
+use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 
 const INDEX_SUBDIR: &str = "sessions/index";
@@ -307,7 +308,23 @@ impl SessionCatalog {
         }
 
         let mut result = ReconcileResult::default();
-        let discovered_entries = scan_rollout_files(&sessions_root).await?;
+        let mut discovered_entries = scan_rollout_files(&sessions_root, false).await?;
+        let archived_root = code_home.join(ARCHIVED_SESSIONS_SUBDIR);
+        if archived_root.exists() {
+            let archived_entries = scan_rollout_files(&archived_root, true).await?;
+            for (session_id, entry) in archived_entries {
+                match discovered_entries.get(&session_id) {
+                    Some(existing) => {
+                        if should_replace(existing, &entry) {
+                            discovered_entries.insert(session_id, entry);
+                        }
+                    }
+                    None => {
+                        discovered_entries.insert(session_id, entry);
+                    }
+                }
+            }
+        }
         let discovered_ids: HashSet<Uuid> = discovered_entries.keys().copied().collect();
         let mut changed = false;
 
@@ -382,6 +399,7 @@ pub struct ReconcileResult {
 #[allow(dead_code)]
 async fn scan_rollout_files(
     sessions_root: &Path,
+    archived: bool,
 ) -> io::Result<HashMap<Uuid, SessionIndexEntry>> {
     use tokio::fs;
 
@@ -400,7 +418,8 @@ async fn scan_rollout_files(
             } else if metadata.is_file() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.ends_with(".jsonl") && name.starts_with("rollout-") {
-                        if let Some(index_entry) = parse_rollout_file(&path, sessions_root).await {
+                        if let Some(mut index_entry) = parse_rollout_file(&path, sessions_root).await {
+                            index_entry.archived = archived;
                             match discovered.get(&index_entry.session_id) {
                                 Some(existing) => {
                                     if should_replace(existing, &index_entry) {
@@ -446,6 +465,7 @@ async fn parse_rollout_file(
     let mut git_branch: Option<String> = None;
     let mut git_project_root: Option<PathBuf> = None;
     let mut session_source: Option<SessionSource> = None;
+    let mut model_provider: Option<String> = None;
     let mut message_count = 0usize;
     let mut user_message_count = 0usize;
     let mut last_user_snippet: Option<String> = None;
@@ -470,6 +490,7 @@ async fn parse_rollout_file(
                 created_at = Some(rollout_line.timestamp.clone());
                 cwd_real = Some(meta_line.meta.cwd.clone());
                 session_source = Some(meta_line.meta.source);
+                model_provider = meta_line.meta.model_provider.clone();
 
                 if let Some(git_info) = meta_line.git {
                     git_branch = git_info.branch;
@@ -547,7 +568,7 @@ async fn parse_rollout_file(
         cwd_display,
         git_project_root,
         git_branch,
-        model_provider: None, // TODO: extract from session if available
+        model_provider,
         session_source,
         message_count,
         user_message_count,

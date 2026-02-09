@@ -38,9 +38,14 @@ pub async fn run_broker(
         |e| io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}")),
     )?;
     let config = Arc::new(config);
+    let preferred_auth = if config.using_chatgpt_auth {
+        AuthMode::Chatgpt
+    } else {
+        AuthMode::ApiKey
+    };
     let auth_manager = AuthManager::shared_with_mode_and_originator(
         config.code_home.clone(),
-        AuthMode::ApiKey,
+        preferred_auth,
         config.responses_originator_header.clone(),
     );
     let conversation_manager = Arc::new(ConversationManager::new(
@@ -185,7 +190,7 @@ async fn handle_connection(
             Ok(JSONRPCMessage::Notification(notification)) => {
                 processor.process_notification(notification).await
             }
-            Ok(JSONRPCMessage::Error(error)) => processor.process_error(error),
+            Ok(JSONRPCMessage::Error(error)) => processor.process_error(error).await,
             Err(err) => debug!("invalid broker message: {err}"),
         }
     }

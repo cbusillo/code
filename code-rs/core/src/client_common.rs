@@ -655,7 +655,7 @@ mod tests {
                 verbosity: OpenAiTextVerbosity::Medium,
                 format: Some(TextFormat {
                     r#type: "json_schema".to_string(),
-                    name: Some("code_output_schema".to_string()),
+                    name: Some("codex_output_schema".to_string()),
                     strict: Some(true),
                     schema: Some(schema.clone()),
                 }),
@@ -672,7 +672,7 @@ mod tests {
 
         assert_eq!(
             format.get("name"),
-            Some(&serde_json::Value::String("code_output_schema".into()))
+            Some(&serde_json::Value::String("codex_output_schema".into()))
         );
         assert_eq!(
             format.get("type"),

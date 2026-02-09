@@ -135,6 +135,8 @@ pub(super) struct State {
     pub(super) approved_commands: HashSet<ApprovedCommandPattern>,
     pub(super) current_task: Option<AgentTask>,
     pub(super) pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pub(super) pending_patch_approvals: HashSet<String>,
+    pub(super) patch_approved_for_session: bool,
     pub(super) pending_request_user_input: HashMap<String, oneshot::Sender<crate::protocol::RequestUserInputResponse>>,
     pub(super) pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(super) pending_input: Vec<ResponseInputItem>,
@@ -1108,6 +1110,15 @@ impl Session {
         reason: Option<String>,
         grant_root: Option<PathBuf>,
     ) -> oneshot::Receiver<ReviewDecision> {
+        {
+            let state = self.state.lock().unwrap();
+            if state.patch_approved_for_session {
+                let (tx_approve, rx_approve) = oneshot::channel();
+                let _ = tx_approve.send(ReviewDecision::ApprovedForSession);
+                return rx_approve;
+            }
+        }
+
         let (tx_approve, rx_approve) = oneshot::channel();
         let event = self.make_event(
             &sub_id,
@@ -1122,6 +1133,7 @@ impl Session {
         {
             let mut state = self.state.lock().unwrap();
             // Track pending approval by call_id to avoid collisions.
+            state.pending_patch_approvals.insert(call_id.clone());
             state.pending_approvals.insert(call_id, tx_approve);
         }
         rx_approve
@@ -1129,6 +1141,10 @@ impl Session {
 
     pub fn notify_approval(&self, call_id: &str, decision: ReviewDecision) {
         let mut state = self.state.lock().unwrap();
+        let was_patch_approval = state.pending_patch_approvals.remove(call_id);
+        if was_patch_approval && decision == ReviewDecision::ApprovedForSession {
+            state.patch_approved_for_session = true;
+        }
         if let Some(tx_approve) = state.pending_approvals.remove(call_id) {
             let _ = tx_approve.send(decision);
         } else {
@@ -1922,6 +1938,7 @@ impl Session {
 
         let mut state = self.state.lock().unwrap();
         state.pending_approvals.clear();
+        state.pending_patch_approvals.clear();
         state.pending_request_user_input.clear();
         state.pending_dynamic_tools.clear();
         // Do not clear `pending_input` here. When a user submits a new message
@@ -2337,6 +2354,7 @@ impl State {
     pub fn partial_clone(&self) -> Self {
         Self {
             approved_commands: self.approved_commands.clone(),
+            patch_approved_for_session: self.patch_approved_for_session,
             history: self.history.clone(),
             // Preserve request_ordinal so reconfigurations (e.g., /reasoning)
             // do not reset provider ordering mid-session.
