@@ -16,28 +16,41 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 code-arg0 = { workspace = true }
+code-chatgpt = { workspace = true }
 code-common = { workspace = true, features = ["cli"] }
 code-core = { workspace = true }
 code-app-server-protocol = { workspace = true }
 code-file-search = { workspace = true }
 code-login = { workspace = true }
+code-rmcp-client = { workspace = true }
 code-protocol = { workspace = true }
+code-utils-absolute-path = { workspace = true }
 code-utils-json-to-toml = { workspace = true }
+futures = { workspace = true }
 # We should only be using mcp-types for JSON-RPC types: it would be nice to
 # split this out into a separate crate at some point.
 mcp-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+shlex = { workspace = true }
 tokio = { workspace = true, features = [
     "io-std",
     "macros",
+    "net",
     "process",
     "rt-multi-thread",
     "signal",
 ] }
+tokio-tungstenite = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+time = { workspace = true }
+toml = { workspace = true }
+zip = "2"
 uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]

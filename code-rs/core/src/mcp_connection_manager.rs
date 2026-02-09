@@ -15,9 +15,12 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use code_rmcp_client::load_valid_access_token_from_env;
 use code_rmcp_client::RmcpClient;
 use mcp_types::ClientCapabilities;
 use mcp_types::Implementation;
+use mcp_types::Resource;
+use mcp_types::ResourceTemplate;
 use mcp_types::Tool;
 
 use serde_json::json;
@@ -191,6 +194,28 @@ impl McpClientAdapter {
         }
     }
 
+    async fn list_resources(
+        &self,
+        params: Option<mcp_types::ListResourcesRequestParams>,
+        timeout: Option<Duration>,
+    ) -> Result<mcp_types::ListResourcesResult> {
+        match self {
+            McpClientAdapter::Rmcp(client) => client.list_resources(params, timeout).await,
+        }
+    }
+
+    async fn list_resource_templates(
+        &self,
+        params: Option<mcp_types::ListResourceTemplatesRequestParams>,
+        timeout: Option<Duration>,
+    ) -> Result<mcp_types::ListResourceTemplatesResult> {
+        match self {
+            McpClientAdapter::Rmcp(client) => {
+                client.list_resource_templates(params, timeout).await
+            }
+        }
+    }
+
     async fn into_shutdown(self) {
         match self {
             McpClientAdapter::Rmcp(client) => {
@@ -306,6 +331,12 @@ impl McpConnectionManager {
                         })
                     }
                     McpServerTransportConfig::StreamableHttp { url, bearer_token } => {
+                        let oauth_token = if bearer_token.is_none() {
+                            load_valid_access_token_from_env(server_name.as_str(), url.as_str())
+                        } else {
+                            None
+                        };
+                        let bearer_token = bearer_token.or(oauth_token);
                         McpClientAdapter::new_streamable_http_client(
                             url,
                             bearer_token,
@@ -402,8 +433,146 @@ impl McpConnectionManager {
         tools_by_server
     }
 
+    pub fn list_tools_with_details_by_server(&self) -> HashMap<String, HashMap<String, Tool>> {
+        let mut tools_by_server: HashMap<String, HashMap<String, Tool>> = HashMap::new();
+        for tool in self.tools.values() {
+            tools_by_server
+                .entry(tool.server_name.clone())
+                .or_default()
+                .insert(tool.tool_name.clone(), tool.tool.clone());
+        }
+
+        for server_name in &self.server_names {
+            tools_by_server.entry(server_name.clone()).or_default();
+        }
+
+        tools_by_server
+    }
+
     pub fn list_server_failures(&self) -> HashMap<String, McpServerFailure> {
         self.failures.clone()
+    }
+
+    pub async fn list_all_resources(&self) -> HashMap<String, Vec<Resource>> {
+        let mut join_set = JoinSet::new();
+
+        for (server_name, managed_client) in self.clients.read().await.iter() {
+            let server_name = server_name.clone();
+            let client = managed_client.client.clone();
+            let timeout = managed_client.tool_timeout;
+
+            join_set.spawn(async move {
+                let mut collected: Vec<Resource> = Vec::new();
+                let mut cursor: Option<String> = None;
+
+                loop {
+                    let params = cursor.as_ref().map(|next| mcp_types::ListResourcesRequestParams {
+                        cursor: Some(next.clone()),
+                    });
+                    let response = match client.list_resources(params, timeout).await {
+                        Ok(result) => result,
+                        Err(err) => return (server_name, Err(err)),
+                    };
+
+                    collected.extend(response.resources);
+
+                    match response.next_cursor {
+                        Some(next) => {
+                            if cursor.as_ref() == Some(&next) {
+                                return (
+                                    server_name,
+                                    Err(anyhow!("resources/list returned duplicate cursor")),
+                                );
+                            }
+                            cursor = Some(next);
+                        }
+                        None => return (server_name, Ok(collected)),
+                    }
+                }
+            });
+        }
+
+        let mut aggregated: HashMap<String, Vec<Resource>> = HashMap::new();
+
+        while let Some(join_res) = join_set.join_next().await {
+            match join_res {
+                Ok((server_name, Ok(resources))) => {
+                    aggregated.insert(server_name, resources);
+                }
+                Ok((server_name, Err(err))) => {
+                    warn!("Failed to list resources for MCP server '{server_name}': {err:#}");
+                }
+                Err(err) => {
+                    warn!("Task panic when listing resources for MCP server: {err:#}");
+                }
+            }
+        }
+
+        aggregated
+    }
+
+    pub async fn list_all_resource_templates(&self) -> HashMap<String, Vec<ResourceTemplate>> {
+        let mut join_set = JoinSet::new();
+
+        for (server_name, managed_client) in self.clients.read().await.iter() {
+            let server_name = server_name.clone();
+            let client = managed_client.client.clone();
+            let timeout = managed_client.tool_timeout;
+
+            join_set.spawn(async move {
+                let mut collected: Vec<ResourceTemplate> = Vec::new();
+                let mut cursor: Option<String> = None;
+
+                loop {
+                    let params = cursor
+                        .as_ref()
+                        .map(|next| mcp_types::ListResourceTemplatesRequestParams {
+                            cursor: Some(next.clone()),
+                        });
+                    let response = match client.list_resource_templates(params, timeout).await {
+                        Ok(result) => result,
+                        Err(err) => return (server_name, Err(err)),
+                    };
+
+                    collected.extend(response.resource_templates);
+
+                    match response.next_cursor {
+                        Some(next) => {
+                            if cursor.as_ref() == Some(&next) {
+                                return (
+                                    server_name,
+                                    Err(anyhow!(
+                                        "resources/templates/list returned duplicate cursor"
+                                    )),
+                                );
+                            }
+                            cursor = Some(next);
+                        }
+                        None => return (server_name, Ok(collected)),
+                    }
+                }
+            });
+        }
+
+        let mut aggregated: HashMap<String, Vec<ResourceTemplate>> = HashMap::new();
+
+        while let Some(join_res) = join_set.join_next().await {
+            match join_res {
+                Ok((server_name, Ok(templates))) => {
+                    aggregated.insert(server_name, templates);
+                }
+                Ok((server_name, Err(err))) => {
+                    warn!(
+                        "Failed to list resource templates for MCP server '{server_name}': {err:#}"
+                    );
+                }
+                Err(err) => {
+                    warn!("Task panic when listing resource templates for MCP server: {err:#}");
+                }
+            }
+        }
+
+        aggregated
     }
 
     /// Invoke the tool indicated by the (server, tool) pair.
