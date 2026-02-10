@@ -1244,6 +1244,32 @@ pub(super) static GIT_DIFF_NAME_ONLY_BETWEEN_STUB: Lazy<Mutex<Option<GitDiffName
 #[cfg(test)]
 pub(super) static AUTO_STUB_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+#[cfg(unix)]
+static APP_SERVER_BROKER_BOOTSTRAP: OnceLock<()> = OnceLock::new();
+
+#[cfg(unix)]
+fn maybe_start_in_process_broker(
+    config: &Config,
+    conversation_manager: Arc<ConversationManager>,
+) {
+    if APP_SERVER_BROKER_BOOTSTRAP.set(()).is_err() {
+        return;
+    }
+
+    let broker_config = Arc::new(config.clone());
+    tokio::spawn(async move {
+        if let Err(err) = code_app_server::broker::run_broker_with_manager(
+            broker_config,
+            conversation_manager,
+            None,
+        )
+        .await
+        {
+            tracing::warn!("app-server broker disabled: {err}");
+        }
+    });
+}
+
 #[derive(Deserialize)]
 struct AutoResolveDecision {
     status: String,
@@ -3167,10 +3193,14 @@ impl ChatWidget<'_> {
 
         tokio::spawn(async move {
             let mut code_op_rx = code_op_rx;
-            let conversation_manager = ConversationManager::new(
+            let conversation_manager = Arc::new(ConversationManager::new(
                 auth_manager.clone(),
                 SessionSource::Cli,
-            );
+            ));
+
+            #[cfg(unix)]
+            maybe_start_in_process_broker(&config, conversation_manager.clone());
+
             let resume_path = config.experimental_resume.clone();
             let new_conversation = match resume_path {
                 Some(path) => conversation_manager

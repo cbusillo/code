@@ -28,6 +28,7 @@ use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 
 mod websocket_transport;
+pub mod broker;
 mod conversation_streams;
 mod config_rpc;
 mod remote_skills;

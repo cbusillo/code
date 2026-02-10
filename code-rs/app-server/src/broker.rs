@@ -63,7 +63,7 @@ pub async fn run_broker_with_manager(
     conversation_manager: Arc<ConversationManager>,
     code_linux_sandbox_exe: Option<PathBuf>,
 ) -> io::Result<()> {
-    let socket_path = config.app_server_listen_path();
+    let socket_path = config.code_home.join("app-server.sock");
     prepare_socket_path(&socket_path).await?;
 
     let listener = UnixListener::bind(&socket_path)?;

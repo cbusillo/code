@@ -36,6 +36,7 @@ code-common = { path = "../common", features = [
     "elapsed",
     "sandbox_summary",
 ] }
+code-app-server = { workspace = true }
 code-core = { path = "../core" }
 code-file-search = { path = "../file-search" }
 code-git-tooling = { path = "../git-tooling" }

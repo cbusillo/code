@@ -1690,6 +1690,7 @@ dependencies = [
  "chrono",
  "clap",
  "code-ansi-escape",
+ "code-app-server",
  "code-arg0",
  "code-auto-drive-core",
  "code-auto-drive-diagnostics",
