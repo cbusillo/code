@@ -54,11 +54,23 @@ use code_core::account_usage::{
 use code_core::auth_accounts::{self, StoredAccount};
 use code_login::AuthManager;
 use code_login::AuthMode;
+#[cfg(unix)]
+use code_protocol::ConversationId;
 use code_protocol::dynamic_tools::DynamicToolResponse;
+#[cfg(unix)]
+use code_protocol::mcp_protocol::{
+    AddConversationListenerParams, ClientInfo, ClientRequest, InitializeParams,
+};
 use code_protocol::protocol::SessionSource;
 use code_protocol::num_format::format_with_separators;
 use code_core::split_command_and_args;
 use serde_json::Value as JsonValue;
+#[cfg(unix)]
+use mcp_types::{JSONRPCMessage, JSONRPCNotification, RequestId};
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::net::UnixStream;
 
 fn format_u64(value: u64) -> String {
     format_with_separators(i64::try_from(value).unwrap_or(i64::MAX))
@@ -1268,6 +1280,153 @@ fn maybe_start_in_process_broker(
             tracing::warn!("app-server broker disabled: {err}");
         }
     });
+}
+
+#[cfg(unix)]
+fn tui_client_info() -> ClientInfo {
+    ClientInfo {
+        name: "code-tui".to_string(),
+        title: Some("Codex TUI".to_string()),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn event_from_broker_notification(notification: JSONRPCNotification) -> Option<Event> {
+    if !notification.method.starts_with("codex/event/") {
+        return None;
+    }
+    notification
+        .params
+        .and_then(|params| serde_json::from_value(params).ok())
+}
+
+#[cfg(unix)]
+fn client_request_to_message(request: ClientRequest) -> Result<JSONRPCMessage, serde_json::Error> {
+    let value = serde_json::to_value(request)?;
+    serde_json::from_value(value)
+}
+
+#[cfg(unix)]
+async fn broker_write_message(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    request: ClientRequest,
+) -> Result<(), String> {
+    let message = client_request_to_message(request)
+        .map_err(|err| format!("failed to encode broker request: {err}"))?;
+    let json =
+        serde_json::to_string(&message).map_err(|err| format!("failed to encode broker json: {err}"))?;
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .map_err(|err| format!("failed to write broker request: {err}"))?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|err| format!("failed to write broker newline: {err}"))
+}
+
+#[cfg(unix)]
+async fn broker_read_message(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+) -> Result<Option<JSONRPCMessage>, String> {
+    let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|err| format!("failed reading broker stream: {err}"))?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str::<JSONRPCMessage>(&line)
+        .map(Some)
+        .map_err(|err| format!("invalid broker message: {err}"))
+}
+
+#[cfg(unix)]
+async fn wait_for_broker_response(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    request_id: RequestId,
+) -> Result<(), String> {
+    loop {
+        let message = match broker_read_message(lines).await? {
+            Some(message) => message,
+            None => return Err("broker connection closed".to_string()),
+        };
+
+        match message {
+            JSONRPCMessage::Response(response) if response.id == request_id => return Ok(()),
+            JSONRPCMessage::Error(error) if error.id == request_id => {
+                return Err(error.error.message);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn start_broker_event_stream(
+    socket_path: &Path,
+    conversation_id: ConversationId,
+    app_event_tx: AppEventSender,
+) -> Result<(), String> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| format!("failed to connect broker stream: {err}"))?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut lines = BufReader::new(read_half).lines();
+
+    broker_write_message(
+        &mut write_half,
+        ClientRequest::Initialize {
+            request_id: RequestId::Integer(1),
+            params: InitializeParams {
+                client_info: tui_client_info(),
+            },
+        },
+    )
+    .await?;
+    wait_for_broker_response(&mut lines, RequestId::Integer(1)).await?;
+
+    broker_write_message(
+        &mut write_half,
+        ClientRequest::AddConversationListener {
+            request_id: RequestId::Integer(2),
+            params: AddConversationListenerParams { conversation_id },
+        },
+    )
+    .await?;
+    wait_for_broker_response(&mut lines, RequestId::Integer(2)).await?;
+
+    tokio::spawn(async move {
+        loop {
+            let message = match broker_read_message(&mut lines).await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!("broker stream read failed: {err}");
+                    break;
+                }
+            };
+
+            if let JSONRPCMessage::Notification(notification) = message
+                && let Some(event) = event_from_broker_notification(notification)
+            {
+                app_event_tx.send(AppEvent::CodexEvent(event));
+            }
+        }
+
+        let error_event = Event {
+            id: conversation_id.to_string(),
+            event_seq: 0,
+            msg: EventMsg::Error(ErrorEvent {
+                message: "broker stream closed".to_string(),
+            }),
+            order: None,
+        };
+        app_event_tx.send(AppEvent::CodexEvent(error_event));
+    });
+
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -3199,6 +3358,9 @@ impl ChatWidget<'_> {
             ));
 
             #[cfg(unix)]
+            let broker_socket_path = config.code_home.join("app-server.sock");
+
+            #[cfg(unix)]
             maybe_start_in_process_broker(&config, conversation_manager.clone());
 
             let resume_path = config.experimental_resume.clone();
@@ -3248,6 +3410,25 @@ impl ChatWidget<'_> {
                     }
                 }
             });
+
+            #[cfg(unix)]
+            {
+                match start_broker_event_stream(
+                    &broker_socket_path,
+                    new_conversation.conversation_id,
+                    app_event_tx_clone.clone(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        tracing::debug!("TUI event stream attached to app-server broker");
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to attach broker event stream, using local stream: {err}");
+                    }
+                }
+            }
 
             while let Ok(event) = conversation.next_event().await {
                 app_event_tx_clone.send(AppEvent::CodexEvent(event));
