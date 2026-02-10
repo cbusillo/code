@@ -4,19 +4,13 @@
     "accessToken": {
       "type": "string"
     },
-    "chatgptAccountId": {
+    "idToken": {
       "type": "string"
-    },
-    "chatgptPlanType": {
-      "type": [
-        "string",
-        "null"
-      ]
     }
   },
   "required": [
     "accessToken",
-    "chatgptAccountId"
+    "idToken"
   ],
   "title": "ChatgptAuthTokensRefreshResponse",
   "type": "object"

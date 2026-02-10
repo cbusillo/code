@@ -13,7 +13,12 @@ const EVENT_BUFFER: usize = 4096;
 /// Shared event fan-out for conversations so multiple clients can observe the
 /// same thread without competing for `next_event()` reads.
 pub(crate) struct ConversationStreams {
-    streams: Mutex<HashMap<ConversationId, broadcast::Sender<Event>>>,
+    streams: Mutex<HashMap<ConversationId, ConversationStreamEntry>>,
+}
+
+struct ConversationStreamEntry {
+    conversation_ptr: usize,
+    sender: broadcast::Sender<Event>,
 }
 
 impl ConversationStreams {
@@ -28,13 +33,22 @@ impl ConversationStreams {
         conversation_id: ConversationId,
         conversation: Arc<CodexConversation>,
     ) -> broadcast::Receiver<Event> {
+        let conversation_ptr = Arc::as_ptr(&conversation) as usize;
         let mut streams = self.streams.lock().await;
-        if let Some(sender) = streams.get(&conversation_id) {
-            return sender.subscribe();
+        if let Some(existing) = streams.get(&conversation_id)
+            && existing.conversation_ptr == conversation_ptr
+        {
+            return existing.sender.subscribe();
         }
 
         let (sender, _) = broadcast::channel(EVENT_BUFFER);
-        streams.insert(conversation_id, sender.clone());
+        streams.insert(
+            conversation_id,
+            ConversationStreamEntry {
+                conversation_ptr,
+                sender: sender.clone(),
+            },
+        );
         drop(streams);
 
         let listener_sender = sender.clone();
@@ -54,7 +68,7 @@ impl ConversationStreams {
 
             let mut streams = stream_manager.streams.lock().await;
             if let Some(existing) = streams.get(&conversation_id)
-                && existing.same_channel(&listener_sender)
+                && existing.sender.same_channel(&listener_sender)
             {
                 streams.remove(&conversation_id);
             }
