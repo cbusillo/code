@@ -24,7 +24,8 @@ if [ -z "$package_version" ]; then
   exit 1
 fi
 
-expected_header="## @just-every/code v${package_version}"
+expected_version="${CODE_RELEASE_VERSION:-$package_version}"
+expected_header="## @just-every/code v${expected_version}"
 actual_header=$(grep -m1 '^## @just-every/code v' "$notes_file" || true)
 
 if [ "$actual_header" != "$expected_header" ]; then

@@ -160,47 +160,35 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Determine next version (across all npm packages; ensure unique)
+      - name: Determine next version (upstream base + fork patch)
         id: version
         working-directory: codex-cli
         shell: bash
         run: |
           set -euo pipefail
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          PKGS=(
-            "@just-every/code"
-            "@just-every/code-darwin-arm64"
-            "@just-every/code-darwin-x64"
-            "@just-every/code-linux-x64-musl"
-            "@just-every/code-linux-arm64-musl"
-            "@just-every/code-win32-x64"
-          )
-          # Find the highest published version across all packages
-          MAX_PUBLISHED="0.0.0"
-          for p in "${PKGS[@]}"; do
-            v=$(npm view "$p" version 2>/dev/null || echo "0.0.0")
-            if [ "$(printf '%s\n%s\n' "$MAX_PUBLISHED" "$v" | sort -V | tail -n1)" != "$MAX_PUBLISHED" ]; then
-              MAX_PUBLISHED="$v"
-            fi
-          done
-          # Start with whichever is higher: CURRENT_VERSION or MAX_PUBLISHED
-          CANDIDATE=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$MAX_PUBLISHED" | sort -V | tail -n1)
-          # If equal to MAX_PUBLISHED, bump patch once
-          if [ "$CANDIDATE" = "$MAX_PUBLISHED" ]; then
-            IFS='.' read -ra V <<< "$CANDIDATE"; CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
+          if [[ "$CURRENT_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+            BASE_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          else
+            echo "Unexpected codex-cli/package.json version: $CURRENT_VERSION" >&2
+            exit 1
           fi
-          # Ensure candidate is globally unused; keep bumping until unique
-          while :; do
-            used=false
-            for p in "${PKGS[@]}"; do
-              if [ "$(npm view "$p@$CANDIDATE" version 2>/dev/null || true)" = "$CANDIDATE" ]; then
-                used=true; break
-              fi
-            done
-            if [ "$used" = false ]; then break; fi
-            IFS='.' read -ra V <<< "$CANDIDATE"; CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
+
+          MAX_FORK_PATCH=0
+          while IFS= read -r tag; do
+            suffix="${tag#v${BASE_VERSION}.}"
+            if [[ "$suffix" =~ ^[0-9]+$ ]] && (( suffix > MAX_FORK_PATCH )); then
+              MAX_FORK_PATCH=$suffix
+            fi
+          done < <(git tag --list "v${BASE_VERSION}.*")
+
+          NEXT_FORK_PATCH=$((MAX_FORK_PATCH + 1))
+          NEW_VERSION="${BASE_VERSION}.${NEXT_FORK_PATCH}"
+          while git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; do
+            NEXT_FORK_PATCH=$((NEXT_FORK_PATCH + 1))
+            NEW_VERSION="${BASE_VERSION}.${NEXT_FORK_PATCH}"
           done
-          NEW_VERSION="$CANDIDATE"
+
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
   build-binaries:
@@ -524,11 +512,12 @@ jobs:
           ls -la release-assets/ || true
 
       - name: Install zstd (package assembly)
-        if: runner.os == 'Linux'
+        if: env.PUBLISH_NPM == 'true' && runner.os == 'Linux'
         shell: bash
         run: sudo apt-get update -qq && sudo apt-get install -y zstd
 
       - name: Build per-target npm binary packages
+        if: env.PUBLISH_NPM == 'true'
         shell: bash
         env:
           NEW_VERSION: ${{ needs.determine-version.outputs.version }}
@@ -616,6 +605,7 @@ jobs:
           done
 
       - name: Sync README for npm
+        if: env.PUBLISH_NPM == 'true'
         shell: bash
         run: cp README.md codex-cli/README.md
 
@@ -627,8 +617,18 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           NEW_VERSION="${{ needs.determine-version.outputs.version }}"
-          npm version "$NEW_VERSION" --no-git-tag-version --allow-same-version
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+          if [ "${PUBLISH_NPM}" != "true" ]; then
+            echo "skip_push=true" >> "$GITHUB_OUTPUT"
+            if ! git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
+              git tag "v${NEW_VERSION}"
+            fi
+            exit 0
+          fi
+
+          npm version "$NEW_VERSION" --no-git-tag-version --allow-same-version
           # Inject optionalDependencies pointing to per-target packages
           # Note: These are platform-filtered in the target packages, so npm will fetch only one.
           tmp=$(mktemp)
@@ -649,9 +649,9 @@ jobs:
           if ! git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
             git tag "v${NEW_VERSION}"
           fi
-          echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Verify ESM bin integrity (no require in coder.js)
+        if: env.PUBLISH_NPM == 'true'
         shell: bash
         working-directory: codex-cli
         run: |
@@ -972,6 +972,8 @@ jobs:
       - name: Verify release notes header matches version
         if: env.RELEASE_NOTES == 'true'
         shell: bash
+        env:
+          CODE_RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
         run: |
           set -euo pipefail
           scripts/check-release-notes-version.sh

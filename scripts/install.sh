@@ -10,13 +10,13 @@ SKIP_CONFIG=false
 
 usage() {
 	cat <<'USAGE'
-Usage: install.sh [--repo owner/name] [--tag vX.Y.Z] [--version X.Y.Z]
+Usage: install.sh [--repo owner/name] [--tag vX.Y.Z.N] [--version X.Y.Z.N]
                   [--install-dir /path] [--skip-config]
 
 Environment overrides:
   CODE_RELEASE_REPO      GitHub repo (owner/name)
-  CODE_RELEASE_TAG       Release tag (e.g., v0.5.1)
-  CODE_RELEASE_VERSION   Release version (e.g., 0.5.1)
+  CODE_RELEASE_TAG       Release tag (e.g., v0.5.1.1)
+  CODE_RELEASE_VERSION   Release version (e.g., 0.5.1.1)
   CODE_INSTALL_DIR       Install directory
 USAGE
 }
