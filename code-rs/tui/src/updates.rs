@@ -599,8 +599,8 @@ async fn fetch_latest_version(originator: &str) -> anyhow::Result<VersionInfo> {
         .await?;
 
     // Support both tagging schemes:
-    // - "rust-vX.Y.Z" (legacy Rust-release workflow)
-    // - "vX.Y.Z" (general release workflow)
+    // - "rust-vX.Y.Z[.N]" (legacy Rust-release workflow)
+    // - "vX.Y.Z[.N]" (general release workflow)
     let latest_version = if let Some(v) = latest_tag_name.strip_prefix("rust-v") {
         v.to_string()
     } else if let Some(v) = latest_tag_name.strip_prefix('v') {
@@ -611,7 +611,7 @@ async fn fetch_latest_version(originator: &str) -> anyhow::Result<VersionInfo> {
         match parse_version(&latest_tag_name) {
             Some(_) => latest_tag_name.clone(),
             None => anyhow::bail!(
-                "Failed to parse latest tag name '{}': expected 'rust-vX.Y.Z' or 'vX.Y.Z'",
+                "Failed to parse latest tag name '{}': expected 'rust-vX.Y.Z[.N]' or 'vX.Y.Z[.N]'",
                 latest_tag_name
             ),
         }
@@ -680,12 +680,19 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+fn parse_version(v: &str) -> Option<(u64, u64, u64, u64)> {
     let mut iter = v.trim().split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
     let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
+    let fork_patch = match iter.next() {
+        Some(next) => next.parse::<u64>().ok()?,
+        None => 0,
+    };
+    if iter.next().is_some() {
+        return None;
+    }
+    Some((maj, min, pat, fork_patch))
 }
 
 #[cfg(test)]
@@ -700,6 +707,27 @@ mod tests {
 
     fn write_cache(path: &Path, info: &serde_json::Value) {
         fs::write(path, format!("{}\n", info)).expect("write version cache");
+    }
+
+    #[test]
+    fn parse_version_supports_optional_fork_patch() {
+        assert_eq!(parse_version("0.6.60"), Some((0, 6, 60, 0)));
+        assert_eq!(parse_version("0.6.60.1"), Some((0, 6, 60, 1)));
+        assert_eq!(parse_version("0.6.60.12"), Some((0, 6, 60, 12)));
+    }
+
+    #[test]
+    fn parse_version_rejects_invalid_shapes() {
+        assert_eq!(parse_version("0.6"), None);
+        assert_eq!(parse_version("0.6.60.1.1"), None);
+        assert_eq!(parse_version("v0.6.60.1"), None);
+    }
+
+    #[test]
+    fn is_newer_prefers_fork_patch_when_base_matches() {
+        assert_eq!(is_newer("0.6.60.1", "0.6.60"), Some(true));
+        assert_eq!(is_newer("0.6.60.2", "0.6.60.1"), Some(true));
+        assert_eq!(is_newer("0.6.60", "0.6.60.2"), Some(false));
     }
 
     #[test]
