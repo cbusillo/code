@@ -1398,6 +1398,9 @@ async fn start_broker_event_stream(
     wait_for_broker_response(&mut lines, RequestId::Integer(2)).await?;
 
     tokio::spawn(async move {
+        // Keep the write half alive for the lifetime of this stream task.
+        // Dropping it immediately causes the broker to see EOF and close the socket.
+        let _write_half_guard = write_half;
         loop {
             let message = match broker_read_message(&mut lines).await {
                 Ok(Some(message)) => message,
