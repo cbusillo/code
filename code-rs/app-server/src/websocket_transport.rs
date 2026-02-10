@@ -3,6 +3,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use code_app_server_protocol::AuthMode;
+use code_protocol::protocol::SessionSource;
+use code_core::AuthManager;
+use code_core::ConversationManager;
 use code_core::config::Config;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -15,6 +19,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::message_processor::MessageProcessor;
+use crate::message_processor::SharedSessionState;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 
@@ -26,13 +31,37 @@ pub(crate) async fn run_websocket_server(
     let listener = TcpListener::bind(bind_address).await?;
     info!("app-server listening on ws://{bind_address}");
 
+    let preferred_auth = if config.using_chatgpt_auth {
+        AuthMode::Chatgpt
+    } else {
+        AuthMode::ApiKey
+    };
+    let auth_manager = AuthManager::shared_with_mode_and_originator(
+        config.code_home.clone(),
+        preferred_auth,
+        config.responses_originator_header.clone(),
+    );
+    let conversation_manager = Arc::new(ConversationManager::new(
+        auth_manager.clone(),
+        SessionSource::Mcp,
+    ));
+    let shared_state = SharedSessionState::new(auth_manager, conversation_manager);
+
     loop {
         let (stream, peer) = listener.accept().await?;
         let config = config.clone();
         let code_linux_sandbox_exe = code_linux_sandbox_exe.clone();
+        let shared_state = shared_state.clone();
         tokio::spawn(async move {
             if let Err(err) =
-                handle_websocket_connection(stream, peer, code_linux_sandbox_exe, config).await
+                handle_websocket_connection(
+                    stream,
+                    peer,
+                    code_linux_sandbox_exe,
+                    config,
+                    shared_state,
+                )
+                .await
             {
                 warn!("websocket connection failed: {err}");
             }
@@ -45,6 +74,7 @@ async fn handle_websocket_connection(
     peer: SocketAddr,
     code_linux_sandbox_exe: Option<PathBuf>,
     config: Arc<Config>,
+    shared_state: SharedSessionState,
 ) -> io::Result<()> {
     let ws = tokio_tungstenite::accept_async(stream)
         .await
@@ -53,7 +83,12 @@ async fn handle_websocket_connection(
 
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
     let outgoing_sender = OutgoingMessageSender::new(outgoing_tx);
-    let mut processor = MessageProcessor::new(outgoing_sender, code_linux_sandbox_exe, config);
+    let mut processor = MessageProcessor::new_with_shared_state(
+        outgoing_sender,
+        code_linux_sandbox_exe,
+        config,
+        shared_state,
+    );
 
     let writer_task = tokio::spawn(async move {
         while let Some(outgoing_message) = outgoing_rx.recv().await {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use crate::config_rpc::ConfigRpc;
+use crate::conversation_streams::ConversationStreams;
 use crate::code_message_processor::CodexMessageProcessor;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::jsonrpc_compat::to_mcp_request_id;
@@ -118,8 +119,27 @@ pub(crate) struct MessageProcessor {
     config_rpc: ConfigRpc,
     code_linux_sandbox_exe: Option<PathBuf>,
     base_config: Arc<Config>,
+    session_state: SharedSessionState,
+    uses_shared_state: bool,
     initialized: bool,
     client_capabilities: InitializeCapabilities,
+}
+
+#[derive(Clone)]
+pub(crate) struct SharedSessionState {
+    auth_manager: Arc<AuthManager>,
+    conversation_manager: Arc<ConversationManager>,
+    conversation_streams: Arc<ConversationStreams>,
+}
+
+impl SharedSessionState {
+    pub(crate) fn new(auth_manager: Arc<AuthManager>, conversation_manager: Arc<ConversationManager>) -> Self {
+        Self {
+            auth_manager,
+            conversation_manager,
+            conversation_streams: ConversationStreams::new(),
+        }
+    }
 }
 
 impl MessageProcessor {
@@ -149,13 +169,50 @@ impl MessageProcessor {
             auth_manager.clone(),
             SessionSource::Mcp,
         ));
+
+        let session_state = SharedSessionState::new(auth_manager, conversation_manager);
+
+        Self::new_internal(
+            outgoing,
+            code_linux_sandbox_exe,
+            config,
+            session_state,
+            false,
+        )
+    }
+
+    pub(crate) fn new_with_shared_state(
+        outgoing: OutgoingMessageSender,
+        code_linux_sandbox_exe: Option<PathBuf>,
+        config: Arc<Config>,
+        shared_state: SharedSessionState,
+    ) -> Self {
+        let outgoing = Arc::new(outgoing);
+        shared_state
+            .auth_manager
+            .set_external_auth_refresher(Arc::new(ExternalAuthRefreshBridge {
+                outgoing: outgoing.clone(),
+                forced_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+            }));
+
+        Self::new_internal(outgoing, code_linux_sandbox_exe, config, shared_state, true)
+    }
+
+    fn new_internal(
+        outgoing: Arc<OutgoingMessageSender>,
+        code_linux_sandbox_exe: Option<PathBuf>,
+        config: Arc<Config>,
+        session_state: SharedSessionState,
+        uses_shared_state: bool,
+    ) -> Self {
         let config_for_processor = config.clone();
-        let code_message_processor = CodexMessageProcessor::new(
-            auth_manager,
-            conversation_manager,
+        let code_message_processor = CodexMessageProcessor::new_with_streams(
+            session_state.auth_manager.clone(),
+            session_state.conversation_manager.clone(),
             outgoing.clone(),
             code_linux_sandbox_exe.clone(),
             config_for_processor.clone(),
+            session_state.conversation_streams.clone(),
         );
         let config_rpc = ConfigRpc::new(config_for_processor.clone());
 
@@ -165,6 +222,8 @@ impl MessageProcessor {
             config_rpc,
             code_linux_sandbox_exe,
             base_config: config_for_processor,
+            session_state,
+            uses_shared_state,
             initialized: false,
             client_capabilities: InitializeCapabilities::default(),
         }
@@ -244,27 +303,57 @@ impl MessageProcessor {
                             originator_for_session.clone();
                         let updated_base_config = Arc::new(updated_base_config);
 
-                        let auth_manager = AuthManager::shared_with_mode_and_originator(
-                            updated_base_config.code_home.clone(),
-                            preferred_auth,
-                            originator_for_session,
-                        );
-                        auth_manager.set_external_auth_refresher(Arc::new(
-                            ExternalAuthRefreshBridge {
-                                outgoing: self.outgoing.clone(),
-                                forced_workspace_id: self.base_config.forced_chatgpt_workspace_id.clone(),
-                            },
-                        ));
-                        let conversation_manager = Arc::new(ConversationManager::new(
-                            auth_manager.clone(),
-                            SessionSource::Mcp,
-                        ));
-                        self.code_message_processor = CodexMessageProcessor::new(
+                        let (auth_manager, conversation_manager, conversation_streams) =
+                            if self.uses_shared_state {
+                                self.session_state
+                                    .auth_manager
+                                    .set_external_auth_refresher(Arc::new(
+                                        ExternalAuthRefreshBridge {
+                                            outgoing: self.outgoing.clone(),
+                                            forced_workspace_id: self
+                                                .base_config
+                                                .forced_chatgpt_workspace_id
+                                                .clone(),
+                                        },
+                                    ));
+                                (
+                                    self.session_state.auth_manager.clone(),
+                                    self.session_state.conversation_manager.clone(),
+                                    self.session_state.conversation_streams.clone(),
+                                )
+                            } else {
+                                let auth_manager = AuthManager::shared_with_mode_and_originator(
+                                    updated_base_config.code_home.clone(),
+                                    preferred_auth,
+                                    originator_for_session,
+                                );
+                                auth_manager.set_external_auth_refresher(Arc::new(
+                                    ExternalAuthRefreshBridge {
+                                        outgoing: self.outgoing.clone(),
+                                        forced_workspace_id: self
+                                            .base_config
+                                            .forced_chatgpt_workspace_id
+                                            .clone(),
+                                    },
+                                ));
+                                let conversation_manager = Arc::new(ConversationManager::new(
+                                    auth_manager.clone(),
+                                    SessionSource::Mcp,
+                                ));
+                                (
+                                    auth_manager,
+                                    conversation_manager,
+                                    ConversationStreams::new(),
+                                )
+                            };
+
+                        self.code_message_processor = CodexMessageProcessor::new_with_streams(
                             auth_manager,
                             conversation_manager,
                             self.outgoing.clone(),
                             self.code_linux_sandbox_exe.clone(),
                             updated_base_config.clone(),
+                            conversation_streams,
                         );
 
                         self.base_config = updated_base_config;

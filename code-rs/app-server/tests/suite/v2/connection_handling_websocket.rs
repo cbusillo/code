@@ -1,6 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use code_app_server_protocol::ClientInfo;
 use code_app_server_protocol::InitializeParams;
@@ -9,6 +10,11 @@ use code_app_server_protocol::JSONRPCMessage;
 use code_app_server_protocol::JSONRPCRequest;
 use code_app_server_protocol::JSONRPCResponse;
 use code_app_server_protocol::RequestId;
+use code_app_server_protocol::ThreadResumeParams;
+use code_app_server_protocol::ThreadStartParams;
+use code_app_server_protocol::ThreadStartResponse;
+use code_app_server_protocol::TurnStartParams;
+use code_app_server_protocol::UserInput;
 use futures::SinkExt;
 use futures::StreamExt;
 use serde_json::json;
@@ -70,6 +76,67 @@ async fn websocket_transport_routes_per_connection_handshake_and_responses() -> 
     assert_eq!(ws2_config.id, RequestId::Integer(77));
     assert!(ws1_config.result.get("config").is_some());
     assert!(ws2_config.result.get("config").is_some());
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_transport_streams_turn_events_to_all_connections_for_same_thread() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let bind_addr = reserve_local_addr()?;
+    let mut process = spawn_websocket_server(codex_home.path(), bind_addr).await?;
+
+    let mut ws1 = connect_websocket(bind_addr).await?;
+    let mut ws2 = connect_websocket(bind_addr).await?;
+
+    send_initialize_request(&mut ws1, 1, "ws_client_one").await?;
+    let _ = read_response_for_id(&mut ws1, 1).await?;
+
+    send_initialize_request(&mut ws2, 2, "ws_client_two").await?;
+    let _ = read_response_for_id(&mut ws2, 2).await?;
+
+    send_thread_start_request(&mut ws1, 3, ThreadStartParams::default()).await?;
+    let start_response = read_response_for_id(&mut ws1, 3).await?;
+    let start_payload: ThreadStartResponse = serde_json::from_value(start_response.result)?;
+    let thread_id = start_payload.thread.id;
+
+    send_thread_resume_request(
+        &mut ws2,
+        4,
+        ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let _resume_response = read_response_for_id(&mut ws2, 4).await?;
+
+    send_turn_start_request(
+        &mut ws1,
+        5,
+        TurnStartParams {
+            thread_id: thread_id.clone(),
+            input: vec![UserInput::Text {
+                text: "hello from ws1".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        },
+    )
+    .await?;
+    let _turn_response = read_response_for_id(&mut ws1, 5).await?;
+
+    let ws1_completed = read_notification_for_method(&mut ws1, "turn/completed").await?;
+    let ws2_completed = read_notification_for_method(&mut ws2, "turn/completed").await?;
+    assert_eq!(ws1_completed.method, "turn/completed");
+    assert_eq!(ws2_completed.method, "turn/completed");
 
     process
         .kill()
@@ -157,6 +224,44 @@ async fn send_config_read_request(stream: &mut WsClient, id: i64) -> Result<()> 
     .await
 }
 
+async fn send_thread_start_request(
+    stream: &mut WsClient,
+    id: i64,
+    params: ThreadStartParams,
+) -> Result<()> {
+    send_request(
+        stream,
+        "thread/start",
+        id,
+        Some(serde_json::to_value(params)?),
+    )
+    .await
+}
+
+async fn send_thread_resume_request(
+    stream: &mut WsClient,
+    id: i64,
+    params: ThreadResumeParams,
+) -> Result<()> {
+    send_request(
+        stream,
+        "thread/resume",
+        id,
+        Some(serde_json::to_value(params)?),
+    )
+    .await
+}
+
+async fn send_turn_start_request(stream: &mut WsClient, id: i64, params: TurnStartParams) -> Result<()> {
+    send_request(
+        stream,
+        "turn/start",
+        id,
+        Some(serde_json::to_value(params)?),
+    )
+    .await
+}
+
 async fn send_request(
     stream: &mut WsClient,
     method: &str,
@@ -199,6 +304,20 @@ async fn read_error_for_id(stream: &mut WsClient, id: i64) -> Result<JSONRPCErro
             && err.id == target_id
         {
             return Ok(err);
+        }
+    }
+}
+
+async fn read_notification_for_method(
+    stream: &mut WsClient,
+    method: &str,
+) -> Result<code_app_server_protocol::JSONRPCNotification> {
+    loop {
+        let message = read_jsonrpc_message(stream).await?;
+        if let JSONRPCMessage::Notification(notification) = message
+            && notification.method == method
+        {
+            return Ok(notification);
         }
     }
 }
@@ -261,4 +380,3 @@ stream_max_retries = 0
         ),
     )
 }
-

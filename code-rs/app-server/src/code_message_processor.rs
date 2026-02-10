@@ -63,6 +63,7 @@ use multimap::MultiMap;
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tracing::error;
@@ -72,6 +73,7 @@ use uuid::Uuid;
 
 use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
+use crate::conversation_streams::ConversationStreams;
 use crate::jsonrpc_compat::to_mcp_request_id;
 use code_utils_json_to_toml::json_to_toml;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -393,6 +395,7 @@ pub struct CodexMessageProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     code_linux_sandbox_exe: Option<PathBuf>,
     config: Arc<Config>,
+    conversation_streams: Arc<ConversationStreams>,
     conversation_listeners: HashMap<Uuid, ConversationListenerHandle>,
     thread_listeners: HashMap<String, oneshot::Sender<()>>,
     loaded_threads: HashSet<String>,
@@ -414,12 +417,31 @@ impl CodexMessageProcessor {
         code_linux_sandbox_exe: Option<PathBuf>,
         config: Arc<Config>,
     ) -> Self {
+        Self::new_with_streams(
+            auth_manager,
+            conversation_manager,
+            outgoing,
+            code_linux_sandbox_exe,
+            config,
+            ConversationStreams::new(),
+        )
+    }
+
+    pub(crate) fn new_with_streams(
+        auth_manager: Arc<AuthManager>,
+        conversation_manager: Arc<ConversationManager>,
+        outgoing: Arc<OutgoingMessageSender>,
+        code_linux_sandbox_exe: Option<PathBuf>,
+        config: Arc<Config>,
+        conversation_streams: Arc<ConversationStreams>,
+    ) -> Self {
         Self {
             auth_manager,
             conversation_manager,
             outgoing,
             code_linux_sandbox_exe,
             config,
+            conversation_streams,
             conversation_listeners: HashMap::new(),
             thread_listeners: HashMap::new(),
             loaded_threads: HashSet::new(),
@@ -935,6 +957,10 @@ impl CodexMessageProcessor {
         let emit_raw_events = experimental_raw_events;
         let outgoing_for_task = self.outgoing.clone();
         let pending_interrupts = self.pending_interrupts.clone();
+        let mut event_rx = self
+            .conversation_streams
+            .subscribe(conversation_id, conversation.clone())
+            .await;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -942,12 +968,15 @@ impl CodexMessageProcessor {
                         // User has unsubscribed, so exit this task.
                         break;
                     }
-                    event = conversation.next_event() => {
+                    event = event_rx.recv() => {
                         let event = match event {
                             Ok(event) => event,
-                            Err(err) => {
-                                tracing::warn!("conversation.next_event() failed with: {err}");
+                            Err(broadcast::error::RecvError::Closed) => {
                                 break;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!("conversation listener lagged and dropped {skipped} events");
+                                continue;
                             }
                         };
 
@@ -1232,6 +1261,93 @@ impl CodexMessageProcessor {
             .history
             .as_deref()
             .and_then(history_preview_from_response_items);
+
+        let has_resume_overrides = params.path.is_some()
+            || params.model.is_some()
+            || params.model_provider.is_some()
+            || params.cwd.is_some()
+            || params.approval_policy.is_some()
+            || params.sandbox.is_some()
+            || params.config.is_some()
+            || params.base_instructions.is_some()
+            || params.developer_instructions.is_some()
+            || params.personality.is_some();
+
+        if !has_resume_overrides
+            && let Ok(existing_conversation_id) = conversation_id_from_thread_str(&params.thread_id)
+            && let Ok(existing_conversation) = self
+                .conversation_manager
+                .get_conversation(existing_conversation_id)
+                .await
+        {
+            let thread_id = existing_conversation_id.to_string();
+            let config_for_response = self
+                .thread_configs
+                .get(&thread_id)
+                .cloned()
+                .unwrap_or_else(|| (*self.config).clone());
+            self.loaded_threads.insert(thread_id.clone());
+            self.thread_configs
+                .entry(thread_id.clone())
+                .or_insert_with(|| config_for_response.clone());
+            self.start_thread_listener(thread_id.clone(), existing_conversation)
+                .await;
+
+            let rollout_path = code_core::find_conversation_path_by_id_str(
+                &self.config.code_home,
+                &thread_id,
+            )
+            .await
+            .ok()
+            .flatten();
+            let turns = if let Some(path) = rollout_path.clone() {
+                read_turns_from_rollout(&config_for_response, &path).await
+            } else {
+                Vec::new()
+            };
+            let thread = match load_thread_from_catalog(
+                &self.config.code_home,
+                &thread_id,
+                self.config.model_provider_id.as_str(),
+            )
+            .await
+            {
+                Some(thread) => thread,
+                None => build_thread_for_new(
+                    &thread_id,
+                    &config_for_response,
+                    turns.clone(),
+                    rollout_path,
+                ),
+            };
+            let mut thread = v2::Thread { turns, ..thread };
+            if let Some(preview) = history_preview {
+                thread.preview = preview;
+            }
+
+            let response = v2::ThreadResumeResponse {
+                thread: thread.clone(),
+                model: config_for_response.model.clone(),
+                model_provider: config_for_response.model_provider_id.clone(),
+                cwd: config_for_response.cwd.clone(),
+                approval_policy: v2::AskForApproval::from(map_ask_for_approval_to_wire(
+                    config_for_response.approval_policy,
+                )),
+                sandbox: v2::SandboxPolicy::from(map_sandbox_policy_to_wire(
+                    &config_for_response.sandbox_policy,
+                )),
+                reasoning_effort: Some(map_reasoning_effort_to_wire(
+                    config_for_response.model_reasoning_effort,
+                )),
+            };
+            self.outgoing.send_response(request_id, response).await;
+            send_v2_notification(
+                self.outgoing.as_ref(),
+                ServerNotification::ThreadStarted(v2::ThreadStartedNotification { thread }),
+            )
+            .await;
+            return;
+        }
 
         let rollout_path = match resolve_rollout_path(
             &self.config.code_home,
@@ -2318,6 +2434,14 @@ impl CodexMessageProcessor {
         self.thread_listeners.insert(thread_id.clone(), cancel_tx);
         let outgoing = self.outgoing.clone();
         let pending_manual_compactions = self.pending_manual_compactions.clone();
+        let Ok(conversation_id) = conversation_id_from_thread_str(&thread_id) else {
+            tracing::warn!("invalid thread id for listener: {thread_id}");
+            return;
+        };
+        let mut event_rx = self
+            .conversation_streams
+            .subscribe(conversation_id, conversation.clone())
+            .await;
         tokio::spawn(async move {
             let mut state = V2StreamState::new(thread_id.clone());
             loop {
@@ -2325,12 +2449,15 @@ impl CodexMessageProcessor {
                     _ = &mut cancel_rx => {
                         break;
                     }
-                    event = conversation.next_event() => {
+                    event = event_rx.recv() => {
                         let event = match event {
                             Ok(event) => event,
-                            Err(err) => {
-                                tracing::warn!("conversation.next_event() failed with: {err}");
+                            Err(broadcast::error::RecvError::Closed) => {
                                 break;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!("thread listener lagged and dropped {skipped} events");
+                                continue;
                             }
                         };
                         handle_v2_event(

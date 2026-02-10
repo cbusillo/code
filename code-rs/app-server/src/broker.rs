@@ -15,6 +15,7 @@ use serde::Serialize;
 use tracing::{debug, error, info, warn};
 
 use crate::message_processor::MessageProcessor;
+use crate::message_processor::SharedSessionState;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 
@@ -77,14 +78,19 @@ pub async fn run_broker_with_manager(
 
     info!("app-server broker listening on {socket_path:?}");
 
+    let shared_state = SharedSessionState::new(
+        conversation_manager.auth_manager(),
+        conversation_manager.clone(),
+    );
+
     loop {
         let (stream, _addr) = listener.accept().await?;
         let config = config.clone();
-        let conversation_manager = conversation_manager.clone();
         let code_linux_sandbox_exe = code_linux_sandbox_exe.clone();
+        let shared_state = shared_state.clone();
         tokio::spawn(async move {
             if let Err(err) =
-                handle_connection(stream, config, conversation_manager, code_linux_sandbox_exe).await
+                handle_connection(stream, config, shared_state, code_linux_sandbox_exe).await
             {
                 warn!("broker connection failed: {err}");
             }
@@ -150,7 +156,7 @@ async fn prepare_socket_path(path: &Path) -> io::Result<()> {
 async fn handle_connection(
     stream: UnixStream,
     config: Arc<Config>,
-    _conversation_manager: Arc<ConversationManager>,
+    shared_state: SharedSessionState,
     code_linux_sandbox_exe: Option<PathBuf>,
 ) -> io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
@@ -158,10 +164,11 @@ async fn handle_connection(
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
     let outgoing_sender = OutgoingMessageSender::new(outgoing_tx);
 
-    let mut processor = MessageProcessor::new(
+    let mut processor = MessageProcessor::new_with_shared_state(
         outgoing_sender,
         code_linux_sandbox_exe,
         config,
+        shared_state,
     );
 
     let writer_task = tokio::spawn(async move {
