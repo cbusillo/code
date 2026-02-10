@@ -3416,6 +3416,31 @@ impl ChatWidget<'_> {
 
             #[cfg(unix)]
             {
+                // On resume, core emits replay/bootstrap events immediately.
+                // Drain those before switching to broker notifications so the
+                // TUI doesn't start with an empty timeline.
+                let mut drained = 0usize;
+                loop {
+                    let next = tokio::time::timeout(Duration::from_millis(75), conversation.next_event()).await;
+                    match next {
+                        Ok(Ok(event)) => {
+                            app_event_tx_clone.send(AppEvent::CodexEvent(event));
+                            drained += 1;
+                            if drained >= 64 {
+                                break;
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            tracing::warn!("failed while draining bootstrap events: {err}");
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+
+            #[cfg(unix)]
+            {
                 match start_broker_event_stream(
                     &broker_socket_path,
                     new_conversation.conversation_id,
