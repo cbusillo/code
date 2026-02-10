@@ -228,9 +228,8 @@ pub struct Config {
     pub otel: crate::config_types::OtelConfig,
 
     /// When true, Code will silently install updates on startup whenever a newer
-    /// release is available. Upgrades are performed using the package manager
-    /// that originally installed the CLI (Homebrew or npm). Manual installs are
-    /// never upgraded automatically.
+    /// release is available. Upgrades use npm for npm-managed installs and
+    /// otherwise fall back to the hosted install script on macOS/Linux.
     pub auto_upgrade_enabled: bool,
 
     /// User-provided instructions from AGENTS.md.

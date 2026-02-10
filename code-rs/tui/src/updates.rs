@@ -144,10 +144,10 @@ struct ReleaseInfo {
 }
 
 const VERSION_FILENAME: &str = "version.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/just-every/code/releases/latest";
-const CURRENT_RELEASE_REPO: &str = "just-every/code";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/cbusillo/code/releases/latest";
+const CURRENT_RELEASE_REPO: &str = "cbusillo/code";
 const LEGACY_RELEASE_REPO: &str = "openai/codex";
-pub const CODE_RELEASE_URL: &str = "https://github.com/just-every/code/releases/latest";
+pub const CODE_RELEASE_URL: &str = "https://github.com/cbusillo/code/releases/latest";
 
 const CACHE_TTL_HOURS: i64 = 20;
 const MAX_CLOCK_SKEW_MINUTES: i64 = 5;
@@ -178,6 +178,14 @@ fn version_filepath(config: &Config) -> PathBuf {
     config.code_home.join(VERSION_FILENAME)
 }
 
+fn executable_exists_on_path(name: &str) -> bool {
+    let Some(path_env) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path_env).any(|dir| dir.join(name).is_file())
+}
+
 pub fn resolve_upgrade_resolution() -> UpgradeResolution {
     if std::env::var_os("CODEX_MANAGED_BY_NPM").is_some() {
         return UpgradeResolution::Command {
@@ -189,6 +197,20 @@ pub fn resolve_upgrade_resolution() -> UpgradeResolution {
             ],
             display: "npm install -g @just-every/code@latest".to_string(),
         };
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if executable_exists_on_path("bash") && executable_exists_on_path("curl") {
+            let install_script_url = format!(
+                "https://github.com/{CURRENT_RELEASE_REPO}/releases/latest/download/install.sh"
+            );
+            let shell_command = format!("curl -fsSL {install_script_url} | bash");
+            return UpgradeResolution::Command {
+                command: vec!["bash".to_string(), "-lc".to_string(), shell_command.clone()],
+                display: shell_command,
+            };
+        }
     }
 
     #[cfg(target_os = "macos")]
