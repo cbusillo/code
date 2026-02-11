@@ -930,18 +930,70 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        let Ok(conversation) = self
+        let conversation = match self
             .conversation_manager
             .get_conversation(conversation_id)
             .await
-        else {
-            let error = JSONRPCErrorError {
-                code: INVALID_REQUEST_ERROR_CODE,
-                message: format!("conversation not found: {conversation_id}"),
-                data: None,
-            };
-            self.outgoing.send_error(request_id, error).await;
-            return;
+        {
+            Ok(conversation) => conversation,
+            Err(_) => {
+                // A listener may attach before this broker process has resumed the
+                // requested thread. Hydrate from disk so independently started
+                // clients can still subscribe to the same conversation.
+                let thread_id = conversation_id.to_string();
+                let rollout_path = match resolve_rollout_path(&self.config.code_home, &thread_id, None).await {
+                    Ok(path) => path,
+                    Err(_) => {
+                        let error = JSONRPCErrorError {
+                            code: INVALID_REQUEST_ERROR_CODE,
+                            message: format!("conversation not found: {conversation_id}"),
+                            data: None,
+                        };
+                        self.outgoing.send_error(request_id, error).await;
+                        return;
+                    }
+                };
+
+                let config_for_resume = self
+                    .thread_configs
+                    .get(&thread_id)
+                    .cloned()
+                    .unwrap_or_else(|| (*self.config).clone());
+
+                match self
+                    .conversation_manager
+                    .resume_conversation_from_rollout(
+                        config_for_resume.clone(),
+                        rollout_path,
+                        self.conversation_manager.auth_manager(),
+                    )
+                    .await
+                {
+                    Ok(NewConversation {
+                        conversation,
+                        conversation_id: resumed_id,
+                        ..
+                    }) => {
+                        let resumed_thread_id = resumed_id.to_string();
+                        self.loaded_threads.insert(resumed_thread_id.clone());
+                        self.thread_configs
+                            .entry(resumed_thread_id.clone())
+                            .or_insert(config_for_resume);
+                        self.start_thread_listener(resumed_thread_id, conversation.clone())
+                            .await;
+                        conversation
+                    }
+                    Err(err) => {
+                        let error = JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!("failed to load conversation for listener: {err}"),
+                            data: None,
+                        };
+                        self.outgoing.send_error(request_id, error).await;
+                        return;
+                    }
+                }
+            }
         };
 
         let subscription_id = Uuid::new_v4();
@@ -2086,6 +2138,18 @@ impl CodexMessageProcessor {
             .await;
         match submit {
             Ok(turn_id) => {
+                if let Some(user_message_event) = user_message_event_from_v2_input(&input_items) {
+                    let synthetic_user_event = Event {
+                        id: turn_id.clone(),
+                        event_seq: 0,
+                        msg: EventMsg::UserMessage(user_message_event),
+                        order: None,
+                    };
+                    self.conversation_streams
+                        .publish(conversation_id, synthetic_user_event)
+                        .await;
+                }
+
                 let thread_id = params.thread_id.clone();
                 let turn = v2::Turn {
                     id: turn_id.clone(),
@@ -5366,6 +5430,44 @@ fn map_v2_user_input(input: v2::UserInput) -> CoreInputItem {
             text: format!("mention:{name} ({path})"),
         },
     }
+}
+
+fn user_message_event_from_v2_input(
+    input: &[v2::UserInput],
+) -> Option<code_protocol::protocol::UserMessageEvent> {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut image_urls: Vec<String> = Vec::new();
+    let mut local_images: Vec<PathBuf> = Vec::new();
+
+    for item in input {
+        match item {
+            v2::UserInput::Text { text, .. } => {
+                if !text.trim().is_empty() {
+                    text_parts.push(text.clone());
+                }
+            }
+            v2::UserInput::Image { url } => image_urls.push(url.clone()),
+            v2::UserInput::LocalImage { path } => local_images.push(path.clone()),
+            v2::UserInput::Skill { name, path } => {
+                text_parts.push(format!("skill:{name} ({})", path.display()));
+            }
+            v2::UserInput::Mention { name, path } => {
+                text_parts.push(format!("mention:{name} ({path})"));
+            }
+        }
+    }
+
+    if text_parts.is_empty() && image_urls.is_empty() && local_images.is_empty() {
+        return None;
+    }
+
+    Some(code_protocol::protocol::UserMessageEvent {
+        message: text_parts.join("\n"),
+        kind: Some(code_protocol::protocol::InputMessageKind::Plain),
+        images: (!image_urls.is_empty()).then_some(image_urls),
+        local_images,
+        text_elements: Vec::new(),
+    })
 }
 
 async fn send_v2_notification(outgoing: &OutgoingMessageSender, notification: ServerNotification) {

@@ -76,4 +76,15 @@ impl ConversationStreams {
 
         sender.subscribe()
     }
+
+    pub(crate) async fn publish(&self, conversation_id: ConversationId, event: Event) {
+        let sender = {
+            let streams = self.streams.lock().await;
+            streams.get(&conversation_id).map(|entry| entry.sender.clone())
+        };
+
+        if let Some(sender) = sender {
+            let _ = sender.send(event);
+        }
+    }
 }

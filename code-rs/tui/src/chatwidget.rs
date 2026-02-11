@@ -199,6 +199,7 @@ use code_core::protocol::TaskCompleteEvent;
 use code_core::protocol::TokenUsage;
 use code_core::protocol::TurnDiffEvent;
 use code_core::protocol::ViewImageToolCallEvent;
+use code_protocol::protocol::InputMessageKind;
 use code_core::review_coord::{bump_snapshot_epoch_for, try_acquire_lock, ReviewGuard};
 use code_core::ConversationManager;
 use code_core::codex::compact::COMPACTION_CHECKPOINT_MESSAGE;
@@ -1369,64 +1370,111 @@ async fn start_broker_event_stream(
     conversation_id: ConversationId,
     app_event_tx: AppEventSender,
 ) -> Result<(), String> {
-    let stream = UnixStream::connect(socket_path)
-        .await
-        .map_err(|err| format!("failed to connect broker stream: {err}"))?;
-    let (read_half, mut write_half) = stream.into_split();
-    let mut lines = BufReader::new(read_half).lines();
+    async fn connect_stream_once(
+        socket_path: &Path,
+        conversation_id: ConversationId,
+    ) -> Result<
+        (
+            tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+            tokio::net::unix::OwnedWriteHalf,
+        ),
+        String,
+    > {
+        let stream = UnixStream::connect(socket_path)
+            .await
+            .map_err(|err| format!("failed to connect broker stream: {err}"))?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut lines = BufReader::new(read_half).lines();
 
-    broker_write_message(
-        &mut write_half,
-        ClientRequest::Initialize {
-            request_id: RequestId::Integer(1),
-            params: InitializeParams {
-                client_info: tui_client_info(),
+        broker_write_message(
+            &mut write_half,
+            ClientRequest::Initialize {
+                request_id: RequestId::Integer(1),
+                params: InitializeParams {
+                    client_info: tui_client_info(),
+                },
             },
-        },
-    )
-    .await?;
-    wait_for_broker_response(&mut lines, RequestId::Integer(1)).await?;
+        )
+        .await?;
+        wait_for_broker_response(&mut lines, RequestId::Integer(1)).await?;
 
-    broker_write_message(
-        &mut write_half,
-        ClientRequest::AddConversationListener {
-            request_id: RequestId::Integer(2),
-            params: AddConversationListenerParams { conversation_id },
-        },
-    )
-    .await?;
-    wait_for_broker_response(&mut lines, RequestId::Integer(2)).await?;
+        broker_write_message(
+            &mut write_half,
+            ClientRequest::AddConversationListener {
+                request_id: RequestId::Integer(2),
+                params: AddConversationListenerParams { conversation_id },
+            },
+        )
+        .await?;
+        wait_for_broker_response(&mut lines, RequestId::Integer(2)).await?;
 
-    tokio::spawn(async move {
-        // Keep the write half alive for the lifetime of this stream task.
-        // Dropping it immediately causes the broker to see EOF and close the socket.
-        let _write_half_guard = write_half;
-        loop {
-            let message = match broker_read_message(&mut lines).await {
-                Ok(Some(message)) => message,
-                Ok(None) => break,
-                Err(err) => {
-                    tracing::warn!("broker stream read failed: {err}");
-                    break;
+        Ok((lines, write_half))
+    }
+
+    // The in-process broker is started asynchronously. Allow a short window for
+    // the socket to come up before giving up and falling back to local events.
+    let attach_deadline = Instant::now() + Duration::from_secs(3);
+    let (mut lines, mut write_half) = loop {
+        match connect_stream_once(socket_path, conversation_id).await {
+            Ok(stream_parts) => break stream_parts,
+            Err(err) => {
+                if Instant::now() >= attach_deadline {
+                    return Err(err);
                 }
-            };
-
-            if let JSONRPCMessage::Notification(notification) = message
-                && let Some(event) = event_from_broker_notification(notification)
-            {
-                app_event_tx.send(AppEvent::CodexEvent(event));
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+    };
 
-        let error_event = Event {
-            id: conversation_id.to_string(),
-            event_seq: 0,
-            msg: EventMsg::Error(ErrorEvent {
-                message: "broker stream closed".to_string(),
-            }),
-            order: None,
-        };
-        app_event_tx.send(AppEvent::CodexEvent(error_event));
+    let socket_path = socket_path.to_path_buf();
+    tokio::spawn(async move {
+        loop {
+            // Keep the writer alive while we read notifications. If it drops,
+            // the broker sees EOF and tears down the stream.
+            loop {
+                let message = match broker_read_message(&mut lines).await {
+                    Ok(Some(message)) => message,
+                    Ok(None) => break,
+                    Err(err) => {
+                        tracing::warn!("broker stream read failed: {err}");
+                        break;
+                    }
+                };
+
+                if let JSONRPCMessage::Notification(notification) = message
+                    && let Some(event) = event_from_broker_notification(notification)
+                {
+                    app_event_tx.send(AppEvent::CodexEvent(event));
+                }
+            }
+
+            let error_event = Event {
+                id: conversation_id.to_string(),
+                event_seq: 0,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "broker stream closed".to_string(),
+                }),
+                order: None,
+            };
+            app_event_tx.send(AppEvent::CodexEvent(error_event));
+
+            drop(write_half);
+            let mut backoff = Duration::from_millis(250);
+            loop {
+                tokio::time::sleep(backoff).await;
+                match connect_stream_once(&socket_path, conversation_id).await {
+                    Ok((new_lines, new_write_half)) => {
+                        lines = new_lines;
+                        write_half = new_write_half;
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to reconnect broker stream: {err}");
+                        backoff = std::cmp::min(backoff * 2, Duration::from_secs(2));
+                    }
+                }
+            }
+        }
     });
 
     Ok(())
@@ -15467,8 +15515,42 @@ impl ChatWidget<'_> {
                         .update_status_text("using browser".to_string());
                 }
             }
-            // Newer protocol variants we currently ignore in the TUI
-            EventMsg::UserMessage(_) => {}
+            // Mirror user turns submitted from other clients (e.g., Web UI) so
+            // multi-client sessions stay in sync in real time.
+            EventMsg::UserMessage(user_message) => {
+                let message_text = user_message.message.trim();
+                if message_text.is_empty() {
+                    return;
+                }
+
+                // Keep hidden/system-style payloads out of the transcript.
+                match user_message.kind {
+                    Some(InputMessageKind::EnvironmentContext)
+                    | Some(InputMessageKind::UserInstructions) => return,
+                    Some(InputMessageKind::Plain) | None => {}
+                }
+
+                // Ignore synthetic action wrappers.
+                if message_text.starts_with("<user_action>") {
+                    return;
+                }
+
+                // Locally submitted prompts are already rendered immediately.
+                if let Some(expected) = self.pending_dispatched_user_messages.front()
+                    && expected.trim() == message_text
+                {
+                    self.pending_dispatched_user_messages.pop_front();
+                    return;
+                }
+
+                let key = match event.order.as_ref() {
+                    Some(order) => self.provider_order_key_from_order_meta(order),
+                    None => self.next_internal_key(),
+                };
+                let state = history_cell::new_user_prompt(message_text.to_string());
+                let _ = self.history_insert_plain_state_with_key(state, key, "prompt");
+                self.request_redraw();
+            }
             EventMsg::TurnAborted(_) => {
                 self.pending_request_user_input = None;
             }
@@ -31428,6 +31510,75 @@ use code_core::protocol::OrderMeta;
         assert!(
             still_active && in_recovery,
             "auto drive should pause for recovery after an error event"
+        );
+    }
+
+    #[test]
+    fn user_message_event_from_peer_renders_in_history() {
+        let mut harness = ChatWidgetHarness::new();
+
+        harness.handle_event(Event {
+            id: "peer-turn".to_string(),
+            event_seq: 1,
+            msg: EventMsg::UserMessage(code_protocol::protocol::UserMessageEvent {
+                message: "peer says hello".to_string(),
+                kind: Some(code_protocol::protocol::InputMessageKind::Plain),
+                images: None,
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
+            }),
+            order: None,
+        });
+
+        let rendered = harness.with_chat(|chat| {
+            chat.history_cells.iter().any(|cell| {
+                cell.display_lines_trimmed().iter().any(|line| {
+                    line.spans
+                        .iter()
+                        .any(|span| span.content.contains("peer says hello"))
+                })
+            })
+        });
+        assert!(rendered, "peer user message should appear in transcript");
+    }
+
+    #[test]
+    fn user_message_event_matching_local_echo_is_deduped() {
+        let mut harness = ChatWidgetHarness::new();
+        harness.with_chat(|chat| {
+            chat
+                .pending_dispatched_user_messages
+                .push_back("dedupe me".to_string());
+        });
+
+        harness.handle_event(Event {
+            id: "local-turn".to_string(),
+            event_seq: 2,
+            msg: EventMsg::UserMessage(code_protocol::protocol::UserMessageEvent {
+                message: "dedupe me".to_string(),
+                kind: Some(code_protocol::protocol::InputMessageKind::Plain),
+                images: None,
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
+            }),
+            order: None,
+        });
+
+        let (queue_empty, rendered_duplicate) = harness.with_chat(|chat| {
+            let rendered = chat.history_cells.iter().any(|cell| {
+                cell.display_lines_trimmed().iter().any(|line| {
+                    line.spans
+                        .iter()
+                        .any(|span| span.content.contains("dedupe me"))
+                })
+            });
+            (chat.pending_dispatched_user_messages.is_empty(), rendered)
+        });
+
+        assert!(queue_empty, "echo queue entry should be consumed");
+        assert!(
+            !rendered_duplicate,
+            "locally-sent user message should not be rendered twice"
         );
     }
 
