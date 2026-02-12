@@ -48,6 +48,11 @@ enum SessionStreamReducer {
         newItem: SessionStreamItem,
         maxItems: Int = 2_000
     ) -> [SessionStreamItem] {
+        if let lastSeq = items.last?.seq,
+           newItem.seq <= lastSeq {
+            return items
+        }
+
         var next = items
         next.append(newItem)
         if next.count > maxItems {

@@ -15,11 +15,13 @@ Codex session stream.
 
 ## Run
 
-From the repo root, start the Rust mirror server:
+The native app expects a WebSocket mirror endpoint at
+`ws://127.0.0.1:4317/ws`.
+
+From the repo root, start the mirror server:
 
 ```bash
-cd code-rs
-cargo run -p code-cli --bin code -- web --host 127.0.0.1 --port 4317
+./code-rs/target/dev-fast/code web --host 127.0.0.1 --port 4317
 ```
 
 In another terminal, run the native app:

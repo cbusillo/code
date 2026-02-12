@@ -1,19 +1,52 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
 
     @StateObject private var voiceInput = VoiceInputController()
     @StateObject private var voiceOutput = VoiceOutputController()
 
-    @State private var autoSpeakAssistant: Bool = true
-    @State private var autoSubmitVoice: Bool = true
+    @AppStorage("code_native_theme_mode") private var themeModeRaw = AppThemeMode.system.rawValue
+    @AppStorage("code_native_thread_density") private var threadDensityRaw = ThreadDensity.comfortable.rawValue
+    @AppStorage("code_native_open_destination") private var openDestinationRaw = OpenDestination.finder.rawValue
+    @AppStorage("code_native_followup_mode") private var followupModeRaw = FollowupMode.steer.rawValue
+    @AppStorage("code_native_multiline_behavior") private var multilineBehaviorRaw = MultilineBehavior.cmdEnter.rawValue
+    @AppStorage("code_native_prevent_sleep") private var preventSleep = false
+    @AppStorage("code_native_glass_window") private var glassWindow = true
+    @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = true
+    @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
+
     @State private var lastSpokenItemID: String?
-    @State private var isPressToTalkActive: Bool = false
-    @State private var createSessionCwd: String = ""
+    @State private var isPressToTalkActive = false
+    @State private var showSettings = false
+    @State private var showConnectionPopover = false
+    @State private var ideContextEnabled = true
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
+    }
+
+    private var selectedThemeMode: AppThemeMode {
+        AppThemeMode(rawValue: themeModeRaw) ?? .system
+    }
+
+    private var selectedThreadDensity: ThreadDensity {
+        ThreadDensity(rawValue: threadDensityRaw) ?? .comfortable
+    }
+
+    private var connectionChipColor: Color {
+        switch store.connectionState {
+        case .connected:
+            return Color.green.opacity(0.85)
+        case .connecting:
+            return Color.orange.opacity(0.9)
+        case .disconnected:
+            return Color.red.opacity(0.85)
+        }
     }
 
     private var voiceStateLabel: String {
@@ -42,13 +75,52 @@ struct ContentView: View {
         }
     }
 
-    var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detailPanel
+    private var repoGroups: [RepoSessionGroup] {
+        let grouped = Dictionary(grouping: store.sessions) { session in
+            let path = URL(fileURLWithPath: session.cwd)
+            let repo = path.lastPathComponent
+            return repo.isEmpty ? "workspace" : repo
         }
-        .navigationSplitViewStyle(.balanced)
+
+        return grouped
+            .map { RepoSessionGroup(repoName: $0.key, sessions: $0.value.sorted(by: { $0.createdAtUnixMs < $1.createdAtUnixMs })) }
+            .sorted(by: { $0.repoName.localizedCaseInsensitiveCompare($1.repoName) == .orderedAscending })
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.06, green: 0.07, blue: 0.10),
+                    Color(red: 0.05, green: 0.06, blue: 0.08)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            HStack(spacing: 0) {
+                sidebar
+                Divider().overlay(Color.white.opacity(0.08))
+                mainPanel
+            }
+        }
+        .preferredColorScheme(selectedThemeMode.colorScheme)
+        .sheet(isPresented: $showSettings) {
+            NativeSettingsView(
+                store: store,
+                autoSpeakAssistant: $autoSpeakAssistant,
+                autoSubmitVoice: $autoSubmitVoice,
+                themeModeRaw: $themeModeRaw,
+                threadDensityRaw: $threadDensityRaw,
+                openDestinationRaw: $openDestinationRaw,
+                followupModeRaw: $followupModeRaw,
+                multilineBehaviorRaw: $multilineBehaviorRaw,
+                preventSleep: $preventSleep,
+                glassWindow: $glassWindow
+            )
+            .frame(minWidth: 900, minHeight: 620)
+        }
         .task {
             if store.connectionState == .disconnected {
                 await store.connect()
@@ -65,229 +137,379 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        VStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Session Endpoint")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Session endpoint")
-                    .accessibilityHint("WebSocket endpoint for the local session server")
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Code Native")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
 
-            HStack(spacing: 8) {
-                Button("Connect") {
+                ActionRailButton(icon: "square.and.pencil", title: "New thread") {
                     Task {
-                        await store.connect()
+                        await store.createSession(cwd: nil)
                     }
                 }
-                .disabled(store.connectionState != .disconnected)
-                .accessibilityLabel("Connect to session server")
 
-                Button("Disconnect") {
-                    store.disconnect()
+                ActionRailButton(icon: "clock.arrow.circlepath", title: "Automations") {
+                    showSettings = true
                 }
-                .disabled(store.connectionState == .disconnected)
-                .accessibilityLabel("Disconnect from session server")
 
-                Button("Refresh") {
-                    Task {
-                        await store.refreshSessions()
-                    }
-                }
-                .disabled(store.connectionState != .connected)
-                .accessibilityLabel("Refresh session list")
-            }
-            .buttonStyle(.borderedProminent)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Create Session")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 8) {
-                    TextField("Optional cwd", text: $createSessionCwd)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Session working directory")
-                        .accessibilityHint("Optional repository path for new session")
-
-                    Button("Create") {
-                        Task {
-                            await store.createSession(cwd: createSessionCwd)
-                            createSessionCwd = ""
-                        }
-                    }
-                    .disabled(store.connectionState != .connected)
-                    .accessibilityLabel("Create session")
+                ActionRailButton(icon: "wand.and.stars", title: "Skills") {
+                    showSettings = true
                 }
             }
 
-            HStack {
-                Text("Status")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(store.statusLine)
-                    .font(.caption)
-            }
+            Divider().overlay(Color.white.opacity(0.08))
 
-            if let lastError = store.lastError {
-                Text(lastError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(repoGroups) { group in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(group.repoName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(group.sessions.count)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
 
-            List(selection: $store.selectedSessionID) {
-                Section("Sessions") {
-                    ForEach(store.sessions) { session in
-                        SessionRow(session: session)
-                            .tag(session.id)
-                    }
-                }
-            }
-            .accessibilityLabel("Session list")
-        }
-        .padding(12)
-        .navigationTitle("Code Native")
-    }
-
-    private var detailPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let session = store.selectedSession {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Session \(session.id.uuidString.prefix(8))")
-                        .font(.title3.weight(.semibold))
-                    Text("\(session.model) · \(session.cwd)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(store.selectedSessionItems) { item in
-                            TranscriptCard(
-                                item: item,
-                                onApproval: { approved in
-                                    handleApproval(item: item, approved: approved)
+                            if group.sessions.isEmpty {
+                                Text("No threads")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(group.sessions) { session in
+                                    ThreadPill(
+                                        session: session,
+                                        isSelected: store.selectedSessionID == session.id,
+                                        density: selectedThreadDensity
+                                    ) {
+                                        store.selectedSessionID = session.id
+                                    }
                                 }
-                            )
+                            }
                         }
                     }
-                    .padding(.vertical, 4)
                 }
-
-                composerPanel
-                voicePanel
-            } else {
-                ContentUnavailableView(
-                    "No Session Selected",
-                    systemImage: "rectangle.stack",
-                    description: Text("Connect and select a session to view its live transcript.")
-                )
+                .padding(.trailing, 4)
             }
+
+            Spacer(minLength: 8)
+
+            Button {
+                showSettings = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .foregroundStyle(.secondary)
         }
         .padding(16)
+        .frame(width: 250)
+        .background(
+            ZStack {
+                if glassWindow {
+                    RoundedRectangle(cornerRadius: 0)
+                        .fill(Color.white.opacity(0.03))
+                } else {
+                    RoundedRectangle(cornerRadius: 0)
+                        .fill(Color.black.opacity(0.35))
+                }
+
+                RadialGradient(
+                    colors: [Color.white.opacity(0.08), .clear],
+                    center: .topLeading,
+                    startRadius: 10,
+                    endRadius: 420
+                )
+            }
+        )
+    }
+
+    private var mainPanel: some View {
+        VStack(spacing: 0) {
+            topBar
+
+            if let session = store.selectedSession {
+                transcriptPanel(session: session)
+                composerPanel
+            } else {
+                emptyState
+                composerPanel
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(store.selectedSession.map(sessionTitle(for:)) ?? "No thread selected")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                Text(store.selectedSession?.model ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            statusChip
+
+            TopBarButton(icon: "folder", title: "Open") {
+                openSelectedWorkspace()
+            }
+            .disabled(store.selectedSession == nil)
+
+            TopBarButton(icon: "checklist", title: "Commit") {
+                showSettings = true
+            }
+            .disabled(store.selectedSession == nil)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(Color.black.opacity(0.28))
+        .overlay(alignment: .bottom) {
+            Divider().overlay(Color.white.opacity(0.08))
+        }
+    }
+
+    private var statusChip: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(connectionChipColor)
+                .frame(width: 8, height: 8)
+            Text(store.statusLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.06), in: Capsule())
+        .onTapGesture {
+            showConnectionPopover.toggle()
+        }
+        .popover(isPresented: $showConnectionPopover, arrowEdge: .bottom) {
+            ConnectionPopover(store: store)
+                .frame(width: 360)
+                .padding(12)
+        }
+    }
+
+    private func transcriptPanel(session: SessionSummary) -> some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                if store.selectedSessionItems.isEmpty {
+                    Text("Ready. Share what you want me to do next.")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.84))
+                        .padding(.top, 140)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    ForEach(store.selectedSessionItems) { item in
+                        TranscriptCard(
+                            item: item,
+                            onApproval: { approved in
+                                handleApproval(item: item, approved: approved)
+                            }
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, 26)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 980)
+            .frame(maxWidth: .infinity)
+        }
     }
 
     private var composerPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Composer")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
+        VStack(spacing: 10) {
+            VStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $store.composerText)
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 108, maxHeight: 220)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
 
-            TextEditor(text: $store.composerText)
-                .font(.body.monospaced())
-                .frame(minHeight: 96, maxHeight: 160)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                    if store.composerText.isEmpty {
+                        Text("Ask for follow-up changes")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 17)
+                            .padding(.top, 18)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                composerControlRows
+            }
+            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            )
+        }
+        .padding(.horizontal, 22)
+        .padding(.bottom, 18)
+    }
+
+    private var composerControlRows: some View {
+        VStack(spacing: 0) {
+            Divider().overlay(Color.white.opacity(0.10))
+
+            HStack(spacing: 14) {
+                Image(systemName: "plus")
+                    .foregroundStyle(.secondary)
+
+                Menu {
+                    Text("Model selection will be wired to thread settings")
+                } label: {
+                    Label("GPT-5.3-Codex", systemImage: "chevron.down")
+                }
+                .menuStyle(.borderlessButton)
+
+                Menu {
+                    ForEach(["Low", "Medium", "High"], id: \.self) { option in
+                        Button(option) {}
+                    }
+                } label: {
+                    Label("High", systemImage: "chevron.down")
+                }
+                .menuStyle(.borderlessButton)
+
+                Toggle(isOn: $ideContextEnabled) {
+                    Text("IDE context")
+                }
+                .toggleStyle(.checkbox)
+
+                Spacer()
+
+                VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            HStack(spacing: 10) {
+                Menu {
+                    Button("Local") {}
+                } label: {
+                    Label("Local", systemImage: "laptopcomputer")
+                }
+                .menuStyle(.borderlessButton)
+
+                Menu {
+                    Button("on-request") {}
+                    Button("on-failure") {}
+                    Button("never") {}
+                } label: {
+                    Label("Default permissions", systemImage: "shield")
+                }
+                .menuStyle(.borderlessButton)
+
+                Spacer()
+
+                PressToTalkButton(
+                    isActive: voiceInput.isRecording,
+                    isDisabled: !canSendTurns,
+                    onPressChanged: handlePressToTalkChanged
                 )
-                .accessibilityLabel("Composer")
 
-            HStack(spacing: 8) {
-                Button("Interrupt") {
+                Button {
+                    handleVoiceToggleTap()
+                } label: {
+                    Image(systemName: voiceInput.isRecording ? "mic.fill" : "mic")
+                        .font(.headline)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(voiceInput.isRecording ? .red : .secondary)
+                .frame(width: 30, height: 30)
+                .background(Color.white.opacity(0.06), in: Circle())
+                .disabled(!canSendTurns)
+
+                Button {
                     Task {
                         await store.interruptTurn()
                     }
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.caption)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(width: 30, height: 30)
+                .background(Color.white.opacity(0.06), in: Circle())
                 .disabled(!canSendTurns)
-                .keyboardShortcut("i", modifiers: [.command])
-                .accessibilityLabel("Interrupt current turn")
 
-                Button("Submit") {
+                Button {
                     Task {
                         await store.submitComposer()
                     }
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.black)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!canSendTurns || store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .keyboardShortcut(.return, modifiers: [.command])
-                .accessibilityLabel("Submit composer")
+                .buttonStyle(.plain)
+                .frame(width: 34, height: 34)
+                .background(
+                    canSubmit ? Color.white : Color.white.opacity(0.4),
+                    in: Circle()
+                )
+                .disabled(!canSubmit)
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
         }
     }
 
-    private var voicePanel: some View {
-        GroupBox("Voice") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    PressToTalkButton(
-                        isActive: voiceInput.isRecording,
-                        isDisabled: !canSendTurns,
-                        onPressChanged: handlePressToTalkChanged
-                    )
-
-                    Button(voiceInput.isRecording ? "Tap to Stop" : "Tap to Record") {
-                        handleVoiceToggleTap()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!canSendTurns)
-                    .keyboardShortcut(" ", modifiers: [.command, .shift])
-                    .accessibilityLabel("Toggle recording")
-
-                    Button("Stop Speaking") {
-                        voiceOutput.stop()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!voiceOutput.isSpeaking)
-
-                    Toggle("Auto Speak", isOn: $autoSpeakAssistant)
-                        .accessibilityHint("Automatically speak assistant responses")
-                    Toggle("Auto Submit Voice", isOn: $autoSubmitVoice)
-                        .accessibilityHint("Submit turn when recording stops")
-                }
-
-                HStack(spacing: 8) {
-                    Text("Voice State")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(voiceStateLabel)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(voiceInput.isRecording ? .green : .secondary)
-                }
-
-                if !voiceInput.liveTranscript.isEmpty {
-                    Text(voiceInput.liveTranscript)
-                        .font(.caption)
-                        .foregroundStyle(
-                            voiceInput.transcriptState == .final
-                                ? .primary
-                                : .secondary
-                        )
-                }
-
-                if let voiceError = voiceInput.lastError {
-                    Text(voiceError)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private var emptyState: some View {
+        VStack {
+            Spacer()
+            Text("Connect and select a session to start mirroring.")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
         }
+    }
+
+    private var canSubmit: Bool {
+        canSendTurns && !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func sessionTitle(for session: SessionSummary) -> String {
+        let repoName = URL(fileURLWithPath: session.cwd).lastPathComponent
+        let prefix = session.id.uuidString.prefix(8)
+        return "Run task \(prefix) · \(repoName)"
+    }
+
+    private func openSelectedWorkspace() {
+        guard let session = store.selectedSession else {
+            return
+        }
+
+        let destination = OpenDestination(rawValue: openDestinationRaw) ?? .finder
+        let url = URL(fileURLWithPath: session.cwd)
+
+        #if os(macOS)
+        switch destination {
+        case .finder, .editor:
+            NSWorkspace.shared.open(url)
+        }
+        #endif
     }
 
     private func startVoiceCapture() {
@@ -306,7 +528,7 @@ struct ContentView: View {
         let normalized = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         store.composerText = finalText
 
-        if shouldSubmit, autoSubmitVoice, !normalized.isEmpty {
+        if shouldSubmit && autoSubmitVoice && !normalized.isEmpty {
             Task {
                 await store.submitComposer()
             }
@@ -356,6 +578,7 @@ struct ContentView: View {
 
         Task {
             await store.submitApproval(
+                sessionID: item.sessionID,
                 callID: approvalRequest.callID,
                 type: approvalRequest.type,
                 approved: approved
@@ -378,6 +601,261 @@ struct ContentView: View {
     }
 }
 
+private struct RepoSessionGroup: Identifiable {
+    let id = UUID()
+    let repoName: String
+    let sessions: [SessionSummary]
+}
+
+private enum AppThemeMode: String, CaseIterable, Identifiable {
+    case light
+    case dark
+    case system
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .light:
+            return "Light"
+        case .dark:
+            return "Dark"
+        case .system:
+            return "System"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        case .system:
+            return nil
+        }
+    }
+}
+
+private enum ThreadDensity: String, CaseIterable, Identifiable {
+    case compact
+    case comfortable
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .compact:
+            return "Compact"
+        case .comfortable:
+            return "Comfortable"
+        }
+    }
+
+    var rowPadding: CGFloat {
+        switch self {
+        case .compact:
+            return 6
+        case .comfortable:
+            return 10
+        }
+    }
+}
+
+private enum OpenDestination: String, CaseIterable, Identifiable {
+    case finder
+    case editor
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .finder:
+            return "Finder"
+        case .editor:
+            return "Editor"
+        }
+    }
+}
+
+private enum FollowupMode: String, CaseIterable, Identifiable {
+    case queue
+    case steer
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .queue:
+            return "Queue"
+        case .steer:
+            return "Steer"
+        }
+    }
+}
+
+private enum MultilineBehavior: String, CaseIterable, Identifiable {
+    case cmdEnter
+    case enter
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .cmdEnter:
+            return "Cmd+Enter"
+        case .enter:
+            return "Enter"
+        }
+    }
+}
+
+private struct ActionRailButton: View {
+    let icon: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.88))
+        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+}
+
+private struct ThreadPill: View {
+    let session: SessionSummary
+    let isSelected: Bool
+    let density: ThreadDensity
+    let onTap: () -> Void
+
+    private var relativeAge: String {
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        let elapsed = nowMs > session.createdAtUnixMs ? nowMs - session.createdAtUnixMs : 0
+        let minutes = elapsed / 60_000
+        if minutes < 1 {
+            return "now"
+        }
+        return "\(minutes)m"
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(session.id.uuidString.prefix(12))
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                    Text(session.model)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text(relativeAge)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, density.rowPadding)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? .white : .white.opacity(0.87))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isSelected ? Color.white.opacity(0.14) : Color.white.opacity(0.04))
+        )
+    }
+}
+
+private struct TopBarButton: View {
+    let icon: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color.white.opacity(0.06), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+    }
+}
+
+private struct VoiceStatusBadge: View {
+    let label: String
+    let isActive: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(isActive ? Color.green : Color.secondary.opacity(0.7))
+                .frame(width: 6, height: 6)
+            Text(label)
+        }
+    }
+}
+
+private struct ConnectionPopover: View {
+    @ObservedObject var store: SessionMirrorStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Session Connection")
+                .font(.headline)
+
+            TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
+                .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                Button("Connect") {
+                    Task {
+                        await store.connect()
+                    }
+                }
+                .disabled(store.connectionState != .disconnected)
+
+                Button("Disconnect") {
+                    store.disconnect()
+                }
+                .disabled(store.connectionState == .disconnected)
+
+                Button("Refresh") {
+                    Task {
+                        await store.refreshSessions()
+                    }
+                }
+                .disabled(store.connectionState != .connected)
+            }
+            .buttonStyle(.borderedProminent)
+
+            if let error = store.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else {
+                Text(store.statusLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 private struct PressToTalkButton: View {
     let isActive: Bool
     let isDisabled: Bool
@@ -385,24 +863,20 @@ private struct PressToTalkButton: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(isActive ? Color.red : Color.accentColor)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: isActive ? "mic.fill" : "mic")
-                Text(isActive ? "Release to Send" : "Hold to Talk")
+                Text(isActive ? "Release" : "Hold")
                     .fontWeight(.semibold)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
-        .frame(minWidth: 180, maxWidth: 260, minHeight: 34)
+        .frame(minWidth: 92, minHeight: 30)
         .opacity(isDisabled ? 0.45 : 1)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(.white.opacity(0.15), lineWidth: 1)
-        )
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
@@ -420,30 +894,6 @@ private struct PressToTalkButton: View {
                 onPressChanged(false)
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isActive ? "Release to send" : "Hold to talk")
-        .accessibilityHint("Press and hold to capture voice, then release to submit")
-        .accessibilityValue(isActive ? "Recording" : "Idle")
-        .accessibilityAddTraits(.isButton)
-    }
-}
-
-private struct SessionRow: View {
-    let session: SessionSummary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(session.model)
-                .font(.subheadline.weight(.semibold))
-            Text(session.cwd)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(session.id.uuidString)
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
     }
 }
 
@@ -454,43 +904,43 @@ private struct TranscriptCard: View {
     private var cardBackground: Color {
         switch item.cardStyle {
         case .assistant:
-            return Color.blue.opacity(0.08)
+            return Color.blue.opacity(0.10)
         case .reasoning:
-            return Color.orange.opacity(0.08)
+            return Color.orange.opacity(0.10)
         case .tool:
-            return Color.teal.opacity(0.09)
+            return Color.teal.opacity(0.11)
         case .approval:
-            return Color.yellow.opacity(0.12)
+            return Color.yellow.opacity(0.14)
         case .composer:
-            return Color.purple.opacity(0.08)
+            return Color.purple.opacity(0.09)
         case .system:
             return Color.gray.opacity(0.12)
         case .defaultStyle:
-            return Color(nsColor: .textBackgroundColor)
+            return Color.white.opacity(0.05)
         }
     }
 
     private var cardBorder: Color {
         switch item.cardStyle {
         case .assistant:
-            return Color.blue.opacity(0.28)
+            return Color.blue.opacity(0.34)
         case .reasoning:
-            return Color.orange.opacity(0.32)
+            return Color.orange.opacity(0.34)
         case .tool:
-            return Color.teal.opacity(0.34)
+            return Color.teal.opacity(0.38)
         case .approval:
-            return Color.yellow.opacity(0.45)
+            return Color.yellow.opacity(0.52)
         case .composer:
-            return Color.purple.opacity(0.28)
+            return Color.purple.opacity(0.32)
         case .system:
-            return Color.gray.opacity(0.25)
+            return Color.gray.opacity(0.28)
         case .defaultStyle:
-            return Color.secondary.opacity(0.2)
+            return Color.white.opacity(0.14)
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(item.title)
                     .font(.caption.weight(.semibold))
@@ -504,6 +954,7 @@ private struct TranscriptCard: View {
 
             Text(item.body)
                 .font(.body.monospaced())
+                .foregroundStyle(.white.opacity(0.93))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -521,15 +972,220 @@ private struct TranscriptCard: View {
                 }
             }
         }
-        .padding(12)
+        .padding(14)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(cardBorder, lineWidth: 1)
         )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(item.title) event")
-        .accessibilityValue(item.body)
+    }
+}
+
+private enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general
+    case configuration
+    case personalization
+    case mcpServers
+    case git
+    case environments
+    case worktrees
+    case archivedThreads
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general:
+            return "General"
+        case .configuration:
+            return "Configuration"
+        case .personalization:
+            return "Personalization"
+        case .mcpServers:
+            return "MCP servers"
+        case .git:
+            return "Git"
+        case .environments:
+            return "Environments"
+        case .worktrees:
+            return "Worktrees"
+        case .archivedThreads:
+            return "Archived threads"
+        }
+    }
+}
+
+private struct NativeSettingsView: View {
+    @ObservedObject var store: SessionMirrorStore
+    @Binding var autoSpeakAssistant: Bool
+    @Binding var autoSubmitVoice: Bool
+    @Binding var themeModeRaw: String
+    @Binding var threadDensityRaw: String
+    @Binding var openDestinationRaw: String
+    @Binding var followupModeRaw: String
+    @Binding var multilineBehaviorRaw: String
+    @Binding var preventSleep: Bool
+    @Binding var glassWindow: Bool
+
+    @State private var selectedCategory: SettingsCategory = .general
+
+    var body: some View {
+        HStack(spacing: 0) {
+            List(SettingsCategory.allCases, selection: $selectedCategory) { category in
+                Text(category.title)
+                    .tag(category)
+            }
+            .listStyle(.sidebar)
+            .frame(width: 220)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(selectedCategory.title)
+                        .font(.title2.weight(.semibold))
+
+                    switch selectedCategory {
+                    case .general:
+                        SettingsRow(title: "Open destination", description: "Choose where file actions open by default.") {
+                            Picker("", selection: $openDestinationRaw) {
+                                ForEach(OpenDestination.allCases) { option in
+                                    Text(option.label).tag(option.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 220)
+                        }
+
+                        SettingsRow(title: "Thread density", description: "Control compactness in the thread list.") {
+                            Picker("", selection: $threadDensityRaw) {
+                                ForEach(ThreadDensity.allCases) { option in
+                                    Text(option.label).tag(option.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 240)
+                        }
+
+                        SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
+                            Toggle("", isOn: $preventSleep)
+                                .labelsHidden()
+                        }
+
+                        SettingsRow(title: "Multiline send", description: "Pick how prompts are submitted.") {
+                            Picker("", selection: $multilineBehaviorRaw) {
+                                ForEach(MultilineBehavior.allCases) { option in
+                                    Text(option.label).tag(option.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 260)
+                        }
+
+                        SettingsRow(title: "Follow-up behavior", description: "Choose whether follow-ups queue or steer running turns.") {
+                            Picker("", selection: $followupModeRaw) {
+                                ForEach(FollowupMode.allCases) { option in
+                                    Text(option.label).tag(option.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 220)
+                        }
+
+                    case .configuration:
+                        SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {
+                            TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 320)
+                        }
+
+                        SettingsRow(title: "Connection status", description: "Current server status for this workspace.") {
+                            Text(store.statusLine)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                    case .personalization:
+                        SettingsRow(title: "Theme", description: "Select appearance mode for the app.") {
+                            Picker("", selection: $themeModeRaw) {
+                                ForEach(AppThemeMode.allCases) { option in
+                                    Text(option.label).tag(option.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 240)
+                        }
+
+                        SettingsRow(title: "Window style", description: "Use translucent shell treatment for sidebars and cards.") {
+                            Toggle("", isOn: $glassWindow)
+                                .labelsHidden()
+                        }
+
+                        SettingsRow(title: "Auto speak responses", description: "Speak assistant replies when new messages arrive.") {
+                            Toggle("", isOn: $autoSpeakAssistant)
+                                .labelsHidden()
+                        }
+
+                        SettingsRow(title: "Auto submit voice", description: "Submit turn automatically after voice capture stops.") {
+                            Toggle("", isOn: $autoSubmitVoice)
+                                .labelsHidden()
+                        }
+
+                    case .mcpServers:
+                        PlaceholderSettingsCard(text: "MCP server management will be wired to the shared Codex config and auth flows.")
+
+                    case .git:
+                        PlaceholderSettingsCard(text: "Git defaults, commit templates, and review policies will be surfaced here.")
+
+                    case .environments:
+                        PlaceholderSettingsCard(text: "Environment profiles and repo-specific launch actions will appear here.")
+
+                    case .worktrees:
+                        PlaceholderSettingsCard(text: "Worktree templates and branch naming rules will be configurable here.")
+
+                    case .archivedThreads:
+                        PlaceholderSettingsCard(text: "Archived thread browsing and restore controls will be added here.")
+                    }
+                }
+                .padding(22)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct SettingsRow<Content: View>: View {
+    let title: String
+    let description: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            content
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct PlaceholderSettingsCard: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

@@ -5,6 +5,8 @@
 - Active plan: native-first Apple apps.
 - Previous WebUI plan is shelved after M1 CP2.
 - Web mirror infrastructure remains in-repo as reusable transport/session work.
+- Visual reference baseline captured from Codex app screenshots at
+  `docs/reference/codex-app-ui-2026-02-12.md`.
 
 ## Decision Summary
 
@@ -46,6 +48,17 @@ integration.
 - Audio: `AVAudioEngine` + `AVAudioSession` lifecycle management.
 - Speech-to-text: Apple on-device speech path by default when available.
 - Text-to-speech: system TTS pipeline with interruption/barge-in support.
+
+### UX Parity Direction (Codex App Spirit)
+
+- Adopt a native shell with a persistent left rail, centered thread workspace,
+  and docked composer.
+- Mirror settings information architecture with category-first navigation and
+  row-based preference cards.
+- Keep visual language calm and dense: dark surfaces, subtle separators,
+  restrained accents, and strong readability.
+- Match terminology where practical (`Worktrees`, `MCP servers`, `Archived
+  threads`, `Steer`) to reduce migration friction.
 
 ### Transport
 
@@ -96,6 +109,13 @@ integration.
 - [x] Multi-session and multi-repo management UX.
 - [x] Reconnect and replay resilience under network/process restarts.
 
+### M2.5: macOS UX Parity Pass
+
+- [x] Implement Codex-style shell layout (rail/workspace/composer hierarchy).
+- [x] Implement Codex-style settings IA and row-card controls.
+- [x] Add polish pass for spacing, typography, iconography, and motion.
+- [x] Validate keyboard/accessibility parity for all top-level interactions.
+
 ### M3: iPadOS First-Class App
 
 - [ ] Adaptive split layout for transcript + controls.
@@ -127,6 +147,7 @@ integration.
 - [x] CP-N2: Voice input pipeline stable with partial/final transcript UX.
 - [x] CP-N3: Voice output + interruption semantics verified.
 - [x] CP-N4: Session controls parity (attach/detach/submit/interrupt/approvals).
+- [x] CP-N4.5: macOS visual + settings parity baseline complete.
 - [ ] CP-N5: iPadOS parity baseline.
 - [ ] CP-N6: iOS companion baseline.
 

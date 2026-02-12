@@ -148,18 +148,19 @@ final class SessionMirrorStore: ObservableObject {
         await send(InterruptTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
     }
 
-    func submitApproval(callID: String, type: ApprovalType, approved: Bool) async {
-        guard let selectedSessionID else {
-            return
-        }
-
+    func submitApproval(
+        sessionID: UUID,
+        callID: String,
+        type: ApprovalType,
+        approved: Bool
+    ) async {
         let decision = approved ? "approved" : "denied"
         switch type {
         case .exec:
             await send(
                 ExecApprovalMessage(
                     requestID: nextRequestID(),
-                    sessionID: selectedSessionID,
+                    sessionID: sessionID,
                     callID: callID,
                     decision: decision
                 )
@@ -168,7 +169,7 @@ final class SessionMirrorStore: ObservableObject {
             await send(
                 PatchApprovalMessage(
                     requestID: nextRequestID(),
-                    sessionID: selectedSessionID,
+                    sessionID: sessionID,
                     callID: callID,
                     decision: decision
                 )
@@ -288,6 +289,7 @@ final class SessionMirrorStore: ObservableObject {
 
             if let selectedSessionID,
                sessions.contains(where: { $0.id == selectedSessionID }) {
+                ensureAttachmentForSelectedSession(selectedSessionID)
                 return
             }
 
@@ -357,6 +359,25 @@ final class SessionMirrorStore: ObservableObject {
         } else {
             sessions.append(session)
             sessions.sort(by: { $0.createdAtUnixMs < $1.createdAtUnixMs })
+        }
+    }
+
+    private func ensureAttachmentForSelectedSession(_ sessionID: UUID) {
+        if attachedSessionID == sessionID {
+            return
+        }
+
+        attachmentGeneration = attachmentGeneration.saturatingIncrement()
+        let generation = attachmentGeneration
+        let previousAttachedSessionID = attachedSessionID
+        expectedAttachedSessionID = sessionID
+
+        Task {
+            await self.switchAttachment(
+                from: previousAttachedSessionID,
+                to: sessionID,
+                generation: generation
+            )
         }
     }
 
