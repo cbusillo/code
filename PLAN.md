@@ -87,7 +87,7 @@ integration.
 - [x] Streaming transcription UX with partial/final text distinction.
 - [x] Spoken assistant output with user barge-in interruption.
 - [x] Session-safe turn control (submit/interrupt) from voice or keyboard.
-- [ ] Accessibility pass for voice controls and focus behavior.
+- [x] Accessibility pass for voice controls and focus behavior.
 
 ### M2: Full Session Controls (macOS)
 

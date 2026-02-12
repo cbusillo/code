@@ -72,6 +72,8 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Session endpoint")
+                    .accessibilityHint("WebSocket endpoint for the local session server")
             }
 
             HStack(spacing: 8) {
@@ -107,6 +109,8 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     TextField("Optional cwd", text: $createSessionCwd)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Session working directory")
+                        .accessibilityHint("Optional repository path for new session")
 
                     Button("Create") {
                         Task {
@@ -115,6 +119,7 @@ struct ContentView: View {
                         }
                     }
                     .disabled(store.connectionState != .connected)
+                    .accessibilityLabel("Create session")
                 }
             }
 
@@ -142,6 +147,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .accessibilityLabel("Session list")
         }
         .padding(12)
         .navigationTitle("Code Native")
@@ -250,7 +256,9 @@ struct ContentView: View {
                     .disabled(!voiceOutput.isSpeaking)
 
                     Toggle("Auto Speak", isOn: $autoSpeakAssistant)
+                        .accessibilityHint("Automatically speak assistant responses")
                     Toggle("Auto Submit Voice", isOn: $autoSubmitVoice)
+                        .accessibilityHint("Submit turn when recording stops")
                 }
 
                 HStack(spacing: 8) {
@@ -415,6 +423,7 @@ private struct PressToTalkButton: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(isActive ? "Release to send" : "Hold to talk")
         .accessibilityHint("Press and hold to capture voice, then release to submit")
+        .accessibilityValue(isActive ? "Recording" : "Idle")
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -519,5 +528,8 @@ private struct TranscriptCard: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(cardBorder, lineWidth: 1)
         )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.title) event")
+        .accessibilityValue(item.body)
     }
 }
