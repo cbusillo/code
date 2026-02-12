@@ -162,30 +162,49 @@ struct ContentView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    ForEach(repoGroups) { group in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(group.repoName)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Text("\(group.sessions.count)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                    if repoGroups.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("No threads yet")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.9))
+                            Text("Start your first local thread to populate the sidebar.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("Create first thread") {
+                                Task {
+                                    await store.createSession(cwd: nil)
+                                }
                             }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding(10)
+                        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else {
+                        ForEach(repoGroups) { group in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text(group.repoName)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(group.sessions.count)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
 
-                            if group.sessions.isEmpty {
-                                Text("No threads")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ForEach(group.sessions) { session in
-                                    ThreadPill(
-                                        session: session,
-                                        isSelected: store.selectedSessionID == session.id,
-                                        density: selectedThreadDensity
-                                    ) {
-                                        store.selectedSessionID = session.id
+                                if group.sessions.isEmpty {
+                                    Text("No threads")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    ForEach(group.sessions) { session in
+                                        ThreadPill(
+                                            session: session,
+                                            isSelected: store.selectedSessionID == session.id,
+                                            density: selectedThreadDensity
+                                        ) {
+                                            store.selectedSessionID = session.id
+                                        }
                                     }
                                 }
                             }

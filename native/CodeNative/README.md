@@ -33,6 +33,30 @@ swift run CodeNativeApp
 
 The default endpoint in the app is `ws://127.0.0.1:4317/ws`.
 
+## One-command Dev Loop
+
+Use the repo helper to run backend + native app and auto-restart both on file
+changes:
+
+```bash
+./scripts/dev-native.sh
+```
+
+Useful options:
+
+```bash
+./scripts/dev-native.sh --host 127.0.0.1 --port 4317
+./scripts/dev-native.sh --no-watch
+```
+
+## Session Visibility
+
+The mirror server only lists sessions created through this mirror process.
+It does not yet auto-import active TUI sessions.
+
+If the sidebar is empty, click `New thread` (or `Create first thread`) to
+create a session.
+
 ## Notes
 
 - The app requests microphone and speech recognition permission when recording
