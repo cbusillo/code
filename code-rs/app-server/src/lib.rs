@@ -41,10 +41,10 @@ pub async fn run_main(
 ) -> IoResult<()> {
     // Install a simple subscriber so `tracing` output is visible.  Users can
     // control the log level with `RUST_LOG`.
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::from_default_env())
-        .init();
+        .try_init();
 
     // Set up channels.
     let (incoming_tx, mut incoming_rx) = mpsc::channel::<JSONRPCMessage>(CHANNEL_CAPACITY);
@@ -57,15 +57,22 @@ pub async fn run_main(
             let reader = BufReader::new(stdin);
             let mut lines = reader.lines();
 
-            while let Some(line) = lines.next_line().await.unwrap_or_default() {
-                match serde_json::from_str::<JSONRPCMessage>(&line) {
-                    Ok(msg) => {
-                        if incoming_tx.send(msg).await.is_err() {
-                            // Receiver gone – nothing left to do.
-                            break;
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => match serde_json::from_str::<JSONRPCMessage>(&line) {
+                        Ok(msg) => {
+                            if incoming_tx.send(msg).await.is_err() {
+                                // Receiver gone – nothing left to do.
+                                break;
+                            }
                         }
+                        Err(e) => error!("Failed to deserialize JSONRPCMessage: {e}"),
+                    },
+                    Ok(None) => break,
+                    Err(e) => {
+                        error!("stdin read error: {e}");
+                        break;
                     }
-                    Err(e) => error!("Failed to deserialize JSONRPCMessage: {e}"),
                 }
             }
 

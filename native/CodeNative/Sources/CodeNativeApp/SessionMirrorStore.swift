@@ -30,6 +30,7 @@ final class SessionMirrorStore: ObservableObject {
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var attachedSessionID: UUID?
+    private var expectedAttachedSessionID: UUID?
     private var clientID: String?
     private var requestCounter: UInt64 = 0
 
@@ -89,16 +90,7 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     func disconnect() {
-        receiveTask?.cancel()
-        receiveTask = nil
-
-        webSocket?.cancel(with: .goingAway, reason: nil)
-        webSocket = nil
-
-        attachedSessionID = nil
-        clientID = nil
-        connectionState = .disconnected
-        statusLine = "Disconnected"
+        cleanupConnection(status: "Disconnected", error: nil)
     }
 
     func refreshSessions() async {
@@ -136,6 +128,23 @@ final class SessionMirrorStore: ObservableObject {
         await send(InterruptTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
     }
 
+    private func cleanupConnection(status: String, error: String?) {
+        receiveTask?.cancel()
+        receiveTask = nil
+
+        webSocket?.cancel(with: .goingAway, reason: nil)
+        webSocket = nil
+
+        attachedSessionID = nil
+        expectedAttachedSessionID = nil
+        clientID = nil
+        if error != nil {
+            lastError = error
+        }
+        connectionState = .disconnected
+        statusLine = status
+    }
+
     private func receiveLoop() async {
         while !Task.isCancelled {
             guard let webSocket else {
@@ -158,9 +167,10 @@ final class SessionMirrorStore: ObservableObject {
                     return
                 }
 
-                lastError = error.localizedDescription
-                statusLine = "Disconnected unexpectedly"
-                connectionState = .disconnected
+                cleanupConnection(
+                    status: "Disconnected unexpectedly",
+                    error: error.localizedDescription
+                )
                 break
             }
         }
@@ -203,10 +213,23 @@ final class SessionMirrorStore: ObservableObject {
             selectedSessionID = message.session.id
 
         case .sessionAttached(let message):
+            if let expectedAttachedSessionID,
+               expectedAttachedSessionID != message.sessionID {
+                return
+            }
+
             let existing = itemsBySession[message.sessionID] ?? []
             let merged = mergeItems(existing: existing, incoming: message.items, fromSeq: message.fromSeq)
             itemsBySession[message.sessionID] = merged
+
+            // A stale attach response can arrive after the user already selected
+            // another session; do not let it override the active selection state.
+            if selectedSessionID != message.sessionID {
+                return
+            }
+
             attachedSessionID = message.sessionID
+            expectedAttachedSessionID = nil
             statusLine = "Attached to \(message.sessionID.uuidString.prefix(8))"
 
         case .sessionDetached(let message):
@@ -258,6 +281,8 @@ final class SessionMirrorStore: ObservableObject {
             await send(OutboundMessage.detachSession(requestID: nextRequestID(), sessionID: oldSessionID))
             attachedSessionID = nil
         }
+
+        expectedAttachedSessionID = newSessionID
 
         guard let newSessionID else {
             return
