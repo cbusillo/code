@@ -9,9 +9,36 @@ struct ContentView: View {
     @State private var autoSpeakAssistant: Bool = true
     @State private var autoSubmitVoice: Bool = true
     @State private var lastSpokenItemID: String?
+    @State private var isPressToTalkActive: Bool = false
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
+    }
+
+    private var voiceStateLabel: String {
+        if voiceInput.isRecording {
+            switch voiceInput.transcriptState {
+            case .listening:
+                return "Listening"
+            case .partial:
+                return "Partial"
+            case .final:
+                return "Final"
+            case .idle:
+                return "Listening"
+            }
+        }
+
+        switch voiceInput.transcriptState {
+        case .final:
+            return "Final captured"
+        case .partial:
+            return "Partial captured"
+        case .listening:
+            return "Listening"
+        case .idle:
+            return "Idle"
+        }
     }
 
     var body: some View {
@@ -30,6 +57,7 @@ struct ContentView: View {
             handleAssistantSpeech()
         }
         .onDisappear {
+            isPressToTalkActive = false
             _ = voiceInput.stopRecording()
             voiceOutput.stop()
         }
@@ -168,11 +196,11 @@ struct ContentView: View {
         GroupBox("Voice") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Button(voiceInput.isRecording ? "Stop Recording" : "Start Recording") {
-                        handleVoiceRecordToggle()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(store.selectedSession == nil)
+                    PressToTalkButton(
+                        isActive: voiceInput.isRecording,
+                        isDisabled: !canSendTurns,
+                        onPressChanged: handlePressToTalkChanged
+                    )
 
                     Button("Stop Speaking") {
                         voiceOutput.stop()
@@ -184,10 +212,23 @@ struct ContentView: View {
                     Toggle("Auto Submit Voice", isOn: $autoSubmitVoice)
                 }
 
+                HStack(spacing: 8) {
+                    Text("Voice State")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(voiceStateLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(voiceInput.isRecording ? .green : .secondary)
+                }
+
                 if !voiceInput.liveTranscript.isEmpty {
                     Text(voiceInput.liveTranscript)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(
+                            voiceInput.transcriptState == .final
+                                ? .primary
+                                : .secondary
+                        )
                 }
 
                 if let voiceError = voiceInput.lastError {
@@ -200,20 +241,7 @@ struct ContentView: View {
         }
     }
 
-    private func handleVoiceRecordToggle() {
-        if voiceInput.isRecording {
-            let finalText = voiceInput.stopRecording()
-            let normalized = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-            store.composerText = finalText
-
-            if autoSubmitVoice, !normalized.isEmpty {
-                Task {
-                    await store.submitComposer()
-                }
-            }
-            return
-        }
-
+    private func startVoiceCapture() {
         voiceOutput.stop()
         Task {
             await voiceInput.startRecording { text, _ in
@@ -224,8 +252,46 @@ struct ContentView: View {
         }
     }
 
+    private func stopVoiceCapture(shouldSubmit: Bool) {
+        let finalText = voiceInput.stopRecording()
+        let normalized = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        store.composerText = finalText
+
+        if shouldSubmit, autoSubmitVoice, !normalized.isEmpty {
+            Task {
+                await store.submitComposer()
+            }
+        }
+    }
+
+    private func handlePressToTalkChanged(isPressed: Bool) {
+        guard canSendTurns else {
+            if isPressToTalkActive {
+                isPressToTalkActive = false
+                stopVoiceCapture(shouldSubmit: false)
+            }
+            return
+        }
+
+        if isPressed {
+            guard !isPressToTalkActive else {
+                return
+            }
+            isPressToTalkActive = true
+            startVoiceCapture()
+            return
+        }
+
+        guard isPressToTalkActive else {
+            return
+        }
+        isPressToTalkActive = false
+        stopVoiceCapture(shouldSubmit: true)
+    }
+
     private func handleAssistantSpeech() {
         guard autoSpeakAssistant,
+              !voiceInput.isRecording,
               let lastItem = store.selectedSessionItems.last,
               lastItem.id != lastSpokenItemID,
               let text = lastItem.assistantMessageText
@@ -235,6 +301,54 @@ struct ContentView: View {
 
         lastSpokenItemID = lastItem.id
         voiceOutput.speak(text)
+    }
+}
+
+private struct PressToTalkButton: View {
+    let isActive: Bool
+    let isDisabled: Bool
+    let onPressChanged: (Bool) -> Void
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isActive ? Color.red : Color.accentColor)
+
+            HStack(spacing: 8) {
+                Image(systemName: isActive ? "mic.fill" : "mic")
+                Text(isActive ? "Release to Send" : "Hold to Talk")
+                    .fontWeight(.semibold)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .frame(minWidth: 180, maxWidth: 260, minHeight: 34)
+        .opacity(isDisabled ? 0.45 : 1)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(.white.opacity(0.15), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !isDisabled {
+                        onPressChanged(true)
+                    }
+                }
+                .onEnded { _ in
+                    onPressChanged(false)
+                }
+        )
+        .onChange(of: isDisabled) { _, disabled in
+            if disabled {
+                onPressChanged(false)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isActive ? "Release to send" : "Hold to talk")
+        .accessibilityAddTraits(.isButton)
     }
 }
 

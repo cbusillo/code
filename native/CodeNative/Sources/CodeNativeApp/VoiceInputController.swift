@@ -4,8 +4,16 @@ import Speech
 
 @MainActor
 final class VoiceInputController: NSObject, ObservableObject {
+    enum TranscriptState {
+        case idle
+        case listening
+        case partial
+        case final
+    }
+
     @Published private(set) var isRecording: Bool = false
     @Published private(set) var liveTranscript: String = ""
+    @Published private(set) var transcriptState: TranscriptState = .idle
     @Published private(set) var lastError: String?
     @Published private(set) var isSpeechAuthorized: Bool = false
     @Published private(set) var isMicAuthorized: Bool = false
@@ -77,6 +85,7 @@ final class VoiceInputController: NSObject, ObservableObject {
         }
 
         liveTranscript = ""
+        transcriptState = .listening
         lastError = nil
         isRecording = true
 
@@ -88,6 +97,7 @@ final class VoiceInputController: NSObject, ObservableObject {
             if let result {
                 Task { @MainActor in
                     self.liveTranscript = result.bestTranscription.formattedString
+                    self.transcriptState = result.isFinal ? .final : .partial
                     onUpdate(result.bestTranscription.formattedString, result.isFinal)
                 }
             }
@@ -95,6 +105,7 @@ final class VoiceInputController: NSObject, ObservableObject {
             if let error {
                 Task { @MainActor in
                     self.lastError = "Speech recognition error: \(error.localizedDescription)"
+                    self.transcriptState = .idle
                     self.stopRecording()
                 }
             }
@@ -113,6 +124,9 @@ final class VoiceInputController: NSObject, ObservableObject {
         recognitionTask = nil
         recognitionRequest = nil
         isRecording = false
+        if liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            transcriptState = .idle
+        }
 
         return liveTranscript
     }

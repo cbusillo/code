@@ -18,6 +18,10 @@ final class VoiceOutputController: NSObject, ObservableObject {
             return
         }
 
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+
         let utterance = AVSpeechUtterance(string: normalized)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.43
