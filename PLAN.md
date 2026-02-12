@@ -76,9 +76,9 @@ integration.
 
 ### M0: Native Bootstrap
 
-- [ ] Create Apple app workspace and project structure.
-- [ ] Define shared protocol/client module for session transport.
-- [ ] Render session list + transcript read-only from live session stream.
+- [x] Create Apple app workspace and project structure.
+- [x] Define shared protocol/client module for session transport.
+- [x] Render session list + transcript read-only from live session stream.
 - [ ] Verify ordering/replay contract with deterministic tests.
 
 ### M1: Voice Conversation MVP (macOS)
@@ -123,7 +123,7 @@ integration.
 
 ## Commit Checkpoints
 
-- [ ] CP-N1: Native shell + streaming transcript attached to live session.
+- [x] CP-N1: Native shell + streaming transcript attached to live session.
 - [ ] CP-N2: Voice input pipeline stable with partial/final transcript UX.
 - [ ] CP-N3: Voice output + interruption semantics verified.
 - [ ] CP-N4: Session controls parity (attach/detach/submit/interrupt/approvals).
