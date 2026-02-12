@@ -83,18 +83,18 @@ integration.
 
 ### M1: Voice Conversation MVP (macOS)
 
-- [ ] Push-to-talk and tap-to-stop capture controls.
-- [ ] Streaming transcription UX with partial/final text distinction.
-- [ ] Spoken assistant output with user barge-in interruption.
-- [ ] Session-safe turn control (submit/interrupt) from voice or keyboard.
+- [x] Push-to-talk and tap-to-stop capture controls.
+- [x] Streaming transcription UX with partial/final text distinction.
+- [x] Spoken assistant output with user barge-in interruption.
+- [x] Session-safe turn control (submit/interrupt) from voice or keyboard.
 - [ ] Accessibility pass for voice controls and focus behavior.
 
 ### M2: Full Session Controls (macOS)
 
-- [ ] Approvals flows (exec/patch) with parity to existing semantics.
-- [ ] Tool/event cards with readable hierarchy and rich formatting.
-- [ ] Multi-session and multi-repo management UX.
-- [ ] Reconnect and replay resilience under network/process restarts.
+- [x] Approvals flows (exec/patch) with parity to existing semantics.
+- [x] Tool/event cards with readable hierarchy and rich formatting.
+- [x] Multi-session and multi-repo management UX.
+- [x] Reconnect and replay resilience under network/process restarts.
 
 ### M3: iPadOS First-Class App
 
@@ -124,9 +124,9 @@ integration.
 ## Commit Checkpoints
 
 - [x] CP-N1: Native shell + streaming transcript attached to live session.
-- [ ] CP-N2: Voice input pipeline stable with partial/final transcript UX.
-- [ ] CP-N3: Voice output + interruption semantics verified.
-- [ ] CP-N4: Session controls parity (attach/detach/submit/interrupt/approvals).
+- [x] CP-N2: Voice input pipeline stable with partial/final transcript UX.
+- [x] CP-N3: Voice output + interruption semantics verified.
+- [x] CP-N4: Session controls parity (attach/detach/submit/interrupt/approvals).
 - [ ] CP-N5: iPadOS parity baseline.
 - [ ] CP-N6: iOS companion baseline.
 
