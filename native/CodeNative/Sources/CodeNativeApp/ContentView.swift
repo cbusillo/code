@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var autoSubmitVoice: Bool = true
     @State private var lastSpokenItemID: String?
     @State private var isPressToTalkActive: Bool = false
+    @State private var createSessionCwd: String = ""
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
@@ -80,11 +81,13 @@ struct ContentView: View {
                     }
                 }
                 .disabled(store.connectionState != .disconnected)
+                .accessibilityLabel("Connect to session server")
 
                 Button("Disconnect") {
                     store.disconnect()
                 }
                 .disabled(store.connectionState == .disconnected)
+                .accessibilityLabel("Disconnect from session server")
 
                 Button("Refresh") {
                     Task {
@@ -92,8 +95,28 @@ struct ContentView: View {
                     }
                 }
                 .disabled(store.connectionState != .connected)
+                .accessibilityLabel("Refresh session list")
             }
             .buttonStyle(.borderedProminent)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Create Session")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    TextField("Optional cwd", text: $createSessionCwd)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Create") {
+                        Task {
+                            await store.createSession(cwd: createSessionCwd)
+                            createSessionCwd = ""
+                        }
+                    }
+                    .disabled(store.connectionState != .connected)
+                }
+            }
 
             HStack {
                 Text("Status")
@@ -138,7 +161,12 @@ struct ContentView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(store.selectedSessionItems) { item in
-                            TranscriptCard(item: item)
+                            TranscriptCard(
+                                item: item,
+                                onApproval: { approved in
+                                    handleApproval(item: item, approved: approved)
+                                }
+                            )
                         }
                     }
                     .padding(.vertical, 4)
@@ -171,6 +199,7 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
                 )
+                .accessibilityLabel("Composer")
 
             HStack(spacing: 8) {
                 Button("Interrupt") {
@@ -180,6 +209,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(!canSendTurns)
+                .keyboardShortcut("i", modifiers: [.command])
+                .accessibilityLabel("Interrupt current turn")
 
                 Button("Submit") {
                     Task {
@@ -188,6 +219,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canSendTurns || store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.return, modifiers: [.command])
+                .accessibilityLabel("Submit composer")
             }
         }
     }
@@ -201,6 +234,14 @@ struct ContentView: View {
                         isDisabled: !canSendTurns,
                         onPressChanged: handlePressToTalkChanged
                     )
+
+                    Button(voiceInput.isRecording ? "Tap to Stop" : "Tap to Record") {
+                        handleVoiceToggleTap()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!canSendTurns)
+                    .keyboardShortcut(" ", modifiers: [.command, .shift])
+                    .accessibilityLabel("Toggle recording")
 
                     Button("Stop Speaking") {
                         voiceOutput.stop()
@@ -289,6 +330,31 @@ struct ContentView: View {
         stopVoiceCapture(shouldSubmit: true)
     }
 
+    private func handleVoiceToggleTap() {
+        if voiceInput.isRecording {
+            isPressToTalkActive = false
+            stopVoiceCapture(shouldSubmit: true)
+            return
+        }
+
+        isPressToTalkActive = true
+        startVoiceCapture()
+    }
+
+    private func handleApproval(item: SessionStreamItem, approved: Bool) {
+        guard let approvalRequest = item.approvalRequest else {
+            return
+        }
+
+        Task {
+            await store.submitApproval(
+                callID: approvalRequest.callID,
+                type: approvalRequest.type,
+                approved: approved
+            )
+        }
+    }
+
     private func handleAssistantSpeech() {
         guard autoSpeakAssistant,
               !voiceInput.isRecording,
@@ -348,6 +414,7 @@ private struct PressToTalkButton: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(isActive ? "Release to send" : "Hold to talk")
+        .accessibilityHint("Press and hold to capture voice, then release to submit")
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -373,6 +440,45 @@ private struct SessionRow: View {
 
 private struct TranscriptCard: View {
     let item: SessionStreamItem
+    let onApproval: (Bool) -> Void
+
+    private var cardBackground: Color {
+        switch item.cardStyle {
+        case .assistant:
+            return Color.blue.opacity(0.08)
+        case .reasoning:
+            return Color.orange.opacity(0.08)
+        case .tool:
+            return Color.teal.opacity(0.09)
+        case .approval:
+            return Color.yellow.opacity(0.12)
+        case .composer:
+            return Color.purple.opacity(0.08)
+        case .system:
+            return Color.gray.opacity(0.12)
+        case .defaultStyle:
+            return Color(nsColor: .textBackgroundColor)
+        }
+    }
+
+    private var cardBorder: Color {
+        switch item.cardStyle {
+        case .assistant:
+            return Color.blue.opacity(0.28)
+        case .reasoning:
+            return Color.orange.opacity(0.32)
+        case .tool:
+            return Color.teal.opacity(0.34)
+        case .approval:
+            return Color.yellow.opacity(0.45)
+        case .composer:
+            return Color.purple.opacity(0.28)
+        case .system:
+            return Color.gray.opacity(0.25)
+        case .defaultStyle:
+            return Color.secondary.opacity(0.2)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -391,13 +497,27 @@ private struct TranscriptCard: View {
                 .font(.body.monospaced())
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            if item.approvalRequest != nil {
+                HStack(spacing: 8) {
+                    Button("Approve") {
+                        onApproval(true)
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Deny") {
+                        onApproval(false)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
         }
         .padding(12)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                .stroke(cardBorder, lineWidth: 1)
         )
     }
 }

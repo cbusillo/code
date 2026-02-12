@@ -19,8 +19,15 @@ final class SessionMirrorStore: ObservableObject {
             guard oldValue != selectedSessionID else {
                 return
             }
+            attachmentGeneration = attachmentGeneration.saturatingIncrement()
+            let generation = attachmentGeneration
+            expectedAttachedSessionID = selectedSessionID
             Task {
-                await self.switchAttachment(from: oldValue, to: self.selectedSessionID)
+                await self.switchAttachment(
+                    from: oldValue,
+                    to: self.selectedSessionID,
+                    generation: generation
+                )
             }
         }
     }
@@ -29,10 +36,13 @@ final class SessionMirrorStore: ObservableObject {
 
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
     private var attachedSessionID: UUID?
     private var expectedAttachedSessionID: UUID?
     private var clientID: String?
+    private var userInitiatedDisconnect: Bool = false
     private var requestCounter: UInt64 = 0
+    private var attachmentGeneration: UInt64 = 0
 
     private lazy var decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -74,6 +84,9 @@ final class SessionMirrorStore: ObservableObject {
         connectionState = .connecting
         statusLine = "Connecting..."
         lastError = nil
+        userInitiatedDisconnect = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
 
         let task = URLSession.shared.webSocketTask(with: url)
         task.resume()
@@ -90,11 +103,18 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     func disconnect() {
+        userInitiatedDisconnect = true
         cleanupConnection(status: "Disconnected", error: nil)
     }
 
     func refreshSessions() async {
         await send(OutboundMessage.listSessions(requestID: nextRequestID()))
+    }
+
+    func createSession(cwd: String?) async {
+        let normalized = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = normalized?.isEmpty == true ? nil : normalized
+        await send(CreateSessionMessage(requestID: nextRequestID(), cwd: value))
     }
 
     func submitComposer() async {
@@ -128,9 +148,39 @@ final class SessionMirrorStore: ObservableObject {
         await send(InterruptTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
     }
 
+    func submitApproval(callID: String, type: ApprovalType, approved: Bool) async {
+        guard let selectedSessionID else {
+            return
+        }
+
+        let decision = approved ? "approved" : "denied"
+        switch type {
+        case .exec:
+            await send(
+                ExecApprovalMessage(
+                    requestID: nextRequestID(),
+                    sessionID: selectedSessionID,
+                    callID: callID,
+                    decision: decision
+                )
+            )
+        case .patch:
+            await send(
+                PatchApprovalMessage(
+                    requestID: nextRequestID(),
+                    sessionID: selectedSessionID,
+                    callID: callID,
+                    decision: decision
+                )
+            )
+        }
+    }
+
     private func cleanupConnection(status: String, error: String?) {
         receiveTask?.cancel()
         receiveTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
 
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
@@ -138,11 +188,46 @@ final class SessionMirrorStore: ObservableObject {
         attachedSessionID = nil
         expectedAttachedSessionID = nil
         clientID = nil
+        attachmentGeneration = attachmentGeneration.saturatingIncrement()
         if error != nil {
             lastError = error
         }
         connectionState = .disconnected
         statusLine = status
+
+        if error != nil,
+           !userInitiatedDisconnect {
+            scheduleReconnect()
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard reconnectTask == nil else {
+            return
+        }
+
+        reconnectTask = Task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            await MainActor.run {
+                self.reconnectTask = nil
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                guard !self.userInitiatedDisconnect,
+                      self.connectionState == .disconnected
+                else {
+                    return
+                }
+
+                Task {
+                    await self.connect()
+                }
+            }
+        }
     }
 
     private func receiveLoop() async {
@@ -213,18 +298,19 @@ final class SessionMirrorStore: ObservableObject {
             selectedSessionID = message.session.id
 
         case .sessionAttached(let message):
-            if let expectedAttachedSessionID,
-               expectedAttachedSessionID != message.sessionID {
-                return
-            }
-
             let existing = itemsBySession[message.sessionID] ?? []
-            let merged = mergeItems(existing: existing, incoming: message.items, fromSeq: message.fromSeq)
+            let merged = SessionStreamReducer.mergeReplayItems(
+                existing: existing,
+                incoming: message.items,
+                fromSeq: message.fromSeq
+            )
             itemsBySession[message.sessionID] = merged
 
-            // A stale attach response can arrive after the user already selected
-            // another session; do not let it override the active selection state.
-            if selectedSessionID != message.sessionID {
+            if !SessionStreamReducer.shouldAcceptSessionAttached(
+                selectedSessionID: selectedSessionID,
+                expectedSessionID: expectedAttachedSessionID,
+                attachedSessionID: message.sessionID
+            ) {
                 return
             }
 
@@ -240,12 +326,10 @@ final class SessionMirrorStore: ObservableObject {
 
         case .sessionStream(let message):
             let sessionID = message.item.sessionID
-            var items = itemsBySession[sessionID] ?? []
-            items.append(message.item)
-            if items.count > 2000 {
-                items.removeFirst(items.count - 2000)
-            }
-            itemsBySession[sessionID] = items
+            itemsBySession[sessionID] = SessionStreamReducer.appendLiveItem(
+                items: itemsBySession[sessionID] ?? [],
+                newItem: message.item
+            )
 
             if sessionID == selectedSessionID,
                message.item.type == "composer" {
@@ -276,19 +360,34 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
-    private func switchAttachment(from oldSessionID: UUID?, to newSessionID: UUID?) async {
+    private func switchAttachment(
+        from oldSessionID: UUID?,
+        to newSessionID: UUID?,
+        generation: UInt64
+    ) async {
+        guard generation == attachmentGeneration else {
+            return
+        }
+
         if let oldSessionID {
             await send(OutboundMessage.detachSession(requestID: nextRequestID(), sessionID: oldSessionID))
             attachedSessionID = nil
-        }
 
-        expectedAttachedSessionID = newSessionID
+            guard generation == attachmentGeneration else {
+                return
+            }
+        }
 
         guard let newSessionID else {
             return
         }
 
         let fromSeq = itemsBySession[newSessionID]?.last?.seq ?? 0
+
+        guard generation == attachmentGeneration else {
+            return
+        }
+
         await send(
             OutboundMessage.attachSession(
                 requestID: nextRequestID(),
@@ -302,6 +401,10 @@ final class SessionMirrorStore: ObservableObject {
         await sendEncodable(message)
     }
 
+    private func send(_ message: CreateSessionMessage) async {
+        await sendEncodable(message)
+    }
+
     private func send(_ message: ComposerUpdateMessage) async {
         await sendEncodable(message)
     }
@@ -311,6 +414,14 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     private func send(_ message: InterruptTurnMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func send(_ message: ExecApprovalMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func send(_ message: PatchApprovalMessage) async {
         await sendEncodable(message)
     }
 
@@ -335,29 +446,6 @@ final class SessionMirrorStore: ObservableObject {
         return "native_\(requestCounter)"
     }
 
-    private func mergeItems(
-        existing: [SessionStreamItem],
-        incoming: [SessionStreamItem],
-        fromSeq: UInt64
-    ) -> [SessionStreamItem] {
-        if fromSeq == 0 {
-            return incoming
-        }
-
-        var merged = existing
-        var existingSeq = Set(existing.map(\.seq))
-
-        for item in incoming where !existingSeq.contains(item.seq) {
-            merged.append(item)
-            existingSeq.insert(item.seq)
-        }
-
-        if merged.count > 2000 {
-            merged.removeFirst(merged.count - 2000)
-        }
-
-        return merged
-    }
 }
 
 private extension UInt64 {

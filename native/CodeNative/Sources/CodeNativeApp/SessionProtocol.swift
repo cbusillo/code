@@ -150,6 +150,12 @@ struct OutboundMessage: Encodable {
     }
 }
 
+struct CreateSessionMessage: Encodable {
+    let type: String = "create_session"
+    let requestID: String
+    let cwd: String?
+}
+
 struct ComposerUpdateMessage: Encodable {
     let type: String = "composer_update"
     let requestID: String
@@ -168,6 +174,32 @@ struct InterruptTurnMessage: Encodable {
     let type: String = "interrupt_turn"
     let requestID: String
     let sessionID: UUID
+}
+
+struct ExecApprovalMessage: Encodable {
+    let type: String = "exec_approval"
+    let requestID: String
+    let sessionID: UUID
+    let callID: String
+    let decision: String
+}
+
+struct PatchApprovalMessage: Encodable {
+    let type: String = "patch_approval"
+    let requestID: String
+    let sessionID: UUID
+    let callID: String
+    let decision: String
+}
+
+enum ApprovalType {
+    case exec
+    case patch
+}
+
+struct ApprovalRequest {
+    let type: ApprovalType
+    let callID: String
 }
 
 enum JSONValue: Decodable, Hashable {
@@ -280,4 +312,58 @@ extension SessionStreamItem {
         }
         return message
     }
+
+    var approvalRequest: ApprovalRequest? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              let object = payload.objectValue,
+              let payloadType = object["type"]?.stringValue,
+              let callID = object["call_id"]?.stringValue
+        else {
+            return nil
+        }
+
+        switch payloadType {
+        case "exec_approval_request":
+            return ApprovalRequest(type: .exec, callID: callID)
+        case "apply_patch_approval_request":
+            return ApprovalRequest(type: .patch, callID: callID)
+        default:
+            return nil
+        }
+    }
+
+    var cardStyle: TranscriptCardStyle {
+        switch type {
+        case "system":
+            return .system
+        case "composer":
+            return .composer
+        case "core_event":
+            if approvalRequest != nil {
+                return .approval
+            }
+
+            let payloadType = event?.payload?.typeHint ?? ""
+            if payloadType.contains("reasoning") {
+                return .reasoning
+            }
+            if payloadType.contains("exec") || payloadType.contains("tool") {
+                return .tool
+            }
+            return .assistant
+        default:
+            return .defaultStyle
+        }
+    }
+}
+
+enum TranscriptCardStyle {
+    case defaultStyle
+    case assistant
+    case reasoning
+    case tool
+    case approval
+    case composer
+    case system
 }
