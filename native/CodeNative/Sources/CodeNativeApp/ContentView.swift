@@ -3,17 +3,35 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
 
+    @StateObject private var voiceInput = VoiceInputController()
+    @StateObject private var voiceOutput = VoiceOutputController()
+
+    @State private var autoSpeakAssistant: Bool = true
+    @State private var autoSubmitVoice: Bool = true
+    @State private var lastSpokenItemID: String?
+
+    private var canSendTurns: Bool {
+        store.connectionState == .connected && store.selectedSession != nil
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
-            transcript
+            detailPanel
         }
         .navigationSplitViewStyle(.balanced)
         .task {
             if store.connectionState == .disconnected {
                 await store.connect()
             }
+        }
+        .onChange(of: store.selectedSessionItems.last?.id) { _, _ in
+            handleAssistantSpeech()
+        }
+        .onDisappear {
+            _ = voiceInput.stopRecording()
+            voiceOutput.stop()
         }
     }
 
@@ -78,7 +96,7 @@ struct ContentView: View {
         .navigationTitle("Code Native")
     }
 
-    private var transcript: some View {
+    private var detailPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let session = store.selectedSession {
                 VStack(alignment: .leading, spacing: 4) {
@@ -97,6 +115,9 @@ struct ContentView: View {
                     }
                     .padding(.vertical, 4)
                 }
+
+                composerPanel
+                voicePanel
             } else {
                 ContentUnavailableView(
                     "No Session Selected",
@@ -106,6 +127,114 @@ struct ContentView: View {
             }
         }
         .padding(16)
+    }
+
+    private var composerPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Composer")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            TextEditor(text: $store.composerText)
+                .font(.body.monospaced())
+                .frame(minHeight: 96, maxHeight: 160)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                )
+
+            HStack(spacing: 8) {
+                Button("Interrupt") {
+                    Task {
+                        await store.interruptTurn()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canSendTurns)
+
+                Button("Submit") {
+                    Task {
+                        await store.submitComposer()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSendTurns || store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+
+    private var voicePanel: some View {
+        GroupBox("Voice") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Button(voiceInput.isRecording ? "Stop Recording" : "Start Recording") {
+                        handleVoiceRecordToggle()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.selectedSession == nil)
+
+                    Button("Stop Speaking") {
+                        voiceOutput.stop()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!voiceOutput.isSpeaking)
+
+                    Toggle("Auto Speak", isOn: $autoSpeakAssistant)
+                    Toggle("Auto Submit Voice", isOn: $autoSubmitVoice)
+                }
+
+                if !voiceInput.liveTranscript.isEmpty {
+                    Text(voiceInput.liveTranscript)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let voiceError = voiceInput.lastError {
+                    Text(voiceError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func handleVoiceRecordToggle() {
+        if voiceInput.isRecording {
+            let finalText = voiceInput.stopRecording()
+            let normalized = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            store.composerText = finalText
+
+            if autoSubmitVoice, !normalized.isEmpty {
+                Task {
+                    await store.submitComposer()
+                }
+            }
+            return
+        }
+
+        voiceOutput.stop()
+        Task {
+            await voiceInput.startRecording { text, _ in
+                Task { @MainActor in
+                    store.composerText = text
+                }
+            }
+        }
+    }
+
+    private func handleAssistantSpeech() {
+        guard autoSpeakAssistant,
+              let lastItem = store.selectedSessionItems.last,
+              lastItem.id != lastSpokenItemID,
+              let text = lastItem.assistantMessageText
+        else {
+            return
+        }
+
+        lastSpokenItemID = lastItem.id
+        voiceOutput.speak(text)
     }
 }
 

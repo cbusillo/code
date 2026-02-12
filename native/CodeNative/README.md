@@ -9,6 +9,9 @@ Codex session stream.
 - Session list from live server
 - Read-only transcript streaming for the selected session
 - Attach/detach wiring when session selection changes
+- Voice controls (start/stop recording, auto-submit voice text,
+  auto-speak assistant replies)
+- Composer submit + interrupt turn controls
 
 ## Run
 
@@ -30,5 +33,9 @@ The default endpoint in the app is `ws://127.0.0.1:4317/ws`.
 
 ## Notes
 
-- This is an M0 bootstrap and intentionally read-only.
-- Voice features and full approvals/tool parity are planned in later milestones.
+- The app requests microphone and speech recognition permission when recording
+  starts.
+- Voice capture currently uses the system speech recognizer with on-device
+  preference enabled.
+- This remains an early native milestone and does not yet include
+  approval/action parity.

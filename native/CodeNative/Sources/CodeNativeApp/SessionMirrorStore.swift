@@ -13,6 +13,7 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var statusLine: String = "Disconnected"
     @Published private(set) var sessions: [SessionSummary] = []
     @Published private(set) var itemsBySession: [UUID: [SessionStreamItem]] = [:]
+    @Published var composerText: String = ""
     @Published var selectedSessionID: UUID? {
         didSet {
             guard oldValue != selectedSessionID else {
@@ -29,6 +30,7 @@ final class SessionMirrorStore: ObservableObject {
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var attachedSessionID: UUID?
+    private var clientID: String?
     private var requestCounter: UInt64 = 0
 
     private lazy var decoder: JSONDecoder = {
@@ -94,12 +96,44 @@ final class SessionMirrorStore: ObservableObject {
         webSocket = nil
 
         attachedSessionID = nil
+        clientID = nil
         connectionState = .disconnected
         statusLine = "Disconnected"
     }
 
     func refreshSessions() async {
         await send(OutboundMessage.listSessions(requestID: nextRequestID()))
+    }
+
+    func submitComposer() async {
+        guard let selectedSessionID else {
+            return
+        }
+
+        let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return
+        }
+
+        let cursor = text.count
+
+        await send(
+            ComposerUpdateMessage(
+                requestID: nextRequestID(),
+                sessionID: selectedSessionID,
+                text: text,
+                cursor: cursor
+            )
+        )
+        await send(SubmitTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
+        composerText = ""
+    }
+
+    func interruptTurn() async {
+        guard let selectedSessionID else {
+            return
+        }
+        await send(InterruptTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
     }
 
     private func receiveLoop() async {
@@ -151,6 +185,7 @@ final class SessionMirrorStore: ObservableObject {
     private func apply(_ envelope: ServerEnvelope) {
         switch envelope {
         case .hello(let message):
+            clientID = message.clientID
             statusLine = "Connected as \(message.clientID.prefix(8))"
 
         case .sessionList(let message):
@@ -188,6 +223,14 @@ final class SessionMirrorStore: ObservableObject {
                 items.removeFirst(items.count - 2000)
             }
             itemsBySession[sessionID] = items
+
+            if sessionID == selectedSessionID,
+               message.item.type == "composer" {
+                let isFromCurrentClient = message.item.sourceClientID == clientID
+                if !isFromCurrentClient {
+                    composerText = message.item.text ?? ""
+                }
+            }
 
         case .error(let message):
             lastError = message.message
@@ -231,6 +274,22 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     private func send(_ message: OutboundMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func send(_ message: ComposerUpdateMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func send(_ message: SubmitTurnMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func send(_ message: InterruptTurnMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func sendEncodable<T: Encodable>(_ message: T) async {
         guard let webSocket else {
             return
         }

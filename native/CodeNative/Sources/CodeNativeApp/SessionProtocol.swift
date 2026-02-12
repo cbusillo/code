@@ -150,6 +150,26 @@ struct OutboundMessage: Encodable {
     }
 }
 
+struct ComposerUpdateMessage: Encodable {
+    let type: String = "composer_update"
+    let requestID: String
+    let sessionID: UUID
+    let text: String
+    let cursor: Int
+}
+
+struct SubmitTurnMessage: Encodable {
+    let type: String = "submit_turn"
+    let requestID: String
+    let sessionID: UUID
+}
+
+struct InterruptTurnMessage: Encodable {
+    let type: String = "interrupt_turn"
+    let requestID: String
+    let sessionID: UUID
+}
+
 enum JSONValue: Decodable, Hashable {
     case string(String)
     case number(Double)
@@ -229,5 +249,35 @@ enum JSONValue: Decodable, Hashable {
                 partialResult[entry.key] = entry.value.asJSONObject
             }
         }
+    }
+}
+
+extension JSONValue {
+    var objectValue: [String: JSONValue]? {
+        if case .object(let value) = self {
+            return value
+        }
+        return nil
+    }
+
+    var stringValue: String? {
+        if case .string(let value) = self {
+            return value
+        }
+        return nil
+    }
+}
+
+extension SessionStreamItem {
+    var assistantMessageText: String? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "agent_message",
+              let object = payload.objectValue,
+              let message = object["message"]?.stringValue
+        else {
+            return nil
+        }
+        return message
     }
 }
