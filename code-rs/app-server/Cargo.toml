@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+axum = { version = "0.8", features = ["json", "ws"] }
 code-arg0 = { workspace = true }
 code-common = { workspace = true, features = ["cli"] }
 code-core = { workspace = true }
@@ -24,6 +25,7 @@ code-login = { workspace = true }
 code-app-server-protocol = { workspace = true }
 code-protocol = { workspace = true }
 code-utils-json-to-toml = { workspace = true }
+futures = { workspace = true }
 # We should only be using mcp-types for JSON-RPC types: it would be nice to
 # split this out into a separate crate at some point.
 mcp-types = { workspace = true }
@@ -32,13 +34,16 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = [
     "io-std",
     "macros",
+    "net",
     "process",
     "rt-multi-thread",
     "signal",
+    "sync",
 ] }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 uuid = { workspace = true, features = ["serde", "v7"] }
+webbrowser = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

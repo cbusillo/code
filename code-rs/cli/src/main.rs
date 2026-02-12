@@ -24,6 +24,7 @@ use code_core::spawn::spawn_std_command_with_retry;
 use code_protocol::protocol::SessionSource;
 use code_cloud_tasks::Cli as CloudTasksCli;
 use code_exec::Cli as ExecCli;
+use code_app_server::web_server::WebServerOptions;
 use code_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use code_tui::Cli as TuiCli;
 use code_tui::ExitSummary;
@@ -122,6 +123,9 @@ enum Subcommand {
     /// [experimental] Run the app server.
     AppServer,
 
+    /// [experimental] Run the native mirror server for Apple clients.
+    Web(WebCommand),
+
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
 
@@ -183,6 +187,21 @@ struct ResumeCommand {
 
     #[clap(flatten)]
     config_overrides: TuiCli,
+}
+
+#[derive(Debug, Parser)]
+struct WebCommand {
+    /// Address to bind the mirror server to.
+    #[arg(long = "host", default_value = "127.0.0.1")]
+    host: String,
+
+    /// Port to bind the mirror server to.
+    #[arg(long = "port", default_value_t = 4317)]
+    port: u16,
+
+    /// Open browser after server starts.
+    #[arg(long = "open", default_value_t = false)]
+    open: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -492,6 +511,15 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
         }
         Some(Subcommand::AppServer) => {
             code_app_server::run_main(code_linux_sandbox_exe, root_config_overrides).await?;
+        }
+        Some(Subcommand::Web(web)) => {
+            let options = WebServerOptions {
+                host: web.host,
+                port: web.port,
+                open_browser: web.open,
+            };
+            code_app_server::run_web_main(code_linux_sandbox_exe, root_config_overrides, options)
+                .await?;
         }
         Some(Subcommand::Resume(ResumeCommand {
             session_id,

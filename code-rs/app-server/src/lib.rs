@@ -3,6 +3,7 @@
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use code_common::CliConfigOverrides;
 use code_core::config::Config;
@@ -22,12 +23,15 @@ use tracing_subscriber::EnvFilter;
 use crate::message_processor::MessageProcessor;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::web_server::WebServerOptions;
+use crate::web_server::run_web_server;
 
 pub mod code_message_processor;
 mod error_code;
 mod fuzzy_file_search;
 mod message_processor;
 pub mod outgoing_message;
+pub mod web_server;
 
 
 /// Size of the bounded channels used to communicate between tasks. The value
@@ -39,12 +43,7 @@ pub async fn run_main(
     code_linux_sandbox_exe: Option<PathBuf>,
     cli_config_overrides: CliConfigOverrides,
 ) -> IoResult<()> {
-    // Install a simple subscriber so `tracing` output is visible.  Users can
-    // control the log level with `RUST_LOG`.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    init_tracing();
 
     // Set up channels.
     let (incoming_tx, mut incoming_rx) = mpsc::channel::<JSONRPCMessage>(CHANNEL_CAPACITY);
@@ -80,20 +79,7 @@ pub async fn run_main(
         }
     });
 
-    // Parse CLI overrides once and derive the base Config eagerly so later
-    // components do not need to work with raw TOML values.
-    let cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
-        std::io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("error parsing -c overrides: {e}"),
-        )
-    })?;
-    let mut config_overrides = ConfigOverrides::default();
-    config_overrides.code_linux_sandbox_exe = code_linux_sandbox_exe.clone();
-
-    let config = Config::load_with_cli_overrides(cli_kv_overrides, config_overrides).map_err(|e| {
-        std::io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}"))
-    })?;
+    let config = load_config(code_linux_sandbox_exe.clone(), cli_config_overrides)?;
 
     // Task: process incoming messages.
     let processor_handle = tokio::spawn({
@@ -101,7 +87,7 @@ pub async fn run_main(
         let mut processor = MessageProcessor::new(
             outgoing_message_sender,
             code_linux_sandbox_exe,
-            std::sync::Arc::new(config),
+            config,
         );
         async move {
             while let Some(msg) = incoming_rx.recv().await {
@@ -146,4 +132,42 @@ pub async fn run_main(
     let _ = tokio::join!(stdin_reader_handle, processor_handle, stdout_writer_handle);
 
     Ok(())
+}
+
+pub async fn run_web_main(
+    code_linux_sandbox_exe: Option<PathBuf>,
+    cli_config_overrides: CliConfigOverrides,
+    options: WebServerOptions,
+) -> IoResult<()> {
+    init_tracing();
+    let config = load_config(code_linux_sandbox_exe, cli_config_overrides)?;
+    run_web_server(config, options).await
+}
+
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+}
+
+fn load_config(
+    code_linux_sandbox_exe: Option<PathBuf>,
+    cli_config_overrides: CliConfigOverrides,
+) -> IoResult<Arc<Config>> {
+    // Parse CLI overrides once and derive the base Config eagerly so later
+    // components do not need to work with raw TOML values.
+    let cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("error parsing -c overrides: {e}"),
+        )
+    })?;
+    let mut config_overrides = ConfigOverrides::default();
+    config_overrides.code_linux_sandbox_exe = code_linux_sandbox_exe;
+
+    let config = Config::load_with_cli_overrides(cli_kv_overrides, config_overrides)
+        .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}")))?;
+
+    Ok(Arc::new(config))
 }
