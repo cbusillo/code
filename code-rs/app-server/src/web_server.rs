@@ -1508,6 +1508,18 @@ mod tests {
         }
     }
 
+    async fn recv_stream_seq(out_rx: &mut mpsc::Receiver<ServerMessage>) -> u64 {
+        let message = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("forwarder should emit message")
+            .expect("forwarded message should exist");
+
+        match message {
+            ServerMessage::SessionStream { item } => item.seq(),
+            other => panic!("unexpected forwarded payload: {other:?}"),
+        }
+    }
+
     #[test]
     fn truncate_attach_history_caps_initial_payload_bytes() {
         let history = (1_u64..=20)
@@ -1652,5 +1664,61 @@ mod tests {
         assert!(duplicate.is_err(), "duplicate seq=11 should be dropped");
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn session_forwarder_keeps_two_clients_in_sync_through_reattach_cycle() {
+        let (stream_tx, stream_rx_a) = broadcast::channel(16);
+        let stream_rx_b = stream_tx.subscribe();
+
+        let (out_tx_a, mut out_rx_a) = mpsc::channel(16);
+        let (out_tx_b, mut out_rx_b) = mpsc::channel(16);
+
+        // Both clients attach to an empty session.
+        let mut handle_a = spawn_session_forwarder(out_tx_a.clone(), stream_rx_a, 0);
+        let handle_b = spawn_session_forwarder(out_tx_b, stream_rx_b, 0);
+
+        stream_tx.send(make_system_item(1)).expect("send seq=1");
+        stream_tx.send(make_system_item(2)).expect("send seq=2");
+
+        assert_eq!(recv_stream_seq(&mut out_rx_a).await, 1);
+        assert_eq!(recv_stream_seq(&mut out_rx_a).await, 2);
+        assert_eq!(recv_stream_seq(&mut out_rx_b).await, 1);
+        assert_eq!(recv_stream_seq(&mut out_rx_b).await, 2);
+
+        // Client A detaches while B remains live.
+        handle_a.abort();
+
+        stream_tx.send(make_system_item(3)).expect("send seq=3");
+        assert_eq!(recv_stream_seq(&mut out_rx_b).await, 3);
+
+        let detached_silent = timeout(Duration::from_millis(150), out_rx_a.recv()).await;
+        assert!(
+            detached_silent.is_err(),
+            "detached client should not receive live updates"
+        );
+
+        // Client A reattaches from_seq=2 and receives seq=3 via replay.
+        let replay = vec![make_system_item(3)];
+        let replay_last_seq = replay.last().map_or(2, SessionStreamItem::seq);
+        assert_eq!(replay_last_seq, 3);
+
+        handle_a = spawn_session_forwarder(out_tx_a, stream_tx.subscribe(), replay_last_seq);
+
+        // seq=3 appears again on the live stream, but should be dropped for both clients.
+        stream_tx.send(make_system_item(3)).expect("send duplicate seq=3");
+        stream_tx.send(make_system_item(4)).expect("send seq=4");
+
+        assert_eq!(recv_stream_seq(&mut out_rx_a).await, 4);
+        assert_eq!(recv_stream_seq(&mut out_rx_b).await, 4);
+
+        let duplicate_silent_a = timeout(Duration::from_millis(150), out_rx_a.recv()).await;
+        assert!(duplicate_silent_a.is_err(), "reattached client should not duplicate seq=3");
+
+        let duplicate_silent_b = timeout(Duration::from_millis(150), out_rx_b.recv()).await;
+        assert!(duplicate_silent_b.is_err(), "live client should not duplicate seq=3");
+
+        handle_a.abort();
+        handle_b.abort();
     }
 }

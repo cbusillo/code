@@ -532,6 +532,14 @@ final class SessionMirrorStore: ObservableObject {
 
 }
 
+#if DEBUG
+extension SessionMirrorStore {
+    func applyEnvelopeForTesting(_ envelope: ServerEnvelope) {
+        apply(envelope)
+    }
+}
+#endif
+
 private extension UInt64 {
     func saturatingIncrement() -> UInt64 {
         if self == UInt64.max {
