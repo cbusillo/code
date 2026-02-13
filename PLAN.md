@@ -93,3 +93,10 @@
 
 - iPadOS/iOS parity milestones (resume after macOS P0/P1 are stable).
 - On-device ML enhancements beyond core session correctness.
+
+## Next Phase: iOS/iPadOS Parity
+
+- [x] Surface iOS quick actions for core thread flow (new/refresh/reconnect)
+  and add pull-to-refresh in the thread picker.
+- [x] Add iOS simulator smoke coverage for top-bar controls and thread picker.
+- [x] Validate iPad split-view ergonomics for transcript + composer density.

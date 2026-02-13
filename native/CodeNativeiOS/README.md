@@ -20,6 +20,48 @@ This creates `CodeNativeiOSDemo.xcodeproj`.
 
 By default, the app connects to `ws://127.0.0.1:4317/ws`.
 
+## iOS Core Controls
+
+- Top bar actions now include:
+  - quick actions menu (`New thread`, `Refresh`, and `Reconnect` when disconnected)
+  - thread picker button
+  - settings button
+- Pull down in the thread picker to refresh sessions.
+
+## Smoke Test
+
+Run the iPhone simulator smoke test for top-bar controls and thread picker:
+
+```bash
+SIM_NAME="$(xcrun simctl list devices available \
+  | awk -F'[()]' '/iPhone/{print $1; exit}' \
+  | xargs)"
+TEST_CASE="CodeNativeiOSDemoUITests/CodeNativeiOSDemoUITests/testTopBarQuickActionsAndThreadPicker"
+
+xcodebuild \
+  -project native/CodeNativeiOS/CodeNativeiOSDemo.xcodeproj \
+  -scheme CodeNativeiOSDemo \
+  -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+  test \
+  -only-testing:"${TEST_CASE}"
+```
+
+Run the iPad split-layout smoke test:
+
+```bash
+IPAD_SIM="$(xcrun simctl list devices available \
+  | awk -F'[()]' '/iPad/{print $1; exit}' \
+  | xargs)"
+IPAD_TEST_CASE="CodeNativeiOSDemoUITests/CodeNativeiOSDemoUITests/testIPadSplitLayoutShowsPersistentSidebar"
+
+xcodebuild \
+  -project native/CodeNativeiOS/CodeNativeiOSDemo.xcodeproj \
+  -scheme CodeNativeiOSDemo \
+  -destination "platform=iOS Simulator,name=${IPAD_SIM}" \
+  test \
+  -only-testing:"${IPAD_TEST_CASE}"
+```
+
 ## Keep Platforms In Sync
 
 - Put session parsing/state logic in shared files under

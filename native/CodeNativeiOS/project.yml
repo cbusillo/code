@@ -39,4 +39,16 @@ targets:
         excludes:
           - CodeNativeApp.swift
     scheme:
-      testTargets: []
+      testTargets:
+        - CodeNativeiOSDemoUITests
+
+  CodeNativeiOSDemoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+    sources:
+      - path: CodeNativeiOSDemoUITests
+    dependencies:
+      - target: CodeNativeiOSDemo

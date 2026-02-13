@@ -4,9 +4,16 @@ import SwiftUI
 import AppKit
 #endif
 
+#if os(iOS)
+import UIKit
+#endif
+
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
     @Environment(\.openURL) private var openURL
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
 
     private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -179,6 +186,14 @@ struct ContentView: View {
         repoGroups.count > 1
     }
 
+    private var showsIPadSplitLayout: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         ZStack {
             LinearGradient(
@@ -192,7 +207,15 @@ struct ContentView: View {
             .ignoresSafeArea()
 
             #if os(iOS)
-            mainPanel
+            if showsIPadSplitLayout {
+                HStack(spacing: 0) {
+                    sidebar
+                        .frame(width: 300)
+                    mainPanel
+                }
+            } else {
+                mainPanel
+            }
             #else
             HStack(spacing: 0) {
                 sidebar
@@ -257,6 +280,13 @@ struct ContentView: View {
         .onChange(of: store.sessions) { _, _ in
             ensureVisibleSelection()
         }
+        #if os(iOS)
+        .onChange(of: showsIPadSplitLayout) { _, isSplit in
+            if isSplit {
+                showThreadPicker = false
+            }
+        }
+        #endif
         .onDisappear {
             _ = voiceInput.stopRecording()
             voiceOutput.stop()
@@ -391,6 +421,11 @@ struct ContentView: View {
                 .padding(.top, 4)
                 .padding(.trailing, 4)
             }
+            #if os(iOS)
+            .refreshable {
+                await store.refreshSessions()
+            }
+            #endif
 
             Spacer(minLength: 8)
 
@@ -492,8 +527,49 @@ struct ContentView: View {
     @ViewBuilder
     private var topBarActions: some View {
         #if os(iOS)
-        TopBarIconButton(icon: "list.bullet", accessibilityID: "top.threads") {
-            showThreadPicker = true
+        Menu {
+            Button {
+                Task {
+                    await store.createSession(cwd: nil)
+                }
+            } label: {
+                Label("New thread", systemImage: "square.and.pencil")
+            }
+            .accessibilityIdentifier("top.quick-actions.new-thread")
+
+            Button {
+                Task {
+                    await store.refreshSessions()
+                }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .accessibilityIdentifier("top.quick-actions.refresh")
+
+            if store.connectionState == .disconnected {
+                Button {
+                    Task {
+                        await store.connect()
+                    }
+                } label: {
+                    Label("Reconnect", systemImage: "bolt.horizontal.circle")
+                }
+                .accessibilityIdentifier("top.quick-actions.reconnect")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(0.06), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .accessibilityIdentifier("top.quick-actions")
+
+        if !showsIPadSplitLayout {
+            TopBarIconButton(icon: "list.bullet", accessibilityID: "top.threads") {
+                showThreadPicker = true
+            }
         }
 
         TopBarIconButton(icon: "gearshape", accessibilityID: "top.settings") {
@@ -619,7 +695,7 @@ struct ContentView: View {
 
     private var transcriptHorizontalPadding: CGFloat {
         #if os(iOS)
-        return 12
+        return showsIPadSplitLayout ? 18 : 12
         #else
         return 26
         #endif
@@ -627,7 +703,7 @@ struct ContentView: View {
 
     private var transcriptBubbleGutter: CGFloat {
         #if os(iOS)
-        return 10
+        return showsIPadSplitLayout ? 34 : 10
         #else
         return 72
         #endif
@@ -1014,8 +1090,16 @@ struct ContentView: View {
                     .stroke(Color.white.opacity(0.09), lineWidth: 1)
             )
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, composerHorizontalPadding)
         .padding(.bottom, composerBottomPadding)
+    }
+
+    private var composerHorizontalPadding: CGFloat {
+        #if os(iOS)
+        return showsIPadSplitLayout ? 16 : 22
+        #else
+        return 22
+        #endif
     }
 
     private var composerBottomPadding: CGFloat {
