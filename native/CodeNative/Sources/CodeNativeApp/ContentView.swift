@@ -44,15 +44,23 @@ struct ContentView: View {
     @AppStorage("code_native_glass_window") private var glassWindow = true
     @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = true
     @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
+    @AppStorage("code_native_selected_model") private var selectedModel = "GPT-5.3-Codex"
+    @AppStorage("code_native_reasoning_level") private var selectedReasoningLevel = "High"
+    @AppStorage("code_native_sandbox_mode") private var selectedSandboxMode = "Local"
+    @AppStorage("code_native_approval_policy") private var selectedApprovalPolicy = "On request"
 
     @State private var lastSpokenItemID: String?
-    @State private var isPressToTalkActive = false
     @State private var showSettings = false
+    @State private var showThreadPicker = false
     @State private var showConnectionPopover = false
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
 
     private let transcriptBottomAnchor = "transcript.bottom"
+    private let modelOptions = ["GPT-5.3-Codex", "GPT-5.2", "Claude Sonnet 4.5"]
+    private let reasoningOptions = ["Low", "Medium", "High"]
+    private let sandboxOptions = ["Local", "Workspace write", "Read-only"]
+    private let approvalPolicyOptions = ["On request", "On failure", "Never"]
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
@@ -182,10 +190,14 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
 
+            #if os(iOS)
+            mainPanel
+            #else
             HStack(spacing: 0) {
                 sidebar
                 mainPanel
             }
+            #endif
         }
         .preferredColorScheme(selectedThemeMode.colorScheme)
         .sheet(isPresented: $showSettings) {
@@ -201,8 +213,26 @@ struct ContentView: View {
                 preventSleep: $preventSleep,
                 glassWindow: $glassWindow
             )
+            #if os(macOS)
             .frame(minWidth: 900, minHeight: 620)
+            #endif
         }
+        #if os(iOS)
+        .sheet(isPresented: $showThreadPicker) {
+            NavigationStack {
+                sidebar
+                    .navigationTitle("Threads")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") {
+                                showThreadPicker = false
+                            }
+                        }
+                    }
+            }
+        }
+        #endif
         .task {
             if store.connectionState == .disconnected {
                 await store.connect()
@@ -217,12 +247,14 @@ struct ContentView: View {
         }
         .onChange(of: store.selectedSessionID) { _, _ in
             activeTranscriptItemID = nil
+            #if os(iOS)
+            showThreadPicker = false
+            #endif
         }
         .onChange(of: store.sessions) { _, _ in
             ensureVisibleSelection()
         }
         .onDisappear {
-            isPressToTalkActive = false
             _ = voiceInput.stopRecording()
             voiceOutput.stop()
         }
@@ -334,6 +366,9 @@ struct ContentView: View {
                                             density: selectedThreadDensity
                                         ) {
                                             store.selectedSessionID = session.id
+                                            #if os(iOS)
+                                            showThreadPicker = false
+                                            #endif
                                         }
                                     }
                                 }
@@ -362,7 +397,11 @@ struct ContentView: View {
             .accessibilityIdentifier("rail.footer-settings")
         }
         .padding(16)
+        #if os(macOS)
         .frame(width: 280)
+        #else
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        #endif
         .background(
             ZStack {
                 if glassWindow {
@@ -410,44 +449,59 @@ struct ContentView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(store.selectedSession.map(sessionTitle(for:)) ?? "New thread")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.95))
+        VStack(alignment: .leading, spacing: 8) {
+            Text(store.selectedSession.map(sessionTitle(for:)) ?? "New thread")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.95))
+                .lineLimit(topBarTitleLineLimit)
+                .truncationMode(.tail)
+
+            HStack(spacing: 8) {
                 Text(store.selectedSession.map(sessionSubtitleLine(for:)) ?? "")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-                if hasReplayOmittedNotice {
-                    Label("History condensed from local replay", systemImage: "tray.full")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                Spacer(minLength: 8)
+
+                if store.connectionState != .connected {
+                    statusChip
                 }
-            }
 
-            Spacer()
-
-            if store.connectionState != .connected {
-                statusChip
+                topBarActions
             }
-
-            TopBarButton(icon: "folder", title: "Open", accessibilityID: "top.open") {
-                openSelectedWorkspace()
-            }
-            .disabled(store.selectedSession == nil)
-
-            TopBarButton(icon: "circle.dashed.inset.filled", title: "Commit", accessibilityID: "top.review") {
-                showSettings = true
-            }
-            .disabled(store.selectedSession == nil)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .background(Color.black.opacity(0.24))
+    }
+
+    @ViewBuilder
+    private var topBarActions: some View {
+        #if os(iOS)
+        TopBarIconButton(icon: "list.bullet", accessibilityID: "top.threads") {
+            showThreadPicker = true
+        }
+
+        TopBarIconButton(icon: "gearshape", accessibilityID: "top.settings") {
+            showSettings = true
+        }
+        #else
+        TopBarButton(icon: "folder", title: "Open", accessibilityID: "top.open") {
+            openSelectedWorkspace()
+        }
+        .disabled(store.selectedSession == nil)
+
+        TopBarButton(icon: "circle.dashed.inset.filled", title: "Commit", accessibilityID: "top.review") {
+            showSettings = true
+        }
+        .disabled(store.selectedSession == nil)
+        #endif
+    }
+
+    private var topBarTitleLineLimit: Int {
+        return 1
     }
 
     private var statusChip: some View {
@@ -490,11 +544,11 @@ struct ContentView: View {
                             .frame(height: 1)
                             .id(transcriptBottomAnchor)
                     }
-                    .padding(.horizontal, 26)
+                    .padding(.horizontal, transcriptHorizontalPadding)
                     .padding(.vertical, 24)
                     .frame(maxWidth: 920)
                     .frame(maxWidth: .infinity)
-                    .frame(minHeight: geometry.size.height, alignment: .bottom)
+                    .frame(minHeight: geometry.size.height, alignment: transcriptContentAlignment)
                 }
                 .onAppear {
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
@@ -531,36 +585,161 @@ struct ContentView: View {
             if item.cardStyle == .assistant {
                 AssistantTranscriptLine(text: item.body)
                     .frame(maxWidth: 760, alignment: .leading)
-                Spacer(minLength: 72)
+                Spacer(minLength: transcriptBubbleGutter)
             } else if item.prefersCenteredBubble {
-                Spacer(minLength: 72)
+                Spacer(minLength: transcriptBubbleGutter)
                 card
-                Spacer(minLength: 72)
+                Spacer(minLength: transcriptBubbleGutter)
             } else {
                 if item.prefersTrailingBubble {
-                    Spacer(minLength: 72)
+                    Spacer(minLength: transcriptBubbleGutter)
                 }
 
                 card
 
                 if !item.prefersTrailingBubble {
-                    Spacer(minLength: 72)
+                    Spacer(minLength: transcriptBubbleGutter)
                 }
             }
         }
         .frame(maxWidth: .infinity)
     }
 
+    private var transcriptHorizontalPadding: CGFloat {
+        #if os(iOS)
+        return 12
+        #else
+        return 26
+        #endif
+    }
+
+    private var transcriptBubbleGutter: CGFloat {
+        #if os(iOS)
+        return 10
+        #else
+        return 72
+        #endif
+    }
+
+    private var transcriptContentAlignment: Alignment {
+        #if os(iOS)
+        return .top
+        #else
+        return .bottom
+        #endif
+    }
+
     private var transcriptItems: [SessionStreamItem] {
         let visible = store.selectedSessionItems.filter { !$0.shouldHideFromTranscript && !$0.isReplayOmittedNotice }
+        let replayPruned = pruneReplayHistoryCardsWhenRedundant(in: visible)
 
-        return collapseConsecutiveReasoningCards(
-            in: dedupeObsoleteBackgroundEvents(
-                in: removeRedundantPatchSummaries(
-                    from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: visible))
+        return dedupeAssistantMessagesWithinTurn(
+            in: collapseConsecutiveReasoningCards(
+                in: dedupeObsoleteBackgroundEvents(
+                    in: collapseTokenUsageBursts(
+                        in: removeRedundantPatchSummaries(
+                            from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: replayPruned))
+                        )
+                    )
                 )
             )
         )
+    }
+
+    private func pruneReplayHistoryCardsWhenRedundant(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        let hasPrimaryConversation = items.contains { item in
+            if item.assistantMessageText != nil {
+                return true
+            }
+
+            if let userText = item.userMessageText,
+               !userText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !item.isImagePlaceholderUserMessage {
+                return true
+            }
+
+            return false
+        }
+
+        guard hasPrimaryConversation else {
+            return items
+        }
+
+        return items.filter { !$0.isReplayHistoryEvent }
+    }
+
+    private func collapseTokenUsageBursts(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return items
+        }
+
+        var seenTokenModels: Set<String> = []
+        var keptReversed: [SessionStreamItem] = []
+        keptReversed.reserveCapacity(items.count)
+
+        for item in items.reversed() {
+            if item.isConversationBoundaryEvent {
+                seenTokenModels.removeAll(keepingCapacity: true)
+                keptReversed.append(item)
+                continue
+            }
+
+            if item.isTokenCountEvent {
+                let modelKey = item.tokenCountRequestedModel?.lowercased() ?? "default"
+                if seenTokenModels.contains(modelKey) {
+                    continue
+                }
+                seenTokenModels.insert(modelKey)
+            }
+
+            keptReversed.append(item)
+        }
+
+        return keptReversed.reversed()
+    }
+
+    private func dedupeAssistantMessagesWithinTurn(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return items
+        }
+
+        var seenAssistantBodies: Set<String> = []
+        var keptReversed: [SessionStreamItem] = []
+        keptReversed.reserveCapacity(items.count)
+
+        for item in items.reversed() {
+            if item.userMessageText != nil {
+                seenAssistantBodies.removeAll(keepingCapacity: true)
+                keptReversed.append(item)
+                continue
+            }
+
+            if let currentSignature = assistantMessageSignature(for: item),
+               seenAssistantBodies.contains(currentSignature) {
+                continue
+            }
+
+            if let currentSignature = assistantMessageSignature(for: item) {
+                seenAssistantBodies.insert(currentSignature)
+            }
+
+            keptReversed.append(item)
+        }
+
+        return keptReversed.reversed()
+    }
+
+    private func assistantMessageSignature(for item: SessionStreamItem) -> String? {
+        guard item.cardStyle == .assistant else {
+            return nil
+        }
+
+        let normalized = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return nil
+        }
+
+        return normalized
     }
 
     private func removeRedundantPatchSummaries(from items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -757,10 +936,6 @@ struct ContentView: View {
         return nil
     }
 
-    private var hasReplayOmittedNotice: Bool {
-        store.selectedSessionItems.contains(where: \.isReplayOmittedNotice)
-    }
-
     private func welcomePanel(for session: SessionSummary) -> some View {
         VStack(spacing: 22) {
             Spacer(minLength: 34)
@@ -827,10 +1002,110 @@ struct ContentView: View {
             )
         }
         .padding(.horizontal, 22)
-        .padding(.bottom, 18)
+        .padding(.bottom, composerBottomPadding)
+    }
+
+    private var composerBottomPadding: CGFloat {
+        #if os(iOS)
+        return 0
+        #else
+        return 18
+        #endif
     }
 
     private var composerControlRows: some View {
+        #if os(iOS)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(modelOptions, id: \.self) { option in
+                        Button(option) {
+                            selectedModel = option
+                        }
+                    }
+                } label: {
+                    Label(selectedModel, systemImage: "chevron.down")
+                }
+                .menuStyle(.borderlessButton)
+
+                Menu {
+                    ForEach(reasoningOptions, id: \.self) { option in
+                        Button(option) {
+                            selectedReasoningLevel = option
+                        }
+                    }
+                } label: {
+                    Label("Reasoning: \(selectedReasoningLevel)", systemImage: "chevron.down")
+                }
+                .menuStyle(.borderlessButton)
+
+                Spacer(minLength: 10)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            HStack(spacing: 8) {
+                Button {
+                    handleVoiceToggleTap()
+                } label: {
+                    Image(systemName: voiceInput.isRecording ? "mic.fill" : "mic")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(voiceInput.isRecording ? .red : .secondary)
+                .frame(width: 24, height: 24)
+                .background(Color.white.opacity(0.05), in: Circle())
+                .disabled(!canSendTurns)
+                .accessibilityIdentifier("composer.mic-toggle")
+
+                Button {
+                    Task {
+                        await store.interruptTurn()
+                    }
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.caption2.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+                .background(Color.white.opacity(0.05), in: Circle())
+                .disabled(!canSendTurns)
+                .accessibilityIdentifier("composer.stop")
+
+                Spacer(minLength: 6)
+
+                VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
+                    .font(.caption2)
+
+                Button {
+                    Task {
+                        await store.submitComposer()
+                    }
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .frame(width: 28, height: 28)
+                .background(
+                    canSubmit ? Color.white : Color.white.opacity(0.35),
+                    in: Circle()
+                )
+                .disabled(!canSubmit)
+                .accessibilityIdentifier("composer.send")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.top, 2)
+            .padding(.bottom, 8)
+        }
+        #else
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "plus")
@@ -839,18 +1114,24 @@ struct ContentView: View {
                     .frame(width: 24, height: 24)
 
                 Menu {
-                    Text("Model selection will be wired to thread settings")
+                    ForEach(modelOptions, id: \.self) { option in
+                        Button(option) {
+                            selectedModel = option
+                        }
+                    }
                 } label: {
-                    Label("GPT-5.3-Codex", systemImage: "chevron.down")
+                    Label(selectedModel, systemImage: "chevron.down")
                 }
                 .menuStyle(.borderlessButton)
 
                 Menu {
-                    ForEach(["Low", "Medium", "High"], id: \.self) { option in
-                        Button(option) {}
+                    ForEach(reasoningOptions, id: \.self) { option in
+                        Button(option) {
+                            selectedReasoningLevel = option
+                        }
                     }
                 } label: {
-                    Label("High", systemImage: "chevron.down")
+                    Label(selectedReasoningLevel, systemImage: "chevron.down")
                 }
                 .menuStyle(.borderlessButton)
 
@@ -866,13 +1147,6 @@ struct ContentView: View {
                 #endif
 
                 Spacer()
-
-                PressToTalkButton(
-                    isActive: voiceInput.isRecording,
-                    isDisabled: !canSendTurns,
-                    onPressChanged: handlePressToTalkChanged
-                )
-                .accessibilityIdentifier("composer.hold-to-talk")
 
                 Button {
                     handleVoiceToggleTap()
@@ -928,18 +1202,24 @@ struct ContentView: View {
 
             HStack(spacing: 14) {
                 Menu {
-                    Button("Local") {}
+                    ForEach(sandboxOptions, id: \.self) { option in
+                        Button(option) {
+                            selectedSandboxMode = option
+                        }
+                    }
                 } label: {
-                    Label("Local", systemImage: "laptopcomputer")
+                    Label(selectedSandboxMode, systemImage: "laptopcomputer")
                 }
                 .menuStyle(.borderlessButton)
 
                 Menu {
-                    Button("on-request") {}
-                    Button("on-failure") {}
-                    Button("never") {}
+                    ForEach(approvalPolicyOptions, id: \.self) { option in
+                        Button(option) {
+                            selectedApprovalPolicy = option
+                        }
+                    }
                 } label: {
-                    Label("Default permissions", systemImage: "shield")
+                    Label(selectedApprovalPolicy, systemImage: "shield")
                 }
                 .menuStyle(.borderlessButton)
 
@@ -961,6 +1241,7 @@ struct ContentView: View {
             .padding(.top, 4)
             .padding(.bottom, 8)
         }
+        #endif
     }
 
     private var emptyState: some View {
@@ -1071,11 +1352,12 @@ struct ContentView: View {
             return cleanThreadTitle(updatedName)
         }
 
-        if let latestUser = items
+        if let latestUserText = items
             .reversed()
             .first(where: { $0.userMessageText != nil && !$0.isImagePlaceholderUserMessage })?
-            .userMessageText {
-            return cleanThreadTitle(latestUser)
+            .userMessageText,
+           let cleanedTitle = cleanThreadTitle(latestUserText) {
+            return cleanedTitle
         }
 
         if let diffTitle = inferDiffTitle(from: items) {
@@ -1205,6 +1487,23 @@ struct ContentView: View {
     }
 
     private func transcriptWidthCap(for item: SessionStreamItem) -> CGFloat {
+        #if os(iOS)
+        if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent {
+            return 360
+        }
+
+        if item.prefersTrailingBubble {
+            let estimated = CGFloat(item.body.count) * 5.4 + 64
+            return min(280, max(130, estimated))
+        }
+
+        switch item.cardStyle {
+        case .tool, .approval:
+            return 360
+        case .reasoning, .composer, .system, .defaultStyle, .assistant, .user:
+            return 350
+        }
+        #else
         if item.isPatchApplyEndEvent {
             return 620
         }
@@ -1228,9 +1527,13 @@ struct ContentView: View {
         case .reasoning, .composer, .system, .defaultStyle, .assistant, .user:
             return 620
         }
+        #endif
     }
 
     private func transcriptMinWidth(for item: SessionStreamItem) -> CGFloat {
+        #if os(iOS)
+        return 0
+        #else
         if item.isPatchApplyEndEvent {
             return 420
         }
@@ -1244,6 +1547,7 @@ struct ContentView: View {
         }
 
         return 0
+        #endif
     }
 
     private func sessionSubtitleLine(for session: SessionSummary) -> String {
@@ -1370,39 +1674,12 @@ struct ContentView: View {
         }
     }
 
-    private func handlePressToTalkChanged(isPressed: Bool) {
-        guard canSendTurns else {
-            if isPressToTalkActive {
-                isPressToTalkActive = false
-                stopVoiceCapture(shouldSubmit: false)
-            }
-            return
-        }
-
-        if isPressed {
-            guard !isPressToTalkActive else {
-                return
-            }
-            isPressToTalkActive = true
-            startVoiceCapture()
-            return
-        }
-
-        guard isPressToTalkActive else {
-            return
-        }
-        isPressToTalkActive = false
-        stopVoiceCapture(shouldSubmit: true)
-    }
-
     private func handleVoiceToggleTap() {
         if voiceInput.isRecording {
-            isPressToTalkActive = false
             stopVoiceCapture(shouldSubmit: true)
             return
         }
 
-        isPressToTalkActive = true
         startVoiceCapture()
     }
 
@@ -1645,6 +1922,24 @@ private struct TopBarButton: View {
     }
 }
 
+private struct TopBarIconButton: View {
+    let icon: String
+    let accessibilityID: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(0.06), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .accessibilityIdentifier(accessibilityID)
+    }
+}
+
 private struct VoiceStatusBadge: View {
     let label: String
     let isActive: Bool
@@ -1704,49 +1999,6 @@ private struct ConnectionPopover: View {
                 Text(store.statusLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-private struct PressToTalkButton: View {
-    let isActive: Bool
-    let isDisabled: Bool
-    let onPressChanged: (Bool) -> Void
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: isActive ? "waveform" : "mic")
-            Text(isActive ? "Release" : "Hold")
-                .fontWeight(.semibold)
-        }
-        .font(.caption)
-        .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.9))
-        .frame(width: 86, height: 28)
-        .background(
-            Capsule(style: .continuous)
-                .fill(isActive ? Color.red.opacity(0.88) : Color.white.opacity(0.08))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(Color.white.opacity(isActive ? 0.18 : 0.14), lineWidth: 1)
-        )
-        .opacity(isDisabled ? 0.45 : 1)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !isDisabled {
-                        onPressChanged(true)
-                    }
-                }
-                .onEnded { _ in
-                    onPressChanged(false)
-                }
-        )
-        .onChange(of: isDisabled) { _, disabled in
-            if disabled {
-                onPressChanged(false)
             }
         }
     }
@@ -2595,6 +2847,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if item.isReplayHistoryEvent {
+            return false
+        }
+
         if item.execCommandInfo != nil {
             return false
         }
@@ -2916,6 +3172,44 @@ private struct TranscriptCard: View {
                             .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                 }
+            } else if item.isReplayHistoryEvent {
+                let replayMessages = item.replayHistoryMessages
+                VStack(alignment: .leading, spacing: 10) {
+                    if replayMessages.isEmpty {
+                        Text(item.body)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.92))
+                            .lineSpacing(3)
+                            .textSelection(.enabled)
+                    } else {
+                        ForEach(replayMessages) { message in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(replayRoleLabel(for: message.role))
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+
+                                if message.role == .assistant {
+                                    Text(message.text)
+                                        .font(.body)
+                                        .foregroundStyle(.white.opacity(0.93))
+                                        .lineSpacing(3)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Text(message.text)
+                                        .font(.body)
+                                        .foregroundStyle(.white.opacity(0.93))
+                                        .lineSpacing(3)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
             } else {
                 Text(displayedBody)
                     .font(usesMonospacedBody ? .body.monospaced() : (usesCompactBodyText ? .subheadline : .body))
@@ -3067,6 +3361,17 @@ private struct TranscriptCard: View {
         }
 
         return code == 0 ? Color.green.opacity(0.92) : Color.red.opacity(0.9)
+    }
+
+    private func replayRoleLabel(for role: ReplayHistoryMessage.Role) -> String {
+        switch role {
+        case .assistant:
+            return "Assistant"
+        case .user:
+            return "You"
+        case .unknown:
+            return "Message"
+        }
     }
 }
 
@@ -3245,19 +3550,19 @@ private struct NativeSettingsView: View {
                         }
 
                     case .mcpServers:
-                        PlaceholderSettingsCard(text: "MCP server management will be wired to the shared Codex config and auth flows.")
+                        SettingsInfoCard(text: "MCP servers are managed from the shared Codex configuration for this workspace.")
 
                     case .git:
-                        PlaceholderSettingsCard(text: "Git defaults, commit templates, and review policies will be surfaced here.")
+                        SettingsInfoCard(text: "Git defaults, commit style, and review policies come from the repository and Codex agent config.")
 
                     case .environments:
-                        PlaceholderSettingsCard(text: "Environment profiles and repo-specific launch actions will appear here.")
+                        SettingsInfoCard(text: "Environment profiles are sourced from your current workspace and launch scripts.")
 
                     case .worktrees:
-                        PlaceholderSettingsCard(text: "Worktree templates and branch naming rules will be configurable here.")
+                        SettingsInfoCard(text: "Worktree behavior follows your active branch and local repository conventions.")
 
                     case .archivedThreads:
-                        PlaceholderSettingsCard(text: "Archived thread browsing and restore controls will be added here.")
+                        SettingsInfoCard(text: "Archived threads are available through session history and replay-based restore.")
                     }
                 }
                 .padding(22)
@@ -3293,7 +3598,7 @@ private struct SettingsRow<Content: View>: View {
     }
 }
 
-private struct PlaceholderSettingsCard: View {
+private struct SettingsInfoCard: View {
     let text: String
 
     var body: some View {

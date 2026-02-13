@@ -1,6 +1,23 @@
 import Foundation
 
 enum SessionStreamReducer {
+    private static func normalizedBySequence(
+        _ items: [SessionStreamItem],
+        maxItems: Int
+    ) -> [SessionStreamItem] {
+        var seen: Set<UInt64> = []
+        var ordered: [SessionStreamItem] = []
+        ordered.reserveCapacity(items.count)
+
+        for item in items.sorted(by: { $0.seq < $1.seq }) {
+            if seen.insert(item.seq).inserted {
+                ordered.append(item)
+            }
+        }
+
+        return Array(ordered.suffix(maxItems))
+    }
+
     static func shouldAcceptSessionAttached(
         selectedSessionID: UUID?,
         expectedSessionID: UUID?,
@@ -24,23 +41,27 @@ enum SessionStreamReducer {
         fromSeq: UInt64,
         maxItems: Int = 2_000
     ) -> [SessionStreamItem] {
+        let normalizedExisting = normalizedBySequence(existing, maxItems: maxItems)
+
         if fromSeq == 0 {
-            return incoming.suffix(maxItems)
+            return normalizedBySequence(incoming, maxItems: maxItems)
         }
 
-        var merged = existing
-        var existingSeq = Set(existing.map(\.seq))
+        guard let highestSeenSeq = normalizedExisting.last?.seq else {
+            return normalizedBySequence(incoming, maxItems: maxItems)
+        }
 
-        for item in incoming where !existingSeq.contains(item.seq) {
+        var merged = normalizedExisting
+        var existingSeq = Set(normalizedExisting.map(\.seq))
+
+        for item in incoming.sorted(by: { $0.seq < $1.seq })
+        where item.seq > highestSeenSeq && !existingSeq.contains(item.seq)
+        {
             merged.append(item)
             existingSeq.insert(item.seq)
         }
 
-        if merged.count > maxItems {
-            merged.removeFirst(merged.count - maxItems)
-        }
-
-        return merged
+        return Array(merged.suffix(maxItems))
     }
 
     static func appendLiveItem(
@@ -48,12 +69,14 @@ enum SessionStreamReducer {
         newItem: SessionStreamItem,
         maxItems: Int = 2_000
     ) -> [SessionStreamItem] {
-        if let lastSeq = items.last?.seq,
+        let normalized = normalizedBySequence(items, maxItems: maxItems)
+
+        if let lastSeq = normalized.last?.seq,
            newItem.seq <= lastSeq {
-            return items
+            return normalized
         }
 
-        var next = items
+        var next = normalized
         next.append(newItem)
         if next.count > maxItems {
             next.removeFirst(next.count - maxItems)

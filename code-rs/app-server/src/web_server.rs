@@ -30,6 +30,7 @@ use code_protocol::models::{ContentItem, ResponseItem};
 use code_protocol::protocol::{RolloutItem, RolloutLine, SessionSource};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
@@ -39,6 +40,7 @@ const HISTORY_LIMIT: usize = 4_096;
 const ATTACH_REPLAY_LIMIT: usize = 800;
 const ATTACH_REPLAY_BYTE_LIMIT: usize = 500_000;
 const ATTACH_REPLAY_ITEM_BYTE_LIMIT: usize = 128_000;
+const COMPACT_REPLAY_ITEM_MAX_CHARS: usize = 420;
 const NO_STORE: &str = "no-store, max-age=0";
 
 #[derive(Debug, Clone)]
@@ -1208,6 +1210,12 @@ fn truncate_attach_history(
     mut history: Vec<SessionStreamItem>,
     requested_from_seq: u64,
 ) -> Vec<SessionStreamItem> {
+    history = history
+        .into_iter()
+        .filter(|item| item.seq() > requested_from_seq)
+        .map(sanitize_stream_item_for_transport)
+        .collect();
+
     if requested_from_seq != 0 {
         return history;
     }
@@ -1216,11 +1224,6 @@ fn truncate_attach_history(
         let keep_from = history.len().saturating_sub(ATTACH_REPLAY_LIMIT);
         history.drain(0..keep_from);
     }
-
-    history = history
-        .into_iter()
-        .map(sanitize_stream_item_for_transport)
-        .collect();
 
     if history.is_empty() {
         return history;
@@ -1260,6 +1263,10 @@ fn sanitize_stream_item_for_transport(item: SessionStreamItem) -> SessionStreamI
         return item;
     }
 
+    if let Some(compact) = compact_oversized_core_event_for_transport(&item) {
+        return compact;
+    }
+
     SessionStreamItem::System {
         session_id: item.session_id(),
         seq: item.seq(),
@@ -1267,6 +1274,180 @@ fn sanitize_stream_item_for_transport(item: SessionStreamItem) -> SessionStreamI
         message: "Large historical item omitted from replay; open the thread in TUI for full details."
             .to_string(),
     }
+}
+
+fn compact_oversized_core_event_for_transport(item: &SessionStreamItem) -> Option<SessionStreamItem> {
+    let SessionStreamItem::CoreEvent {
+        session_id,
+        seq,
+        event,
+    } = item
+    else {
+        return None;
+    };
+
+    compact_replay_history_core_event_for_transport(*session_id, *seq, event)
+}
+
+fn compact_replay_history_core_event_for_transport(
+    session_id: Uuid,
+    seq: u64,
+    event: &CoreEventPayload,
+) -> Option<SessionStreamItem> {
+    let payload_type = event
+        .payload
+        .get("type")
+        .and_then(serde_json::Value::as_str)?;
+    if payload_type != "replay_history" {
+        return None;
+    }
+
+    let items = event
+        .payload
+        .get("items")
+        .and_then(serde_json::Value::as_array)?;
+
+    let mut compact_messages: Vec<serde_json::Value> = Vec::new();
+    compact_messages.reserve(items.len());
+
+    for item in items {
+        let Some((role, message)) = compact_replay_role_and_message(item) else {
+            continue;
+        };
+
+        let message = truncate_chars(message.trim(), COMPACT_REPLAY_ITEM_MAX_CHARS);
+        if message.is_empty() {
+            continue;
+        }
+
+        if should_skip_compacted_replay_message(role, &message) {
+            continue;
+        }
+
+        compact_messages.push(json!({
+            "role": role,
+            "message": message,
+        }));
+    }
+
+    if compact_messages.is_empty() {
+        return None;
+    }
+
+    for keep in [48usize, 32, 24, 16, 10, 6, 4, 2, 1] {
+        let keep_count = compact_messages.len().min(keep);
+        let start = compact_messages.len().saturating_sub(keep_count);
+        let kept_messages = compact_messages[start..].to_vec();
+        let omitted_items = compact_messages.len().saturating_sub(kept_messages.len());
+
+        let payload = if omitted_items == 0 {
+            json!({
+                "type": "replay_history",
+                "items": kept_messages,
+            })
+        } else {
+            json!({
+                "type": "replay_history",
+                "items": kept_messages,
+                "omitted_items": omitted_items,
+            })
+        };
+
+        let candidate = SessionStreamItem::CoreEvent {
+            session_id,
+            seq,
+            event: CoreEventPayload {
+                id: event.id.clone(),
+                event_seq: event.event_seq,
+                kind: event.kind.clone(),
+                order: event.order.clone(),
+                payload,
+            },
+        };
+
+        if estimate_stream_item_json_size(&candidate) <= ATTACH_REPLAY_ITEM_BYTE_LIMIT {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let truncated: String = value.chars().take(max_chars).collect();
+    format!("{truncated}…")
+}
+
+fn compact_replay_role_and_message(item: &serde_json::Value) -> Option<(&'static str, String)> {
+    if let Some(object) = item.as_object() {
+        if let (Some(role), Some(message)) = (
+            object.get("role").and_then(serde_json::Value::as_str),
+            object.get("message").and_then(serde_json::Value::as_str),
+        ) {
+            let normalized_role = match role.to_ascii_lowercase().as_str() {
+                "user" => "user",
+                "assistant" => "assistant",
+                _ => return None,
+            };
+
+            return Some((normalized_role, message.to_string()));
+        }
+
+        if let (Some(payload_type), Some(message)) = (
+            object.get("type").and_then(serde_json::Value::as_str),
+            object.get("message").and_then(serde_json::Value::as_str),
+        ) {
+            let normalized_role = match payload_type {
+                "user_message" => "user",
+                "agent_message" => "assistant",
+                _ => return None,
+            };
+
+            return Some((normalized_role, message.to_string()));
+        }
+    }
+
+    let response_item = serde_json::from_value::<ResponseItem>(item.clone()).ok()?;
+    let seed_payload = response_item_seed_payload(response_item)?;
+    let role = match seed_payload.get("type").and_then(serde_json::Value::as_str) {
+        Some("user_message") => "user",
+        Some("agent_message") => "assistant",
+        _ => return None,
+    };
+    let message = seed_payload
+        .get("message")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+
+    Some((role, message))
+}
+
+fn should_skip_compacted_replay_message(role: &str, message: &str) -> bool {
+    let trimmed = message.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+
+    if role == "user" {
+        if trimmed.starts_with("[image:") && trimmed.ends_with(']') {
+            return true;
+        }
+
+        return normalized.contains("# agents.md instructions")
+            || normalized.contains("<environment_context>")
+            || normalized.contains("[compaction summary]");
+    }
+
+    if role == "assistant" {
+        return normalized.starts_with("background shell completed (")
+            || normalized.contains("sandbox error: command was killed by a signal")
+            || normalized.starts_with("[developer] background auto-review completed")
+            || normalized.starts_with("background auto-review completed");
+    }
+
+    false
 }
 
 fn now_unix_ms() -> u64 {
@@ -1339,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_attach_history_preserves_incremental_replay() {
+    fn truncate_attach_history_filters_incremental_replay_by_seq() {
         let history = (1_u64..=5)
             .map(|seq| SessionStreamItem::System {
                 session_id: Uuid::nil(),
@@ -1350,8 +1531,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         let replay = truncate_attach_history(history.clone(), 2);
-        assert_eq!(replay.len(), history.len());
-        assert_eq!(replay.first().map(SessionStreamItem::seq), Some(1));
+        assert_eq!(replay.len(), 3);
+        assert_eq!(replay.first().map(SessionStreamItem::seq), Some(3));
         assert_eq!(replay.last().map(SessionStreamItem::seq), Some(5));
+    }
+
+    #[test]
+    fn truncate_attach_history_uses_from_seq_as_high_water_mark() {
+        let history = (1_u64..=5)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: "payload".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let replay = truncate_attach_history(history, 5);
+        assert!(replay.is_empty());
     }
 }

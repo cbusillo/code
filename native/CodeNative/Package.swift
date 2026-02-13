@@ -25,5 +25,10 @@ let package = Package(
             name: "CodeNativeAutomation",
             path: "Tools/CodeNativeAutomation"
         ),
+        .testTarget(
+            name: "CodeNativeAppTests",
+            dependencies: ["CodeNativeApp"],
+            path: "Tests/CodeNativeAppTests"
+        ),
     ]
 )

@@ -158,7 +158,14 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         if payloadType == "user_message",
            let message = object["message"]?.stringValue {
+            if isImagePlaceholderMessage(message) {
+                return "Shared image"
+            }
             return normalizeStructuredText(message)
+        }
+
+        if payloadType == "replay_history" {
+            return summarizeReplayHistory(object)
         }
 
         if payloadType == "entered_review_mode",
@@ -368,6 +375,97 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private func summarizeReplayHistory(_ object: [String: JSONValue]) -> String {
+        guard let replayItems = object["items"]?.arrayValue,
+              !replayItems.isEmpty
+        else {
+            return "Restored history"
+        }
+
+        var samples: [String] = []
+        samples.reserveCapacity(2)
+
+        for item in replayItems {
+            guard let messageObject = item.objectValue else {
+                continue
+            }
+
+            let roleType = replayMessageRole(from: messageObject)
+            let role = replayRoleDisplayLabel(roleType)
+            let text = replayMessageTextValue(from: messageObject)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                continue
+            }
+
+            if shouldSkipReplayMessage(role: roleType, text: trimmed) {
+                continue
+            }
+
+            samples.append("\(role): \(truncate(trimmed, maxCharacters: 140))")
+            if samples.count == 2 {
+                break
+            }
+        }
+
+        if samples.isEmpty {
+            return "Restored history · \(replayItems.count) messages"
+        }
+
+        let heading = "Restored history · \(replayItems.count) messages"
+        return "\(heading)\n\(samples.joined(separator: "\n"))"
+    }
+
+    private func replayRoleLabel(from object: [String: JSONValue]) -> String {
+        replayRoleDisplayLabel(replayMessageRole(from: object))
+    }
+
+    private func replayRoleDisplayLabel(_ role: ReplayHistoryMessage.Role) -> String {
+        switch role {
+        case .assistant:
+            return "Assistant"
+        case .user:
+            return "You"
+        case .unknown:
+            return "Message"
+        }
+    }
+
+    private func replayMessageTextValue(from object: [String: JSONValue]) -> String {
+        if let message = object["message"]?.stringValue {
+            return normalizeStructuredText(message)
+        }
+
+        if let content = object["content"]?.arrayValue {
+            let chunks = content.compactMap(replayTextChunkValue(from:)).filter { !$0.isEmpty }
+            if !chunks.isEmpty {
+                return chunks.joined(separator: "\n")
+            }
+        }
+
+        if let text = object["text"]?.stringValue {
+            return normalizeStructuredText(text)
+        }
+
+        return ""
+    }
+
+    private func replayTextChunkValue(from value: JSONValue) -> String? {
+        guard let object = value.objectValue else {
+            return nil
+        }
+
+        if let text = object["text"]?.stringValue {
+            return normalizeStructuredText(text)
+        }
+
+        if let nested = object["content"]?.stringValue {
+            return normalizeStructuredText(nested)
+        }
+
+        return nil
     }
 
     private func formatTokenCount(_ value: Int) -> String {
@@ -667,6 +765,18 @@ struct ExecCommandInfo {
     let duration: String?
 }
 
+struct ReplayHistoryMessage: Hashable, Identifiable {
+    enum Role: Hashable {
+        case user
+        case assistant
+        case unknown
+    }
+
+    let id: String
+    let role: Role
+    let text: String
+}
+
 enum JSONValue: Decodable, Hashable {
     case string(String)
     case number(Double)
@@ -831,6 +941,13 @@ extension SessionStreamItem {
         return event?.payload?.typeHint == "background_event"
     }
 
+    var isReplayHistoryEvent: Bool {
+        guard type == "core_event" else {
+            return false
+        }
+        return event?.payload?.typeHint == "replay_history"
+    }
+
     var tokenCountRequestedModel: String? {
         guard type == "core_event",
               let payload = event?.payload,
@@ -855,7 +972,131 @@ extension SessionStreamItem {
         else {
             return nil
         }
+
+        if isInternalAssistantStatusMessage(message) {
+            return nil
+        }
+
         return message
+    }
+
+    var replayHistoryMessages: [ReplayHistoryMessage] {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "replay_history",
+              let object = payload.objectValue,
+              let replayItems = object["items"]?.arrayValue,
+              !replayItems.isEmpty
+        else {
+            return []
+        }
+
+        var parsed: [ReplayHistoryMessage] = []
+        parsed.reserveCapacity(replayItems.count)
+
+        for (index, item) in replayItems.enumerated() {
+            guard let itemObject = item.objectValue else {
+                continue
+            }
+
+            let role = replayMessageRole(from: itemObject)
+
+            let text = replayMessageText(from: itemObject)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                continue
+            }
+
+            if shouldSkipReplayMessage(role: role, text: trimmed) {
+                continue
+            }
+
+            let message = ReplayHistoryMessage(id: "\(seq)-\(index)", role: role, text: trimmed)
+
+            if role == .assistant,
+               let last = parsed.last,
+               last.role == .assistant {
+                parsed[parsed.count - 1] = message
+                continue
+            }
+
+            parsed.append(message)
+        }
+
+        return parsed
+    }
+
+    private func replayMessageRole(from object: [String: JSONValue]) -> ReplayHistoryMessage.Role {
+        let roleValue = object["role"]?.stringValue?.lowercased() ?? ""
+        switch roleValue {
+        case "assistant":
+            return .assistant
+        case "user":
+            return .user
+        default:
+            let payloadType = object["type"]?.stringValue?.lowercased() ?? ""
+            if payloadType == "agent_message" {
+                return .assistant
+            }
+            if payloadType == "user_message" {
+                return .user
+            }
+            return .unknown
+        }
+    }
+
+    private func replayMessageText(from object: [String: JSONValue]) -> String {
+        if let message = object["message"]?.stringValue {
+            return normalizeStructuredText(message)
+        }
+
+        if let content = object["content"]?.arrayValue {
+            let chunks = content.compactMap(replayTextChunk(from:)).filter { !$0.isEmpty }
+            if !chunks.isEmpty {
+                return chunks.joined(separator: "\n")
+            }
+        }
+
+        if let text = object["text"]?.stringValue {
+            return normalizeStructuredText(text)
+        }
+
+        if let summary = object["summary"]?.stringValue {
+            return normalizeStructuredText(summary)
+        }
+
+        return ""
+    }
+
+    private func replayTextChunk(from value: JSONValue) -> String? {
+        guard let object = value.objectValue else {
+            return nil
+        }
+
+        if let text = object["text"]?.stringValue {
+            return normalizeStructuredText(text)
+        }
+
+        if let nested = object["content"]?.stringValue {
+            return normalizeStructuredText(nested)
+        }
+
+        return nil
+    }
+
+    private func shouldSkipReplayMessage(role: ReplayHistoryMessage.Role, text: String) -> Bool {
+        if role == .user,
+           isImagePlaceholderMessage(text) {
+            return true
+        }
+
+        if role == .assistant {
+            if isInternalAssistantStatusMessage(text) {
+                return true
+            }
+        }
+
+        return false
     }
 
     var userMessageText: String? {
@@ -1012,7 +1253,19 @@ extension SessionStreamItem {
             return true
         }
 
+        if payloadType == "plan_update" {
+            return true
+        }
+
         if payloadType == "exec_command_begin" || payloadType == "exec_command_output_delta" {
+            return true
+        }
+
+        if payloadType == "agent_message",
+           let payload = event?.payload,
+           let object = payload.objectValue,
+           let message = object["message"]?.stringValue,
+           isInternalAssistantStatusMessage(message) {
             return true
         }
 
@@ -1025,14 +1278,28 @@ extension SessionStreamItem {
         if payloadType == "user_message",
            let payload = event?.payload,
            let object = payload.objectValue,
-           let message = object["message"]?.stringValue {
-            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("[image:") && trimmed.hasSuffix("]") {
-                return true
-            }
+           let message = object["message"]?.stringValue,
+           isImagePlaceholderMessage(message) {
+            return true
         }
 
         return false
+    }
+
+    private func isImagePlaceholderMessage(_ message: String) -> Bool {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("[image:") && trimmed.hasSuffix("]")
+    }
+
+    private func isInternalAssistantStatusMessage(_ message: String) -> Bool {
+        let normalized = message
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        return normalized.hasPrefix("background shell completed (")
+            || normalized.contains("sandbox error: command was killed by a signal")
+            || normalized.hasPrefix("[developer] background auto-review completed")
+            || normalized.hasPrefix("background auto-review completed")
     }
 
     var cardStyle: TranscriptCardStyle {
