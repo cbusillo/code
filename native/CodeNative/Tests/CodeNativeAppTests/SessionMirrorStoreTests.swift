@@ -3,6 +3,21 @@ import XCTest
 
 final class SessionMirrorStoreTests: XCTestCase {
     @MainActor
+    func testConnectRejectsNonLoopbackEndpoint() async {
+        let store = SessionMirrorStore()
+        store.endpoint = "ws://example.com:4317/ws"
+
+        await store.connect()
+
+        XCTAssertEqual(store.connectionState, .disconnected)
+        XCTAssertEqual(store.statusLine, "Loopback endpoints only")
+        XCTAssertEqual(
+            store.lastError,
+            "Endpoint must use ws://localhost, ws://127.0.0.1, or ws://[::1]."
+        )
+    }
+
+    @MainActor
     func testStoreDropsStaleLiveItemsAndMergesIncrementalReplayWithoutDuplicates() throws {
         let store = SessionMirrorStore()
         let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000111")!
@@ -151,6 +166,17 @@ final class SessionMirrorStoreTests: XCTestCase {
         )
 
         XCTAssertFalse(store.statusLine.contains(staleSessionId.uuidString.prefix(8)))
+    }
+
+    @MainActor
+    func testStoreDecodeFailureIncrementsTransportFailureTelemetry() {
+        let store = SessionMirrorStore()
+
+        store.ingestRawPayloadForTesting("{ this is not valid json }")
+
+        XCTAssertEqual(store.transportFailureCount, 1)
+        XCTAssertNotNil(store.lastTransportFailureAt)
+        XCTAssertTrue((store.lastError ?? "").hasPrefix("Failed to decode server message:"))
     }
 
     @MainActor

@@ -1,7 +1,10 @@
 import Foundation
+import OSLog
 
 @MainActor
 final class SessionMirrorStore: ObservableObject {
+    private static let logger = Logger(subsystem: "com.every.code.native", category: "session-mirror")
+
     enum ConnectionState: String {
         case disconnected
         case connecting
@@ -33,6 +36,8 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     @Published private(set) var lastError: String?
+    @Published private(set) var transportFailureCount: UInt64 = 0
+    @Published private(set) var lastTransportFailureAt: Date?
 
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -78,6 +83,12 @@ final class SessionMirrorStore: ObservableObject {
         guard let url = URL(string: endpoint) else {
             statusLine = "Invalid URL"
             lastError = "Endpoint must be a valid WebSocket URL."
+            return
+        }
+
+        guard endpointIsAllowed(url) else {
+            statusLine = "Loopback endpoints only"
+            lastError = "Endpoint must use ws://localhost, ws://127.0.0.1, or ws://[::1]."
             return
         }
 
@@ -188,6 +199,7 @@ final class SessionMirrorStore: ObservableObject {
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
         if error != nil {
             lastError = error
+            recordTransportFailure(context: status, details: error)
         }
         connectionState = .disconnected
         statusLine = statusLineForDisconnect(status: status, error: error)
@@ -270,7 +282,9 @@ final class SessionMirrorStore: ObservableObject {
             let envelope = try decoder.decode(ServerEnvelope.self, from: data)
             apply(envelope)
         } catch {
-            lastError = "Failed to decode server message: \(decodeErrorDescription(error))"
+            let description = decodeErrorDescription(error)
+            lastError = "Failed to decode server message: \(description)"
+            recordTransportFailure(context: "Decode failure", details: description)
         }
     }
 
@@ -481,8 +495,35 @@ final class SessionMirrorStore: ObservableObject {
             }
             try await webSocket.send(.string(text))
         } catch {
-            lastError = "Failed to send message: \(error.localizedDescription)"
+            let description = error.localizedDescription
+            lastError = "Failed to send message: \(description)"
+            recordTransportFailure(context: "Send failure", details: description)
         }
+    }
+
+    private func endpointIsAllowed(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "ws" || scheme == "wss" else {
+            return false
+        }
+
+        guard let host = url.host?.lowercased() else {
+            return false
+        }
+
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    private func recordTransportFailure(context: String, details: String?) {
+        transportFailureCount = transportFailureCount.saturatingIncrement()
+        lastTransportFailureAt = Date()
+
+        if let details,
+           !details.isEmpty {
+            Self.logger.error("\(context, privacy: .public): \(details, privacy: .public)")
+            return
+        }
+
+        Self.logger.error("\(context, privacy: .public)")
     }
 
     private func nextRequestID() -> String {
@@ -536,6 +577,13 @@ final class SessionMirrorStore: ObservableObject {
 extension SessionMirrorStore {
     func applyEnvelopeForTesting(_ envelope: ServerEnvelope) {
         apply(envelope)
+    }
+
+    func ingestRawPayloadForTesting(_ payload: String) {
+        guard let data = payload.data(using: .utf8) else {
+            return
+        }
+        handleIncomingData(data)
     }
 }
 #endif
