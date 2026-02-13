@@ -15,6 +15,9 @@
 - Native stream reducer now normalizes/dedupes sequence ordering.
 - Server forwarder high-water filtering has deterministic unit coverage.
 - Dev harness now waits for backend readiness and defaults to ownership-safe cleanup.
+- Server tests now cover `from_seq` fallback high-water and incremental replay
+  payload-size behavior.
+- Native reducer tests cover stale `session_attached` acceptance rules.
 
 ## Active Plan (Next)
 
@@ -23,7 +26,7 @@
 - [ ] Lock replay/live invariants in tests (`seq` monotonicity,
   `from_seq` semantics, no replay+live duplicates).
 - [ ] Add deterministic reconnect/reattach integration tests for TUI/native parity.
-- [ ] Add server coverage for attach replay + high-water edges,
+- [x] Add server coverage for attach replay + high-water edges,
   including `from_seq > 0` payload-size policy.
 - [ ] Add native state-store tests for stale/out-of-order live events
   and duplicate replay handling.
