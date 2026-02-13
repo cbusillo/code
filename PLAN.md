@@ -54,6 +54,11 @@
 - Use `--takeover-port` only when you explicitly want to reclaim a port from
   another `code web` process.
 
+## Harness Follow-Ups
+
+- [ ] Move backend/app teardown to process-group cleanup to avoid orphaned children.
+- [ ] Evaluate event-driven watch mode (or slower polling) to reduce CPU churn.
+
 ## Validation Gates (Required)
 
 - `swift build --package-path native/CodeNative`
