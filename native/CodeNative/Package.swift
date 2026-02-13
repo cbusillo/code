@@ -11,11 +11,19 @@ let package = Package(
             name: "CodeNativeApp",
             targets: ["CodeNativeApp"]
         ),
+        .executable(
+            name: "CodeNativeAutomation",
+            targets: ["CodeNativeAutomation"]
+        ),
     ],
     targets: [
         .executableTarget(
             name: "CodeNativeApp",
             path: "Sources/CodeNativeApp"
+        ),
+        .executableTarget(
+            name: "CodeNativeAutomation",
+            path: "Tools/CodeNativeAutomation"
         ),
     ]
 )

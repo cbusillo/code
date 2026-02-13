@@ -1,0 +1,9 @@
+[
+  { "kind": "wait", "seconds": 0.2 },
+  { "kind": "click", "id": "rail.new-thread" },
+  { "kind": "wait", "seconds": 0.5 },
+  {
+    "kind": "screenshot",
+    "path": "docs/reference/native-ui/new-thread-automation.png"
+  }
+]

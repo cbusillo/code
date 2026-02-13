@@ -16,14 +16,18 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
+use chrono::DateTime;
 use code_app_server_protocol::AuthMode;
 use code_core::AuthManager;
 use code_core::CodexConversation;
 use code_core::ConversationManager;
 use code_core::NewConversation;
+use code_core::SessionCatalog;
+use code_core::SessionQuery;
 use code_core::config::Config;
 use code_core::protocol::{self, Event, InputItem, Op, ReviewDecision};
-use code_protocol::protocol::SessionSource;
+use code_protocol::models::{ContentItem, ResponseItem};
+use code_protocol::protocol::{RolloutItem, RolloutLine, SessionSource};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -32,6 +36,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const HISTORY_LIMIT: usize = 4_096;
+const ATTACH_REPLAY_LIMIT: usize = 800;
+const ATTACH_REPLAY_BYTE_LIMIT: usize = 500_000;
+const ATTACH_REPLAY_ITEM_BYTE_LIMIT: usize = 128_000;
 const NO_STORE: &str = "no-store, max-age=0";
 
 #[derive(Debug, Clone)]
@@ -117,8 +124,10 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let client_id = Uuid::new_v4().to_string();
+    info!("Websocket client connected: {client_id}");
     let (mut sender, mut receiver) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<ServerMessage>(256);
+    let writer_client_id = client_id.clone();
 
     let writer = tokio::spawn(async move {
         while let Some(message) = out_rx.recv().await {
@@ -130,6 +139,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             };
             if sender.send(Message::Text(serialized.into())).await.is_err() {
+                info!("Websocket writer closed for client {writer_client_id}");
                 break;
             }
         }
@@ -162,7 +172,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             Ok(Message::Close(_)) => break,
             Ok(_) => continue,
             Err(err) => {
-                warn!("Websocket receive error: {err}");
+                warn!("Websocket receive error for client {client_id}: {err}");
                 break;
             }
         };
@@ -207,6 +217,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             } => {
                 match state.hub.attach_session(session_id, from_seq).await {
                     Ok((history, stream)) => {
+                        let replay_bytes: usize =
+                            history.iter().map(estimate_stream_item_json_size).sum();
+                        info!(
+                            "Attach replay for {session_id}: {} items, {replay_bytes} bytes (from_seq={})",
+                            history.len(),
+                            from_seq.unwrap_or(0)
+                        );
+
                         let high_water = history.last().map_or(from_seq.unwrap_or(0), SessionStreamItem::seq);
 
                         let _ = out_tx.send(ServerMessage::SessionAttached {
@@ -343,6 +361,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         handle.abort();
     }
     writer.abort();
+    info!("Websocket client disconnected: {client_id}");
 }
 
 fn spawn_session_forwarder(
@@ -470,6 +489,9 @@ pub struct SessionSummary {
     model: String,
     cwd: String,
     created_at_unix_ms: u64,
+    last_event_at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 struct SessionHub {
@@ -488,12 +510,25 @@ impl SessionHub {
     }
 
     async fn list_sessions(&self) -> Vec<SessionSummary> {
-        let sessions = self.sessions.read().await;
-        let mut values: Vec<SessionSummary> = sessions
-            .values()
-            .map(|session| session.summary.clone())
-            .collect();
-        values.sort_by_key(|summary| summary.created_at_unix_ms);
+        let mut values_by_id: HashMap<Uuid, SessionSummary> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .map(|session| (session.summary.id, session.summary.clone()))
+                .collect()
+        };
+
+        for summary in self.catalog_summaries().await {
+            values_by_id
+                .entry(summary.id)
+                .and_modify(|existing| {
+                    *existing = merge_session_summaries(existing, &summary);
+                })
+                .or_insert(summary);
+        }
+
+        let mut values: Vec<SessionSummary> = values_by_id.into_values().collect();
+        values.sort_by_key(session_activity_unix_ms);
         values
     }
 
@@ -508,7 +543,13 @@ impl SessionHub {
             .await
             .map_err(|err| format!("Failed to create conversation: {err}"))?;
 
-        let session = LiveSession::new(new_conversation, cwd);
+        let session = LiveSession::new(
+            new_conversation,
+            cwd,
+            now_unix_ms(),
+            None,
+            Vec::new(),
+        );
         let summary = session.summary.clone();
 
         let session_id = summary.id;
@@ -527,14 +568,13 @@ impl SessionHub {
         session_id: Uuid,
         from_seq: Option<u64>,
     ) -> Result<(Vec<SessionStreamItem>, broadcast::Receiver<SessionStreamItem>), String> {
-        let sessions = self.sessions.read().await;
-        let Some(session) = sessions.get(&session_id) else {
-            return Err(format!("Session {session_id} not found"));
-        };
+        let session = self.session_for_id(session_id).await?;
+        let requested_from_seq = from_seq.unwrap_or(0);
 
         // Subscribe first to avoid losing events emitted during history replay.
         let receiver = session.stream.subscribe();
-        let history = session.history_since(from_seq.unwrap_or(0)).await;
+        let history = session.history_since(requested_from_seq).await;
+        let history = truncate_attach_history(history, requested_from_seq);
         Ok((history, receiver))
     }
 
@@ -545,10 +585,7 @@ impl SessionHub {
         cursor: usize,
         source_client_id: Option<String>,
     ) -> Result<(), String> {
-        let sessions = self.sessions.read().await;
-        let Some(session) = sessions.get(&session_id) else {
-            return Err(format!("Session {session_id} not found"));
-        };
+        let session = self.session_for_id(session_id).await?;
         session
             .set_composer(text, cursor, source_client_id)
             .await;
@@ -556,18 +593,12 @@ impl SessionHub {
     }
 
     async fn submit_turn(&self, session_id: Uuid) -> Result<(), String> {
-        let sessions = self.sessions.read().await;
-        let Some(session) = sessions.get(&session_id) else {
-            return Err(format!("Session {session_id} not found"));
-        };
+        let session = self.session_for_id(session_id).await?;
         session.submit_turn().await
     }
 
     async fn interrupt_turn(&self, session_id: Uuid) -> Result<(), String> {
-        let sessions = self.sessions.read().await;
-        let Some(session) = sessions.get(&session_id) else {
-            return Err(format!("Session {session_id} not found"));
-        };
+        let session = self.session_for_id(session_id).await?;
         session
             .conversation
             .submit(Op::Interrupt)
@@ -583,10 +614,7 @@ impl SessionHub {
         turn_id: Option<String>,
         decision: ReviewDecision,
     ) -> Result<(), String> {
-        let sessions = self.sessions.read().await;
-        let Some(session) = sessions.get(&session_id) else {
-            return Err(format!("Session {session_id} not found"));
-        };
+        let session = self.session_for_id(session_id).await?;
 
         session
             .conversation
@@ -606,10 +634,7 @@ impl SessionHub {
         call_id: String,
         decision: ReviewDecision,
     ) -> Result<(), String> {
-        let sessions = self.sessions.read().await;
-        let Some(session) = sessions.get(&session_id) else {
-            return Err(format!("Session {session_id} not found"));
-        };
+        let session = self.session_for_id(session_id).await?;
 
         session
             .conversation
@@ -620,6 +645,111 @@ impl SessionHub {
             .await
             .map_err(|err| format!("Failed to submit patch approval: {err}"))?;
         Ok(())
+    }
+
+    async fn session_for_id(&self, session_id: Uuid) -> Result<Arc<LiveSession>, String> {
+        if let Some(existing) = self.sessions.read().await.get(&session_id).cloned() {
+            return Ok(existing);
+        }
+
+        let restored = self.restore_catalog_session(session_id).await?;
+
+        let mut sessions = self.sessions.write().await;
+        if let Some(existing) = sessions.get(&session_id).cloned() {
+            return Ok(existing);
+        }
+
+        sessions.insert(session_id, Arc::clone(&restored));
+        drop(sessions);
+
+        restored.spawn_dispatcher();
+        Ok(restored)
+    }
+
+    async fn restore_catalog_session(&self, session_id: Uuid) -> Result<Arc<LiveSession>, String> {
+        let catalog = SessionCatalog::new(self.base_config.code_home.clone());
+        let Some(entry) = catalog
+            .find_by_id(&session_id.to_string())
+            .await
+            .map_err(|err| format!("Failed to query session catalog: {err}"))?
+        else {
+            return Err(format!("Session {session_id} not found"));
+        };
+
+        if entry.archived || entry.deleted {
+            return Err(format!("Session {session_id} is archived or deleted"));
+        }
+
+        let rollout_path = catalog.entry_rollout_path(&entry);
+        let mut config = self.base_config.as_ref().clone();
+        config.cwd = entry.cwd_real.clone();
+
+        let new_conversation = self
+            .conversation_manager
+            .resume_conversation_from_rollout(
+                config,
+                rollout_path.clone(),
+                self.conversation_manager.auth_manager(),
+            )
+            .await
+            .map_err(|err| format!("Failed to resume session {session_id}: {err}"))?;
+
+        let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
+
+        Ok(LiveSession::new(
+            new_conversation,
+            entry.cwd_real,
+            parse_rfc3339_millis(&entry.created_at),
+            Some(session_id),
+            seed_history,
+        ))
+    }
+
+    async fn catalog_summaries(&self) -> Vec<SessionSummary> {
+        let catalog = SessionCatalog::new(self.base_config.code_home.clone());
+        let query = SessionQuery {
+            cwd: None,
+            git_root: None,
+            sources: vec![SessionSource::Cli, SessionSource::VSCode, SessionSource::Exec],
+            min_user_messages: 1,
+            include_archived: false,
+            include_deleted: false,
+            limit: Some(400),
+        };
+
+        let entries = match catalog.query(&query).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                warn!("Failed to query persisted sessions: {err}");
+                return Vec::new();
+            }
+        };
+
+        entries
+            .into_iter()
+            .map(|entry| SessionSummary {
+                id: entry.session_id,
+                conversation_id: entry.session_id.to_string(),
+                model: entry
+                    .model_provider
+                    .unwrap_or_else(|| "Unknown model".to_string()),
+                cwd: entry.cwd_real.display().to_string(),
+                created_at_unix_ms: parse_rfc3339_millis(&entry.created_at),
+                last_event_at_unix_ms: parse_rfc3339_millis(&entry.last_event_at),
+                title: entry
+                    .nickname
+                    .and_then(|value| {
+                        let trimmed = value.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    })
+                    .or_else(|| {
+                        entry.last_user_snippet.and_then(|value| {
+                            let trimmed = value.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_string())
+                        })
+                    }),
+            })
+            .collect()
     }
 }
 
@@ -633,20 +763,32 @@ struct LiveSession {
 }
 
 impl LiveSession {
-    fn new(new_conversation: NewConversation, cwd: PathBuf) -> Arc<Self> {
-        let created_at_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
+    fn new(
+        new_conversation: NewConversation,
+        cwd: PathBuf,
+        created_at_unix_ms: u64,
+        forced_session_id: Option<Uuid>,
+        seed_history: Vec<SessionStreamItem>,
+    ) -> Arc<Self> {
+        let conversation_id: Uuid = new_conversation.conversation_id.into();
+        let session_id = forced_session_id.unwrap_or(conversation_id);
+        let mut initial_history = seed_history;
+        if initial_history.len() > HISTORY_LIMIT {
+            let excess = initial_history.len().saturating_sub(HISTORY_LIMIT);
+            initial_history.drain(0..excess);
+        }
+        let next_seq = initial_history
+            .last()
+            .map_or(1, |item| item.seq().saturating_add(1));
 
-        let session_id = Uuid::new_v4();
         let summary = SessionSummary {
             id: session_id,
             conversation_id: new_conversation.conversation_id.to_string(),
             model: new_conversation.session_configured.model,
             cwd: cwd.display().to_string(),
             created_at_unix_ms,
+            last_event_at_unix_ms: created_at_unix_ms,
+            title: None,
         };
 
         let (stream, _) = broadcast::channel::<SessionStreamItem>(1024);
@@ -655,8 +797,8 @@ impl LiveSession {
             summary,
             conversation: new_conversation.conversation,
             stream,
-            history: RwLock::new(Vec::new()),
-            next_stream_seq: AtomicU64::new(1),
+            history: RwLock::new(initial_history),
+            next_stream_seq: AtomicU64::new(next_seq),
             composer: RwLock::new(ComposerState {
                 rev: 0,
                 text: String::new(),
@@ -775,6 +917,8 @@ impl LiveSession {
     }
 
     async fn push_item(&self, item: SessionStreamItem) {
+        let item = sanitize_stream_item_for_transport(item);
+
         {
             let mut history = self.history.write().await;
             history.push(item.clone());
@@ -830,6 +974,14 @@ impl SessionStreamItem {
             | SessionStreamItem::System { seq, .. } => *seq,
         }
     }
+
+    const fn session_id(&self) -> Uuid {
+        match self {
+            SessionStreamItem::CoreEvent { session_id, .. }
+            | SessionStreamItem::Composer { session_id, .. }
+            | SessionStreamItem::System { session_id, .. } => *session_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -878,6 +1030,253 @@ impl From<WebReviewDecision> for ReviewDecision {
     }
 }
 
+async fn load_rollout_seed_history(
+    session_id: Uuid,
+    rollout_path: &Path,
+) -> Vec<SessionStreamItem> {
+    let text = match tokio::fs::read_to_string(rollout_path).await {
+        Ok(text) => text,
+        Err(err) => {
+            warn!(
+                "Failed to read rollout history for {session_id} from {}: {err}",
+                rollout_path.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut seq = 1u64;
+    let mut items = Vec::new();
+    let mut parse_errors = 0usize;
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let rollout_line: RolloutLine = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => {
+                parse_errors = parse_errors.saturating_add(1);
+                continue;
+            }
+        };
+
+        let stream_item = match rollout_line.item {
+            RolloutItem::Event(event) => {
+                let payload = match serde_json::to_value(&event.msg) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+
+                SessionStreamItem::CoreEvent {
+                    session_id,
+                    seq,
+                    event: CoreEventPayload {
+                        id: event.id,
+                        event_seq: event.event_seq,
+                        kind: event.msg.to_string(),
+                        order: event.order.as_ref().map(|order| WebOrderMeta {
+                            request_ordinal: order.request_ordinal,
+                            output_index: order.output_index,
+                            sequence_number: order.sequence_number,
+                        }),
+                        payload,
+                    },
+                }
+            }
+            RolloutItem::EventMsg(event_msg) => {
+                let payload = match serde_json::to_value(&event_msg) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+
+                SessionStreamItem::CoreEvent {
+                    session_id,
+                    seq,
+                    event: CoreEventPayload {
+                        id: format!("replay-{seq}"),
+                        event_seq: seq,
+                        kind: event_msg.to_string(),
+                        order: None,
+                        payload,
+                    },
+                }
+            }
+            RolloutItem::ResponseItem(response_item) => {
+                let Some(payload) = response_item_seed_payload(response_item) else {
+                    continue;
+                };
+
+                SessionStreamItem::CoreEvent {
+                    session_id,
+                    seq,
+                    event: CoreEventPayload {
+                        id: format!("replay-response-{seq}"),
+                        event_seq: seq,
+                        kind: "rollout.response_item".to_string(),
+                        order: None,
+                        payload,
+                    },
+                }
+            }
+            _ => continue,
+        };
+
+        items.push(stream_item);
+        seq = seq.saturating_add(1);
+    }
+
+    if parse_errors > 0 {
+        warn!(
+            "Skipped {parse_errors} unreadable rollout lines while seeding history for {session_id}"
+        );
+    }
+
+    items
+}
+
+fn response_item_seed_payload(item: ResponseItem) -> Option<serde_json::Value> {
+    let ResponseItem::Message {
+        role,
+        content,
+        ..
+    } = item
+    else {
+        return None;
+    };
+
+    let text = content
+        .into_iter()
+        .filter_map(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+            ContentItem::InputImage { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if text.is_empty() {
+        return None;
+    }
+
+    let payload_type = if role.eq_ignore_ascii_case("user") {
+        "user_message"
+    } else {
+        "agent_message"
+    };
+
+    Some(serde_json::json!({
+        "type": payload_type,
+        "message": text,
+    }))
+}
+
+fn parse_rfc3339_millis(value: &str) -> u64 {
+    match DateTime::parse_from_rfc3339(value) {
+        Ok(parsed) => u64::try_from(parsed.timestamp_millis()).unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+fn session_activity_unix_ms(summary: &SessionSummary) -> u64 {
+    summary
+        .last_event_at_unix_ms
+        .max(summary.created_at_unix_ms)
+}
+
+fn merge_session_summaries(existing: &SessionSummary, incoming: &SessionSummary) -> SessionSummary {
+    let model = if existing.model == "Unknown model" && incoming.model != "Unknown model" {
+        incoming.model.clone()
+    } else {
+        existing.model.clone()
+    };
+
+    SessionSummary {
+        id: existing.id,
+        conversation_id: existing.conversation_id.clone(),
+        model,
+        cwd: existing.cwd.clone(),
+        created_at_unix_ms: existing.created_at_unix_ms.min(incoming.created_at_unix_ms),
+        last_event_at_unix_ms: session_activity_unix_ms(existing).max(session_activity_unix_ms(incoming)),
+        title: existing.title.clone().or_else(|| incoming.title.clone()),
+    }
+}
+
+fn truncate_attach_history(
+    mut history: Vec<SessionStreamItem>,
+    requested_from_seq: u64,
+) -> Vec<SessionStreamItem> {
+    if requested_from_seq != 0 {
+        return history;
+    }
+
+    if history.len() > ATTACH_REPLAY_LIMIT {
+        let keep_from = history.len().saturating_sub(ATTACH_REPLAY_LIMIT);
+        history.drain(0..keep_from);
+    }
+
+    history = history
+        .into_iter()
+        .map(sanitize_stream_item_for_transport)
+        .collect();
+
+    if history.is_empty() {
+        return history;
+    }
+
+    let mut keep_from = history.len();
+    let mut total_bytes = 0_usize;
+
+    for index in (0..history.len()).rev() {
+        let item_bytes = estimate_stream_item_json_size(&history[index]);
+        let would_exceed = total_bytes.saturating_add(item_bytes) > ATTACH_REPLAY_BYTE_LIMIT;
+        if keep_from < history.len() && would_exceed {
+            break;
+        }
+
+        keep_from = index;
+        total_bytes = total_bytes.saturating_add(item_bytes);
+    }
+
+    if keep_from > 0 {
+        history.drain(0..keep_from);
+    }
+
+    history
+}
+
+fn estimate_stream_item_json_size(item: &SessionStreamItem) -> usize {
+    match serde_json::to_vec(item) {
+        Ok(json) => json.len(),
+        Err(_) => 512,
+    }
+}
+
+fn sanitize_stream_item_for_transport(item: SessionStreamItem) -> SessionStreamItem {
+    let item_size = estimate_stream_item_json_size(&item);
+    if item_size <= ATTACH_REPLAY_ITEM_BYTE_LIMIT {
+        return item;
+    }
+
+    SessionStreamItem::System {
+        session_id: item.session_id(),
+        seq: item.seq(),
+        level: "warning".to_string(),
+        message: "Large historical item omitted from replay; open the thread in TUI for full details."
+            .to_string(),
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn resolve_cwd(default_cwd: &Path, requested: Option<String>) -> Result<PathBuf, String> {
     let Some(requested) = requested else {
         return Ok(default_cwd.to_path_buf());
@@ -909,5 +1308,50 @@ fn host_is_loopback(host: &str) -> bool {
     match host.parse::<IpAddr>() {
         Ok(ip) => ip.is_loopback(),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_attach_history_caps_initial_payload_bytes() {
+        let history = (1_u64..=20)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: "x".repeat(140_000),
+            })
+            .collect::<Vec<_>>();
+
+        let truncated = truncate_attach_history(history, 0);
+        assert!(!truncated.is_empty());
+
+        let total_bytes = truncated
+            .iter()
+            .map(estimate_stream_item_json_size)
+            .sum::<usize>();
+
+        assert!(total_bytes <= ATTACH_REPLAY_BYTE_LIMIT);
+        assert_eq!(truncated.last().map(SessionStreamItem::seq), Some(20));
+    }
+
+    #[test]
+    fn truncate_attach_history_preserves_incremental_replay() {
+        let history = (1_u64..=5)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: "payload".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let replay = truncate_attach_history(history.clone(), 2);
+        assert_eq!(replay.len(), history.len());
+        assert_eq!(replay.first().map(SessionStreamItem::seq), Some(1));
+        assert_eq!(replay.last().map(SessionStreamItem::seq), Some(5));
     }
 }

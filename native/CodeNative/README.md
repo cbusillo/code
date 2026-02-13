@@ -49,16 +49,56 @@ Useful options:
 ./scripts/dev-native.sh --no-watch
 ```
 
+## Durable Native UI Automation
+
+Use accessibility-identifier driven automation for repeatable interaction and
+screenshot capture.
+
+Prerequisites (macOS):
+
+- Accessibility enabled for the terminal app that runs automation (iTerm/Terminal/Code)
+- Automation permission for that terminal app to control `System Events`
+- Screen Recording permission for screenshot capture steps
+- A visible `CodeNativeApp` window in the current login session
+
+Run a scenario:
+
+```bash
+swift run --package-path native/CodeNative CodeNativeAutomation \
+  --scenario native/CodeNative/automation/scenarios/new-thread-shot.json
+```
+
+Run any scenario file:
+
+```bash
+swift run --package-path native/CodeNative CodeNativeAutomation --scenario <path-to-scenario.json>
+```
+
+Scenario steps supported:
+
+- `wait` with `seconds`
+- `click` with accessibility `id`
+- `type` with accessibility `id` and `text`
+- `screenshot` with output `path`
+
 ## Session Visibility
 
-The mirror server only lists sessions created through this mirror process.
-It does not yet auto-import active TUI sessions.
+The mirror server lists:
+
+- live sessions created in the current mirror runtime
+- persisted CLI/Exec/VSCode sessions from the shared session catalog
+
+Catalog sessions are lazily resumed when you attach/select them.
+
+If you are expecting a session and it is missing, make sure the session has at
+least one user message and is not archived/deleted.
 
 If the sidebar is empty, click `New thread` (or `Create first thread`) to
 create a session.
 
 ## Notes
 
+- For native design/UX standards, use `UI_UX_REFERENCE.md`.
 - The app requests microphone and speech recognition permission when recording
   starts.
 - Voice capture currently uses the system speech recognizer with on-device

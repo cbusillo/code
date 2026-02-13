@@ -1,0 +1,7 @@
+[
+  { "kind": "wait", "seconds": 1.0 },
+  {
+    "kind": "screenshot",
+    "path": "docs/reference/native-ui/current-window-automation.png"
+  }
+]

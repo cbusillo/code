@@ -18,6 +18,7 @@ workspace = true
 anyhow = { workspace = true }
 axum = { version = "0.8", features = ["json", "ws"] }
 clap = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
 code-arg0 = { workspace = true }
 code-common = { workspace = true, features = ["cli"] }
 code-core = { workspace = true }

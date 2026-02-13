@@ -39,7 +39,7 @@ final class SessionMirrorStore: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var attachedSessionID: UUID?
     private var expectedAttachedSessionID: UUID?
-    private var clientID: String?
+    private var clientId: String?
     private var userInitiatedDisconnect: Bool = false
     private var requestCounter: UInt64 = 0
     private var attachmentGeneration: UInt64 = 0
@@ -92,14 +92,10 @@ final class SessionMirrorStore: ObservableObject {
         task.resume()
 
         webSocket = task
-        connectionState = .connected
-        statusLine = "Connected"
 
         receiveTask = Task {
             await self.receiveLoop()
         }
-
-        await send(OutboundMessage.listSessions(requestID: nextRequestID()))
     }
 
     func disconnect() {
@@ -108,13 +104,13 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     func refreshSessions() async {
-        await send(OutboundMessage.listSessions(requestID: nextRequestID()))
+        await send(OutboundMessage.listSessions(requestId: nextRequestID()))
     }
 
     func createSession(cwd: String?) async {
         let normalized = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = normalized?.isEmpty == true ? nil : normalized
-        await send(CreateSessionMessage(requestID: nextRequestID(), cwd: value))
+        await send(CreateSessionMessage(requestId: nextRequestID(), cwd: value))
     }
 
     func submitComposer() async {
@@ -131,13 +127,13 @@ final class SessionMirrorStore: ObservableObject {
 
         await send(
             ComposerUpdateMessage(
-                requestID: nextRequestID(),
-                sessionID: selectedSessionID,
+                requestId: nextRequestID(),
+                sessionId: selectedSessionID,
                 text: text,
                 cursor: cursor
             )
         )
-        await send(SubmitTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
+        await send(SubmitTurnMessage(requestId: nextRequestID(), sessionId: selectedSessionID))
         composerText = ""
     }
 
@@ -145,33 +141,33 @@ final class SessionMirrorStore: ObservableObject {
         guard let selectedSessionID else {
             return
         }
-        await send(InterruptTurnMessage(requestID: nextRequestID(), sessionID: selectedSessionID))
+        await send(InterruptTurnMessage(requestId: nextRequestID(), sessionId: selectedSessionID))
     }
 
     func submitApproval(
-        sessionID: UUID,
-        callID: String,
+        sessionId: UUID,
+        callId: String,
         type: ApprovalType,
-        approved: Bool
+        decision: ApprovalDecisionChoice
     ) async {
-        let decision = approved ? "approved" : "denied"
+        let wireDecision = decision.wireValue
         switch type {
         case .exec:
             await send(
                 ExecApprovalMessage(
-                    requestID: nextRequestID(),
-                    sessionID: sessionID,
-                    callID: callID,
-                    decision: decision
+                    requestId: nextRequestID(),
+                    sessionId: sessionId,
+                    callId: callId,
+                    decision: wireDecision
                 )
             )
         case .patch:
             await send(
                 PatchApprovalMessage(
-                    requestID: nextRequestID(),
-                    sessionID: sessionID,
-                    callID: callID,
-                    decision: decision
+                    requestId: nextRequestID(),
+                    sessionId: sessionId,
+                    callId: callId,
+                    decision: wireDecision
                 )
             )
         }
@@ -188,13 +184,13 @@ final class SessionMirrorStore: ObservableObject {
 
         attachedSessionID = nil
         expectedAttachedSessionID = nil
-        clientID = nil
+        clientId = nil
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
         if error != nil {
             lastError = error
         }
         connectionState = .disconnected
-        statusLine = status
+        statusLine = statusLineForDisconnect(status: status, error: error)
 
         if error != nil,
            !userInitiatedDisconnect {
@@ -274,18 +270,39 @@ final class SessionMirrorStore: ObservableObject {
             let envelope = try decoder.decode(ServerEnvelope.self, from: data)
             apply(envelope)
         } catch {
-            lastError = "Failed to decode server message: \(error.localizedDescription)"
+            lastError = "Failed to decode server message: \(decodeErrorDescription(error))"
+        }
+    }
+
+    private func decodeErrorDescription(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+
+        switch decodingError {
+        case .keyNotFound(let key, let context):
+            let path = (context.codingPath + [key]).map(\.stringValue).joined(separator: ".")
+            return "missing key '\(path)'"
+        case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
+            let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+            if path.isEmpty {
+                return context.debugDescription
+            }
+            return "\(context.debugDescription) at '\(path)'"
+        @unknown default:
+            return error.localizedDescription
         }
     }
 
     private func apply(_ envelope: ServerEnvelope) {
         switch envelope {
         case .hello(let message):
-            clientID = message.clientID
-            statusLine = "Connected as \(message.clientID.prefix(8))"
+            clientId = message.clientId
+            connectionState = .connected
+            statusLine = "Connected as \(message.clientId.prefix(8))"
 
         case .sessionList(let message):
-            sessions = message.sessions.sorted(by: { $0.createdAtUnixMs < $1.createdAtUnixMs })
+            sessions = message.sessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
 
             if let selectedSessionID,
                sessions.contains(where: { $0.id == selectedSessionID }) {
@@ -293,49 +310,51 @@ final class SessionMirrorStore: ObservableObject {
                 return
             }
 
-            selectedSessionID = sessions.last?.id
+            selectedSessionID = preferredAutoSelectedSession(in: sessions)?.id
 
         case .sessionCreated(let message):
             upsertSession(message.session)
             selectedSessionID = message.session.id
 
         case .sessionAttached(let message):
-            let existing = itemsBySession[message.sessionID] ?? []
+            let existing = itemsBySession[message.sessionId] ?? []
             let merged = SessionStreamReducer.mergeReplayItems(
                 existing: existing,
                 incoming: message.items,
                 fromSeq: message.fromSeq
             )
-            itemsBySession[message.sessionID] = merged
+            itemsBySession[message.sessionId] = merged
 
             if !SessionStreamReducer.shouldAcceptSessionAttached(
                 selectedSessionID: selectedSessionID,
                 expectedSessionID: expectedAttachedSessionID,
-                attachedSessionID: message.sessionID
+                attachedSessionID: message.sessionId
             ) {
                 return
             }
 
-            attachedSessionID = message.sessionID
+            attachedSessionID = message.sessionId
             expectedAttachedSessionID = nil
-            statusLine = "Attached to \(message.sessionID.uuidString.prefix(8))"
+            statusLine = "Attached to \(message.sessionId.uuidString.prefix(8))"
 
         case .sessionDetached(let message):
-            if attachedSessionID == message.sessionID {
+            if attachedSessionID == message.sessionId {
                 attachedSessionID = nil
             }
-            statusLine = "Detached from \(message.sessionID.uuidString.prefix(8))"
+            statusLine = "Detached from \(message.sessionId.uuidString.prefix(8))"
 
         case .sessionStream(let message):
-            let sessionID = message.item.sessionID
-            itemsBySession[sessionID] = SessionStreamReducer.appendLiveItem(
-                items: itemsBySession[sessionID] ?? [],
+            let sessionId = message.item.sessionId
+            itemsBySession[sessionId] = SessionStreamReducer.appendLiveItem(
+                items: itemsBySession[sessionId] ?? [],
                 newItem: message.item
             )
 
-            if sessionID == selectedSessionID,
+            bumpSessionActivity(sessionId: sessionId)
+
+            if sessionId == selectedSessionID,
                message.item.type == "composer" {
-                let isFromCurrentClient = message.item.sourceClientID == clientID
+                let isFromCurrentClient = message.item.sourceClientId == clientId
                 if !isFromCurrentClient {
                     composerText = message.item.text ?? ""
                 }
@@ -358,12 +377,16 @@ final class SessionMirrorStore: ObservableObject {
             sessions[index] = session
         } else {
             sessions.append(session)
-            sessions.sort(by: { $0.createdAtUnixMs < $1.createdAtUnixMs })
         }
+        sessions.sort(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
     }
 
     private func ensureAttachmentForSelectedSession(_ sessionID: UUID) {
         if attachedSessionID == sessionID {
+            return
+        }
+
+        if expectedAttachedSessionID == sessionID {
             return
         }
 
@@ -391,7 +414,7 @@ final class SessionMirrorStore: ObservableObject {
         }
 
         if let oldSessionID {
-            await send(OutboundMessage.detachSession(requestID: nextRequestID(), sessionID: oldSessionID))
+            await send(OutboundMessage.detachSession(requestId: nextRequestID(), sessionId: oldSessionID))
             attachedSessionID = nil
 
             guard generation == attachmentGeneration else {
@@ -411,8 +434,8 @@ final class SessionMirrorStore: ObservableObject {
 
         await send(
             OutboundMessage.attachSession(
-                requestID: nextRequestID(),
-                sessionID: newSessionID,
+                requestId: nextRequestID(),
+                sessionId: newSessionID,
                 fromSeq: fromSeq
             )
         )
@@ -465,6 +488,46 @@ final class SessionMirrorStore: ObservableObject {
     private func nextRequestID() -> String {
         requestCounter = requestCounter.saturatingIncrement()
         return "native_\(requestCounter)"
+    }
+
+    private func statusLineForDisconnect(status: String, error: String?) -> String {
+        guard let error else {
+            return status
+        }
+
+        let normalized = error.lowercased()
+        if normalized.contains("could not connect") || normalized.contains("not connected") {
+            return "Backend offline; retrying..."
+        }
+        if normalized.contains("timed out") {
+            return "Connection timed out; retrying..."
+        }
+        return status
+    }
+
+    private func sessionActivityUnixMs(_ session: SessionSummary) -> UInt64 {
+        max(session.lastEventAtUnixMs, session.createdAtUnixMs)
+    }
+
+    private func bumpSessionActivity(sessionId: UUID) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else {
+            return
+        }
+
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1_000)
+        if nowMs > sessions[index].lastEventAtUnixMs {
+            sessions[index].lastEventAtUnixMs = nowMs
+            sessions.sort(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
+        }
+    }
+
+    private func preferredAutoSelectedSession(in sessions: [SessionSummary]) -> SessionSummary? {
+        sessions.last(where: { !isAutoReviewSession($0) }) ?? sessions.last
+    }
+
+    private func isAutoReviewSession(_ session: SessionSummary) -> Bool {
+        let normalized = session.cwd.lowercased()
+        return normalized.contains("/.code/working/") && normalized.contains("/branches/auto-review")
     }
 
 }
