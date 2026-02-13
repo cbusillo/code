@@ -31,6 +31,13 @@ repository. Read `AGENTS.md` first, then apply this file as an override.
 - Use IntelliJ inspections (via Idea inspections MCP) on touched areas when practical,
   and fix real issues before finalizing.
 
+## UI/UX Source Of Truth
+
+- Follow `UI_UX_REFERENCE.md` for native Apple UI/UX decisions.
+- Keep naming, sizing, spacing, and hierarchy aligned with that reference.
+- For native UI changes, apply the `Pre-Merge UX Gate` from
+  `UI_UX_REFERENCE.md` before finalizing.
+
 ## Native/TUI Parity Bar
 
 - Native apps and TUI are equal clients of one session model.
