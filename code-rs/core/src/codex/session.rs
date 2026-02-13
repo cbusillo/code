@@ -136,6 +136,7 @@ pub(super) struct State {
     pub(super) pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
     pub(super) pending_request_user_input: HashMap<String, oneshot::Sender<crate::protocol::RequestUserInputResponse>>,
     pub(super) pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+    pub(super) selected_mcp_tools: Vec<String>,
     pub(super) pending_input: Vec<ResponseInputItem>,
     pub(super) pending_user_input: Vec<QueuedUserInput>,
     pub(super) history: ConversationHistory,
@@ -904,6 +905,31 @@ impl Session {
         (state.wait_interrupt_epoch, state.wait_interrupt_reason)
     }
 
+    pub(super) fn merge_mcp_tool_selection(&self, tool_names: Vec<String>) -> Vec<String> {
+        let mut state = self.state.lock().unwrap();
+        for tool_name in tool_names {
+            if !state.selected_mcp_tools.iter().any(|name| name == &tool_name) {
+                state.selected_mcp_tools.push(tool_name);
+            }
+        }
+        state.selected_mcp_tools.sort();
+        state.selected_mcp_tools.clone()
+    }
+
+    pub(super) fn get_mcp_tool_selection(&self) -> Option<Vec<String>> {
+        let state = self.state.lock().unwrap();
+        if state.selected_mcp_tools.is_empty() {
+            None
+        } else {
+            Some(state.selected_mcp_tools.clone())
+        }
+    }
+
+    pub(super) fn clear_mcp_tool_selection(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.selected_mcp_tools.clear();
+    }
+
     pub(super) fn enforce_user_message_limits(
         &self,
         sub_id: &str,
@@ -1082,6 +1108,7 @@ impl Session {
             &sub_id,
             EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
                 call_id: call_id.clone(),
+                turn_id: sub_id.clone(),
                 command,
                 cwd,
                 reason,

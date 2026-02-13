@@ -50,7 +50,7 @@ impl AgentControl {
         let new_thread = match session_source {
             Some(session_source) => {
                 state
-                    .spawn_new_thread_with_source(config, self.clone(), session_source)
+                    .spawn_new_thread_with_source(config, self.clone(), session_source, false)
                     .await?
             }
             None => state.spawn_new_thread(config, self.clone()).await?,
@@ -215,7 +215,7 @@ mod tests {
     impl AgentControlHarness {
         async fn new() -> Self {
             let (home, config) = test_config().await;
-            let manager = ThreadManager::with_models_provider_and_home(
+            let manager = ThreadManager::with_models_provider_and_home_for_tests(
                 CodexAuth::from_api_key("dummy"),
                 config.model_provider.clone(),
                 config.codex_home.clone(),
@@ -484,7 +484,7 @@ mod tests {
             TomlValue::Integer(max_threads as i64),
         )])
         .await;
-        let manager = ThreadManager::with_models_provider_and_home(
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
             config.codex_home.clone(),
@@ -527,7 +527,7 @@ mod tests {
             TomlValue::Integer(max_threads as i64),
         )])
         .await;
-        let manager = ThreadManager::with_models_provider_and_home(
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
             config.codex_home.clone(),
@@ -561,7 +561,7 @@ mod tests {
             TomlValue::Integer(max_threads as i64),
         )])
         .await;
-        let manager = ThreadManager::with_models_provider_and_home(
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
             config.codex_home.clone(),
@@ -597,7 +597,7 @@ mod tests {
             TomlValue::Integer(max_threads as i64),
         )])
         .await;
-        let manager = ThreadManager::with_models_provider_and_home(
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
             config.codex_home.clone(),
@@ -650,7 +650,7 @@ mod tests {
             TomlValue::Integer(max_threads as i64),
         )])
         .await;
-        let manager = ThreadManager::with_models_provider_and_home(
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
             config.codex_home.clone(),

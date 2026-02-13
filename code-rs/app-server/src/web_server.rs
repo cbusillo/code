@@ -295,11 +295,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 request_id,
                 session_id,
                 call_id,
+                turn_id,
                 decision,
             } => {
                 match state
                     .hub
-                    .exec_approval(session_id, call_id, decision.into())
+                    .exec_approval(session_id, call_id, turn_id, decision.into())
                     .await
                 {
                     Ok(()) => {
@@ -418,6 +419,8 @@ enum ClientMessage {
         request_id: Option<String>,
         session_id: Uuid,
         call_id: String,
+        #[serde(default)]
+        turn_id: Option<String>,
         decision: WebReviewDecision,
     },
     PatchApproval {
@@ -577,6 +580,7 @@ impl SessionHub {
         &self,
         session_id: Uuid,
         call_id: String,
+        turn_id: Option<String>,
         decision: ReviewDecision,
     ) -> Result<(), String> {
         let sessions = self.sessions.read().await;
@@ -588,6 +592,7 @@ impl SessionHub {
             .conversation
             .submit(Op::ExecApproval {
                 id: call_id,
+                turn_id,
                 decision,
             })
             .await

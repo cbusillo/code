@@ -7,6 +7,20 @@
 
 - (none)
 
+## [0.6.67] - 2026-02-13
+
+- Skills: discover .agents and admin roots and remove deep-scan caps. (eff5ad73, 4b1faf08)
+- TUI: improve /model navigation and /resume popup visibility. (3248c705, adc2240d, 33b521b7, 99425efe)
+- App Server: surface JSON-RPC errors to avoid masked auth failures. (8d97b5c2)
+- Sandbox: add slash command to grant read access to inaccessible directories. (5c3ca739)
+
+## [0.6.66] - 2026-02-12
+
+- App Server: add websocket transport and protocol updates. (3ebd8b72)
+- Core/Websocket: bound ingress buffering and unblock spark exec/close readers. (6b6fab16, 1458e477)
+- TUI/Model: surface gpt-5.3-codex-spark in /model. (7d6b5915)
+- Core/JS REPL: add host helpers and exec end events. (466be55a)
+
 ## [0.6.65] - 2026-02-11
 
 - CLI/Env: stop traversing parent .env files at startup. (04c45da1)

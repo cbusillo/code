@@ -203,6 +203,9 @@ pub enum Op {
     ExecApproval {
         /// The id of the submission we are approving
         id: String,
+        /// Turn id associated with the approval event, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
     },
@@ -351,10 +354,12 @@ pub enum AskForApproval {
     #[strum(serialize = "untrusted")]
     UnlessTrusted,
 
-    /// *All* commands are auto‑approved, but they are expected to run inside a
-    /// sandbox where network access is disabled and writes are confined to a
-    /// specific set of paths. If the command fails, it will be escalated to
-    /// the user to approve execution without a sandbox.
+    /// DEPRECATED: *All* commands are auto‑approved, but they are expected to
+    /// run inside a sandbox where network access is disabled and writes are
+    /// confined to a specific set of paths. If the command fails, it will be
+    /// escalated to the user to approve execution without a sandbox.
+    /// Prefer `OnRequest` for interactive runs or `Never` for non-interactive
+    /// runs.
     OnFailure,
 
     /// The model decides when to ask the user for approval.

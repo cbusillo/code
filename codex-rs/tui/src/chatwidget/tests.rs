@@ -15,8 +15,6 @@ use crate::history_cell::UserHistoryCell;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
-use codex_common::approval_presets::builtin_approval_presets;
-use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -38,6 +36,7 @@ use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExecCommandSource;
+use codex_core::protocol::ExecCommandStatus as CoreExecCommandStatus;
 use codex_core::protocol::ExecPolicyAmendment;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
@@ -48,6 +47,7 @@ use codex_core::protocol::McpStartupUpdateEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
+use codex_core::protocol::PatchApplyStatus as CorePatchApplyStatus;
 use codex_core::protocol::RateLimitWindow;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
@@ -89,6 +89,7 @@ use codex_protocol::protocol::SkillScope;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_approval_presets::builtin_approval_presets;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -152,7 +153,7 @@ async fn resumed_initial_messages_render_history() {
         model: "test-model".to_string(),
         model_provider_id: "test-provider".to_string(),
         approval_policy: AskForApproval::Never,
-        sandbox_policy: SandboxPolicy::ReadOnly,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -220,7 +221,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         model: "test-model".to_string(),
         model_provider_id: "test-provider".to_string(),
         approval_policy: AskForApproval::Never,
-        sandbox_policy: SandboxPolicy::ReadOnly,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -338,7 +339,7 @@ async fn submission_preserves_text_elements_and_local_images() {
         model: "test-model".to_string(),
         model_provider_id: "test-provider".to_string(),
         approval_policy: AskForApproval::Never,
-        sandbox_policy: SandboxPolicy::ReadOnly,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -418,7 +419,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         model: "test-model".to_string(),
         model_provider_id: "test-provider".to_string(),
         approval_policy: AskForApproval::Never,
-        sandbox_policy: SandboxPolicy::ReadOnly,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -965,13 +966,16 @@ async fn helpers_are_available_and_do_not_panic() {
     let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
     let tx = AppEventSender::new(tx_raw);
     let cfg = test_config().await;
-    let resolved_model = ModelsManager::get_model_offline(cfg.model.as_deref());
+    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
     let otel_manager = test_otel_manager(&cfg, resolved_model.as_str());
-    let thread_manager = Arc::new(ThreadManager::with_models_provider(
-        CodexAuth::from_api_key("test"),
-        cfg.model_provider.clone(),
-    ));
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
     let init = ChatWidgetInit {
         config: cfg,
         frame_requester: FrameRequester::test_dummy(),
@@ -993,7 +997,7 @@ async fn helpers_are_available_and_do_not_panic() {
 }
 
 fn test_otel_manager(config: &Config, model: &str) -> OtelManager {
-    let model_info = ModelsManager::construct_model_info_offline(model, config);
+    let model_info = codex_core::test_support::construct_model_info_offline(model, config);
     OtelManager::new(
         ThreadId::new(),
         model,
@@ -1022,7 +1026,7 @@ async fn make_chatwidget_manual(
     let mut cfg = test_config().await;
     let resolved_model = model_override
         .map(str::to_owned)
-        .unwrap_or_else(|| ModelsManager::get_model_offline(cfg.model.as_deref()));
+        .unwrap_or_else(|| codex_core::test_support::get_model_offline(cfg.model.as_deref()));
     if let Some(model) = model_override {
         cfg.model = Some(model.to_string());
     }
@@ -1039,7 +1043,8 @@ async fn make_chatwidget_manual(
     });
     bottom.set_steer_enabled(true);
     bottom.set_collaboration_modes_enabled(cfg.features.enabled(Feature::CollaborationModes));
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
     let codex_home = cfg.codex_home.clone();
     let models_manager = Arc::new(ModelsManager::new(codex_home, auth_manager.clone()));
     let reasoning_effort = None;
@@ -1144,8 +1149,9 @@ fn next_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
 }
 
 fn set_chatgpt_auth(chat: &mut ChatWidget) {
-    chat.auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
     chat.models_manager = Arc::new(ModelsManager::new(
         chat.config.codex_home.clone(),
         chat.auth_manager.clone(),
@@ -1448,8 +1454,9 @@ async fn rate_limit_snapshots_keep_separate_entries_per_limit_id() {
 #[tokio::test]
 async fn rate_limit_switch_prompt_skips_when_on_lower_cost_model() {
     let (mut chat, _, _) = make_chatwidget_manual(Some(NUDGE_MODEL_SLUG)).await;
-    chat.auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
 
     chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
 
@@ -1463,7 +1470,7 @@ async fn rate_limit_switch_prompt_skips_when_on_lower_cost_model() {
 async fn rate_limit_switch_prompt_skips_non_codex_limit() {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.auth_manager = AuthManager::from_auth_for_testing(auth);
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
@@ -1488,7 +1495,7 @@ async fn rate_limit_switch_prompt_skips_non_codex_limit() {
 async fn rate_limit_switch_prompt_shows_once_per_session() {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.auth_manager = AuthManager::from_auth_for_testing(auth);
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
 
     chat.on_rate_limit_snapshot(Some(snapshot(90.0)));
     assert!(
@@ -1512,7 +1519,7 @@ async fn rate_limit_switch_prompt_shows_once_per_session() {
 async fn rate_limit_switch_prompt_respects_hidden_notice() {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.auth_manager = AuthManager::from_auth_for_testing(auth);
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
     chat.config.notices.hide_rate_limit_model_nudge = Some(true);
 
     chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
@@ -1527,7 +1534,7 @@ async fn rate_limit_switch_prompt_respects_hidden_notice() {
 async fn rate_limit_switch_prompt_defers_until_task_complete() {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.auth_manager = AuthManager::from_auth_for_testing(auth);
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
 
     chat.bottom_pane.set_task_running(true);
     chat.on_rate_limit_snapshot(Some(snapshot(90.0)));
@@ -1547,8 +1554,9 @@ async fn rate_limit_switch_prompt_defers_until_task_complete() {
 #[tokio::test]
 async fn rate_limit_switch_prompt_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
 
     chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
     chat.maybe_show_pending_rate_limit_prompt();
@@ -1881,8 +1889,9 @@ async fn plan_implementation_popup_shows_after_proposed_plan_output() {
 #[tokio::test]
 async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    chat.auth_manager = codex_core::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
     chat.set_feature_enabled(Feature::CollaborationModes, true);
     let plan_mask =
         collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
@@ -2173,6 +2182,11 @@ fn end_exec(
             exit_code,
             duration: std::time::Duration::from_millis(5),
             formatted_output: aggregated,
+            status: if exit_code == 0 {
+                CoreExecCommandStatus::Completed
+            } else {
+                CoreExecCommandStatus::Failed
+            },
         }),
     });
 }
@@ -2634,6 +2648,7 @@ async fn exec_end_without_begin_uses_event_command() {
             exit_code: 0,
             duration: std::time::Duration::from_millis(5),
             formatted_output: "done".to_string(),
+            status: CoreExecCommandStatus::Completed,
         }),
     });
 
@@ -3098,7 +3113,7 @@ async fn plan_slash_command_with_args_submits_prompt_in_plan_mode() {
         model: "test-model".to_string(),
         model_provider_id: "test-provider".to_string(),
         approval_policy: AskForApproval::Never,
-        sandbox_policy: SandboxPolicy::ReadOnly,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -3143,13 +3158,16 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
         .build()
         .await
         .expect("config");
-    let resolved_model = ModelsManager::get_model_offline(cfg.model.as_deref());
+    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
     let otel_manager = test_otel_manager(&cfg, resolved_model.as_str());
-    let thread_manager = Arc::new(ThreadManager::with_models_provider(
-        CodexAuth::from_api_key("test"),
-        cfg.model_provider.clone(),
-    ));
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
     let init = ChatWidgetInit {
         config: cfg,
         frame_requester: FrameRequester::test_dummy(),
@@ -3189,13 +3207,16 @@ async fn experimental_mode_plan_applies_on_startup() {
         .build()
         .await
         .expect("config");
-    let resolved_model = ModelsManager::get_model_offline(cfg.model.as_deref());
+    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
     let otel_manager = test_otel_manager(&cfg, resolved_model.as_str());
-    let thread_manager = Arc::new(ThreadManager::with_models_provider(
-        CodexAuth::from_api_key("test"),
-        cfg.model_provider.clone(),
-    ));
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
     let init = ChatWidgetInit {
         config: cfg,
         frame_requester: FrameRequester::test_dummy(),
@@ -3365,6 +3386,24 @@ async fn slash_clean_submits_background_terminal_cleanup() {
         rendered.contains("Stopping all background terminals."),
         "expected cleanup confirmation, got {rendered:?}"
     );
+}
+
+#[tokio::test]
+async fn slash_memory_drop_submits_drop_memories_op() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::MemoryDrop);
+
+    assert_matches!(op_rx.try_recv(), Ok(Op::DropMemories));
+}
+
+#[tokio::test]
+async fn slash_memory_update_submits_update_memories_op() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::MemoryUpdate);
+
+    assert_matches!(op_rx.try_recv(), Ok(Op::UpdateMemories));
 }
 
 #[tokio::test]
@@ -3839,6 +3878,7 @@ async fn apps_popup_refreshes_when_connectors_snapshot_updates() {
                 distribution_channel: None,
                 install_url: Some("https://example.test/notion".to_string()),
                 is_accessible: true,
+                is_enabled: true,
             }],
         }),
         false,
@@ -3854,6 +3894,10 @@ async fn apps_popup_refreshes_when_connectors_snapshot_updates() {
         before.contains("Installed 1 of 1 available apps."),
         "expected initial apps popup snapshot, got:\n{before}"
     );
+    assert!(
+        before.contains("Installed. Press Enter to open the app page"),
+        "expected selected app description to explain the app page action, got:\n{before}"
+    );
 
     chat.on_connectors_loaded(
         Ok(ConnectorsSnapshot {
@@ -3867,6 +3911,7 @@ async fn apps_popup_refreshes_when_connectors_snapshot_updates() {
                     distribution_channel: None,
                     install_url: Some("https://example.test/notion".to_string()),
                     is_accessible: true,
+                    is_enabled: true,
                 },
                 codex_chatgpt::connectors::AppInfo {
                     id: "connector_2".to_string(),
@@ -3877,6 +3922,7 @@ async fn apps_popup_refreshes_when_connectors_snapshot_updates() {
                     distribution_channel: None,
                     install_url: Some("https://example.test/linear".to_string()),
                     is_accessible: true,
+                    is_enabled: true,
                 },
             ],
         }),
@@ -3910,6 +3956,7 @@ async fn apps_refresh_failure_keeps_existing_full_snapshot() {
             distribution_channel: None,
             install_url: Some("https://example.test/notion".to_string()),
             is_accessible: true,
+            is_enabled: true,
         },
         codex_chatgpt::connectors::AppInfo {
             id: "connector_2".to_string(),
@@ -3920,6 +3967,7 @@ async fn apps_refresh_failure_keeps_existing_full_snapshot() {
             distribution_channel: None,
             install_url: Some("https://example.test/linear".to_string()),
             is_accessible: false,
+            is_enabled: true,
         },
     ];
     chat.on_connectors_loaded(
@@ -3940,6 +3988,7 @@ async fn apps_refresh_failure_keeps_existing_full_snapshot() {
                 distribution_channel: None,
                 install_url: Some("https://example.test/notion".to_string()),
                 is_accessible: true,
+                is_enabled: true,
             }],
         }),
         false,
@@ -3956,6 +4005,265 @@ async fn apps_refresh_failure_keeps_existing_full_snapshot() {
     assert!(
         popup.contains("Installed 1 of 2 available apps."),
         "expected previous full snapshot to be preserved, got:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn apps_partial_refresh_uses_same_filtering_as_full_refresh() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.features.enable(Feature::Apps);
+    chat.bottom_pane.set_connectors_enabled(true);
+
+    let full_connectors = vec![
+        codex_chatgpt::connectors::AppInfo {
+            id: "unit_test_connector_1".to_string(),
+            name: "Notion".to_string(),
+            description: Some("Workspace docs".to_string()),
+            logo_url: None,
+            logo_url_dark: None,
+            distribution_channel: None,
+            install_url: Some("https://example.test/notion".to_string()),
+            is_accessible: true,
+            is_enabled: true,
+        },
+        codex_chatgpt::connectors::AppInfo {
+            id: "unit_test_connector_2".to_string(),
+            name: "Linear".to_string(),
+            description: Some("Project tracking".to_string()),
+            logo_url: None,
+            logo_url_dark: None,
+            distribution_channel: None,
+            install_url: Some("https://example.test/linear".to_string()),
+            is_accessible: false,
+            is_enabled: true,
+        },
+    ];
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: full_connectors.clone(),
+        }),
+        true,
+    );
+    chat.add_connectors_output();
+
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: vec![
+                codex_chatgpt::connectors::AppInfo {
+                    id: "unit_test_connector_1".to_string(),
+                    name: "Notion".to_string(),
+                    description: Some("Workspace docs".to_string()),
+                    logo_url: None,
+                    logo_url_dark: None,
+                    distribution_channel: None,
+                    install_url: Some("https://example.test/notion".to_string()),
+                    is_accessible: true,
+                    is_enabled: true,
+                },
+                codex_chatgpt::connectors::AppInfo {
+                    id: "connector_openai_hidden".to_string(),
+                    name: "Hidden OpenAI".to_string(),
+                    description: Some("Should be filtered".to_string()),
+                    logo_url: None,
+                    logo_url_dark: None,
+                    distribution_channel: None,
+                    install_url: Some("https://example.test/hidden-openai".to_string()),
+                    is_accessible: true,
+                    is_enabled: true,
+                },
+            ],
+        }),
+        false,
+    );
+
+    assert_matches!(
+        &chat.connectors_cache,
+        ConnectorsCacheState::Ready(snapshot) if snapshot.connectors == full_connectors
+    );
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Installed 1 of 1 available apps."),
+        "expected partial refresh popup to use filtered connectors, got:\n{popup}"
+    );
+    assert!(
+        !popup.contains("Hidden OpenAI"),
+        "expected disallowed connector to be filtered from partial refresh popup, got:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn apps_popup_shows_disabled_status_for_installed_but_disabled_apps() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.features.enable(Feature::Apps);
+    chat.bottom_pane.set_connectors_enabled(true);
+
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: vec![codex_chatgpt::connectors::AppInfo {
+                id: "connector_1".to_string(),
+                name: "Notion".to_string(),
+                description: Some("Workspace docs".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                install_url: Some("https://example.test/notion".to_string()),
+                is_accessible: true,
+                is_enabled: false,
+            }],
+        }),
+        true,
+    );
+
+    chat.add_connectors_output();
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Installed · Disabled. Press Enter to open the app page"),
+        "expected selected app description to include disabled status, got:\n{popup}"
+    );
+    assert!(
+        popup.contains("enable/disable this app."),
+        "expected selected app description to mention enable/disable action, got:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn apps_initial_load_applies_enabled_state_from_config() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.features.enable(Feature::Apps);
+    chat.bottom_pane.set_connectors_enabled(true);
+
+    let temp = tempdir().expect("tempdir");
+    let config_toml_path =
+        AbsolutePathBuf::try_from(temp.path().join("config.toml")).expect("absolute config path");
+    let user_config = toml::from_str::<TomlValue>(
+        "[apps.connector_1]\nenabled = false\ndisabled_reason = \"user\"\n",
+    )
+    .expect("apps config");
+    chat.config.config_layer_stack = chat
+        .config
+        .config_layer_stack
+        .with_user_config(&config_toml_path, user_config);
+
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: vec![codex_chatgpt::connectors::AppInfo {
+                id: "connector_1".to_string(),
+                name: "Notion".to_string(),
+                description: Some("Workspace docs".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                install_url: Some("https://example.test/notion".to_string()),
+                is_accessible: true,
+                is_enabled: true,
+            }],
+        }),
+        true,
+    );
+
+    assert_matches!(
+        &chat.connectors_cache,
+        ConnectorsCacheState::Ready(snapshot)
+            if snapshot
+                .connectors
+                .iter()
+                .find(|connector| connector.id == "connector_1")
+                .is_some_and(|connector| !connector.is_enabled)
+    );
+}
+
+#[tokio::test]
+async fn apps_refresh_preserves_toggled_enabled_state() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.features.enable(Feature::Apps);
+    chat.bottom_pane.set_connectors_enabled(true);
+
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: vec![codex_chatgpt::connectors::AppInfo {
+                id: "connector_1".to_string(),
+                name: "Notion".to_string(),
+                description: Some("Workspace docs".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                install_url: Some("https://example.test/notion".to_string()),
+                is_accessible: true,
+                is_enabled: true,
+            }],
+        }),
+        true,
+    );
+    chat.update_connector_enabled("connector_1", false);
+
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: vec![codex_chatgpt::connectors::AppInfo {
+                id: "connector_1".to_string(),
+                name: "Notion".to_string(),
+                description: Some("Workspace docs".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                install_url: Some("https://example.test/notion".to_string()),
+                is_accessible: true,
+                is_enabled: true,
+            }],
+        }),
+        true,
+    );
+
+    assert_matches!(
+        &chat.connectors_cache,
+        ConnectorsCacheState::Ready(snapshot)
+            if snapshot
+                .connectors
+                .iter()
+                .find(|connector| connector.id == "connector_1")
+                .is_some_and(|connector| !connector.is_enabled)
+    );
+
+    chat.add_connectors_output();
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Installed · Disabled. Press Enter to open the app page"),
+        "expected disabled status to persist after reload, got:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn apps_popup_for_not_installed_app_uses_install_only_selected_description() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.config.features.enable(Feature::Apps);
+    chat.bottom_pane.set_connectors_enabled(true);
+
+    chat.on_connectors_loaded(
+        Ok(ConnectorsSnapshot {
+            connectors: vec![codex_chatgpt::connectors::AppInfo {
+                id: "connector_2".to_string(),
+                name: "Linear".to_string(),
+                description: Some("Project tracking".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                install_url: Some("https://example.test/linear".to_string()),
+                is_accessible: false,
+                is_enabled: true,
+            }],
+        }),
+        true,
+    );
+
+    chat.add_connectors_output();
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Can be installed. Press Enter to open the app page to install"),
+        "expected selected app description to be install-only for not-installed apps, got:\n{popup}"
+    );
+    assert!(
+        !popup.contains("enable/disable this app."),
+        "did not expect enable/disable text for not-installed apps, got:\n{popup}"
     );
 }
 
@@ -4083,7 +4391,7 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 }
 
 #[tokio::test]
-async fn model_cap_error_does_not_switch_models() {
+async fn server_overloaded_error_does_not_switch_models() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("boomslang")).await;
     chat.set_model("boomslang");
     while rx.try_recv().is_ok() {}
@@ -4092,11 +4400,8 @@ async fn model_cap_error_does_not_switch_models() {
     chat.handle_codex_event(Event {
         id: "err-1".to_string(),
         msg: EventMsg::Error(ErrorEvent {
-            message: "model cap".to_string(),
-            codex_error_info: Some(CodexErrorInfo::ModelCap {
-                model: "boomslang".to_string(),
-                reset_after_seconds: Some(120),
-            }),
+            message: "server overloaded".to_string(),
+            codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
         }),
     });
 
@@ -4104,7 +4409,7 @@ async fn model_cap_error_does_not_switch_models() {
         if let AppEvent::UpdateModel(model) = event {
             assert_eq!(
                 model, "boomslang",
-                "did not expect model switch on model-cap error"
+                "did not expect model switch on server-overloaded error"
             );
         }
     }
@@ -4113,7 +4418,7 @@ async fn model_cap_error_does_not_switch_models() {
         if let Op::OverrideTurnContext { model, .. } = event {
             assert!(
                 model.is_none(),
-                "did not expect OverrideTurnContext model update on model-cap error"
+                "did not expect OverrideTurnContext model update on server-overloaded error"
             );
         }
     }
@@ -4148,27 +4453,37 @@ async fn approvals_selection_popup_snapshot_windows_degraded_sandbox() {
     chat.open_approvals_popup();
 
     let popup = render_bottom_popup(&chat, 80);
-    insta::with_settings!({ snapshot_suffix => "windows_degraded" }, {
-        assert_snapshot!("approvals_selection_popup", popup);
-    });
+    assert!(
+        popup.contains("Default (non-admin sandbox)"),
+        "expected degraded sandbox label in approvals popup: {popup}"
+    );
+    assert!(
+        popup.contains("/setup-default-sandbox"),
+        "expected setup hint in approvals popup: {popup}"
+    );
+    assert!(
+        popup.contains("non-admin sandbox"),
+        "expected degraded sandbox note in approvals popup: {popup}"
+    );
 }
 
 #[tokio::test]
-async fn preset_matching_ignores_extra_writable_roots() {
+async fn preset_matching_requires_exact_workspace_write_settings() {
     let preset = builtin_approval_presets()
         .into_iter()
         .find(|p| p.id == "auto")
         .expect("auto preset exists");
     let current_sandbox = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![AbsolutePathBuf::try_from("C:\\extra").unwrap()],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
     };
 
     assert!(
-        ChatWidget::preset_matches_current(AskForApproval::OnRequest, &current_sandbox, &preset),
-        "WorkspaceWrite with extra roots should still match the Agent preset"
+        !ChatWidget::preset_matches_current(AskForApproval::OnRequest, &current_sandbox, &preset),
+        "WorkspaceWrite with extra roots should not match the Default preset"
     );
     assert!(
         !ChatWidget::preset_matches_current(AskForApproval::Never, &current_sandbox, &preset),
@@ -4203,8 +4518,12 @@ async fn windows_auto_mode_prompt_requests_enabling_sandbox_feature() {
 
     let popup = render_bottom_popup(&chat, 120);
     assert!(
-        popup.contains("requires elevation"),
-        "expected auto mode prompt to mention elevation, popup: {popup}"
+        popup.contains("requires Administrator permissions"),
+        "expected auto mode prompt to mention Administrator permissions, popup: {popup}"
+    );
+    assert!(
+        popup.contains("Use non-admin sandbox"),
+        "expected auto mode prompt to include non-admin fallback option, popup: {popup}"
     );
 }
 
@@ -4215,22 +4534,40 @@ async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
 
     chat.set_feature_enabled(Feature::WindowsSandbox, false);
     chat.set_feature_enabled(Feature::WindowsSandboxElevated, false);
-    chat.config.forced_auto_mode_downgraded_on_windows = true;
 
-    chat.maybe_prompt_windows_sandbox_enable();
+    chat.maybe_prompt_windows_sandbox_enable(true);
 
     let popup = render_bottom_popup(&chat, 120);
     assert!(
-        popup.contains("requires elevation"),
-        "expected startup prompt to explain elevation: {popup}"
+        popup.contains("requires Administrator permissions"),
+        "expected startup prompt to mention Administrator permissions: {popup}"
     );
     assert!(
-        popup.contains("Set up agent sandbox"),
-        "expected startup prompt to offer agent sandbox setup: {popup}"
+        popup.contains("Set up default sandbox"),
+        "expected startup prompt to offer default sandbox setup: {popup}"
     );
     assert!(
-        popup.contains("Stay in"),
-        "expected startup prompt to offer staying in current mode: {popup}"
+        popup.contains("Use non-admin sandbox"),
+        "expected startup prompt to offer non-admin fallback: {popup}"
+    );
+    assert!(
+        popup.contains("Quit"),
+        "expected startup prompt to offer quit action: {popup}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn startup_does_not_prompt_for_windows_sandbox_when_not_requested() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.set_feature_enabled(Feature::WindowsSandbox, false);
+    chat.set_feature_enabled(Feature::WindowsSandboxElevated, false);
+    chat.maybe_prompt_windows_sandbox_enable(false);
+
+    assert!(
+        chat.bottom_pane.no_modal_or_popup_active(),
+        "expected no startup sandbox NUX popup when startup trigger is false"
     );
 }
 
@@ -4442,7 +4779,7 @@ async fn disabled_slash_command_while_task_running_snapshot() {
 async fn approvals_popup_shows_disabled_presets() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
-    chat.config.approval_policy =
+    chat.config.permissions.approval_policy =
         Constrained::new(AskForApproval::OnRequest, |candidate| match candidate {
             AskForApproval::OnRequest => Ok(()),
             _ => Err(invalid_value(
@@ -4478,7 +4815,7 @@ async fn approvals_popup_shows_disabled_presets() {
 async fn approvals_popup_navigation_skips_disabled() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
 
-    chat.config.approval_policy =
+    chat.config.permissions.approval_policy =
         Constrained::new(AskForApproval::OnRequest, |candidate| match candidate {
             AskForApproval::OnRequest => Ok(()),
             _ => Err(invalid_value(candidate.to_string(), "[on-request]")),
@@ -4555,7 +4892,10 @@ async fn approval_modal_exec_snapshot() -> anyhow::Result<()> {
     // Build a chat widget with manual channels to avoid spawning the agent.
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     // Ensure policy allows surfacing approvals explicitly (not strictly required for direct event).
-    chat.config.approval_policy.set(AskForApproval::OnRequest)?;
+    chat.config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)?;
     // Inject an exec approval request to display the approval modal.
     let ev = ExecApprovalRequestEvent {
         call_id: "call-approve-cmd".into(),
@@ -4610,7 +4950,10 @@ async fn approval_modal_exec_snapshot() -> anyhow::Result<()> {
 #[tokio::test]
 async fn approval_modal_exec_without_reason_snapshot() -> anyhow::Result<()> {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    chat.config.approval_policy.set(AskForApproval::OnRequest)?;
+    chat.config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)?;
 
     let ev = ExecApprovalRequestEvent {
         call_id: "call-approve-cmd-noreason".into(),
@@ -4652,7 +4995,10 @@ async fn approval_modal_exec_without_reason_snapshot() -> anyhow::Result<()> {
 async fn approval_modal_exec_multiline_prefix_hides_execpolicy_option_snapshot()
 -> anyhow::Result<()> {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    chat.config.approval_policy.set(AskForApproval::OnRequest)?;
+    chat.config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)?;
 
     let script = "python - <<'PY'\nprint('hello')\nPY".to_string();
     let command = vec!["bash".into(), "-lc".into(), script];
@@ -4692,7 +5038,10 @@ async fn approval_modal_exec_multiline_prefix_hides_execpolicy_option_snapshot()
 #[tokio::test]
 async fn approval_modal_patch_snapshot() -> anyhow::Result<()> {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
-    chat.config.approval_policy.set(AskForApproval::OnRequest)?;
+    chat.config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)?;
 
     // Build a small changeset and a reason/grant_root to exercise the prompt text.
     let mut changes = HashMap::new();
@@ -5224,6 +5573,7 @@ async fn apply_patch_events_emit_history_cells() {
         stderr: String::new(),
         success: true,
         changes: end_changes,
+        status: CorePatchApplyStatus::Completed,
     };
     chat.handle_codex_event(Event {
         id: "s1".into(),
@@ -5451,6 +5801,7 @@ async fn apply_patch_full_flow_integration_like() {
             stderr: String::new(),
             success: true,
             changes: end_changes,
+            status: CorePatchApplyStatus::Completed,
         }),
     });
 }
@@ -5459,7 +5810,10 @@ async fn apply_patch_full_flow_integration_like() {
 async fn apply_patch_untrusted_shows_approval_modal() -> anyhow::Result<()> {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
     // Ensure approval policy is untrusted (OnRequest)
-    chat.config.approval_policy.set(AskForApproval::OnRequest)?;
+    chat.config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)?;
 
     // Simulate a patch approval request from backend
     let mut changes = HashMap::new();
@@ -5507,7 +5861,10 @@ async fn apply_patch_request_shows_diff_summary() -> anyhow::Result<()> {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 
     // Ensure we are in OnRequest so an approval is surfaced
-    chat.config.approval_policy.set(AskForApproval::OnRequest)?;
+    chat.config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)?;
 
     // Simulate backend asking to apply a patch adding two lines to README.md
     let mut changes = HashMap::new();
@@ -6041,6 +6398,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
             exit_code: 0,
             duration: std::time::Duration::from_millis(16000),
             formatted_output: String::new(),
+            status: CoreExecCommandStatus::Completed,
         }),
     });
     chat.handle_codex_event(Event {

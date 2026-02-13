@@ -22,6 +22,7 @@ use crate::agent_tool::external_agent_command_exists;
 use crate::protocol::McpListToolsResponseEvent;
 use code_app_server_protocol::AuthMode as AppAuthMode;
 use code_protocol::models::FunctionCallOutputContentItem;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AgentTaskKind {
@@ -29,6 +30,9 @@ enum AgentTaskKind {
     Review,
     Compact,
 }
+
+const SEARCH_TOOL_DEVELOPER_INSTRUCTIONS: &str =
+    include_str!("../../templates/search_tool/developer_instructions.md");
 
 /// A series of Turns in response to user input.
 pub(super) struct AgentTask {
@@ -598,6 +602,8 @@ pub(super) async fn submission_loop(
                 );
                 tools_config.web_search_allowed_domains =
                     config.tools_web_search_allowed_domains.clone();
+                tools_config.web_search_external = config.tools_web_search_external;
+                tools_config.search_tool = config.tools_search_tool;
 
                 let mut agent_models: Vec<String> = if config.agents.is_empty() {
                     default_agent_configs()
@@ -737,6 +743,19 @@ pub(super) async fn submission_loop(
                         error!("failed to send event: {e:?}");
                     }
                 }
+
+                if config.approval_policy == AskForApproval::OnFailure {
+                    let warning_event = sess_arc.make_event(
+                        &sub.id,
+                        EventMsg::Warning(crate::protocol::WarningEvent {
+                            message: "`on-failure` approval policy is deprecated and will be removed in a future release. Use `on-request` for interactive approvals or `never` for non-interactive runs.".to_string(),
+                        }),
+                    );
+                    if let Err(e) = tx_event.send(warning_event).await {
+                        warn!("failed to send deprecated approval policy warning: {e}");
+                    }
+                }
+
                 // If we resumed from a rollout, replay the prior transcript into the UI.
                 if replay_history_items.is_some()
                     || restored_history_snapshot.is_some()
@@ -864,7 +883,11 @@ pub(super) async fn submission_loop(
                     sess.set_task(agent);
                 }
             }
-            Op::ExecApproval { id, decision } => {
+            Op::ExecApproval {
+                id,
+                turn_id: _,
+                decision,
+            } => {
                 let sess = match sess.as_ref() {
                     Some(sess) => sess,
                     None => {
@@ -1122,6 +1145,9 @@ pub(super) async fn submission_loop(
                             }
                             crate::skills::model::SkillScope::System => {
                                 code_protocol::protocol::SkillScope::System
+                            }
+                            crate::skills::model::SkillScope::Admin => {
+                                code_protocol::protocol::SkillScope::Admin
                             }
                         },
                         enabled: true,
@@ -1525,6 +1551,9 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
             &input[0],
             InputItem::Text { text } if text == PENDING_ONLY_SENTINEL
         );
+
+    // MCP tool search selections are scoped to a single top-level turn.
+    sess.clear_mcp_tool_selection();
 
     // Debug logging for ephemeral images
     let ephemeral_count = input
@@ -1932,6 +1961,8 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
         exit_review_mode(sess.clone(), sub_id.clone(), output).await;
     }
 
+    sess.clear_mcp_tool_selection();
+
     sess.remove_task(&sub_id);
     let event = sess.make_event(
         &sub_id,
@@ -2052,9 +2083,25 @@ async fn run_turn(
             tc.sandbox_policy.clone(),
             effective_family,
         );
+        let mcp_tools = select_mcp_tools_for_turn(
+            sess.mcp_connection_manager.list_all_tools(),
+            sess.get_mcp_tool_selection(),
+            tools_config.search_tool,
+        );
+
+        if tools_config.search_tool
+            && !prompt
+                .prepend_developer_messages
+                .iter()
+                .any(|message| message == SEARCH_TOOL_DEVELOPER_INSTRUCTIONS)
+        {
+            prompt
+                .prepend_developer_messages
+                .push(SEARCH_TOOL_DEVELOPER_INSTRUCTIONS.to_string());
+        }
         prompt.tools = get_openai_tools(
             &tools_config,
-            Some(sess.mcp_connection_manager.list_all_tools()),
+            Some(mcp_tools),
             browser_enabled,
             agents_active,
             sess.dynamic_tools.as_slice(),
@@ -2405,6 +2452,89 @@ async fn run_turn(
                 }
             }
         }
+    }
+}
+
+fn select_mcp_tools_for_turn(
+    mcp_tools: HashMap<String, mcp_types::Tool>,
+    selected_tools: Option<Vec<String>>,
+    search_tool_enabled: bool,
+) -> HashMap<String, mcp_types::Tool> {
+    if !search_tool_enabled {
+        return mcp_tools;
+    }
+
+    let Some(selected_tools) = selected_tools else {
+        return HashMap::new();
+    };
+
+    let selected: std::collections::HashSet<String> = selected_tools.into_iter().collect();
+    mcp_tools
+        .into_iter()
+        .filter(|(name, _tool)| selected.contains(name))
+        .collect()
+}
+
+#[cfg(test)]
+mod mcp_tool_selection_tests {
+    use super::select_mcp_tools_for_turn;
+    use mcp_types::Tool;
+    use mcp_types::ToolInputSchema;
+    use std::collections::HashMap;
+
+    fn test_tool(name: &str) -> Tool {
+        Tool {
+            name: name.to_string(),
+            title: None,
+            description: Some(format!("{name} description")),
+            input_schema: ToolInputSchema {
+                properties: Some(serde_json::json!({})),
+                required: None,
+                r#type: "object".to_string(),
+            },
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    #[test]
+    fn search_tool_enabled_hides_mcp_tools_until_selection_exists() {
+        let mcp_tools = HashMap::from([
+            ("mcp__one__a".to_string(), test_tool("a")),
+            ("mcp__two__b".to_string(), test_tool("b")),
+        ]);
+
+        let selected = select_mcp_tools_for_turn(mcp_tools, None, true);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn search_tool_enabled_returns_only_selected_mcp_tools() {
+        let mcp_tools = HashMap::from([
+            ("mcp__one__a".to_string(), test_tool("a")),
+            ("mcp__two__b".to_string(), test_tool("b")),
+        ]);
+
+        let selected = select_mcp_tools_for_turn(
+            mcp_tools,
+            Some(vec!["mcp__two__b".to_string()]),
+            true,
+        );
+        assert_eq!(selected.len(), 1);
+        assert!(selected.contains_key("mcp__two__b"));
+    }
+
+    #[test]
+    fn search_tool_disabled_returns_all_mcp_tools() {
+        let mcp_tools = HashMap::from([
+            ("mcp__one__a".to_string(), test_tool("a")),
+            ("mcp__two__b".to_string(), test_tool("b")),
+        ]);
+
+        let selected = select_mcp_tools_for_turn(mcp_tools, None, false);
+        assert_eq!(selected.len(), 2);
+        assert!(selected.contains_key("mcp__one__a"));
+        assert!(selected.contains_key("mcp__two__b"));
     }
 }
 
@@ -3241,6 +3371,7 @@ async fn handle_function_call(
         "gh_run_wait" => handle_gh_run_wait(sess, &ctx, arguments).await,
         "kill" => handle_kill(sess, &ctx, arguments).await,
         "code_bridge" | "code_bridge_subscription" => handle_code_bridge(sess, &ctx, arguments).await,
+        "search_tool_bm25" => handle_search_tool_bm25(sess, &ctx, arguments).await,
         _ => {
             if sess.is_dynamic_tool(&name) {
                 return handle_dynamic_tool_call(sess, &ctx, name, arguments).await;
@@ -3434,6 +3565,239 @@ async fn handle_dynamic_tool_call(
             let mut payload = FunctionCallOutputPayload::from_content_items(content_items);
             payload.success = Some(response.success);
             payload
+        },
+    }
+}
+
+const SEARCH_TOOL_BM25_DEFAULT_LIMIT: usize = 8;
+
+fn search_tool_bm25_default_limit() -> usize {
+    SEARCH_TOOL_BM25_DEFAULT_LIMIT
+}
+
+#[derive(Deserialize)]
+struct SearchToolBm25Args {
+    query: String,
+    #[serde(default = "search_tool_bm25_default_limit")]
+    limit: usize,
+}
+
+#[derive(Clone)]
+struct SearchToolCandidate {
+    name: String,
+    server_name: String,
+    description: Option<String>,
+    input_keys: Vec<String>,
+    search_text: String,
+}
+
+impl SearchToolCandidate {
+    fn from_mcp_tool(name: String, server_name: String, tool: mcp_types::Tool) -> Self {
+        let description = tool.description.map(|value| value.to_string());
+        let input_keys = tool
+            .input_schema
+            .properties
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .map_or_else(Vec::new, |map| map.keys().cloned().collect());
+
+        let mut search_parts = vec![name.clone(), server_name.clone()];
+        if let Some(desc) = description.as_ref()
+            && !desc.trim().is_empty()
+        {
+            search_parts.push(desc.clone());
+        }
+        if !input_keys.is_empty() {
+            search_parts.extend(input_keys.iter().cloned());
+        }
+
+        let search_text = search_parts.join(" ").to_ascii_lowercase();
+        Self {
+            name,
+            server_name,
+            description,
+            input_keys,
+            search_text,
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_tool_candidate_tests {
+    use super::SearchToolCandidate;
+
+    #[test]
+    fn preserves_server_name_with_delimiter() {
+        let tool = mcp_types::Tool {
+            name: "run".to_string(),
+            title: None,
+            description: Some("desc".to_string()),
+            input_schema: mcp_types::ToolInputSchema {
+                properties: Some(serde_json::json!({"query": {"type": "string"}})),
+                required: None,
+                r#type: "object".to_string(),
+            },
+            output_schema: None,
+            annotations: None,
+        };
+
+        let candidate = SearchToolCandidate::from_mcp_tool(
+            "alpha__beta__run".to_string(),
+            "alpha__beta".to_string(),
+            tool,
+        );
+
+        assert_eq!(candidate.server_name, "alpha__beta");
+    }
+}
+
+fn tokenize_search_query(query: &str) -> Vec<String> {
+    query
+        .split(|char: char| !char.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn score_search_candidate(
+    normalized_query: &str,
+    query_tokens: &[String],
+    candidate: &SearchToolCandidate,
+) -> f64 {
+    let mut score = 0.0;
+    if candidate.search_text.contains(normalized_query) {
+        score += 8.0;
+    }
+
+    for token in query_tokens {
+        if token.len() <= 1 {
+            continue;
+        }
+        if candidate.search_text.contains(token) {
+            score += 2.0;
+        }
+    }
+
+    score
+}
+
+async fn handle_search_tool_bm25(
+    sess: &Session,
+    ctx: &ToolCallCtx,
+    arguments: String,
+) -> ResponseInputItem {
+    let args = match serde_json::from_str::<SearchToolBm25Args>(&arguments) {
+        Ok(args) => args,
+        Err(err) => {
+            return ResponseInputItem::FunctionCallOutput {
+                call_id: ctx.call_id.clone(),
+                output: FunctionCallOutputPayload {
+                    body: code_protocol::models::FunctionCallOutputBody::Text(format!(
+                        "invalid search_tool_bm25 arguments: {err}"
+                    )),
+                    success: Some(false),
+                },
+            };
+        }
+    };
+
+    let query = args.query.trim();
+    if query.is_empty() {
+        return ResponseInputItem::FunctionCallOutput {
+            call_id: ctx.call_id.clone(),
+            output: FunctionCallOutputPayload {
+                body: code_protocol::models::FunctionCallOutputBody::Text(
+                    "query must not be empty".to_string(),
+                ),
+                success: Some(false),
+            },
+        };
+    }
+
+    if args.limit == 0 {
+        return ResponseInputItem::FunctionCallOutput {
+            call_id: ctx.call_id.clone(),
+            output: FunctionCallOutputPayload {
+                body: code_protocol::models::FunctionCallOutputBody::Text(
+                    "limit must be greater than zero".to_string(),
+                ),
+                success: Some(false),
+            },
+        };
+    }
+
+    let all_mcp_tools = sess.mcp_connection_manager.list_all_tools_with_server_names();
+    let total_tools = all_mcp_tools.len();
+
+    let mut candidates: Vec<SearchToolCandidate> = all_mcp_tools
+        .into_iter()
+        .map(|(name, server_name, tool)| SearchToolCandidate::from_mcp_tool(name, server_name, tool))
+        .collect();
+    candidates.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let normalized_query = query.to_ascii_lowercase();
+    let query_tokens = tokenize_search_query(&normalized_query);
+
+    let mut ranked: Vec<(f64, SearchToolCandidate)> = candidates
+        .into_iter()
+        .map(|candidate| {
+            (
+                score_search_candidate(&normalized_query, &query_tokens, &candidate),
+                candidate,
+            )
+        })
+        .collect();
+    ranked.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let mut selected_tools: Vec<String> = ranked
+        .iter()
+        .filter(|(score, _candidate)| *score > 0.0)
+        .take(args.limit)
+        .map(|(_score, candidate)| candidate.name.clone())
+        .collect();
+
+    if selected_tools.is_empty() {
+        selected_tools = ranked
+            .iter()
+            .take(args.limit)
+            .map(|(_score, candidate)| candidate.name.clone())
+            .collect();
+    }
+
+    let active_selected_tools = sess.merge_mcp_tool_selection(selected_tools.clone());
+
+    let mut tools_payload = Vec::new();
+    for (score, candidate) in ranked
+        .into_iter()
+        .filter(|(_score, candidate)| selected_tools.iter().any(|name| name == &candidate.name))
+    {
+        tools_payload.push(serde_json::json!({
+            "name": candidate.name,
+            "server": candidate.server_name,
+            "description": candidate.description,
+            "input_keys": candidate.input_keys,
+            "score": score,
+        }));
+    }
+
+    let content = serde_json::json!({
+        "query": query,
+        "total_tools": total_tools,
+        "active_selected_tools": active_selected_tools,
+        "tools": tools_payload,
+    })
+    .to_string();
+
+    ResponseInputItem::FunctionCallOutput {
+        call_id: ctx.call_id.clone(),
+        output: FunctionCallOutputPayload {
+            body: code_protocol::models::FunctionCallOutputBody::Text(content),
+            success: Some(true),
         },
     }
 }

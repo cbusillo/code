@@ -1,17 +1,17 @@
-## @just-every/code v0.6.65
+## @just-every/code v0.6.67
 
-This release improves dotenv handling for more predictable startup configuration.
+This release expands skill discovery, improves TUI navigation, and clarifies app-server error reporting.
 
 ### Changes
-
-- CLI/Env: stop traversing parent .env files at startup.
-- CLI/Env: exclude more provider keys from project dotenv.
+- Skills: discover .agents and admin roots and remove deep-scan caps.
+- TUI: improve /model navigation and /resume popup visibility.
+- App Server: surface JSON-RPC errors to avoid masked auth failures.
+- Sandbox: add slash command to grant read access to inaccessible directories.
 
 ### Install
-
-```sh
+```
 npm install -g @just-every/code@latest
 code
 ```
 
-Compare: https://github.com/just-every/code/compare/v0.6.64...v0.6.65
+Compare: https://github.com/just-every/code/compare/v0.6.66...v0.6.67
