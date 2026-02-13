@@ -22,6 +22,15 @@
   high-water duplicate suppression.
 - Native state-store tests now cover stale/out-of-order live events and
   duplicate incremental replay handling.
+- Native mirror now tracks transport failure telemetry (count + timestamp)
+  and logs transport/decode/send failures.
+- Native endpoint validation now enforces loopback-only WebSocket hosts.
+- Native release script now builds macOS + iOS simulator artifacts into a
+  deterministic output directory.
+- Transcript protocol tests now cover replay-history condensation, long
+  diff summarization, and approval card mapping.
+- macOS keyboard/focus shortcuts are wired for new thread, refresh,
+  settings, send, and interrupt flows.
 
 ## Active Plan (Next)
 
@@ -39,19 +48,19 @@
 
 ### P1: macOS Product Polish (No Feature Gaps in Core Flow)
 
-- [ ] Align macOS transcript behavior with TUI for dense history,
+- [x] Align macOS transcript behavior with TUI for dense history,
   long diffs, and approvals.
 - [x] Implement keybindings + focus management for compose,
   interrupt, approvals, and settings.
-- [ ] Remove/avoid placeholder UX text on primary surfaces.
-- [ ] Keep primary controls persistently visible and correctly
+- [x] Remove/avoid placeholder UX text on primary surfaces.
+- [x] Keep primary controls persistently visible and correctly
   stateful (model/reasoning/sandbox/approval).
 
 ### P2: Hardening + Release Readiness
 
-- [ ] Add crash/telemetry basics for native session and transport failures.
-- [ ] Security pass for local data and permissions.
-- [ ] Define release automation for native artifacts.
+- [x] Add crash/telemetry basics for native session and transport failures.
+- [x] Security pass for local data and permissions.
+- [x] Define release automation for native artifacts.
 
 ## Dev Harness Policy (Current)
 
