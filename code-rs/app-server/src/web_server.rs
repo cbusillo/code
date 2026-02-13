@@ -1563,6 +1563,31 @@ mod tests {
         assert!(replay.is_empty());
     }
 
+    #[test]
+    fn truncate_attach_history_keeps_incremental_replay_even_if_payload_is_large() {
+        let history = (1_u64..=1_500)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: "x".repeat(1_500),
+            })
+            .collect::<Vec<_>>();
+
+        let replay = truncate_attach_history(history, 399);
+
+        assert_eq!(replay.first().map(SessionStreamItem::seq), Some(400));
+        assert_eq!(replay.last().map(SessionStreamItem::seq), Some(1_500));
+        assert_eq!(replay.len(), 1_101);
+
+        let total_bytes = replay
+            .iter()
+            .map(estimate_stream_item_json_size)
+            .sum::<usize>();
+
+        assert!(total_bytes > ATTACH_REPLAY_BYTE_LIMIT);
+    }
+
     #[tokio::test]
     async fn session_forwarder_uses_high_water_mark_to_drop_duplicates() {
         let (stream_tx, stream_rx) = broadcast::channel(16);
@@ -1589,6 +1614,42 @@ mod tests {
             }
             other => panic!("unexpected forwarded payload: {other:?}"),
         }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn session_forwarder_uses_from_seq_high_water_when_replay_is_empty() {
+        let (stream_tx, stream_rx) = broadcast::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+
+        let handle = spawn_session_forwarder(out_tx, stream_rx, 10);
+
+        stream_tx.send(make_system_item(10)).expect("send seq=10");
+
+        let silent = timeout(Duration::from_millis(150), out_rx.recv()).await;
+        assert!(silent.is_err(), "seq=10 should be suppressed at high water");
+
+        stream_tx.send(make_system_item(11)).expect("send seq=11");
+
+        let forwarded = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("forwarder should emit seq above high water")
+            .expect("forwarded message should exist");
+
+        match forwarded {
+            ServerMessage::SessionStream { item } => {
+                assert_eq!(item.seq(), 11);
+            }
+            other => panic!("unexpected forwarded payload: {other:?}"),
+        }
+
+        stream_tx
+            .send(make_system_item(11))
+            .expect("send duplicate seq=11");
+
+        let duplicate = timeout(Duration::from_millis(150), out_rx.recv()).await;
+        assert!(duplicate.is_err(), "duplicate seq=11 should be dropped");
 
         handle.abort();
     }
