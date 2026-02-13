@@ -1,0 +1,42 @@
+---
+name: CodeNativeiOSDemo
+options:
+  minimumXcodeGenVersion: 2.38.0
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+targets:
+  CodeNativeiOSDemo:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.every.code.nativeiosdemo
+        PRODUCT_NAME: CodeNativeiOSDemo
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: CodeNative iOS Demo
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: >-
+          Voice capture sends your speech to on-device recognition.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: >-
+          Speech recognition converts your voice into prompt text.
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: >-
+          UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft
+          UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: >-
+          UIInterfaceOrientationPortrait
+          UIInterfaceOrientationPortraitUpsideDown
+          UIInterfaceOrientationLandscapeLeft
+          UIInterfaceOrientationLandscapeRight
+        TARGETED_DEVICE_FAMILY: 1,2
+        SUPPORTS_MACCATALYST: false
+    sources:
+      - path: CodeNativeiOSDemo/App
+      - path: ../CodeNative/Sources/CodeNativeApp
+        excludes:
+          - CodeNativeApp.swift
+    scheme:
+      testTargets: []

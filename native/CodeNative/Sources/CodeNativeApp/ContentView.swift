@@ -6,6 +6,7 @@ import AppKit
 
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
+    @Environment(\.openURL) private var openURL
 
     private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -853,10 +854,16 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
 
+                #if os(macOS)
                 Toggle(isOn: $ideContextEnabled) {
                     Text("IDE context")
                 }
                 .toggleStyle(.checkbox)
+                #else
+                Toggle(isOn: $ideContextEnabled) {
+                    Text("IDE context")
+                }
+                #endif
 
                 Spacer()
 
@@ -1331,6 +1338,11 @@ struct ContentView: View {
         switch destination {
         case .finder, .editor:
             NSWorkspace.shared.open(url)
+        }
+        #else
+        switch destination {
+        case .finder, .editor:
+            openURL(url)
         }
         #endif
     }
@@ -3106,12 +3118,36 @@ private struct NativeSettingsView: View {
 
     @State private var selectedCategory: SettingsCategory = .general
 
+    @ViewBuilder
+    private var settingsSidebar: some View {
+        #if os(macOS)
+        List(SettingsCategory.allCases, selection: $selectedCategory) { category in
+            Text(category.title)
+                .tag(category)
+        }
+        #else
+        List(SettingsCategory.allCases) { category in
+            Button {
+                selectedCategory = category
+            } label: {
+                HStack {
+                    Text(category.title)
+                    Spacer(minLength: 8)
+                    if selectedCategory == category {
+                        Image(systemName: "checkmark")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+        }
+        #endif
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            List(SettingsCategory.allCases, selection: $selectedCategory) { category in
-                Text(category.title)
-                    .tag(category)
-            }
+            settingsSidebar
             .listStyle(.sidebar)
             .frame(width: 220)
 
@@ -3227,7 +3263,11 @@ private struct NativeSettingsView: View {
                 .padding(22)
             }
         }
+        #if os(macOS)
         .background(Color(nsColor: .windowBackgroundColor))
+        #else
+        .background(Color(uiColor: .systemGroupedBackground))
+        #endif
     }
 }
 

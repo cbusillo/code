@@ -99,6 +99,7 @@ create a session.
 ## Notes
 
 - For native design/UX standards, use `UI_UX_REFERENCE.md`.
+- For iOS/iPadOS demo scaffolding, see `native/CodeNativeiOS/README.md`.
 - The app requests microphone and speech recognition permission when recording
   starts.
 - Voice capture currently uses the system speech recognizer with on-device
