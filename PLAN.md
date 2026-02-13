@@ -18,19 +18,23 @@
 - Server tests now cover `from_seq` fallback high-water and incremental replay
   payload-size behavior.
 - Native reducer tests cover stale `session_attached` acceptance rules.
+- Server tests now cover two-client detach/reattach mirror behavior with
+  high-water duplicate suppression.
+- Native state-store tests now cover stale/out-of-order live events and
+  duplicate incremental replay handling.
 
 ## Active Plan (Next)
 
 ### P0: Mirror Determinism (Must Hold)
 
-- [ ] Lock replay/live invariants in tests (`seq` monotonicity,
+- [x] Lock replay/live invariants in tests (`seq` monotonicity,
   `from_seq` semantics, no replay+live duplicates).
-- [ ] Add deterministic reconnect/reattach integration tests for TUI/native parity.
+- [x] Add deterministic reconnect/reattach integration tests for TUI/native parity.
 - [x] Add server coverage for attach replay + high-water edges,
   including `from_seq > 0` payload-size policy.
-- [ ] Add native state-store tests for stale/out-of-order live events
+- [x] Add native state-store tests for stale/out-of-order live events
   and duplicate replay handling.
-- [ ] Add automated two-client same-session mirror test
+- [x] Add automated two-client same-session mirror test
   through detach/reattach cycles.
 
 ### P1: macOS Product Polish (No Feature Gaps in Core Flow)
@@ -59,8 +63,8 @@
 
 ## Harness Follow-Ups
 
-- [ ] Move backend/app teardown to process-group cleanup to avoid orphaned children.
-- [ ] Evaluate event-driven watch mode (or slower polling) to reduce CPU churn.
+- [x] Move backend/app teardown to process-group cleanup to avoid orphaned children.
+- [x] Evaluate event-driven watch mode (or slower polling) to reduce CPU churn.
 
 ## Validation Gates (Required)
 

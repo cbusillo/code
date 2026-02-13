@@ -41,6 +41,22 @@ APP_PID=""
 APP_NAME="CodeNativeApp"
 LOCK_FILE="$ROOT_DIR/.code/dev-native.lock"
 
+terminate_process_tree() {
+	local pid="$1"
+	if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+		return
+	fi
+
+	local children
+	children="$(pgrep -P "$pid" 2>/dev/null || true)"
+	for child in $children; do
+		terminate_process_tree "$child"
+	done
+
+	kill "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+}
+
 acquire_lock() {
 	mkdir -p "$(dirname "$LOCK_FILE")"
 	if [[ -f "$LOCK_FILE" ]]; then
@@ -77,8 +93,7 @@ acquire_lock() {
 kill_existing_backend() {
 	if [[ -n "$BACKEND_PID" ]] && kill -0 "$BACKEND_PID" 2>/dev/null; then
 		echo "[dev-native] stopping our backend (pid $BACKEND_PID)"
-		kill "$BACKEND_PID" 2>/dev/null || true
-		wait "$BACKEND_PID" 2>/dev/null || true
+		terminate_process_tree "$BACKEND_PID"
 	fi
 
 	BACKEND_PID=""
@@ -136,15 +151,12 @@ wait_for_backend_ready() {
 }
 
 kill_existing_native_app() {
-	local pids
-	pids="$(pgrep -af "$APP_NAME" 2>/dev/null | awk '!/CodeNativeAutomation/ {print $1}' || true)"
-	if [[ -n "$pids" ]]; then
-		echo "[dev-native] stopping existing $APP_NAME process(es): $pids"
-		for pid in $pids; do
-			kill "$pid" 2>/dev/null || true
-		done
-		sleep 0.2
+	if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
+		echo "[dev-native] stopping our app (pid $APP_PID)"
+		terminate_process_tree "$APP_PID"
 	fi
+
+	APP_PID=""
 }
 
 activate_app() {
@@ -161,12 +173,8 @@ start_app() {
 }
 
 stop_processes() {
-	for pid in "$BACKEND_PID" "$APP_PID"; do
-		if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-			kill "$pid" 2>/dev/null || true
-			wait "$pid" 2>/dev/null || true
-		fi
-	done
+	kill_existing_backend
+	kill_existing_native_app
 
 	BACKEND_PID=""
 	APP_PID=""
@@ -185,14 +193,20 @@ watch_snapshot() {
 		\( -path '*/target/*' -o -path '*/.build/*' -o -path '*/node_modules/*' \) -prune -o \
 		-type f \
 		\( -name '*.rs' -o -name '*.toml' -o -name '*.swift' -o -name '*.json' -o -name '*.mjs' -o -name '*.js' -o -name '*.css' -o -name '*.html' \) \
-		-print0 2>/dev/null |
-		while IFS= read -r -d '' file; do
-			# Files may disappear between find and stat while builds are running.
-			stat -f '%m %N' "$file" 2>/dev/null || true
-		done |
+		-exec stat -f '%m %N' {} + 2>/dev/null |
 		LC_ALL=C sort |
 		shasum -a 256 |
 		awk '{print $1}'
+}
+
+watch_once_event_driven() {
+	fswatch -1 -r \
+		--exclude '.*/target/.*' \
+		--exclude '.*/\.build/.*' \
+		--exclude '.*/node_modules/.*' \
+		--include '.*\.(rs|toml|swift|json|mjs|js|css|html)$' \
+		--exclude '.*' \
+		code-rs native/CodeNative >/dev/null
 }
 
 acquire_lock
@@ -209,17 +223,29 @@ if [[ "$WATCH_MODE" == "0" ]]; then
 fi
 
 echo "[dev-native] watch mode enabled"
-PREV_SNAPSHOT="$(watch_snapshot)"
-
-while true; do
-	sleep 1
-	NEXT_SNAPSHOT="$(watch_snapshot)"
-	if [[ "$NEXT_SNAPSHOT" != "$PREV_SNAPSHOT" ]]; then
-		PREV_SNAPSHOT="$NEXT_SNAPSHOT"
+if command -v fswatch >/dev/null 2>&1; then
+	echo "[dev-native] using event-driven watcher (fswatch)"
+	while true; do
+		watch_once_event_driven
 		echo "[dev-native] changes detected, restarting backend + app"
 		stop_processes
 		start_backend
 		wait_for_backend_ready
 		start_app
-	fi
-done
+	done
+else
+	echo "[dev-native] fswatch not found; using polling fallback"
+	PREV_SNAPSHOT="$(watch_snapshot)"
+	while true; do
+		sleep 2
+		NEXT_SNAPSHOT="$(watch_snapshot)"
+		if [[ "$NEXT_SNAPSHOT" != "$PREV_SNAPSHOT" ]]; then
+			PREV_SNAPSHOT="$NEXT_SNAPSHOT"
+			echo "[dev-native] changes detected, restarting backend + app"
+			stop_processes
+			start_backend
+			wait_for_backend_ready
+			start_app
+		fi
+	done
+fi
