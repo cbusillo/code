@@ -41,7 +41,7 @@
 
 - [ ] Align macOS transcript behavior with TUI for dense history,
   long diffs, and approvals.
-- [ ] Implement keybindings + focus management for compose,
+- [x] Implement keybindings + focus management for compose,
   interrupt, approvals, and settings.
 - [ ] Remove/avoid placeholder UX text on primary surfaces.
 - [ ] Keep primary controls persistently visible and correctly

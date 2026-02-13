@@ -55,6 +55,7 @@ struct ContentView: View {
     @State private var showConnectionPopover = false
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
+    @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
     private let modelOptions = ["GPT-5.3-Codex", "GPT-5.2", "Claude Sonnet 4.5"]
@@ -249,6 +250,8 @@ struct ContentView: View {
             activeTranscriptItemID = nil
             #if os(iOS)
             showThreadPicker = false
+            #else
+            composerIsFocused = true
             #endif
         }
         .onChange(of: store.sessions) { _, _ in
@@ -276,16 +279,25 @@ struct ContentView: View {
                         await store.createSession(cwd: nil)
                     }
                 }
+                #if os(macOS)
+                .keyboardShortcut("n", modifiers: [.command])
+                #endif
 
                 ActionRailButton(icon: "arrow.clockwise", title: "Refresh", accessibilityID: "rail.refresh") {
                     Task {
                         await store.refreshSessions()
                     }
                 }
+                #if os(macOS)
+                .keyboardShortcut("r", modifiers: [.command])
+                #endif
 
                 ActionRailButton(icon: "clock.arrow.circlepath", title: "Automations", accessibilityID: "rail.automations") {
                     showSettings = true
                 }
+                #if os(macOS)
+                .keyboardShortcut(",", modifiers: [.command])
+                #endif
 
                 ActionRailButton(icon: "cube.box", title: "Skills", accessibilityID: "rail.skills") {
                     showSettings = true
@@ -979,6 +991,7 @@ struct ContentView: View {
                         .foregroundStyle(.white.opacity(0.9))
                         .scrollContentBackground(.hidden)
                         .frame(height: composerEditorHeight)
+                        .focused($composerIsFocused)
                         .padding(.horizontal, 12)
                         .padding(.top, 8)
                         .accessibilityIdentifier("composer.input")
@@ -1062,9 +1075,7 @@ struct ContentView: View {
                 .accessibilityIdentifier("composer.mic-toggle")
 
                 Button {
-                    Task {
-                        await store.interruptTurn()
-                    }
+                    interruptTurnAction()
                 } label: {
                     Image(systemName: "stop.fill")
                         .font(.caption2.weight(.semibold))
@@ -1075,6 +1086,9 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
                 .accessibilityIdentifier("composer.stop")
+                #if os(macOS)
+                .keyboardShortcut(".", modifiers: [.command])
+                #endif
 
                 Spacer(minLength: 6)
 
@@ -1082,9 +1096,7 @@ struct ContentView: View {
                     .font(.caption2)
 
                 Button {
-                    Task {
-                        await store.submitComposer()
-                    }
+                    submitComposerAction()
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
@@ -1098,6 +1110,9 @@ struct ContentView: View {
                 )
                 .disabled(!canSubmit)
                 .accessibilityIdentifier("composer.send")
+                #if os(macOS)
+                .keyboardShortcut(.return, modifiers: [.command])
+                #endif
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1162,9 +1177,7 @@ struct ContentView: View {
                 .accessibilityIdentifier("composer.mic-toggle")
 
                 Button {
-                    Task {
-                        await store.interruptTurn()
-                    }
+                    interruptTurnAction()
                 } label: {
                     Image(systemName: "stop.fill")
                         .font(.caption2.weight(.semibold))
@@ -1175,11 +1188,12 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
                 .accessibilityIdentifier("composer.stop")
+                #if os(macOS)
+                .keyboardShortcut(".", modifiers: [.command])
+                #endif
 
                 Button {
-                    Task {
-                        await store.submitComposer()
-                    }
+                    submitComposerAction()
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
@@ -1193,6 +1207,9 @@ struct ContentView: View {
                 )
                 .disabled(!canSubmit)
                 .accessibilityIdentifier("composer.send")
+                #if os(macOS)
+                .keyboardShortcut(.return, modifiers: [.command])
+                #endif
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1256,6 +1273,18 @@ struct ContentView: View {
 
     private var canSubmit: Bool {
         canSendTurns && !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func submitComposerAction() {
+        Task {
+            await store.submitComposer()
+        }
+    }
+
+    private func interruptTurnAction() {
+        Task {
+            await store.interruptTurn()
+        }
     }
 
     private var composerEditorHeight: CGFloat {
