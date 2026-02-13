@@ -1495,6 +1495,18 @@ fn host_is_loopback(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    fn make_system_item(seq: u64) -> SessionStreamItem {
+        SessionStreamItem::System {
+            session_id: Uuid::nil(),
+            seq,
+            level: "info".to_string(),
+            message: format!("payload-{seq}"),
+        }
+    }
 
     #[test]
     fn truncate_attach_history_caps_initial_payload_bytes() {
@@ -1549,5 +1561,35 @@ mod tests {
 
         let replay = truncate_attach_history(history, 5);
         assert!(replay.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_forwarder_uses_high_water_mark_to_drop_duplicates() {
+        let (stream_tx, stream_rx) = broadcast::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+
+        let handle = spawn_session_forwarder(out_tx, stream_rx, 3);
+
+        stream_tx.send(make_system_item(2)).expect("send seq=2");
+        stream_tx.send(make_system_item(3)).expect("send seq=3");
+
+        let silent = timeout(Duration::from_millis(150), out_rx.recv()).await;
+        assert!(silent.is_err(), "no message should be forwarded at high water");
+
+        stream_tx.send(make_system_item(4)).expect("send seq=4");
+
+        let message = timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("forwarder should emit newer message")
+            .expect("forwarded message should exist");
+
+        match message {
+            ServerMessage::SessionStream { item } => {
+                assert_eq!(item.seq(), 4);
+            }
+            other => panic!("unexpected forwarded payload: {other:?}"),
+        }
+
+        handle.abort();
     }
 }

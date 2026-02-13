@@ -5,13 +5,25 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT_DIR/target"}
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+	echo "[pre-release] validating native Swift package"
+	swift build --package-path "$ROOT_DIR/native/CodeNative"
+
+	echo "[pre-release] validating iOS demo build"
+	xcodebuild \
+		-project "$ROOT_DIR/native/CodeNativeiOS/CodeNativeiOSDemo.xcodeproj" \
+		-scheme CodeNativeiOSDemo \
+		-destination "generic/platform=iOS Simulator" \
+		build
+fi
+
 echo "[pre-release] building CLI (dev-fast)"
 cd "$ROOT_DIR/code-rs"
 cargo build --locked --profile dev-fast --bin code
 
 echo "[pre-release] running CLI smokes (skip cargo tests)"
 SKIP_CARGO_TESTS=1 CI_CLI_BIN="$CARGO_TARGET_DIR/dev-fast/code" \
-  bash "$ROOT_DIR/scripts/ci-tests.sh"
+	bash "$ROOT_DIR/scripts/ci-tests.sh"
 
 echo "[pre-release] running workspace tests (nextest)"
 cargo nextest run --no-fail-fast --locked
