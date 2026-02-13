@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
+use tokio::time::Instant;
 use tokio::time::sleep;
 use tracing::info;
 use tracing::warn;
@@ -51,6 +52,11 @@ mod transport;
 pub use crate::transport::AppServerTransport;
 
 const INTERNAL_REQUEST_ID_PREFIX: &str = "__code_internal_request__";
+
+// In stdio mode we allow time for in-flight request routes to resolve so
+// late responses can still be delivered. Keep this bounded to avoid hangs.
+const STDIO_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
+const STDIO_CONNECTION_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Control-plane messages from the processor side to the outbound router task.
 enum OutboundControlEvent {
@@ -275,11 +281,20 @@ pub async fn run_main_with_transport(
                                 .clear_callbacks_for_connection(connection_id)
                                 .await;
                             processor.on_connection_closed(connection_id).await;
-                            wait_for_request_routes_for_connection(
+                            let pending_request_routes = wait_for_request_routes_for_connection(
                                 &request_routes,
                                 connection_id,
+                                STDIO_CONNECTION_DRAIN_TIMEOUT,
                             )
                             .await;
+                            if pending_request_routes > 0 {
+                                warn!(
+                                    connection_id = ?connection_id,
+                                    pending_request_routes,
+                                    timeout = ?STDIO_CONNECTION_DRAIN_TIMEOUT,
+                                    "stdio shutdown timed out waiting for pending request routes to drain"
+                                );
+                            }
                         }
 
                         if outbound_control_tx
@@ -489,19 +504,28 @@ async fn remove_request_routes_for_connection(
 async fn wait_for_request_routes_for_connection(
     request_routes: &Arc<tokio::sync::Mutex<HashMap<RequestId, RequestRoute>>>,
     connection_id: ConnectionId,
-) {
+    timeout: Duration,
+) -> usize {
+    let deadline = Instant::now() + timeout;
     loop {
-        let has_pending_requests = {
+        let pending_request_routes = {
             let request_routes = request_routes.lock().await;
             request_routes
                 .values()
-                .any(|route| route.connection_id == connection_id)
+                .filter(|route| route.connection_id == connection_id)
+                .count()
         };
 
-        if !has_pending_requests {
-            return;
+        if pending_request_routes == 0 {
+            return 0;
         }
 
-        sleep(Duration::from_millis(10)).await;
+        let now = Instant::now();
+        if now >= deadline {
+            return pending_request_routes;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        sleep(remaining.min(STDIO_CONNECTION_DRAIN_POLL_INTERVAL)).await;
     }
 }
