@@ -78,6 +78,41 @@ final class SessionStreamReducerTests: XCTestCase {
         XCTAssertEqual(appended.map(\.seq), [3, 4, 5, 6])
     }
 
+    func testShouldAcceptSessionAttachedRejectsStaleExpectedSession() {
+        let selected = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let expected = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let attached = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+
+        XCTAssertFalse(
+            SessionStreamReducer.shouldAcceptSessionAttached(
+                selectedSessionID: selected,
+                expectedSessionID: expected,
+                attachedSessionID: attached
+            )
+        )
+    }
+
+    func testShouldAcceptSessionAttachedRequiresSelectedSessionMatch() {
+        let selected = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let attached = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+        XCTAssertTrue(
+            SessionStreamReducer.shouldAcceptSessionAttached(
+                selectedSessionID: selected,
+                expectedSessionID: nil,
+                attachedSessionID: attached
+            )
+        )
+
+        XCTAssertFalse(
+            SessionStreamReducer.shouldAcceptSessionAttached(
+                selectedSessionID: nil,
+                expectedSessionID: nil,
+                attachedSessionID: attached
+            )
+        )
+    }
+
     private func makeSystemItem(seq: UInt64) -> SessionStreamItem {
         SessionStreamItem(
             type: "system",
@@ -93,4 +128,3 @@ final class SessionStreamReducerTests: XCTestCase {
         )
     }
 }
-
