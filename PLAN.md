@@ -14,22 +14,31 @@
 - Replay attach now honors high-water semantics (`from_seq`).
 - Native stream reducer now normalizes/dedupes sequence ordering.
 - Server forwarder high-water filtering has deterministic unit coverage.
+- Dev harness now waits for backend readiness and defaults to ownership-safe cleanup.
 
 ## Active Plan (Next)
 
 ### P0: Mirror Determinism (Must Hold)
 
-- [ ] Add deterministic reconnect/reattach tests for TUI/native parity paths.
-- [ ] Add server test coverage for attach replay + high-water edge cases.
-- [ ] Add native store tests for stale/out-of-order live events and duplicate replay.
-- [ ] Validate two-client same-session mirroring under detach/reattach cycles.
+- [ ] Lock replay/live invariants in tests (`seq` monotonicity,
+  `from_seq` semantics, no replay+live duplicates).
+- [ ] Add deterministic reconnect/reattach integration tests for TUI/native parity.
+- [ ] Add server coverage for attach replay + high-water edges,
+  including `from_seq > 0` payload-size policy.
+- [ ] Add native state-store tests for stale/out-of-order live events
+  and duplicate replay handling.
+- [ ] Add automated two-client same-session mirror test
+  through detach/reattach cycles.
 
 ### P1: macOS Product Polish (No Feature Gaps in Core Flow)
 
-- [ ] Final macOS transcript parity pass (dense history, long diffs, approvals).
-- [ ] Keyboard pass for primary workflows (compose, interrupt, approvals, settings).
+- [ ] Align macOS transcript behavior with TUI for dense history,
+  long diffs, and approvals.
+- [ ] Implement keybindings + focus management for compose,
+  interrupt, approvals, and settings.
 - [ ] Remove/avoid placeholder UX text on primary surfaces.
-- [ ] Keep controls visible and stateful (model/reasoning/sandbox/approval selectors).
+- [ ] Keep primary controls persistently visible and correctly
+  stateful (model/reasoning/sandbox/approval).
 
 ### P2: Hardening + Release Readiness
 
@@ -53,6 +62,11 @@
   `build`
 - `./build-fast.sh`
 - `./pre-release.sh` now includes native build validation on macOS.
+
+## Fast PR Gates (Recommended)
+
+- `swift test --package-path native/CodeNative`
+- `cargo test --manifest-path code-rs/Cargo.toml -p code-app-server`
 
 ## Deferred (Pruned From Active Work)
 
