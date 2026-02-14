@@ -58,6 +58,7 @@ struct ContentView: View {
 
     @State private var lastSpokenItemID: String?
     @State private var showSettings = false
+    @State private var settingsCategory: SettingsCategory = .general
     @State private var showThreadPicker = false
     @State private var showConnectionPopover = false
     @State private var ideContextEnabled = true
@@ -80,6 +81,54 @@ struct ContentView: View {
             "Find the top performance bottleneck and fix it.",
             "Create a clear implementation plan for my next feature."
         ]
+    }
+
+    private var isCompactPhoneLayout: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .compact
+        #else
+        return false
+        #endif
+    }
+
+    private var topBarActionButtonSize: CGFloat {
+        isCompactPhoneLayout ? 30 : 34
+    }
+
+    private var welcomePrimaryFontSize: CGFloat {
+        #if os(iOS)
+        return isCompactPhoneLayout ? 34 : 42
+        #else
+        return 42
+        #endif
+    }
+
+    private var welcomeSecondaryFontSize: CGFloat {
+        #if os(iOS)
+        return isCompactPhoneLayout ? 26 : 44
+        #else
+        return 44
+        #endif
+    }
+
+    private var welcomeSecondaryLineLimit: Int {
+        isCompactPhoneLayout ? 4 : 3
+    }
+
+    private var welcomePromptCardMinHeight: CGFloat {
+        isCompactPhoneLayout ? 98 : 112
+    }
+
+    private var welcomePromptCardLineLimit: Int {
+        isCompactPhoneLayout ? 2 : 3
+    }
+
+    private var shouldUsePromptScroller: Bool {
+        #if os(iOS)
+        return isCompactPhoneLayout
+        #else
+        return false
+        #endif
     }
 
     private var selectedThemeMode: AppThemeMode {
@@ -225,20 +274,22 @@ struct ContentView: View {
         }
         .preferredColorScheme(selectedThemeMode.colorScheme)
         .sheet(isPresented: $showSettings) {
-            NativeSettingsView(
-                store: store,
-                autoSpeakAssistant: $autoSpeakAssistant,
-                autoSubmitVoice: $autoSubmitVoice,
-                themeModeRaw: $themeModeRaw,
-                threadDensityRaw: $threadDensityRaw,
-                openDestinationRaw: $openDestinationRaw,
-                followupModeRaw: $followupModeRaw,
-                multilineBehaviorRaw: $multilineBehaviorRaw,
-                preventSleep: $preventSleep,
-                glassWindow: $glassWindow
-            )
-            #if os(macOS)
-            .frame(minWidth: 900, minHeight: 620)
+            #if os(iOS)
+            NavigationStack {
+                settingsSheetContent
+                    .navigationTitle("Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") {
+                                showSettings = false
+                            }
+                            .accessibilityIdentifier("settings.done")
+                        }
+                    }
+            }
+            #else
+            settingsSheetContent
             #endif
         }
         #if os(iOS)
@@ -293,6 +344,26 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var settingsSheetContent: some View {
+        NativeSettingsView(
+            store: store,
+            autoSpeakAssistant: $autoSpeakAssistant,
+            autoSubmitVoice: $autoSubmitVoice,
+            themeModeRaw: $themeModeRaw,
+            threadDensityRaw: $threadDensityRaw,
+            openDestinationRaw: $openDestinationRaw,
+            followupModeRaw: $followupModeRaw,
+            multilineBehaviorRaw: $multilineBehaviorRaw,
+            preventSleep: $preventSleep,
+            glassWindow: $glassWindow,
+            initialCategory: settingsCategory
+        )
+        #if os(macOS)
+        .frame(minWidth: 900, minHeight: 620)
+        #endif
+    }
+
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
@@ -323,14 +394,14 @@ struct ContentView: View {
                 #endif
 
                 ActionRailButton(icon: "clock.arrow.circlepath", title: "Automations", accessibilityID: "rail.automations") {
-                    showSettings = true
+                    presentSettings(.configuration)
                 }
                 #if os(macOS)
                 .keyboardShortcut(",", modifiers: [.command])
                 #endif
 
                 ActionRailButton(icon: "cube.box", title: "Skills", accessibilityID: "rail.skills") {
-                    showSettings = true
+                    presentSettings(.mcpServers)
                 }
             }
 
@@ -430,7 +501,7 @@ struct ContentView: View {
             Spacer(minLength: 8)
 
             Button {
-                showSettings = true
+                presentSettings(.general)
             } label: {
                 Label("Settings", systemImage: "gearshape")
                     .font(.subheadline)
@@ -501,14 +572,17 @@ struct ContentView: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.95))
                 .lineLimit(topBarTitleLineLimit)
+                .minimumScaleFactor(0.85)
                 .truncationMode(.tail)
 
             HStack(spacing: 8) {
-                Text(store.selectedSession.map(sessionSubtitleLine(for:)) ?? "")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.62))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if !isCompactPhoneLayout {
+                    Text(store.selectedSession.map(sessionSubtitleLine(for:)) ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
 
                 Spacer(minLength: 8)
 
@@ -519,8 +593,8 @@ struct ContentView: View {
                 topBarActions
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
+        .padding(.horizontal, isCompactPhoneLayout ? 14 : 18)
+        .padding(.vertical, isCompactPhoneLayout ? 8 : 10)
         .background(Color.black.opacity(0.24))
     }
 
@@ -559,7 +633,7 @@ struct ContentView: View {
         } label: {
             Image(systemName: "ellipsis.circle")
                 .font(.subheadline.weight(.semibold))
-                .frame(width: 34, height: 34)
+                .frame(width: topBarActionButtonSize, height: topBarActionButtonSize)
                 .background(Color.white.opacity(0.06), in: Circle())
         }
         .buttonStyle(.plain)
@@ -567,13 +641,21 @@ struct ContentView: View {
         .accessibilityIdentifier("top.quick-actions")
 
         if !showsIPadSplitLayout {
-            TopBarIconButton(icon: "list.bullet", accessibilityID: "top.threads") {
+            TopBarIconButton(
+                icon: "list.bullet",
+                accessibilityID: "top.threads",
+                buttonSize: topBarActionButtonSize
+            ) {
                 showThreadPicker = true
             }
         }
 
-        TopBarIconButton(icon: "gearshape", accessibilityID: "top.settings") {
-            showSettings = true
+        TopBarIconButton(
+            icon: "gearshape",
+            accessibilityID: "top.settings",
+            buttonSize: topBarActionButtonSize
+        ) {
+            presentSettings(.general)
         }
         #else
         TopBarButton(icon: "folder", title: "Open", accessibilityID: "top.open") {
@@ -582,14 +664,18 @@ struct ContentView: View {
         .disabled(store.selectedSession == nil)
 
         TopBarButton(icon: "circle.dashed.inset.filled", title: "Commit", accessibilityID: "top.review") {
-            showSettings = true
+            presentSettings(.git)
         }
         .disabled(store.selectedSession == nil)
         #endif
     }
 
     private var topBarTitleLineLimit: Int {
+        #if os(iOS)
+        return isCompactPhoneLayout ? 2 : 1
+        #else
         return 1
+        #endif
     }
 
     private var statusChip: some View {
@@ -1036,26 +1122,57 @@ struct ContentView: View {
 
             VStack(spacing: 6) {
                 Text("Let's build")
-                    .font(.system(size: 42, weight: .semibold))
+                    .font(.system(size: welcomePrimaryFontSize, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.95))
                 Text(sessionDisplayTitle(for: session))
-                    .font(.system(size: 44, weight: .semibold))
+                    .font(.system(size: welcomeSecondaryFontSize, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.55))
+                    .lineLimit(welcomeSecondaryLineLimit)
+                    .minimumScaleFactor(0.75)
+                    .multilineTextAlignment(.center)
             }
 
+            welcomePromptSection
+
+            Spacer(minLength: 24)
+        }
+        .padding(.top, isCompactPhoneLayout ? 12 : 36)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var welcomePromptSection: some View {
+        if shouldUsePromptScroller {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(quickStartPrompts, id: \.self) { prompt in
+                        QuickPromptCard(
+                            prompt: prompt,
+                            lineLimit: welcomePromptCardLineLimit,
+                            minHeight: welcomePromptCardMinHeight
+                        ) {
+                            store.composerText = prompt
+                        }
+                        .frame(width: 224)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
             HStack(spacing: 12) {
                 ForEach(quickStartPrompts, id: \.self) { prompt in
-                    QuickPromptCard(prompt: prompt) {
+                    QuickPromptCard(
+                        prompt: prompt,
+                        lineLimit: welcomePromptCardLineLimit,
+                        minHeight: welcomePromptCardMinHeight
+                    ) {
                         store.composerText = prompt
                     }
                 }
             }
             .frame(maxWidth: 900)
-
-            Spacer(minLength: 24)
         }
-        .padding(.top, 36)
-        .frame(maxWidth: .infinity)
     }
 
     private var composerPanel: some View {
@@ -1357,6 +1474,11 @@ struct ContentView: View {
 
     private var canSubmit: Bool {
         canSendTurns && !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func presentSettings(_ category: SettingsCategory) {
+        settingsCategory = category
+        showSettings = true
     }
 
     private func submitComposerAction() {
@@ -2038,13 +2160,21 @@ private struct TopBarButton: View {
 private struct TopBarIconButton: View {
     let icon: String
     let accessibilityID: String
+    let buttonSize: CGFloat
     let action: () -> Void
+
+    init(icon: String, accessibilityID: String, buttonSize: CGFloat = 34, action: @escaping () -> Void) {
+        self.icon = icon
+        self.accessibilityID = accessibilityID
+        self.buttonSize = buttonSize
+        self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.subheadline.weight(.semibold))
-                .frame(width: 34, height: 34)
+                .frame(width: buttonSize, height: buttonSize)
                 .background(Color.white.opacity(0.06), in: Circle())
         }
         .buttonStyle(.plain)
@@ -2119,7 +2249,16 @@ private struct ConnectionPopover: View {
 
 private struct QuickPromptCard: View {
     let prompt: String
+    let lineLimit: Int
+    let minHeight: CGFloat
     let action: () -> Void
+
+    init(prompt: String, lineLimit: Int = 3, minHeight: CGFloat = 112, action: @escaping () -> Void) {
+        self.prompt = prompt
+        self.lineLimit = lineLimit
+        self.minHeight = minHeight
+        self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
@@ -2130,11 +2269,11 @@ private struct QuickPromptCard: View {
                 Text(prompt)
                     .font(.body.weight(.medium))
                     .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(3)
+                    .lineLimit(lineLimit)
                     .multilineTextAlignment(.leading)
             }
             .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
             .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -3533,6 +3672,7 @@ private struct NativeSettingsView: View {
     @Binding var multilineBehaviorRaw: String
     @Binding var preventSleep: Bool
     @Binding var glassWindow: Bool
+    let initialCategory: SettingsCategory
 
     @State private var selectedCategory: SettingsCategory = .general
 
@@ -3686,6 +3826,9 @@ private struct NativeSettingsView: View {
         #else
         .background(Color(uiColor: .systemGroupedBackground))
         #endif
+        .onAppear {
+            selectedCategory = initialCategory
+        }
     }
 }
 

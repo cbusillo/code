@@ -8,6 +8,10 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
 
     @MainActor
     func testTopBarQuickActionsAndThreadPicker() throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw XCTSkip("This scenario is iPhone-only.")
+        }
+
         let app = XCUIApplication()
         app.launch()
 
@@ -26,7 +30,14 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         refreshAction.tap()
 
         threadsButton.tap()
-        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        let threadPickerDoneButton = app.buttons["Done"]
+        XCTAssertTrue(threadPickerDoneButton.waitForExistence(timeout: 5))
+        threadPickerDoneButton.tap()
+
+        settingsButton.tap()
+        let settingsDoneButton = app.buttons["settings.done"]
+        XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
+        settingsDoneButton.tap()
     }
 
     @MainActor
@@ -41,5 +52,15 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["rail.new-thread"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.textViews["composer.input"].exists)
         XCTAssertFalse(app.buttons["top.threads"].exists)
+
+        app.buttons["rail.automations"].tap()
+        let settingsDoneButton = app.buttons["settings.done"]
+        XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Settings"].exists)
+        settingsDoneButton.tap()
+
+        app.buttons["rail.skills"].tap()
+        XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Settings"].exists)
     }
 }
