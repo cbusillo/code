@@ -75,6 +75,29 @@ struct ContentView: View {
         store.connectionState == .connected && store.selectedSession != nil
     }
 
+    private var hasComposerText: Bool {
+        !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var showVoiceBadge: Bool {
+        voiceInput.isRecording || voiceInput.transcriptState != .idle
+    }
+
+    private var lastAssistantResponseText: String? {
+        for item in store.selectedSessionItems.reversed() {
+            guard item.cardStyle == .assistant else {
+                continue
+            }
+
+            let trimmed = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return nil
+    }
+
     private var quickStartPrompts: [String] {
         [
             "Build a one-page summary of this repo.",
@@ -95,6 +118,14 @@ struct ContentView: View {
         isCompactPhoneLayout ? 30 : 34
     }
 
+    private var assistantTranscriptMaxWidth: CGFloat {
+        #if os(iOS)
+        return isCompactPhoneLayout ? 336 : 560
+        #else
+        return 760
+        #endif
+    }
+
     private var welcomePrimaryFontSize: CGFloat {
         #if os(iOS)
         return isCompactPhoneLayout ? 34 : 42
@@ -112,7 +143,7 @@ struct ContentView: View {
     }
 
     private var welcomeSecondaryLineLimit: Int {
-        isCompactPhoneLayout ? 4 : 3
+        isCompactPhoneLayout ? 2 : 3
     }
 
     private var welcomePromptCardMinHeight: CGFloat {
@@ -620,6 +651,15 @@ struct ContentView: View {
             }
             .accessibilityIdentifier("top.quick-actions.refresh")
 
+            if lastAssistantResponseText != nil {
+                Button {
+                    copyLastAssistantResponseToPasteboard()
+                } label: {
+                    Label("Copy last reply", systemImage: "doc.on.doc")
+                }
+                .accessibilityIdentifier("top.quick-actions.copy-last")
+            }
+
             if store.connectionState == .disconnected {
                 Button {
                     Task {
@@ -758,7 +798,7 @@ struct ContentView: View {
         return HStack(spacing: 0) {
             if item.cardStyle == .assistant {
                 AssistantTranscriptLine(text: item.body)
-                    .frame(maxWidth: 760, alignment: .leading)
+                    .frame(maxWidth: assistantTranscriptMaxWidth, alignment: .leading)
                 Spacer(minLength: transcriptBubbleGutter)
             } else if item.prefersCenteredBubble {
                 Spacer(minLength: transcriptBubbleGutter)
@@ -781,7 +821,10 @@ struct ContentView: View {
 
     private var transcriptHorizontalPadding: CGFloat {
         #if os(iOS)
-        return showsIPadSplitLayout ? 18 : 12
+        if showsIPadSplitLayout {
+            return 18
+        }
+        return isCompactPhoneLayout ? 10 : 12
         #else
         return 26
         #endif
@@ -789,7 +832,10 @@ struct ContentView: View {
 
     private var transcriptBubbleGutter: CGFloat {
         #if os(iOS)
-        return showsIPadSplitLayout ? 34 : 10
+        if showsIPadSplitLayout {
+            return 34
+        }
+        return isCompactPhoneLayout ? 8 : 10
         #else
         return 72
         #endif
@@ -1111,8 +1157,10 @@ struct ContentView: View {
     }
 
     private func welcomePanel(for session: SessionSummary) -> some View {
-        VStack(spacing: 22) {
-            Spacer(minLength: 34)
+        VStack(spacing: isCompactPhoneLayout ? 16 : 22) {
+            if !isCompactPhoneLayout {
+                Spacer(minLength: 34)
+            }
 
             Image(systemName: "sparkles")
                 .font(.title2.weight(.semibold))
@@ -1134,31 +1182,34 @@ struct ContentView: View {
 
             welcomePromptSection
 
-            Spacer(minLength: 24)
+            if !isCompactPhoneLayout {
+                Spacer(minLength: 24)
+            }
         }
-        .padding(.top, isCompactPhoneLayout ? 12 : 36)
+        .padding(.top, isCompactPhoneLayout ? 8 : 36)
         .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
     private var welcomePromptSection: some View {
         if shouldUsePromptScroller {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(quickStartPrompts, id: \.self) { prompt in
-                        QuickPromptCard(
-                            prompt: prompt,
-                            lineLimit: welcomePromptCardLineLimit,
-                            minHeight: welcomePromptCardMinHeight
-                        ) {
-                            store.composerText = prompt
-                        }
-                        .frame(width: 224)
+            TabView {
+                ForEach(quickStartPrompts, id: \.self) { prompt in
+                    QuickPromptCard(
+                        prompt: prompt,
+                        lineLimit: welcomePromptCardLineLimit,
+                        minHeight: welcomePromptCardMinHeight
+                    ) {
+                        store.composerText = prompt
                     }
+                    .padding(.horizontal, 2)
                 }
-                .padding(.horizontal, 2)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            #if os(iOS)
+            .tabViewStyle(.page(indexDisplayMode: .automatic))
+            #endif
+            .frame(height: welcomePromptCardMinHeight + 12)
+            .frame(maxWidth: .infinity)
         } else {
             HStack(spacing: 12) {
                 ForEach(quickStartPrompts, id: \.self) { prompt in
@@ -1192,7 +1243,7 @@ struct ContentView: View {
                     if store.composerText.isEmpty {
                         Text("Ask for follow-up changes")
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.42))
                             .padding(.horizontal, 18)
                             .padding(.top, 14)
                             .allowsHitTesting(false)
@@ -1201,10 +1252,10 @@ struct ContentView: View {
 
                 composerControlRows
             }
-            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(Color.white.opacity(isCompactPhoneLayout ? 0.065 : 0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                    .stroke(Color.white.opacity(isCompactPhoneLayout ? 0.14 : 0.09), lineWidth: 1)
             )
         }
         .padding(.horizontal, composerHorizontalPadding)
@@ -1291,22 +1342,38 @@ struct ContentView: View {
                 .keyboardShortcut(".", modifiers: [.command])
                 #endif
 
+                if hasComposerText {
+                    Button {
+                        store.composerText = ""
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .accessibilityIdentifier("composer.clear")
+                }
+
                 Spacer(minLength: 6)
 
-                VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
-                    .font(.caption2)
+                if showVoiceBadge {
+                    VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
+                        .font(.caption2)
+                }
 
                 Button {
                     submitComposerAction()
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(canSubmit ? .black : .white.opacity(0.6))
                 }
                 .buttonStyle(.plain)
                 .frame(width: 28, height: 28)
                 .background(
-                    canSubmit ? Color.white : Color.white.opacity(0.35),
+                    canSubmit ? Color.white : Color.white.opacity(0.16),
                     in: Circle()
                 )
                 .disabled(!canSubmit)
@@ -1398,12 +1465,12 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(canSubmit ? .black : .white.opacity(0.6))
                 }
                 .buttonStyle(.plain)
                 .frame(width: 28, height: 28)
                 .background(
-                    canSubmit ? Color.white : Color.white.opacity(0.35),
+                    canSubmit ? Color.white : Color.white.opacity(0.16),
                     in: Circle()
                 )
                 .disabled(!canSubmit)
@@ -1479,6 +1546,15 @@ struct ContentView: View {
     private func presentSettings(_ category: SettingsCategory) {
         settingsCategory = category
         showSettings = true
+    }
+
+    private func copyLastAssistantResponseToPasteboard() {
+        #if os(iOS)
+        guard let text = lastAssistantResponseText else {
+            return
+        }
+        UIPasteboard.general.string = text
+        #endif
     }
 
     private func submitComposerAction() {
@@ -1723,20 +1799,23 @@ struct ContentView: View {
 
     private func transcriptWidthCap(for item: SessionStreamItem) -> CGFloat {
         #if os(iOS)
+        let compactCap: CGFloat = isCompactPhoneLayout ? 318 : 350
+        let toolCap: CGFloat = isCompactPhoneLayout ? 330 : 360
+
         if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent {
-            return 360
+            return toolCap
         }
 
         if item.prefersTrailingBubble {
             let estimated = CGFloat(item.body.count) * 5.4 + 64
-            return min(280, max(130, estimated))
+            return min(isCompactPhoneLayout ? 252 : 280, max(120, estimated))
         }
 
         switch item.cardStyle {
         case .tool, .approval:
-            return 360
+            return toolCap
         case .reasoning, .composer, .system, .defaultStyle, .assistant, .user:
-            return 350
+            return compactCap
         }
         #else
         if item.isPatchApplyEndEvent {
@@ -2287,6 +2366,18 @@ private struct QuickPromptCard: View {
 private struct AssistantTranscriptLine: View {
     let text: String
 
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
+    private var usesCompactPhoneTypography: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .compact
+        #else
+        return false
+        #endif
+    }
+
     private var renderedText: Text {
         if let attributed = try? AttributedString(
             markdown: text,
@@ -2303,12 +2394,12 @@ private struct AssistantTranscriptLine: View {
 
     var body: some View {
         renderedText
-            .font(.body)
+            .font(usesCompactPhoneTypography ? .callout : .body)
             .foregroundStyle(.white.opacity(0.93))
-            .lineSpacing(4)
+            .lineSpacing(usesCompactPhoneTypography ? 2 : 4)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 4)
+            .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2999,9 +3090,21 @@ private struct TranscriptCard: View {
     let onActivate: () -> Void
     let onApproval: (ApprovalDecisionChoice) -> Void
 
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
     @State private var selectedDecision: ApprovalDecisionChoice = .approved
     @State private var isExpanded = false
     @State private var diffExpansionSteps = 0
+
+    private var usesCompactPhoneLayout: Bool {
+        #if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .compact
+        #else
+        false
+        #endif
+    }
 
     private var cardBackground: Color {
         if item.isPatchApplyEndEvent {
@@ -3226,11 +3329,14 @@ private struct TranscriptCard: View {
     }
 
     private var baseDiffLineLimit: Int {
-        isActive ? 12 : 7
+        if usesCompactPhoneLayout {
+            return isActive ? 9 : 5
+        }
+        return isActive ? 12 : 7
     }
 
     private var diffExpandChunkSize: Int {
-        20
+        usesCompactPhoneLayout ? 14 : 20
     }
 
     private var currentDiffLineLimit: Int {
@@ -3259,11 +3365,14 @@ private struct TranscriptCard: View {
         guard shouldClampBodyLines else {
             return nil
         }
+        if usesCompactPhoneLayout {
+            return isActive ? 14 : 6
+        }
         return isActive ? 18 : 7
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: usesCompactPhoneLayout ? 8 : 10) {
             if showsMetaHeader {
                 HStack {
                     Text(item.title)
@@ -3464,9 +3573,15 @@ private struct TranscriptCard: View {
                 }
             } else {
                 Text(displayedBody)
-                    .font(usesMonospacedBody ? .body.monospaced() : (usesCompactBodyText ? .subheadline : .body))
+                    .font(
+                        usesMonospacedBody
+                        ? .body.monospaced()
+                        : (usesCompactBodyText
+                           ? (usesCompactPhoneLayout ? .caption : .subheadline)
+                           : (usesCompactPhoneLayout ? .callout : .body))
+                    )
                     .foregroundStyle(.white.opacity(0.93))
-                    .lineSpacing(3)
+                    .lineSpacing(usesCompactPhoneLayout ? 2 : 3)
                     .textSelection(.enabled)
                     .lineLimit(bodyLineLimit)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3531,20 +3646,27 @@ private struct TranscriptCard: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, usesCompactPhoneLayout ? 12 : 14)
+        .padding(.vertical, usesCompactPhoneLayout ? 10 : 12)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: usesCompactPhoneLayout ? 14 : 16, style: .continuous))
         .overlay {
             if shouldDrawBorder {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: usesCompactPhoneLayout ? 14 : 16, style: .continuous)
                     .stroke(cardBorder, lineWidth: 1)
             }
         }
         .overlay {
             if isActive {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: usesCompactPhoneLayout ? 14 : 16, style: .continuous)
                     .stroke(Color.white.opacity(0.16), lineWidth: 1)
+            }
+        }
+        .contextMenu {
+            if !item.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button("Copy text") {
+                    copyTextToPasteboard(item.body)
+                }
             }
         }
         .onTapGesture {
@@ -3556,6 +3678,16 @@ private struct TranscriptCard: View {
                 isExpanded = false
             }
         }
+    }
+
+    private func copyTextToPasteboard(_ text: String) {
+        #if os(macOS)
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(text, forType: .string)
+        #elseif os(iOS)
+        UIPasteboard.general.string = text
+        #endif
     }
 
     private var expandButtonLabel: String {

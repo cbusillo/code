@@ -38,6 +38,15 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         let settingsDoneButton = app.buttons["settings.done"]
         XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
         settingsDoneButton.tap()
+
+        let composerInput = app.textViews["composer.input"]
+        XCTAssertTrue(composerInput.exists)
+        composerInput.tap()
+        composerInput.typeText("test clear")
+
+        let clearButton = app.buttons["composer.clear"]
+        XCTAssertTrue(clearButton.waitForExistence(timeout: 3))
+        clearButton.tap()
     }
 
     @MainActor
