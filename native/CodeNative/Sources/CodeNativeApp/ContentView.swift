@@ -60,6 +60,7 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var settingsCategory: SettingsCategory = .general
     @State private var showThreadPicker = false
+    @State private var threadSearchQuery = ""
     @State private var showConnectionPopover = false
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
@@ -73,6 +74,34 @@ struct ContentView: View {
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
+    }
+
+    private var composerHelperText: String? {
+        if canSendTurns {
+            return nil
+        }
+
+        if store.connectionState != .connected {
+            return "Connect to start sending messages"
+        }
+
+        if store.selectedSession == nil {
+            return "Create or select a thread to continue"
+        }
+
+        return nil
+    }
+
+    private var composerPrimaryActionTitle: String? {
+        if store.connectionState != .connected {
+            return "Connect"
+        }
+
+        if store.selectedSession == nil {
+            return "New thread"
+        }
+
+        return nil
     }
 
     private var hasComposerText: Bool {
@@ -118,6 +147,26 @@ struct ContentView: View {
         isCompactPhoneLayout ? 30 : 34
     }
 
+    private var compactSessionMetaLine: String? {
+        guard isCompactPhoneLayout,
+              let session = store.selectedSession
+        else {
+            return nil
+        }
+
+        let eventCount = store.selectedSessionItems.count
+        let eventLabel = eventCount == 1 ? "1 event" : "\(eventCount) events"
+        return "\(sessionDisplaySubtitle(for: session)) • \(eventLabel)"
+    }
+
+    private var transcriptRowSpacing: CGFloat {
+        #if os(iOS)
+        return isCompactPhoneLayout ? 10 : 12
+        #else
+        return 12
+        #endif
+    }
+
     private var assistantTranscriptMaxWidth: CGFloat {
         #if os(iOS)
         return isCompactPhoneLayout ? 336 : 560
@@ -147,7 +196,7 @@ struct ContentView: View {
     }
 
     private var welcomePromptCardMinHeight: CGFloat {
-        isCompactPhoneLayout ? 98 : 112
+        isCompactPhoneLayout ? 90 : 112
     }
 
     private var welcomePromptCardLineLimit: Int {
@@ -160,6 +209,18 @@ struct ContentView: View {
         #else
         return false
         #endif
+    }
+
+    private var compactWelcomeSubtitle: String {
+        "Start with a quick prompt or type below"
+    }
+
+    private var usesCondensedWelcomeCopy: Bool {
+        isCompactPhoneLayout || showsIPadSplitLayout
+    }
+
+    private var composerControlForegroundStyle: Color {
+        isCompactPhoneLayout ? Color.white.opacity(0.62) : .secondary
     }
 
     private var selectedThemeMode: AppThemeMode {
@@ -208,7 +269,7 @@ struct ContentView: View {
     }
 
     private var repoGroups: [RepoSessionGroup] {
-        let grouped = Dictionary(grouping: visibleSessions) { session in
+        let grouped = Dictionary(grouping: filteredSessions) { session in
             let path = URL(fileURLWithPath: session.cwd)
             let repo = path.lastPathComponent
             return repo.isEmpty ? "workspace" : repo
@@ -235,6 +296,21 @@ struct ContentView: View {
         store.sessions.filter { !isHiddenReviewSession($0) }
     }
 
+    private var filteredSessions: [SessionSummary] {
+        let query = threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return visibleSessions
+        }
+
+        let normalized = query.lowercased()
+        return visibleSessions.filter { session in
+            let title = sessionDisplayTitle(for: session).lowercased()
+            let repo = sessionRepoName(for: session).lowercased()
+            let model = sessionDisplaySubtitle(for: session).lowercased()
+            return title.contains(normalized) || repo.contains(normalized) || model.contains(normalized)
+        }
+    }
+
     private var hiddenReviewCountByRepo: [String: Int] {
         store.sessions.reduce(into: [String: Int]()) { result, session in
             guard isHiddenReviewSession(session) else {
@@ -251,13 +327,13 @@ struct ContentView: View {
     }
 
     private var sessionTitleCounts: [String: Int] {
-        visibleSessions.reduce(into: [String: Int]()) { counts, session in
+        filteredSessions.reduce(into: [String: Int]()) { counts, session in
             counts[sessionDisplayTitle(for: session), default: 0] += 1
         }
     }
 
     private var sessionCountByRepoName: [String: Int] {
-        visibleSessions.reduce(into: [String: Int]()) { counts, session in
+        filteredSessions.reduce(into: [String: Int]()) { counts, session in
             counts[sessionRepoName(for: session), default: 0] += 1
         }
     }
@@ -373,6 +449,28 @@ struct ContentView: View {
             _ = voiceInput.stopRecording()
             voiceOutput.stop()
         }
+        #if os(iOS)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Button("Dismiss") {
+                    composerIsFocused = false
+                }
+
+                Spacer()
+
+                if hasComposerText {
+                    Button("Clear") {
+                        store.composerText = ""
+                    }
+                }
+
+                Button("Send") {
+                    submitComposerAction()
+                }
+                .disabled(!canSubmit)
+            }
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -438,12 +536,27 @@ struct ContentView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if !visibleSessions.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            TextField("Filter threads", text: $threadSearchQuery)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.9))
+                                .accessibilityIdentifier("sidebar.search")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+
                     if repoGroups.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("No threads")
+                            Text(threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No threads" : "No matching threads")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.9))
-                            Text("Start your first local thread to populate the sidebar.")
+                            Text(threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Start your first local thread to populate the sidebar." : "Try a different filter or clear search.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -453,12 +566,19 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
 
-                            Button("Create first thread") {
-                                Task {
-                                    await store.createSession(cwd: nil)
+                            if threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Button("Create first thread") {
+                                    Task {
+                                        await store.createSession(cwd: nil)
+                                    }
                                 }
+                                .buttonStyle(.borderedProminent)
+                            } else {
+                                Button("Clear filter") {
+                                    threadSearchQuery = ""
+                                }
+                                .buttonStyle(.bordered)
                             }
-                            .buttonStyle(.borderedProminent)
                         }
                         .padding(10)
                         .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -607,7 +727,13 @@ struct ContentView: View {
                 .truncationMode(.tail)
 
             HStack(spacing: 8) {
-                if !isCompactPhoneLayout {
+                if let compactSessionMetaLine {
+                    Text(compactSessionMetaLine)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.56))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
                     Text(store.selectedSession.map(sessionSubtitleLine(for:)) ?? "")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.62))
@@ -745,7 +871,7 @@ struct ContentView: View {
         ScrollViewReader { proxy in
             GeometryReader { geometry in
                 ScrollView {
-                    VStack(spacing: 12) {
+                    VStack(spacing: transcriptRowSpacing) {
                         if transcriptItems.isEmpty {
                             welcomePanel(for: session)
                         } else {
@@ -1159,7 +1285,7 @@ struct ContentView: View {
     private func welcomePanel(for session: SessionSummary) -> some View {
         VStack(spacing: isCompactPhoneLayout ? 16 : 22) {
             if !isCompactPhoneLayout {
-                Spacer(minLength: 34)
+                Spacer(minLength: showsIPadSplitLayout ? 14 : 34)
             }
 
             Image(systemName: "sparkles")
@@ -1172,22 +1298,32 @@ struct ContentView: View {
                 Text("Let's build")
                     .font(.system(size: welcomePrimaryFontSize, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.95))
-                Text(sessionDisplayTitle(for: session))
-                    .font(.system(size: welcomeSecondaryFontSize, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .lineLimit(welcomeSecondaryLineLimit)
-                    .minimumScaleFactor(0.75)
-                    .multilineTextAlignment(.center)
+                if usesCondensedWelcomeCopy {
+                    Text(compactWelcomeSubtitle)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .lineLimit(showsIPadSplitLayout ? 2 : 1)
+                        .minimumScaleFactor(0.85)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text(sessionDisplayTitle(for: session))
+                        .font(.system(size: welcomeSecondaryFontSize, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(welcomeSecondaryLineLimit)
+                        .minimumScaleFactor(0.75)
+                        .multilineTextAlignment(.center)
+                }
             }
 
             welcomePromptSection
 
             if !isCompactPhoneLayout {
-                Spacer(minLength: 24)
+                Spacer(minLength: showsIPadSplitLayout ? 8 : 24)
             }
         }
-        .padding(.top, isCompactPhoneLayout ? 8 : 36)
-        .frame(maxWidth: .infinity)
+        .padding(.top, isCompactPhoneLayout ? 8 : (showsIPadSplitLayout ? 18 : 36))
+        .frame(maxWidth: showsIPadSplitLayout ? 900 : .infinity)
+        .frame(maxWidth: .infinity, alignment: .top)
     }
 
     @ViewBuilder
@@ -1272,7 +1408,7 @@ struct ContentView: View {
 
     private var composerBottomPadding: CGFloat {
         #if os(iOS)
-        return 0
+        return showsIPadSplitLayout ? 8 : 10
         #else
         return 18
         #endif
@@ -1307,10 +1443,36 @@ struct ContentView: View {
                 Spacer(minLength: 10)
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(composerControlForegroundStyle)
             .padding(.horizontal, 12)
             .padding(.top, 8)
             .padding(.bottom, 4)
+
+            if let helper = composerHelperText {
+                HStack(spacing: 8) {
+                    Text(helper)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 8)
+
+                    if let primaryActionTitle = composerPrimaryActionTitle {
+                        Button(primaryActionTitle) {
+                            composerPrimaryAction()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                        .accessibilityIdentifier("composer.primary-action")
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 2)
+            }
 
             HStack(spacing: 8) {
                 Button {
@@ -1320,7 +1482,7 @@ struct ContentView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(voiceInput.isRecording ? .red : .secondary)
+                .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
                 .frame(width: 24, height: 24)
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
@@ -1333,7 +1495,7 @@ struct ContentView: View {
                         .font(.caption2.weight(.semibold))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.62))
                 .frame(width: 24, height: 24)
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
@@ -1350,7 +1512,7 @@ struct ContentView: View {
                             .font(.caption2.weight(.semibold))
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.62))
                     .frame(width: 24, height: 24)
                     .background(Color.white.opacity(0.05), in: Circle())
                     .accessibilityIdentifier("composer.clear")
@@ -1373,7 +1535,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .frame(width: 28, height: 28)
                 .background(
-                    canSubmit ? Color.white : Color.white.opacity(0.16),
+                    canSubmit ? Color.white : Color.white.opacity(0.24),
                     in: Circle()
                 )
                 .disabled(!canSubmit)
@@ -1383,7 +1545,7 @@ struct ContentView: View {
                 #endif
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(composerControlForegroundStyle)
             .padding(.horizontal, 12)
             .padding(.top, 2)
             .padding(.bottom, 8)
@@ -1470,7 +1632,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .frame(width: 28, height: 28)
                 .background(
-                    canSubmit ? Color.white : Color.white.opacity(0.16),
+                    canSubmit ? Color.white : Color.white.opacity(0.24),
                     in: Circle()
                 )
                 .disabled(!canSubmit)
@@ -1546,6 +1708,19 @@ struct ContentView: View {
     private func presentSettings(_ category: SettingsCategory) {
         settingsCategory = category
         showSettings = true
+    }
+
+    private func composerPrimaryAction() {
+        Task {
+            if store.connectionState != .connected {
+                await store.connect()
+                return
+            }
+
+            if store.selectedSession == nil {
+                await store.createSession(cwd: nil)
+            }
+        }
     }
 
     private func copyLastAssistantResponseToPasteboard() {
@@ -3197,6 +3372,15 @@ private struct TranscriptCard: View {
         item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent
     }
 
+    private var monospacedBodyFont: Font {
+        #if os(iOS)
+        if usesCompactPhoneLayout {
+            return .system(.callout, design: .monospaced)
+        }
+        #endif
+        return .body.monospaced()
+    }
+
     private var showsMetaHeader: Bool {
         if item.turnDiffText != nil {
             return false
@@ -3575,7 +3759,7 @@ private struct TranscriptCard: View {
                 Text(displayedBody)
                     .font(
                         usesMonospacedBody
-                        ? .body.monospaced()
+                        ? monospacedBodyFont
                         : (usesCompactBodyText
                            ? (usesCompactPhoneLayout ? .caption : .subheadline)
                            : (usesCompactPhoneLayout ? .callout : .body))
