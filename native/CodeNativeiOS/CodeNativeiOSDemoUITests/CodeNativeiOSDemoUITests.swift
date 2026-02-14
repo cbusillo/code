@@ -41,6 +41,7 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         settingsButton.tap()
         let settingsDoneButton = app.buttons["settings.done"]
         XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Transcript density"].exists)
         settingsDoneButton.tap()
 
         let composerInput = app.textViews["composer.input"]
@@ -71,6 +72,7 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         let settingsDoneButton = app.buttons["settings.done"]
         XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Settings"].exists)
+        XCTAssertTrue(app.staticTexts["Transcript density"].exists)
         settingsDoneButton.tap()
 
         app.buttons["rail.skills"].tap()

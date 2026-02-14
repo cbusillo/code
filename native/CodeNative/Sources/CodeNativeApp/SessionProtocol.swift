@@ -250,17 +250,30 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         let reasoning = usage?["reasoning_output_tokens"]?.numberValue.map(Int.init)
 
         var parts: [String] = [model]
-        if let total {
-            parts.append("\(formatCompactTokenCount(total)) total")
+
+        let hasDirectionalBreakdown = (input ?? 0) > 0 || (output ?? 0) > 0 || (reasoning ?? 0) > 0
+
+        if !hasDirectionalBreakdown,
+           let total,
+           total > 0 {
+            parts.append("\(formatCompactTokenCount(total)) tok")
         }
-        if let input {
-            parts.append("\(formatCompactTokenCount(input)) in")
+
+        if let input,
+           input > 0 {
+            parts.append("in \(formatCompactTokenCount(input))")
         }
-        if let output {
-            parts.append("\(formatCompactTokenCount(output)) out")
+        if let output,
+           output > 0 {
+            parts.append("out \(formatCompactTokenCount(output))")
         }
-        if let reasoning {
-            parts.append("\(formatCompactTokenCount(reasoning)) reasoning")
+        if let reasoning,
+           reasoning > 0 {
+            parts.append("reason \(formatCompactTokenCount(reasoning))")
+        }
+
+        if parts.count == 1 {
+            parts.append("usage updated")
         }
 
         return parts.joined(separator: " · ")

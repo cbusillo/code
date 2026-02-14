@@ -107,6 +107,45 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertTrue(detached.shouldHideFromTranscript)
     }
 
+    func testTokenCountBodyUsesCondensedLabels() {
+        let breakdownItem = makeCoreEventItem(
+            seq: 13,
+            payload: .object([
+                "type": .string("token_count"),
+                "info": .object([
+                    "requested_model": .string("gpt-5.3-codex"),
+                    "last_token_usage": .object([
+                        "total_tokens": .number(12340),
+                        "input_tokens": .number(4600),
+                        "output_tokens": .number(7740),
+                        "reasoning_output_tokens": .number(1200)
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertTrue(breakdownItem.body.contains("GPT-5.3-Codex"))
+        XCTAssertFalse(breakdownItem.body.contains("tok"))
+        XCTAssertTrue(breakdownItem.body.contains("in"))
+        XCTAssertTrue(breakdownItem.body.contains("out"))
+        XCTAssertTrue(breakdownItem.body.contains("reason"))
+
+        let totalOnlyItem = makeCoreEventItem(
+            seq: 14,
+            payload: .object([
+                "type": .string("token_count"),
+                "info": .object([
+                    "requested_model": .string("gpt-5.3-codex"),
+                    "last_token_usage": .object([
+                        "total_tokens": .number(1200)
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertTrue(totalOnlyItem.body.contains("tok"))
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

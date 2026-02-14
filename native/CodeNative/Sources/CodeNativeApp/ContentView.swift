@@ -44,6 +44,7 @@ struct ContentView: View {
 
     @AppStorage("code_native_theme_mode") private var themeModeRaw = AppThemeMode.system.rawValue
     @AppStorage("code_native_thread_density") private var threadDensityRaw = ThreadDensity.comfortable.rawValue
+    @AppStorage("code_native_transcript_density") private var transcriptDensityRaw = TranscriptDensity.comfortable.rawValue
     @AppStorage("code_native_open_destination") private var openDestinationRaw = OpenDestination.finder.rawValue
     @AppStorage("code_native_followup_mode") private var followupModeRaw = FollowupMode.steer.rawValue
     @AppStorage("code_native_multiline_behavior") private var multilineBehaviorRaw = MultilineBehavior.cmdEnter.rawValue
@@ -167,11 +168,7 @@ struct ContentView: View {
     }
 
     private var transcriptRowSpacing: CGFloat {
-        #if os(iOS)
-        return isCompactPhoneLayout ? 10 : 12
-        #else
-        return 12
-        #endif
+        selectedTranscriptDensity.rowSpacing + (isCompactPhoneLayout ? -1 : 0)
     }
 
     private var assistantTranscriptMaxWidth: CGFloat {
@@ -236,6 +233,10 @@ struct ContentView: View {
 
     private var selectedThreadDensity: ThreadDensity {
         ThreadDensity(rawValue: threadDensityRaw) ?? .comfortable
+    }
+
+    private var selectedTranscriptDensity: TranscriptDensity {
+        TranscriptDensity(rawValue: transcriptDensityRaw) ?? .comfortable
     }
 
     private var connectionChipColor: Color {
@@ -500,6 +501,7 @@ struct ContentView: View {
             autoSubmitVoice: $autoSubmitVoice,
             themeModeRaw: $themeModeRaw,
             threadDensityRaw: $threadDensityRaw,
+            transcriptDensityRaw: $transcriptDensityRaw,
             openDestinationRaw: $openDestinationRaw,
             followupModeRaw: $followupModeRaw,
             multilineBehaviorRaw: $multilineBehaviorRaw,
@@ -929,6 +931,7 @@ struct ContentView: View {
         let card = TranscriptCard(
             item: item,
             isActive: activeTranscriptItemID == item.id,
+            density: selectedTranscriptDensity,
             onActivate: {
                 activeTranscriptItemID = item.id
             },
@@ -942,7 +945,7 @@ struct ContentView: View {
 
         return HStack(spacing: 0) {
             if item.cardStyle == .assistant {
-                AssistantTranscriptLine(text: item.body)
+                AssistantTranscriptLine(text: item.body, density: selectedTranscriptDensity)
                     .frame(maxWidth: assistantTranscriptMaxWidth, alignment: .leading)
                 Spacer(minLength: transcriptBubbleGutter)
             } else if item.prefersCenteredBubble {
@@ -967,22 +970,26 @@ struct ContentView: View {
     private var transcriptHorizontalPadding: CGFloat {
         #if os(iOS)
         if showsIPadSplitLayout {
-            return 18
+            return selectedTranscriptDensity.horizontalPadding + 4
         }
-        return isCompactPhoneLayout ? 10 : 12
+        return isCompactPhoneLayout
+            ? max(8, selectedTranscriptDensity.horizontalPadding - 2)
+            : selectedTranscriptDensity.horizontalPadding
         #else
-        return 26
+        return selectedTranscriptDensity.horizontalPadding + 12
         #endif
     }
 
     private var transcriptBubbleGutter: CGFloat {
         #if os(iOS)
         if showsIPadSplitLayout {
-            return 34
+            return selectedTranscriptDensity.bubbleGutter + 20
         }
-        return isCompactPhoneLayout ? 8 : 10
+        return isCompactPhoneLayout
+            ? max(6, selectedTranscriptDensity.bubbleGutter - 2)
+            : selectedTranscriptDensity.bubbleGutter
         #else
-        return 72
+        return selectedTranscriptDensity.bubbleGutter + 36
         #endif
     }
 
@@ -2039,9 +2046,10 @@ struct ContentView: View {
     }
 
     private func transcriptWidthCap(for item: SessionStreamItem) -> CGFloat {
+        let widthDelta = selectedTranscriptDensity.widthDelta
         #if os(iOS)
-        let compactCap: CGFloat = isCompactPhoneLayout ? 318 : 350
-        let toolCap: CGFloat = isCompactPhoneLayout ? 330 : 360
+        let compactCap: CGFloat = (isCompactPhoneLayout ? 318 : 350) + widthDelta
+        let toolCap: CGFloat = (isCompactPhoneLayout ? 330 : 360) + widthDelta
 
         if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent {
             return toolCap
@@ -2060,27 +2068,27 @@ struct ContentView: View {
         }
         #else
         if item.isPatchApplyEndEvent {
-            return 620
+            return 620 + widthDelta
         }
 
         if item.isTokenCountEvent {
-            return 760
+            return 760 + widthDelta
         }
 
         if item.isBackgroundEvent {
-            return 760
+            return 760 + widthDelta
         }
 
         if item.prefersTrailingBubble {
             let estimated = CGFloat(item.body.count) * 6.4 + 76
-            return min(520, max(170, estimated))
+            return min(520 + widthDelta, max(170, estimated))
         }
 
         switch item.cardStyle {
         case .tool, .approval:
-            return 700
+            return 700 + widthDelta
         case .reasoning, .composer, .system, .defaultStyle, .assistant, .user:
-            return 620
+            return 620 + widthDelta
         }
         #endif
     }
@@ -2326,6 +2334,102 @@ private enum ThreadDensity: String, CaseIterable, Identifiable {
             return 6
         case .comfortable:
             return 10
+        }
+    }
+}
+
+private enum TranscriptDensity: String, CaseIterable, Identifiable {
+    case compact
+    case comfortable
+    case roomy
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .compact:
+            return "Compact"
+        case .comfortable:
+            return "Comfortable"
+        case .roomy:
+            return "Roomy"
+        }
+    }
+
+    var rowSpacing: CGFloat {
+        switch self {
+        case .compact:
+            return 10
+        case .comfortable:
+            return 12
+        case .roomy:
+            return 14
+        }
+    }
+
+    var horizontalPadding: CGFloat {
+        switch self {
+        case .compact:
+            return 10
+        case .comfortable:
+            return 12
+        case .roomy:
+            return 14
+        }
+    }
+
+    var bubbleGutter: CGFloat {
+        switch self {
+        case .compact:
+            return 8
+        case .comfortable:
+            return 10
+        case .roomy:
+            return 12
+        }
+    }
+
+    var widthDelta: CGFloat {
+        switch self {
+        case .compact:
+            return -14
+        case .comfortable:
+            return 0
+        case .roomy:
+            return 24
+        }
+    }
+
+    var lineSpacing: CGFloat {
+        switch self {
+        case .compact:
+            return 2
+        case .comfortable:
+            return 3
+        case .roomy:
+            return 4
+        }
+    }
+
+    var cardHorizontalPadding: CGFloat {
+        switch self {
+        case .compact:
+            return 12
+        case .comfortable:
+            return 14
+        case .roomy:
+            return 16
+        }
+    }
+
+    var cardVerticalPadding: CGFloat {
+        switch self {
+        case .compact:
+            return 10
+        case .comfortable:
+            return 12
+        case .roomy:
+            return 14
         }
     }
 }
@@ -2606,6 +2710,12 @@ private struct QuickPromptCard: View {
 
 private struct AssistantTranscriptLine: View {
     let text: String
+    let density: TranscriptDensity
+
+    init(text: String, density: TranscriptDensity = .comfortable) {
+        self.text = text
+        self.density = density
+    }
 
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -2637,7 +2747,7 @@ private struct AssistantTranscriptLine: View {
         renderedText
             .font(usesCompactPhoneTypography ? .callout : .body)
             .foregroundStyle(.white.opacity(0.93))
-            .lineSpacing(usesCompactPhoneTypography ? 2 : 4)
+            .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
@@ -3328,6 +3438,7 @@ private enum DiffLineKind: Hashable {
 private struct TranscriptCard: View {
     let item: SessionStreamItem
     let isActive: Bool
+    let density: TranscriptDensity
     let onActivate: () -> Void
     let onApproval: (ApprovalDecisionChoice) -> Void
 
@@ -3338,6 +3449,22 @@ private struct TranscriptCard: View {
     @State private var selectedDecision: ApprovalDecisionChoice = .approved
     @State private var isExpanded = false
     @State private var diffExpansionSteps = 0
+
+    private var effectiveLineSpacing: CGFloat {
+        usesCompactPhoneLayout ? min(2, density.lineSpacing) : density.lineSpacing
+    }
+
+    private var effectiveCardHorizontalPadding: CGFloat {
+        usesCompactPhoneLayout ? 12 : density.cardHorizontalPadding
+    }
+
+    private var effectiveCardVerticalPadding: CGFloat {
+        usesCompactPhoneLayout ? 10 : density.cardVerticalPadding
+    }
+
+    private var effectiveCardCornerRadius: CGFloat {
+        usesCompactPhoneLayout ? 14 : 16
+    }
 
     private var usesCompactPhoneLayout: Bool {
         #if os(iOS)
@@ -3490,6 +3617,13 @@ private struct TranscriptCard: View {
         }
     }
 
+    private var metaHeaderColor: Color {
+        if item.isTurnAbortedEvent {
+            return Color.orange.opacity(0.9)
+        }
+        return .secondary
+    }
+
     private var shouldDrawBorder: Bool {
         if item.isBackgroundEvent {
             return true
@@ -3630,13 +3764,13 @@ private struct TranscriptCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: usesCompactPhoneLayout ? 8 : 10) {
+        VStack(alignment: .leading, spacing: max(8, density.rowSpacing - 2)) {
             if showsMetaHeader {
                 HStack {
                     Text(item.title)
                         .font(.caption.weight(.semibold))
                         .textCase(.uppercase)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(metaHeaderColor)
                     Spacer()
                 }
             }
@@ -3839,7 +3973,7 @@ private struct TranscriptCard: View {
                            : (usesCompactPhoneLayout ? .callout : .body))
                     )
                     .foregroundStyle(.white.opacity(0.93))
-                    .lineSpacing(usesCompactPhoneLayout ? 2 : 3)
+                    .lineSpacing(effectiveLineSpacing)
                     .textSelection(.enabled)
                     .lineLimit(bodyLineLimit)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3904,19 +4038,19 @@ private struct TranscriptCard: View {
                 }
             }
         }
-        .padding(.horizontal, usesCompactPhoneLayout ? 12 : 14)
-        .padding(.vertical, usesCompactPhoneLayout ? 10 : 12)
+        .padding(.horizontal, effectiveCardHorizontalPadding)
+        .padding(.vertical, effectiveCardVerticalPadding)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: usesCompactPhoneLayout ? 14 : 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: effectiveCardCornerRadius, style: .continuous))
         .overlay {
             if shouldDrawBorder {
-                RoundedRectangle(cornerRadius: usesCompactPhoneLayout ? 14 : 16, style: .continuous)
+                RoundedRectangle(cornerRadius: effectiveCardCornerRadius, style: .continuous)
                     .stroke(cardBorder, lineWidth: 1)
             }
         }
         .overlay {
             if isActive {
-                RoundedRectangle(cornerRadius: usesCompactPhoneLayout ? 14 : 16, style: .continuous)
+                RoundedRectangle(cornerRadius: effectiveCardCornerRadius, style: .continuous)
                     .stroke(Color.white.opacity(0.16), lineWidth: 1)
             }
         }
@@ -4057,6 +4191,7 @@ private struct NativeSettingsView: View {
     @Binding var autoSubmitVoice: Bool
     @Binding var themeModeRaw: String
     @Binding var threadDensityRaw: String
+    @Binding var transcriptDensityRaw: String
     @Binding var openDestinationRaw: String
     @Binding var followupModeRaw: String
     @Binding var multilineBehaviorRaw: String
@@ -4126,6 +4261,16 @@ private struct NativeSettingsView: View {
                             }
                             .pickerStyle(.segmented)
                             .frame(width: 240)
+                        }
+
+                        SettingsRow(title: "Transcript density", description: "Adjust message spacing and card width in transcript view.") {
+                            Picker("", selection: $transcriptDensityRaw) {
+                                ForEach(TranscriptDensity.allCases) { option in
+                                    Text(option.label).tag(option.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 280)
                         }
 
                         SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
