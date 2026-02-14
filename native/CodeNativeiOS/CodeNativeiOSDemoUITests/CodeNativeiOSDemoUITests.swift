@@ -44,10 +44,12 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Transcript density"].exists)
         settingsDoneButton.tap()
 
+        let quickPromptButton = app.buttons["composer.quick.0"]
+        XCTAssertTrue(quickPromptButton.waitForExistence(timeout: 5))
+        quickPromptButton.tap()
+
         let composerInput = app.textViews["composer.input"]
         XCTAssertTrue(composerInput.exists)
-        composerInput.tap()
-        composerInput.typeText("test clear")
 
         let clearButton = app.buttons["composer.clear"]
         XCTAssertTrue(clearButton.waitForExistence(timeout: 3))

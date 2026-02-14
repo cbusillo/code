@@ -136,6 +136,39 @@ struct ContentView: View {
         ]
     }
 
+    private var composerQuickActionPrompts: [String] {
+        if store.selectedSessionItems.isEmpty {
+            return [
+                "Summarize this thread in 5 bullets.",
+                "What should we do next?",
+                "Draft a minimal implementation plan."
+            ]
+        }
+
+        return [
+            "Summarize progress and open risks.",
+            "Propose the next 3 implementation steps.",
+            "Generate a focused patch plan for the top issue."
+        ]
+    }
+
+    private var primaryComposerQuickActionPrompts: [String] {
+        if isCompactPhoneLayout {
+            return Array(composerQuickActionPrompts.prefix(2))
+        }
+        return composerQuickActionPrompts
+    }
+
+    private var overflowComposerQuickActionPrompts: [String] {
+        guard isCompactPhoneLayout,
+              composerQuickActionPrompts.count > 2
+        else {
+            return []
+        }
+
+        return Array(composerQuickActionPrompts.dropFirst(2))
+    }
+
     private var isCompactPhoneLayout: Bool {
         #if os(iOS)
         return UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .compact
@@ -1506,6 +1539,77 @@ struct ContentView: View {
     private var composerControlRows: some View {
         #if os(iOS)
         VStack(spacing: 0) {
+            if canSendTurns,
+               !hasComposerText {
+                if isCompactPhoneLayout {
+                    HStack(spacing: 8) {
+                        ForEach(Array(primaryComposerQuickActionPrompts.enumerated()), id: \.offset) { index, prompt in
+                            Button {
+                                applyComposerQuickAction(prompt)
+                            } label: {
+                                Text(prompt)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.84))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("composer.quick.\(index)")
+                        }
+
+                        if !overflowComposerQuickActionPrompts.isEmpty {
+                            Menu {
+                                ForEach(Array(overflowComposerQuickActionPrompts.enumerated()), id: \.offset) { offset, prompt in
+                                    Button(prompt) {
+                                        applyComposerQuickAction(prompt)
+                                    }
+                                    .accessibilityIdentifier("composer.quick.\(offset + primaryComposerQuickActionPrompts.count)")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.82))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("composer.quick.more")
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(Array(composerQuickActionPrompts.enumerated()), id: \.offset) { index, prompt in
+                                Button {
+                                    applyComposerQuickAction(prompt)
+                                } label: {
+                                    Text(prompt)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.white.opacity(0.84))
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("composer.quick.\(index)")
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                    }
+                    .padding(.bottom, 4)
+                }
+            }
+
             HStack(spacing: 8) {
                 Menu {
                     ForEach(modelOptions, id: \.self) { option in
@@ -1810,6 +1914,11 @@ struct ContentView: View {
                 await store.createSession(cwd: nil)
             }
         }
+    }
+
+    private func applyComposerQuickAction(_ prompt: String) {
+        store.composerText = prompt
+        composerIsFocused = true
     }
 
     private func copyLastAssistantResponseToPasteboard() {
