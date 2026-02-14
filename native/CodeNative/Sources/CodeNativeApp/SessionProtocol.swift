@@ -203,6 +203,18 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return summarizePatchApplyEnd(object)
         }
 
+        if payloadType == "turn_aborted" {
+            return summarizeTurnAborted(object)
+        }
+
+        if payloadType == "session_attached" {
+            return summarizeSessionAttached(object)
+        }
+
+        if payloadType == "session_detached" {
+            return "Detached from thread"
+        }
+
         if let message = object["message"]?.stringValue {
             return truncate(normalizeStructuredText(message), maxCharacters: 8_000)
         }
@@ -304,6 +316,34 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             .joined(separator: "\n")
 
         return "\(headlineParts.joined(separator: " · "))\n\(truncate(preview, maxCharacters: 380))"
+    }
+
+    private func summarizeTurnAborted(_ object: [String: JSONValue]) -> String {
+        if let reason = object["reason"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !reason.isEmpty {
+            return "Reason: \(reason.replacingOccurrences(of: "_", with: " "))"
+        }
+
+        return "Turn stopped"
+    }
+
+    private func summarizeSessionAttached(_ object: [String: JSONValue]) -> String {
+        let fromSeq = object["from_seq"]?.numberValue.map(UInt64.init)
+        let replayCount = object["replay_item_count"]?.numberValue.map(Int.init)
+
+        var details: [String] = []
+        if let fromSeq {
+            details.append("from seq \(fromSeq)")
+        }
+        if let replayCount {
+            details.append("\(replayCount) replay item\(replayCount == 1 ? "" : "s")")
+        }
+
+        if details.isEmpty {
+            return "Attached to thread"
+        }
+
+        return "Attached to thread (\(details.joined(separator: ", ")))"
     }
 
     private func formatModelName(_ value: String) -> String {
@@ -941,6 +981,13 @@ extension SessionStreamItem {
         return event?.payload?.typeHint == "background_event"
     }
 
+    var isTurnAbortedEvent: Bool {
+        guard type == "core_event" else {
+            return false
+        }
+        return event?.payload?.typeHint == "turn_aborted"
+    }
+
     var isReplayHistoryEvent: Bool {
         guard type == "core_event" else {
             return false
@@ -1239,6 +1286,10 @@ extension SessionStreamItem {
               let payloadType = event?.payload?.typeHint
         else {
             return false
+        }
+
+        if payloadType == "session_attached" || payloadType == "session_detached" || payloadType == "thread_name_updated" {
+            return true
         }
 
         if payloadType == "agent_reasoning_section_break" || payloadType == "agent_reasoning" {

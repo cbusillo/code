@@ -155,7 +155,14 @@ struct ContentView: View {
         }
 
         let eventCount = store.selectedSessionItems.count
-        let eventLabel = eventCount == 1 ? "1 event" : "\(eventCount) events"
+        let eventLabel: String
+        if eventCount == 0 {
+            eventLabel = "Ready"
+        } else if eventCount == 1 {
+            eventLabel = "1 event"
+        } else {
+            eventLabel = "\(eventCount) events"
+        }
         return "\(sessionDisplaySubtitle(for: session)) • \(eventLabel)"
     }
 
@@ -340,6 +347,18 @@ struct ContentView: View {
 
     private var shouldShowRepoHeaders: Bool {
         repoGroups.count > 1
+    }
+
+    private var welcomeQuickSwitchSessions: [SessionSummary] {
+        guard let selectedID = store.selectedSessionID else {
+            return []
+        }
+
+        return filteredSessions
+            .filter { $0.id != selectedID }
+            .sorted(by: { sessionActivityUnixMs($0) > sessionActivityUnixMs($1) })
+            .prefix(4)
+            .map { $0 }
     }
 
     private var showsIPadSplitLayout: Bool {
@@ -1317,6 +1336,10 @@ struct ContentView: View {
 
             welcomePromptSection
 
+            if !welcomeQuickSwitchSessions.isEmpty {
+                welcomeRecentThreadsSection
+            }
+
             if !isCompactPhoneLayout {
                 Spacer(minLength: showsIPadSplitLayout ? 8 : 24)
             }
@@ -1360,6 +1383,49 @@ struct ContentView: View {
             }
             .frame(maxWidth: 900)
         }
+    }
+
+    private var welcomeRecentThreadsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Recent threads")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                Spacer(minLength: 8)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(welcomeQuickSwitchSessions) { session in
+                        Button {
+                            store.selectedSessionID = session.id
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(sessionSidebarTitle(for: session))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .lineLimit(1)
+                                Text(relativeAgeLabel(for: session))
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.55))
+                                    .lineLimit(1)
+                            }
+                            .frame(width: 180, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+        }
+        .frame(maxWidth: 900)
     }
 
     private var composerPanel: some View {
@@ -3282,6 +3348,10 @@ private struct TranscriptCard: View {
     }
 
     private var cardBackground: Color {
+        if item.isTurnAbortedEvent {
+            return Color.orange.opacity(0.13)
+        }
+
         if item.isPatchApplyEndEvent {
             return Color.white.opacity(0.045)
         }
@@ -3315,6 +3385,10 @@ private struct TranscriptCard: View {
     }
 
     private var cardBorder: Color {
+        if item.isTurnAbortedEvent {
+            return Color.orange.opacity(0.34)
+        }
+
         if item.isPatchApplyEndEvent {
             return Color.white.opacity(0.10)
         }

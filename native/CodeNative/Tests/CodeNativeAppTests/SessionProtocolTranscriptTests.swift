@@ -71,6 +71,42 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.cardStyle, .approval)
     }
 
+    func testTurnAbortedBodyShowsReason() {
+        let item = makeCoreEventItem(
+            seq: 10,
+            payload: .object([
+                "type": .string("turn_aborted"),
+                "reason": .string("interrupted")
+            ])
+        )
+
+        XCTAssertEqual(item.body, "Reason: interrupted")
+        XCTAssertTrue(item.isTurnAbortedEvent)
+        XCTAssertFalse(item.shouldHideFromTranscript)
+    }
+
+    func testSessionAttachAndDetachAreSuppressedInTranscript() {
+        let attached = makeCoreEventItem(
+            seq: 11,
+            payload: .object([
+                "type": .string("session_attached"),
+                "from_seq": .number(42),
+                "replay_item_count": .number(3)
+            ])
+        )
+
+        let detached = makeCoreEventItem(
+            seq: 12,
+            payload: .object([
+                "type": .string("session_detached")
+            ])
+        )
+
+        XCTAssertTrue(attached.body.contains("Attached to thread"))
+        XCTAssertTrue(attached.shouldHideFromTranscript)
+        XCTAssertTrue(detached.shouldHideFromTranscript)
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",
