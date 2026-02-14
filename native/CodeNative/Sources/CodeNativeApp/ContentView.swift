@@ -9,6 +9,12 @@ import UIKit
 #endif
 
 struct ContentView: View {
+    private struct ComposerQuickAction: Hashable {
+        let prompt: String
+        let compactLabel: String
+        let icon: String
+    }
+
     @ObservedObject var store: SessionMirrorStore
     @Environment(\.openURL) private var openURL
     #if os(iOS)
@@ -136,37 +142,61 @@ struct ContentView: View {
         ]
     }
 
-    private var composerQuickActionPrompts: [String] {
+    private var composerQuickActions: [ComposerQuickAction] {
         if store.selectedSessionItems.isEmpty {
             return [
-                "Summarize this thread in 5 bullets.",
-                "What should we do next?",
-                "Draft a minimal implementation plan."
+                ComposerQuickAction(
+                    prompt: "Summarize this thread in 5 bullets.",
+                    compactLabel: "Summarize",
+                    icon: "list.bullet"
+                ),
+                ComposerQuickAction(
+                    prompt: "What should we do next?",
+                    compactLabel: "Next step",
+                    icon: "figure.walk.motion"
+                ),
+                ComposerQuickAction(
+                    prompt: "Draft a minimal implementation plan.",
+                    compactLabel: "Plan",
+                    icon: "checklist"
+                )
             ]
         }
 
         return [
-            "Summarize progress and open risks.",
-            "Propose the next 3 implementation steps.",
-            "Generate a focused patch plan for the top issue."
+            ComposerQuickAction(
+                prompt: "Summarize progress and open risks.",
+                compactLabel: "Progress",
+                icon: "chart.line.uptrend.xyaxis"
+            ),
+            ComposerQuickAction(
+                prompt: "Propose the next 3 implementation steps.",
+                compactLabel: "Next 3",
+                icon: "arrowshape.turn.up.right"
+            ),
+            ComposerQuickAction(
+                prompt: "Generate a focused patch plan for the top issue.",
+                compactLabel: "Patch plan",
+                icon: "wrench.and.screwdriver"
+            )
         ]
     }
 
-    private var primaryComposerQuickActionPrompts: [String] {
+    private var primaryComposerQuickActions: [ComposerQuickAction] {
         if isCompactPhoneLayout {
-            return Array(composerQuickActionPrompts.prefix(2))
+            return Array(composerQuickActions.prefix(2))
         }
-        return composerQuickActionPrompts
+        return composerQuickActions
     }
 
-    private var overflowComposerQuickActionPrompts: [String] {
+    private var overflowComposerQuickActions: [ComposerQuickAction] {
         guard isCompactPhoneLayout,
-              composerQuickActionPrompts.count > 2
+              composerQuickActions.count > 2
         else {
             return []
         }
 
-        return Array(composerQuickActionPrompts.dropFirst(2))
+        return Array(composerQuickActions.dropFirst(2))
     }
 
     private var isCompactPhoneLayout: Bool {
@@ -826,43 +856,7 @@ struct ContentView: View {
     private var topBarActions: some View {
         #if os(iOS)
         Menu {
-            Button {
-                Task {
-                    await store.createSession(cwd: nil)
-                }
-            } label: {
-                Label("New thread", systemImage: "square.and.pencil")
-            }
-            .accessibilityIdentifier("top.quick-actions.new-thread")
-
-            Button {
-                Task {
-                    await store.refreshSessions()
-                }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .accessibilityIdentifier("top.quick-actions.refresh")
-
-            if lastAssistantResponseText != nil {
-                Button {
-                    copyLastAssistantResponseToPasteboard()
-                } label: {
-                    Label("Copy last reply", systemImage: "doc.on.doc")
-                }
-                .accessibilityIdentifier("top.quick-actions.copy-last")
-            }
-
-            if store.connectionState == .disconnected {
-                Button {
-                    Task {
-                        await store.connect()
-                    }
-                } label: {
-                    Label("Reconnect", systemImage: "bolt.horizontal.circle")
-                }
-                .accessibilityIdentifier("top.quick-actions.reconnect")
-            }
+            topBarQuickActionMenuItems(includeNavigationItems: isCompactPhoneLayout)
         } label: {
             Image(systemName: "ellipsis.circle")
                 .font(.subheadline.weight(.semibold))
@@ -873,7 +867,8 @@ struct ContentView: View {
         .foregroundStyle(.white.opacity(0.9))
         .accessibilityIdentifier("top.quick-actions")
 
-        if !showsIPadSplitLayout {
+        if !showsIPadSplitLayout,
+           !isCompactPhoneLayout {
             TopBarIconButton(
                 icon: "list.bullet",
                 accessibilityID: "top.threads",
@@ -883,12 +878,14 @@ struct ContentView: View {
             }
         }
 
-        TopBarIconButton(
-            icon: "gearshape",
-            accessibilityID: "top.settings",
-            buttonSize: topBarActionButtonSize
-        ) {
-            presentSettings(.general)
+        if !isCompactPhoneLayout {
+            TopBarIconButton(
+                icon: "gearshape",
+                accessibilityID: "top.settings",
+                buttonSize: topBarActionButtonSize
+            ) {
+                presentSettings(.general)
+            }
         }
         #else
         TopBarButton(icon: "folder", title: "Open", accessibilityID: "top.open") {
@@ -901,6 +898,67 @@ struct ContentView: View {
         }
         .disabled(store.selectedSession == nil)
         #endif
+    }
+
+    @ViewBuilder
+    private func topBarQuickActionMenuItems(includeNavigationItems: Bool) -> some View {
+        Button {
+            Task {
+                await store.createSession(cwd: nil)
+            }
+        } label: {
+            Label("New thread", systemImage: "square.and.pencil")
+        }
+        .accessibilityIdentifier("top.quick-actions.new-thread")
+
+        Button {
+            Task {
+                await store.refreshSessions()
+            }
+        } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
+        }
+        .accessibilityIdentifier("top.quick-actions.refresh")
+
+        if lastAssistantResponseText != nil {
+            Button {
+                copyLastAssistantResponseToPasteboard()
+            } label: {
+                Label("Copy last reply", systemImage: "doc.on.doc")
+            }
+            .accessibilityIdentifier("top.quick-actions.copy-last")
+        }
+
+        if store.connectionState == .disconnected {
+            Button {
+                Task {
+                    await store.connect()
+                }
+            } label: {
+                Label("Reconnect", systemImage: "bolt.horizontal.circle")
+            }
+            .accessibilityIdentifier("top.quick-actions.reconnect")
+        }
+
+        if includeNavigationItems {
+            if !showsIPadSplitLayout {
+                Divider()
+
+                Button {
+                    showThreadPicker = true
+                } label: {
+                    Label("Threads", systemImage: "list.bullet")
+                }
+                .accessibilityIdentifier("top.threads")
+            }
+
+            Button {
+                presentSettings(.general)
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .accessibilityIdentifier("top.settings")
+        }
     }
 
     private var topBarTitleLineLimit: Int {
@@ -1543,14 +1601,15 @@ struct ContentView: View {
                !hasComposerText {
                 if isCompactPhoneLayout {
                     HStack(spacing: 8) {
-                        ForEach(Array(primaryComposerQuickActionPrompts.enumerated()), id: \.offset) { index, prompt in
+                        ForEach(Array(primaryComposerQuickActions.enumerated()), id: \.offset) { index, action in
                             Button {
-                                applyComposerQuickAction(prompt)
+                                applyComposerQuickAction(action.prompt)
                             } label: {
-                                Text(prompt)
+                                Label(action.compactLabel, systemImage: action.icon)
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.white.opacity(0.84))
                                     .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
                                     .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
@@ -1559,13 +1618,15 @@ struct ContentView: View {
                             .accessibilityIdentifier("composer.quick.\(index)")
                         }
 
-                        if !overflowComposerQuickActionPrompts.isEmpty {
+                        if !overflowComposerQuickActions.isEmpty {
                             Menu {
-                                ForEach(Array(overflowComposerQuickActionPrompts.enumerated()), id: \.offset) { offset, prompt in
-                                    Button(prompt) {
-                                        applyComposerQuickAction(prompt)
+                                ForEach(Array(overflowComposerQuickActions.enumerated()), id: \.offset) { offset, action in
+                                    Button {
+                                        applyComposerQuickAction(action.prompt)
+                                    } label: {
+                                        Label(action.prompt, systemImage: action.icon)
                                     }
-                                    .accessibilityIdentifier("composer.quick.\(offset + primaryComposerQuickActionPrompts.count)")
+                                    .accessibilityIdentifier("composer.quick.\(offset + primaryComposerQuickActions.count)")
                                 }
                             } label: {
                                 Image(systemName: "ellipsis")
@@ -1587,11 +1648,11 @@ struct ContentView: View {
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            ForEach(Array(composerQuickActionPrompts.enumerated()), id: \.offset) { index, prompt in
+                            ForEach(Array(composerQuickActions.enumerated()), id: \.offset) { index, action in
                                 Button {
-                                    applyComposerQuickAction(prompt)
+                                    applyComposerQuickAction(action.prompt)
                                 } label: {
-                                    Text(prompt)
+                                    Label(action.prompt, systemImage: action.icon)
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(.white.opacity(0.84))
                                         .lineLimit(1)
@@ -1885,12 +1946,91 @@ struct ContentView: View {
     }
 
     private var emptyState: some View {
-        VStack {
+        VStack(spacing: 0) {
+            Spacer(minLength: isCompactPhoneLayout ? 28 : 44)
+
+            VStack(spacing: 14) {
+                Image(systemName: emptyStateSymbol)
+                    .font(.system(size: isCompactPhoneLayout ? 22 : 26, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .frame(width: 48, height: 48)
+                    .background(Color.white.opacity(0.08), in: Circle())
+
+                VStack(spacing: 6) {
+                    Text(emptyStateTitle)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.94))
+                        .multilineTextAlignment(.center)
+
+                    Text(emptyStateSubtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.58))
+                        .multilineTextAlignment(.center)
+                }
+
+                HStack(spacing: 10) {
+                    Button(emptyStatePrimaryActionTitle) {
+                        emptyStatePrimaryAction()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("empty.primary-action")
+
+                    Button("Settings") {
+                        presentSettings(.general)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("empty.settings")
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(maxWidth: isCompactPhoneLayout ? .infinity : 460)
+            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.09), lineWidth: 1)
+            )
+            .padding(.horizontal, isCompactPhoneLayout ? 20 : 32)
+
             Spacer()
-            Text("Connect and select a session to start mirroring.")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Spacer()
+        }
+    }
+
+    private var emptyStateSymbol: String {
+        if store.connectionState == .connected {
+            return "message"
+        }
+        return "antenna.radiowaves.left.and.right"
+    }
+
+    private var emptyStateTitle: String {
+        if store.connectionState == .connected {
+            return "Create or choose a thread"
+        }
+        return "Connect to your local session"
+    }
+
+    private var emptyStateSubtitle: String {
+        if store.connectionState == .connected {
+            return "Start a new thread to mirror Codex events in real time."
+        }
+        return "Use a local loopback endpoint, then pick a thread to begin."
+    }
+
+    private var emptyStatePrimaryActionTitle: String {
+        if store.connectionState == .connected {
+            return "New thread"
+        }
+        return "Connect"
+    }
+
+    private func emptyStatePrimaryAction() {
+        Task {
+            if store.connectionState == .connected {
+                await store.createSession(cwd: nil)
+            } else {
+                await store.connect()
+            }
         }
     }
 

@@ -16,12 +16,8 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         app.launch()
 
         let quickActionsButton = app.buttons["top.quick-actions"]
-        let threadsButton = app.buttons["top.threads"]
-        let settingsButton = app.buttons["top.settings"]
 
         XCTAssertTrue(quickActionsButton.waitForExistence(timeout: 10))
-        XCTAssertTrue(threadsButton.exists)
-        XCTAssertTrue(settingsButton.exists)
 
         quickActionsButton.tap()
         XCTAssertTrue(app.buttons["top.quick-actions.new-thread"].waitForExistence(timeout: 5))
@@ -29,7 +25,15 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(refreshAction.exists)
         refreshAction.tap()
 
-        threadsButton.tap()
+        if app.buttons["top.threads"].exists {
+            app.buttons["top.threads"].tap()
+        } else {
+            quickActionsButton.tap()
+            let threadsMenuItem = app.buttons["top.threads"]
+            XCTAssertTrue(threadsMenuItem.waitForExistence(timeout: 5))
+            threadsMenuItem.tap()
+        }
+
         let threadPickerDoneButton = app.buttons["Done"]
         XCTAssertTrue(threadPickerDoneButton.waitForExistence(timeout: 5))
 
@@ -38,7 +42,15 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
 
         threadPickerDoneButton.tap()
 
-        settingsButton.tap()
+        if app.buttons["top.settings"].exists {
+            app.buttons["top.settings"].tap()
+        } else {
+            quickActionsButton.tap()
+            let settingsMenuItem = app.buttons["top.settings"]
+            XCTAssertTrue(settingsMenuItem.waitForExistence(timeout: 5))
+            settingsMenuItem.tap()
+        }
+
         let settingsDoneButton = app.buttons["settings.done"]
         XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Transcript density"].exists)
