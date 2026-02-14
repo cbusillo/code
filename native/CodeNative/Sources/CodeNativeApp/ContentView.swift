@@ -4056,6 +4056,29 @@ private struct TranscriptCard: View {
                 .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 preview
+            } else if let tokenUsage = item.tokenUsageBreakdown {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "chart.bar.fill")
+                            .font(.caption)
+                            .foregroundStyle(Color.white.opacity(0.78))
+
+                        Text(tokenUsageHeadline(tokenUsage))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.86))
+                            .lineLimit(1)
+
+                        Spacer(minLength: 4)
+                    }
+
+                    HStack(spacing: 6) {
+                        tokenMetricPill(label: "In", value: tokenUsage.input)
+                        tokenMetricPill(label: "Out", value: tokenUsage.output)
+                        tokenMetricPill(label: "Reason", value: tokenUsage.reasoning)
+
+                        Spacer(minLength: 0)
+                    }
+                }
             } else if item.isBackgroundEvent {
                 let lines = item.body.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                 let headline = lines.first ?? "Background event"
@@ -4267,6 +4290,61 @@ private struct TranscriptCard: View {
         #elseif os(iOS)
         UIPasteboard.general.string = text
         #endif
+    }
+
+    private func tokenUsageHeadline(_ usage: TokenUsageBreakdown) -> String {
+        let model = item.tokenCountRequestedModel.map(displayTokenModelName) ?? "Token usage"
+        guard let total = usage.total,
+              total > 0
+        else {
+            return model
+        }
+
+        return "\(model) · \(formatCompactTokenCount(total)) total"
+    }
+
+    private func displayTokenModelName(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "Token usage"
+        }
+
+        var formatted = trimmed
+        if formatted.lowercased().hasPrefix("gpt-") {
+            formatted = "GPT-\(formatted.dropFirst(4))"
+        }
+        formatted = formatted.replacingOccurrences(of: "-codex", with: "-Codex")
+        formatted = formatted.replacingOccurrences(of: "-mini", with: "-Mini")
+        return formatted
+    }
+
+    private func formatCompactTokenCount(_ value: Int) -> String {
+        let absolute = Double(abs(value))
+        let sign = value < 0 ? "-" : ""
+        if absolute >= 1_000_000 {
+            let shortened = String(format: "%.1f", absolute / 1_000_000)
+                .replacingOccurrences(of: ".0", with: "")
+            return "\(sign)\(shortened)M"
+        }
+        if absolute >= 1_000 {
+            let shortened = String(format: "%.1f", absolute / 1_000)
+                .replacingOccurrences(of: ".0", with: "")
+            return "\(sign)\(shortened)k"
+        }
+        return "\(value)"
+    }
+
+    @ViewBuilder
+    private func tokenMetricPill(label: String, value: Int?) -> some View {
+        if let value,
+           value > 0 {
+            Text("\(label) \(formatCompactTokenCount(value))")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.82))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+        }
     }
 
     private var expandButtonLabel: String {

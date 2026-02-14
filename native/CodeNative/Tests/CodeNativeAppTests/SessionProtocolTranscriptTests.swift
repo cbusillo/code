@@ -146,6 +146,28 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertTrue(totalOnlyItem.body.contains("tok"))
     }
 
+    func testTokenUsageBreakdownParsesStructuredCounts() {
+        let item = makeCoreEventItem(
+            seq: 15,
+            payload: .object([
+                "type": .string("token_count"),
+                "info": .object([
+                    "last_token_usage": .object([
+                        "total_tokens": .number(800),
+                        "input_tokens": .number(300),
+                        "output_tokens": .number(500),
+                        "reasoning_output_tokens": .number(120)
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.tokenUsageBreakdown?.total, 800)
+        XCTAssertEqual(item.tokenUsageBreakdown?.input, 300)
+        XCTAssertEqual(item.tokenUsageBreakdown?.output, 500)
+        XCTAssertEqual(item.tokenUsageBreakdown?.reasoning, 120)
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

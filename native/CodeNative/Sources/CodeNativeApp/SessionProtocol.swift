@@ -818,6 +818,13 @@ struct ExecCommandInfo {
     let duration: String?
 }
 
+struct TokenUsageBreakdown {
+    let total: Int?
+    let input: Int?
+    let output: Int?
+    let reasoning: Int?
+}
+
 struct ReplayHistoryMessage: Hashable, Identifiable {
     enum Role: Hashable {
         case user
@@ -1021,6 +1028,32 @@ extension SessionStreamItem {
         }
 
         return model
+    }
+
+    var tokenUsageBreakdown: TokenUsageBreakdown? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "token_count",
+              let object = payload.objectValue,
+              let info = object["info"]?.objectValue,
+              let usage = info["last_token_usage"]?.objectValue
+        else {
+            return nil
+        }
+
+        let total = usage["total_tokens"]?.numberValue.map(Int.init)
+        let input = usage["input_tokens"]?.numberValue.map(Int.init)
+        let output = usage["output_tokens"]?.numberValue.map(Int.init)
+        let reasoning = usage["reasoning_output_tokens"]?.numberValue.map(Int.init)
+
+        if total == nil,
+           input == nil,
+           output == nil,
+           reasoning == nil {
+            return nil
+        }
+
+        return TokenUsageBreakdown(total: total, input: input, output: output, reasoning: reasoning)
     }
 
     var assistantMessageText: String? {
