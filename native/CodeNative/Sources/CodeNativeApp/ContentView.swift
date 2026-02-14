@@ -873,7 +873,7 @@ struct ContentView: View {
     private var topBarTitleLineLimit: Int {
         #if os(iOS)
         if isCompactPhoneLayout {
-            return 2
+            return usesExpandedTopTitle ? 2 : 1
         }
         return 1
         #else
@@ -1858,7 +1858,18 @@ struct ContentView: View {
     }
 
     private func sessionTitle(for session: SessionSummary) -> String {
-        sessionSidebarTitle(for: session)
+        let title = sessionSidebarTitle(for: session)
+        guard isCompactPhoneLayout else {
+            return title
+        }
+
+        let maxLength = 56
+        guard title.count > maxLength else {
+            return title
+        }
+
+        let end = title.index(title.startIndex, offsetBy: maxLength)
+        return "\(title[..<end])…"
     }
 
     private func ensureVisibleSelection() {
