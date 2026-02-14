@@ -2727,6 +2727,7 @@ private struct QuickPromptCard: View {
 private struct AssistantTranscriptLine: View {
     let text: String
     let density: TranscriptDensity
+    @State private var isExpanded = false
 
     init(text: String, density: TranscriptDensity = .comfortable) {
         self.text = text
@@ -2759,16 +2760,61 @@ private struct AssistantTranscriptLine: View {
         return Text(text)
     }
 
+    private var collapsedLineLimit: Int {
+        usesCompactPhoneTypography ? 12 : 16
+    }
+
+    private var estimatedLineCount: Int {
+        let wrapWidth = usesCompactPhoneTypography ? 52 : 78
+        return text
+            .components(separatedBy: "\n")
+            .reduce(into: 0) { count, line in
+                let wrapped = max(1, (line.count + wrapWidth - 1) / wrapWidth)
+                count += wrapped
+            }
+    }
+
+    private var shouldClampInitially: Bool {
+        estimatedLineCount > collapsedLineLimit + 4 || text.count > 900
+    }
+
+    private var isCollapsed: Bool {
+        shouldClampInitially && !isExpanded
+    }
+
     var body: some View {
-        renderedText
-            .font(usesCompactPhoneTypography ? .callout : .body)
-            .foregroundStyle(.white.opacity(0.93))
-            .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
-            .padding(.vertical, 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.white.opacity(0.22))
+                    .frame(width: 2)
+                    .padding(.top, 2)
+
+                renderedText
+                    .font(usesCompactPhoneTypography ? .callout : .body)
+                    .foregroundStyle(.white.opacity(0.93))
+                    .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                    .textSelection(.enabled)
+                    .lineLimit(isCollapsed ? collapsedLineLimit : nil)
+                    .fixedSize(horizontal: false, vertical: !isCollapsed)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if shouldClampInitially {
+                Button(isExpanded ? "Collapse" : "Show more") {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isExpanded.toggle()
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.78))
+                .padding(.leading, 12)
+            }
+        }
+        .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -3764,7 +3810,9 @@ private struct TranscriptCard: View {
         switch item.cardStyle {
         case .tool, .reasoning, .system, .defaultStyle:
             return !renderedAsDiff && !isExpanded
-        case .approval, .composer, .assistant, .user:
+        case .user:
+            return usesCompactPhoneLayout && !isExpanded
+        case .approval, .composer, .assistant:
             return false
         }
     }
@@ -3772,6 +3820,9 @@ private struct TranscriptCard: View {
     private var bodyLineLimit: Int? {
         guard shouldClampBodyLines else {
             return nil
+        }
+        if item.cardStyle == .user {
+            return isActive ? 12 : 8
         }
         if usesCompactPhoneLayout {
             return isActive ? 14 : 6
