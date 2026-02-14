@@ -171,6 +171,17 @@ struct ContentView: View {
         selectedTranscriptDensity.rowSpacing + (isCompactPhoneLayout ? -1 : 0)
     }
 
+    private var usesExpandedTopTitle: Bool {
+        isCompactPhoneLayout && store.selectedSessionItems.isEmpty
+    }
+
+    private var topBarTitleFont: Font {
+        if isCompactPhoneLayout {
+            return usesExpandedTopTitle ? .title3.weight(.semibold) : .headline.weight(.semibold)
+        }
+        return .headline.weight(.semibold)
+    }
+
     private var assistantTranscriptMaxWidth: CGFloat {
         #if os(iOS)
         return isCompactPhoneLayout ? 336 : 560
@@ -739,12 +750,14 @@ struct ContentView: View {
     }
 
     private var topBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: isCompactPhoneLayout ? 6 : 8) {
             Text(store.selectedSession.map(sessionTitle(for:)) ?? "New thread")
-                .font(.headline.weight(.semibold))
+                .font(topBarTitleFont)
                 .foregroundStyle(.white.opacity(0.95))
                 .lineLimit(topBarTitleLineLimit)
-                .minimumScaleFactor(0.85)
+                .minimumScaleFactor(isCompactPhoneLayout ? 0.74 : 0.85)
+                .lineSpacing(isCompactPhoneLayout ? 1 : 0)
+                .multilineTextAlignment(.leading)
                 .truncationMode(.tail)
 
             HStack(spacing: 8) {
@@ -859,7 +872,10 @@ struct ContentView: View {
 
     private var topBarTitleLineLimit: Int {
         #if os(iOS)
-        return isCompactPhoneLayout ? 2 : 1
+        if isCompactPhoneLayout {
+            return 2
+        }
+        return 1
         #else
         return 1
         #endif
@@ -1995,7 +2011,7 @@ struct ContentView: View {
             }
         }
 
-        let maxLength = 46
+        let maxLength = 120
         if title.count > maxLength {
             let end = title.index(title.startIndex, offsetBy: maxLength)
             title = "\(title[..<end])…"
