@@ -2316,12 +2316,14 @@ struct ContentView: View {
     }
 
     private func sessionDisplayTitle(for session: SessionSummary) -> String {
-        if let summaryTitle = sessionSummaryTitle(session) {
-            return summaryTitle
+        if let threadTitle = sessionThreadTitle(for: session),
+           !isLowSignalThreadTitle(threadTitle) {
+            return threadTitle
         }
 
-        if let threadTitle = sessionThreadTitle(for: session) {
-            return threadTitle
+        if let summaryTitle = sessionSummaryTitle(session),
+           !isLowSignalThreadTitle(summaryTitle) {
+            return summaryTitle
         }
 
         return sessionRepoName(for: session)
@@ -2352,6 +2354,30 @@ struct ContentView: View {
 
         if let updatedName = items.reversed().compactMap(\.threadNameUpdate).first {
             return cleanThreadTitle(updatedName)
+        }
+
+        let userTexts = items
+            .compactMap(\.userMessageText)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        if let latestMeaningful = userTexts
+            .reversed()
+            .compactMap(cleanThreadTitle)
+            .first(where: { !isLowSignalThreadTitle($0) }) {
+            return latestMeaningful
+        }
+
+        if let firstMeaningful = userTexts
+            .compactMap(cleanThreadTitle)
+            .first(where: { !isLowSignalThreadTitle($0) }) {
+            return firstMeaningful
+        }
+
+        if let fallbackUserTitle = userTexts
+            .reversed()
+            .compactMap(cleanThreadTitle)
+            .first {
+            return fallbackUserTitle
         }
 
         if let latestUserText = items
@@ -2421,12 +2447,17 @@ struct ContentView: View {
         var title = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
 
         guard !title.isEmpty else {
             return nil
         }
 
         if title.hasPrefix("[image:") {
+            return nil
+        }
+
+        if title.lowercased().contains("[running in read-only mode") {
             return nil
         }
 
@@ -2438,6 +2469,11 @@ struct ContentView: View {
             }
         }
 
+        if title.lowercased().hasPrefix("review "),
+           let filename = firstFilenameMentioned(in: title) {
+            title = "Review \(filename)"
+        }
+
         let maxLength = 120
         if title.count > maxLength {
             let end = title.index(title.startIndex, offsetBy: maxLength)
@@ -2445,6 +2481,61 @@ struct ContentView: View {
         }
 
         return title
+    }
+
+    private func isLowSignalThreadTitle(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard !normalized.isEmpty else {
+            return true
+        }
+
+        let lowSignalPhrases: Set<String> = [
+            "ok",
+            "okay",
+            "yes",
+            "yep",
+            "thanks",
+            "thank you",
+            "go ahead",
+            "continue",
+            "done",
+            "great",
+            "cool",
+            "test"
+        ]
+
+        if normalized.contains("every code harness") {
+            return true
+        }
+
+        if normalized.contains("session is not from me") {
+            return true
+        }
+
+        return lowSignalPhrases.contains(normalized)
+    }
+
+    private func firstFilenameMentioned(in value: String) -> String? {
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        let tokens = value.components(separatedBy: separators).filter { !$0.isEmpty }
+        let supportedSuffixes = [".swift", ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".kt"]
+
+        for token in tokens {
+            let lowercased = token.lowercased()
+            guard supportedSuffixes.contains(where: { lowercased.hasSuffix($0) }) else {
+                continue
+            }
+
+            let filename = URL(fileURLWithPath: token).lastPathComponent
+            if !filename.isEmpty {
+                return filename
+            }
+        }
+
+        return nil
     }
 
     private func sessionDisplaySubtitle(for session: SessionSummary) -> String {
@@ -3209,8 +3300,30 @@ private struct AssistantTranscriptLine: View {
         shouldClampInitially && !isExpanded
     }
 
+    private var canCopyText: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if canCopyText {
+                HStack {
+                    Spacer()
+
+                    Button {
+                        copyTextToPasteboard(text)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                            .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Copy message")
+                }
+            }
+
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(Color.white.opacity(0.22))
@@ -3242,6 +3355,16 @@ private struct AssistantTranscriptLine: View {
         .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func copyTextToPasteboard(_ value: String) {
+        #if os(macOS)
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(value, forType: .string)
+        #elseif os(iOS)
+        UIPasteboard.general.string = value
+        #endif
     }
 }
 
@@ -4199,6 +4322,20 @@ private struct TranscriptCard: View {
         item.turnDiffText != nil
     }
 
+    private var copyableBodyText: String? {
+        if let diff = item.turnDiffText {
+            let trimmed = diff.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : diff
+        }
+
+        let trimmed = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        return item.body
+    }
+
     private var totalDiffLines: Int {
         guard let diff = item.turnDiffText else {
             return 0
@@ -4259,13 +4396,30 @@ private struct TranscriptCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: max(8, density.rowSpacing - 2)) {
-            if showsMetaHeader {
+            if showsMetaHeader || copyableBodyText != nil {
                 HStack {
-                    Text(item.title)
-                        .font(.caption.weight(.semibold))
-                        .textCase(.uppercase)
-                        .foregroundStyle(metaHeaderColor)
+                    if showsMetaHeader {
+                        Text(item.title)
+                            .font(.caption.weight(.semibold))
+                            .textCase(.uppercase)
+                            .foregroundStyle(metaHeaderColor)
+                    }
+
                     Spacer()
+
+                    if let copyableBodyText {
+                        Button {
+                            copyTextToPasteboard(copyableBodyText)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(6)
+                                .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Copy card text")
+                    }
                 }
             }
 

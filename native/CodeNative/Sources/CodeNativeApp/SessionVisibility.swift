@@ -3,6 +3,7 @@ import Foundation
 enum SessionHiddenReason: Equatable {
     case autoReviewWorktree
     case automationPrompt
+    case harnessReviewPrompt
 }
 
 enum SessionVisibility {
@@ -22,6 +23,10 @@ enum SessionVisibility {
 
         if isLikelyAutomationPromptTitle(session.title) {
             return .automationPrompt
+        }
+
+        if isLikelyHarnessReviewPrompt(session.title) {
+            return .harnessReviewPrompt
         }
 
         return nil
@@ -55,6 +60,29 @@ enum SessionVisibility {
         }
 
         if normalizedTitle.hasPrefix("review ") && normalizedTitle.contains(" only.") {
+            return true
+        }
+
+        return false
+    }
+
+    private static func isLikelyHarnessReviewPrompt(_ rawTitle: String?) -> Bool {
+        let normalizedTitle = normalizeTitle(rawTitle)
+        guard !normalizedTitle.isEmpty else {
+            return false
+        }
+
+        if normalizedTitle.contains("every code harness") {
+            return true
+        }
+
+        if normalizedTitle.contains("[running in read-only mode") {
+            return true
+        }
+
+        if normalizedTitle.hasPrefix("review "),
+           normalizedTitle.contains("files to consider:"),
+           normalizedTitle.contains("output:") {
             return true
         }
 

@@ -56,6 +56,33 @@ final class SessionVisibilityTests: XCTestCase {
         XCTAssertNil(SessionVisibility.hiddenReason(for: session))
     }
 
+    func testHarnessReadOnlyReviewPromptIsHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "Review native/CodeNative/Sources/CodeNativeApp/ContentView.swift ... [Running in read-only mode - no modifications allowed]"
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .harnessReviewPrompt)
+    }
+
+    func testHarnessStructuredReviewPromptIsHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "Review ContentView.swift and propose changes. Output: patch suggestions. Files to consider: ContentView.swift"
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .harnessReviewPrompt)
+    }
+
+    func testEveryCodeHarnessMarkerIsHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "This session is not from me, it's from the Every Code harness."
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .harnessReviewPrompt)
+    }
+
     private func makeSession(cwd: String, title: String?) -> SessionSummary {
         SessionSummary(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
