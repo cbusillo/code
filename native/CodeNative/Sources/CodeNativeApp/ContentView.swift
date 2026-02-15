@@ -431,6 +431,14 @@ struct ContentView: View {
         #endif
     }
 
+    private var showsDeveloperDiagnostics: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["CODE_NATIVE_DEBUG_UI"] == "1"
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         ZStack {
             LinearGradient(
@@ -575,14 +583,16 @@ struct ContentView: View {
                 .keyboardShortcut("n", modifiers: [.command])
                 #endif
 
-                ActionRailButton(icon: "arrow.clockwise", title: "Refresh", accessibilityID: "rail.refresh") {
-                    Task {
-                        await store.refreshSessions()
+                if showsDeveloperDiagnostics {
+                    ActionRailButton(icon: "arrow.clockwise", title: "Refresh", accessibilityID: "rail.refresh") {
+                        Task {
+                            await store.refreshSessions()
+                        }
                     }
+                    #if os(macOS)
+                    .keyboardShortcut("r", modifiers: [.command])
+                    #endif
                 }
-                #if os(macOS)
-                .keyboardShortcut("r", modifiers: [.command])
-                #endif
 
                 ActionRailButton(icon: "clock.arrow.circlepath", title: "Automations", accessibilityID: "rail.automations") {
                     presentSettings(.configuration)
@@ -622,13 +632,13 @@ struct ContentView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
-                            if totalHiddenSessionCount > 0 {
+                            if showsDeveloperDiagnostics && totalHiddenSessionCount > 0 {
                                 Text("\(totalHiddenSessionCount) internal threads are hidden.")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
 
-                            if unavailableSessionCount > 0 {
+                            if showsDeveloperDiagnostics && unavailableSessionCount > 0 {
                                 Text("\(unavailableSessionCount) unavailable threads are hidden.")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
@@ -656,7 +666,7 @@ struct ContentView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.9))
 
-                            if totalHiddenSessionCount > 0 {
+                            if showsDeveloperDiagnostics && totalHiddenSessionCount > 0 {
                                 Text("\(totalHiddenSessionCount) hidden")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary.opacity(0.9))
@@ -665,7 +675,7 @@ struct ContentView: View {
                                     .background(Color.white.opacity(0.04), in: Capsule(style: .continuous))
                             }
 
-                            if unavailableSessionCount > 0 {
+                            if showsDeveloperDiagnostics && unavailableSessionCount > 0 {
                                 Text("\(unavailableSessionCount) unavailable")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary.opacity(0.9))
@@ -910,14 +920,16 @@ struct ContentView: View {
         }
         .accessibilityIdentifier("top.quick-actions.new-thread")
 
-        Button {
-            Task {
-                await store.refreshSessions()
+        if showsDeveloperDiagnostics {
+            Button {
+                Task {
+                    await store.refreshSessions()
+                }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
             }
-        } label: {
-            Label("Refresh", systemImage: "arrow.clockwise")
+            .accessibilityIdentifier("top.quick-actions.refresh")
         }
-        .accessibilityIdentifier("top.quick-actions.refresh")
 
         if lastAssistantResponseText != nil {
             Button {
