@@ -171,6 +171,9 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         if payloadType == "agent_message",
            let message = object["message"]?.stringValue {
+            if isAutoReviewSummaryMessage(message) {
+                return summarizeAutoReviewMessage(message)
+            }
             return normalizeStructuredText(message)
         }
 
@@ -223,6 +226,14 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         if payloadType == "patch_apply_end" {
             return summarizePatchApplyEnd(object)
+        }
+
+        if payloadType == "task_started" {
+            return "Task started"
+        }
+
+        if payloadType == "task_complete" {
+            return "Task complete"
         }
 
         if payloadType == "turn_aborted" {
@@ -1442,20 +1453,9 @@ extension SessionStreamItem {
             || payloadType == "agent_reasoning"
             || payloadType == "task_started"
             || payloadType == "task_complete"
-            || payloadType == "token_count"
-            || payloadType == "plan_update"
             || payloadType == "exec_command_begin"
-            || payloadType == "exec_command_output_delta"
             || payloadType == "background_event"
         {
-            return true
-        }
-
-        if payloadType.contains("browser") {
-            return true
-        }
-
-        if payloadType.contains("tool_call") && !payloadType.contains("view_image_tool_call") {
             return true
         }
 
@@ -1503,8 +1503,39 @@ extension SessionStreamItem {
 
         return normalized.hasPrefix("background shell completed (")
             || normalized.contains("sandbox error: command was killed by a signal")
-            || normalized.hasPrefix("[developer] background auto-review completed")
+    }
+
+    private func isAutoReviewSummaryMessage(_ message: String) -> Bool {
+        let normalized = message
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        return normalized.hasPrefix("[developer] background auto-review completed")
             || normalized.hasPrefix("background auto-review completed")
+    }
+
+    private func summarizeAutoReviewMessage(_ message: String) -> String {
+        let trimmed = normalizeStructuredText(message).trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = [
+            "[developer] background auto-review completed:",
+            "background auto-review completed:",
+            "[developer] background auto-review completed",
+            "background auto-review completed",
+        ]
+
+        let lowercased = trimmed.lowercased()
+        for prefix in prefixes {
+            if lowercased.hasPrefix(prefix) {
+                let start = trimmed.index(trimmed.startIndex, offsetBy: prefix.count)
+                let remainder = trimmed[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if remainder.isEmpty {
+                    return "Auto-review completed"
+                }
+                return "Auto-review summary: \(remainder)"
+            }
+        }
+
+        return "Auto-review summary: \(trimmed)"
     }
 
     var cardStyle: TranscriptCardStyle {
