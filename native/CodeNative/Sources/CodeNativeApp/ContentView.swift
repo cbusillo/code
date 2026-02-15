@@ -337,7 +337,7 @@ struct ContentView: View {
     }
 
     private var visibleSessions: [SessionSummary] {
-        store.sessions.filter { !isHiddenReviewSession($0) }
+        store.sessions.filter { !isHiddenSession($0) }
     }
 
     private var filteredSessions: [SessionSummary] {
@@ -355,19 +355,19 @@ struct ContentView: View {
         }
     }
 
-    private var hiddenReviewCountByRepo: [String: Int] {
+    private var hiddenSessionCountByRepo: [String: Int] {
         store.sessions.reduce(into: [String: Int]()) { result, session in
-            guard isHiddenReviewSession(session) else {
+            guard isHiddenSession(session) else {
                 return
             }
 
-            let key = linkedRepoNameForHiddenReview(session)
+            let key = linkedRepoNameForHiddenSession(session)
             result[key, default: 0] += 1
         }
     }
 
-    private var totalHiddenReviewCount: Int {
-        hiddenReviewCountByRepo.values.reduce(0, +)
+    private var totalHiddenSessionCount: Int {
+        hiddenSessionCountByRepo.values.reduce(0, +)
     }
 
     private var sessionTitleCounts: [String: Int] {
@@ -608,8 +608,8 @@ struct ContentView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
-                            if totalHiddenReviewCount > 0 {
-                                Text("\(totalHiddenReviewCount) auto-review threads are hidden.")
+                            if totalHiddenSessionCount > 0 {
+                                Text("\(totalHiddenSessionCount) internal threads are hidden.")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -636,8 +636,8 @@ struct ContentView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.9))
 
-                            if totalHiddenReviewCount > 0 {
-                                Text("\(totalHiddenReviewCount) hidden")
+                            if totalHiddenSessionCount > 0 {
+                                Text("\(totalHiddenSessionCount) hidden")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary.opacity(0.9))
                                     .padding(.horizontal, 6)
@@ -2202,19 +2202,18 @@ struct ContentView: View {
 
     private func ensureVisibleSelection() {
         if let selectedSession = store.selectedSession,
-           !isHiddenReviewSession(selectedSession) {
+           !isHiddenSession(selectedSession) {
             return
         }
 
         store.selectedSessionID = visibleSessions.last?.id
     }
 
-    private func isHiddenReviewSession(_ session: SessionSummary) -> Bool {
-        let normalized = session.cwd.lowercased()
-        return normalized.contains("/.code/working/") && normalized.contains("/branches/auto-review")
+    private func isHiddenSession(_ session: SessionSummary) -> Bool {
+        SessionVisibility.isHidden(session)
     }
 
-    private func linkedRepoNameForHiddenReview(_ session: SessionSummary) -> String {
+    private func linkedRepoNameForHiddenSession(_ session: SessionSummary) -> String {
         let url = URL(fileURLWithPath: session.cwd)
         let components = url.pathComponents
         guard let branchIndex = components.firstIndex(of: "branches"),

@@ -19,6 +19,24 @@ struct SessionSummary: Decodable, Hashable, Identifiable {
         case title
     }
 
+    init(
+        id: UUID,
+        conversationId: String,
+        model: String,
+        cwd: String,
+        createdAtUnixMs: UInt64,
+        lastEventAtUnixMs: UInt64,
+        title: String?
+    ) {
+        self.id = id
+        self.conversationId = conversationId
+        self.model = model
+        self.cwd = cwd
+        self.createdAtUnixMs = createdAtUnixMs
+        self.lastEventAtUnixMs = lastEventAtUnixMs
+        self.title = title
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)

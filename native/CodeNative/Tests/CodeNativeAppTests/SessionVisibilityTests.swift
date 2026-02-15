@@ -1,0 +1,70 @@
+import XCTest
+@testable import CodeNativeApp
+
+final class SessionVisibilityTests: XCTestCase {
+    func testAutoReviewWorktreeSessionsAreHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/.code/working/code/branches/auto-review-a1b2",
+            title: "Normal title"
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .autoReviewWorktree)
+    }
+
+    func testContextPromptSessionsAreHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "Context: Repo /Users/cbusillo/Developer/code. Need implement UI polish."
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .automationPrompt)
+    }
+
+    func testStrictReviewSessionsAreHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "Strict review: find concrete bugs/security regressions only."
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .automationPrompt)
+    }
+
+    func testDiffPayloadPromptSessionsAreHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "Review this diff and identify critical bugs. diff --git a/main.swift b/main.swift"
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .automationPrompt)
+    }
+
+    func testUuidTitledSessionsAreHidden() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "277c36fc-8ea3-4899-8390-fbe472ea9795"
+        )
+
+        XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .automationPrompt)
+    }
+
+    func testNaturalLanguageSessionsStayVisible() {
+        let session = makeSession(
+            cwd: "/Users/cbusillo/Developer/code",
+            title: "Can we refine the macOS thread list and make it calmer?"
+        )
+
+        XCTAssertNil(SessionVisibility.hiddenReason(for: session))
+    }
+
+    private func makeSession(cwd: String, title: String?) -> SessionSummary {
+        SessionSummary(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            conversationId: "conversation-1",
+            model: "Unknown model",
+            cwd: cwd,
+            createdAtUnixMs: 1,
+            lastEventAtUnixMs: 1,
+            title: title
+        )
+    }
+}
