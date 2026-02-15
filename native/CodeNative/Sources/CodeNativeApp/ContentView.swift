@@ -522,6 +522,8 @@ struct ContentView: View {
                         }
                     }
             }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
             #else
             settingsSheetContent
             #endif
@@ -836,13 +838,30 @@ struct ContentView: View {
 
             if let session = store.selectedSession {
                 transcriptPanel(session: session)
-                composerPanel
             } else {
                 emptyState
+            }
+
+            if !usesBottomInsetComposer {
                 composerPanel
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        #if os(iOS)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if usesBottomInsetComposer {
+                composerPanel
+            }
+        }
+        #endif
+    }
+
+    private var usesBottomInsetComposer: Bool {
+        #if os(iOS)
+        return isCompactPhoneLayout
+        #else
+        return false
+        #endif
     }
 
     private var topBar: some View {
@@ -1628,9 +1647,6 @@ struct ContentView: View {
         }
         .padding(.horizontal, composerHorizontalPadding)
         .padding(.bottom, composerBottomPadding)
-        #if os(iOS)
-        .ignoresSafeArea(.container, edges: isCompactPhoneLayout ? .bottom : [])
-        #endif
     }
 
     private var composerHorizontalPadding: CGFloat {
@@ -4769,8 +4785,19 @@ private struct NativeSettingsView: View {
     @Binding var preventSleep: Bool
     @Binding var glassWindow: Bool
     let initialCategory: SettingsCategory
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
 
     @State private var selectedCategory: SettingsCategory = .general
+
+    private var isCompactSettingsLayout: Bool {
+        #if os(iOS)
+        return horizontalSizeClass == .compact
+        #else
+        return false
+        #endif
+    }
 
     @ViewBuilder
     private var settingsSidebar: some View {
@@ -4799,132 +4826,182 @@ private struct NativeSettingsView: View {
         #endif
     }
 
-    var body: some View {
-        HStack(spacing: 0) {
-            settingsSidebar
-            .listStyle(.sidebar)
-            .frame(width: 220)
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(selectedCategory.title)
-                        .font(.title2.weight(.semibold))
-
-                    switch selectedCategory {
-                    case .general:
-                        SettingsRow(title: "Open destination", description: "Choose where file actions open by default.") {
-                            Picker("", selection: $openDestinationRaw) {
-                                ForEach(OpenDestination.allCases) { option in
-                                    Text(option.label).tag(option.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 220)
-                        }
-
-                        SettingsRow(title: "Thread density", description: "Control compactness in the thread list.") {
-                            Picker("", selection: $threadDensityRaw) {
-                                ForEach(ThreadDensity.allCases) { option in
-                                    Text(option.label).tag(option.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 240)
-                        }
-
-                        SettingsRow(title: "Transcript density", description: "Adjust message spacing and card width in transcript view.") {
-                            Picker("", selection: $transcriptDensityRaw) {
-                                ForEach(TranscriptDensity.allCases) { option in
-                                    Text(option.label).tag(option.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 280)
-                        }
-
-                        SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
-                            Toggle("", isOn: $preventSleep)
-                                .labelsHidden()
-                        }
-
-                        SettingsRow(title: "Multiline send", description: "Pick how prompts are submitted.") {
-                            Picker("", selection: $multilineBehaviorRaw) {
-                                ForEach(MultilineBehavior.allCases) { option in
-                                    Text(option.label).tag(option.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 260)
-                        }
-
-                        SettingsRow(title: "Follow-up behavior", description: "Choose whether follow-ups queue or steer running turns.") {
-                            Picker("", selection: $followupModeRaw) {
-                                ForEach(FollowupMode.allCases) { option in
-                                    Text(option.label).tag(option.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 220)
-                        }
-
-                    case .configuration:
-                        SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {
-                            TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 320)
-                        }
-
-                        SettingsRow(title: "Connection status", description: "Current server status for this workspace.") {
-                            Text(store.statusLine)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                    case .personalization:
-                        SettingsRow(title: "Theme", description: "Select appearance mode for the app.") {
-                            Picker("", selection: $themeModeRaw) {
-                                ForEach(AppThemeMode.allCases) { option in
-                                    Text(option.label).tag(option.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 240)
-                        }
-
-                        SettingsRow(title: "Window style", description: "Use translucent shell treatment for sidebars and cards.") {
-                            Toggle("", isOn: $glassWindow)
-                                .labelsHidden()
-                        }
-
-                        SettingsRow(title: "Auto speak responses", description: "Speak assistant replies when new messages arrive.") {
-                            Toggle("", isOn: $autoSpeakAssistant)
-                                .labelsHidden()
-                        }
-
-                        SettingsRow(title: "Auto submit voice", description: "Submit turn automatically after voice capture stops.") {
-                            Toggle("", isOn: $autoSubmitVoice)
-                                .labelsHidden()
-                        }
-
-                    case .mcpServers:
-                        SettingsInfoCard(text: "MCP servers are managed from the shared Codex configuration for this workspace.")
-
-                    case .git:
-                        SettingsInfoCard(text: "Git defaults, commit style, and review policies come from the repository and Codex agent config.")
-
-                    case .environments:
-                        SettingsInfoCard(text: "Environment profiles are sourced from your current workspace and launch scripts.")
-
-                    case .worktrees:
-                        SettingsInfoCard(text: "Worktree behavior follows your active branch and local repository conventions.")
-
-                    case .archivedThreads:
-                        SettingsInfoCard(text: "Archived threads are available through session history and replay-based restore.")
+    @ViewBuilder
+    private var compactCategoryPicker: some View {
+        Menu {
+            ForEach(SettingsCategory.allCases) { category in
+                Button {
+                    selectedCategory = category
+                } label: {
+                    if selectedCategory == category {
+                        Label(category.title, systemImage: "checkmark")
+                    } else {
+                        Text(category.title)
                     }
                 }
-                .padding(22)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text("Category")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text(selectedCategory.title)
+                    .font(.subheadline.weight(.semibold))
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var settingsDetailContent: some View {
+        Text(selectedCategory.title)
+            .font(.title2.weight(.semibold))
+
+        switch selectedCategory {
+        case .general:
+            SettingsRow(title: "Open destination", description: "Choose where file actions open by default.") {
+                Picker("", selection: $openDestinationRaw) {
+                    ForEach(OpenDestination.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 220)
+            }
+
+            SettingsRow(title: "Thread density", description: "Control compactness in the thread list.") {
+                Picker("", selection: $threadDensityRaw) {
+                    ForEach(ThreadDensity.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 240)
+            }
+
+            SettingsRow(title: "Transcript density", description: "Adjust message spacing and card width in transcript view.") {
+                Picker("", selection: $transcriptDensityRaw) {
+                    ForEach(TranscriptDensity.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 280)
+            }
+
+            SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
+                Toggle("", isOn: $preventSleep)
+                    .labelsHidden()
+            }
+
+            SettingsRow(title: "Multiline send", description: "Pick how prompts are submitted.") {
+                Picker("", selection: $multilineBehaviorRaw) {
+                    ForEach(MultilineBehavior.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 260)
+            }
+
+            SettingsRow(title: "Follow-up behavior", description: "Choose whether follow-ups queue or steer running turns.") {
+                Picker("", selection: $followupModeRaw) {
+                    ForEach(FollowupMode.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 220)
+            }
+
+        case .configuration:
+            SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {
+                TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: isCompactSettingsLayout ? nil : 320)
+            }
+
+            SettingsRow(title: "Connection status", description: "Current server status for this workspace.") {
+                Text(store.statusLine)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+        case .personalization:
+            SettingsRow(title: "Theme", description: "Select appearance mode for the app.") {
+                Picker("", selection: $themeModeRaw) {
+                    ForEach(AppThemeMode.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 240)
+            }
+
+            SettingsRow(title: "Window style", description: "Use translucent shell treatment for sidebars and cards.") {
+                Toggle("", isOn: $glassWindow)
+                    .labelsHidden()
+            }
+
+            SettingsRow(title: "Auto speak responses", description: "Speak assistant replies when new messages arrive.") {
+                Toggle("", isOn: $autoSpeakAssistant)
+                    .labelsHidden()
+            }
+
+            SettingsRow(title: "Auto submit voice", description: "Submit turn automatically after voice capture stops.") {
+                Toggle("", isOn: $autoSubmitVoice)
+                    .labelsHidden()
+            }
+
+        case .mcpServers:
+            SettingsInfoCard(text: "MCP servers are managed from the shared Codex configuration for this workspace.")
+
+        case .git:
+            SettingsInfoCard(text: "Git defaults, commit style, and review policies come from the repository and Codex agent config.")
+
+        case .environments:
+            SettingsInfoCard(text: "Environment profiles are sourced from your current workspace and launch scripts.")
+
+        case .worktrees:
+            SettingsInfoCard(text: "Worktree behavior follows your active branch and local repository conventions.")
+
+        case .archivedThreads:
+            SettingsInfoCard(text: "Archived threads are available through session history and replay-based restore.")
+        }
+    }
+
+    var body: some View {
+        Group {
+            if isCompactSettingsLayout {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        compactCategoryPicker
+                        settingsDetailContent
+                    }
+                    .padding(16)
+                }
+            } else {
+                HStack(spacing: 0) {
+                    settingsSidebar
+                        .listStyle(.sidebar)
+                        .frame(width: 220)
+
+                    Divider()
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            settingsDetailContent
+                        }
+                        .padding(22)
+                    }
+                }
             }
         }
         #if os(macOS)
@@ -4943,20 +5020,51 @@ private struct SettingsRow<Content: View>: View {
     let description: String
     @ViewBuilder let content: Content
 
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
+    private var isCompactSettingsRow: Bool {
+        #if os(iOS)
+        return horizontalSizeClass == .compact
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                Text(description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        Group {
+            if isCompactSettingsRow {
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.headline)
+                        Text(description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    content
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(14)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.headline)
+                        Text(description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    content
+                }
+                .padding(14)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            Spacer()
-            content
         }
-        .padding(14)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
