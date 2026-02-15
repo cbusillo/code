@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
+use std::io::SeekFrom;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use code_protocol::protocol::{RolloutItem, RolloutLine, SessionSource};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
@@ -41,6 +43,7 @@ const ATTACH_REPLAY_LIMIT: usize = 800;
 const ATTACH_REPLAY_BYTE_LIMIT: usize = 500_000;
 const ATTACH_REPLAY_ITEM_BYTE_LIMIT: usize = 128_000;
 const COMPACT_REPLAY_ITEM_MAX_CHARS: usize = 420;
+const ROLLOUT_TAIL_POLL_INTERVAL_MS: u64 = 350;
 const NO_STORE: &str = "no-store, max-age=0";
 
 #[derive(Debug, Clone)]
@@ -698,13 +701,17 @@ impl SessionHub {
 
         let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
 
-        Ok(LiveSession::new(
+        let session = LiveSession::new(
             new_conversation,
             entry.cwd_real,
             parse_rfc3339_millis(&entry.created_at),
             Some(session_id),
-            seed_history,
-        ))
+            seed_history.items,
+        );
+
+        session.spawn_rollout_tailer(rollout_path, seed_history.tail_cursor);
+
+        Ok(session)
     }
 
     async fn catalog_summaries(&self) -> Vec<SessionSummary> {
@@ -833,6 +840,40 @@ impl LiveSession {
         });
     }
 
+    fn spawn_rollout_tailer(self: &Arc<Self>, rollout_path: PathBuf, mut cursor: RolloutTailCursor) {
+        let session = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(ROLLOUT_TAIL_POLL_INTERVAL_MS))
+                    .await;
+
+                match read_rollout_tail_items(session.summary.id, &rollout_path, &mut cursor).await {
+                    Ok(items) => {
+                        for item in items {
+                            session.push_item(item).await;
+                        }
+                    }
+                    Err(err) => {
+                        if err.kind() == ErrorKind::NotFound {
+                            warn!(
+                                "Rollout history disappeared for session {} at {}",
+                                session.summary.id,
+                                rollout_path.display()
+                            );
+                            break;
+                        }
+
+                        warn!(
+                            "Failed to tail rollout history for session {} at {}: {err}",
+                            session.summary.id,
+                            rollout_path.display()
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     async fn set_composer(&self, text: String, cursor: usize, source_client_id: Option<String>) {
         let mut composer = self.composer.write().await;
         composer.rev = composer.rev.saturating_add(1);
@@ -925,6 +966,9 @@ impl LiveSession {
 
         {
             let mut history = self.history.write().await;
+            if is_duplicate_core_event(&history, &item) {
+                return;
+            }
             history.push(item.clone());
             if history.len() > HISTORY_LIMIT {
                 let excess = history.len().saturating_sub(HISTORY_LIMIT);
@@ -988,6 +1032,25 @@ impl SessionStreamItem {
     }
 }
 
+fn is_duplicate_core_event(history: &[SessionStreamItem], candidate: &SessionStreamItem) -> bool {
+    let SessionStreamItem::CoreEvent {
+        event: candidate_event,
+        ..
+    } = candidate
+    else {
+        return false;
+    };
+
+    history
+        .iter()
+        .rev()
+        .take(512)
+        .any(|existing| match existing {
+            SessionStreamItem::CoreEvent { event, .. } => event.id == candidate_event.id,
+            _ => false,
+        })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CoreEventPayload {
     id: String,
@@ -1034,110 +1097,183 @@ impl From<WebReviewDecision> for ReviewDecision {
     }
 }
 
-async fn load_rollout_seed_history(
-    session_id: Uuid,
-    rollout_path: &Path,
-) -> Vec<SessionStreamItem> {
-    let text = match tokio::fs::read_to_string(rollout_path).await {
-        Ok(text) => text,
+struct RolloutSeedHistory {
+    items: Vec<SessionStreamItem>,
+    tail_cursor: RolloutTailCursor,
+}
+
+struct RolloutTailCursor {
+    file_offset: u64,
+    next_seq: u64,
+    partial_line: Vec<u8>,
+}
+
+impl Default for RolloutTailCursor {
+    fn default() -> Self {
+        Self {
+            file_offset: 0,
+            next_seq: 1,
+            partial_line: Vec::new(),
+        }
+    }
+}
+
+async fn load_rollout_seed_history(session_id: Uuid, rollout_path: &Path) -> RolloutSeedHistory {
+    let mut cursor = RolloutTailCursor::default();
+    let items = match read_rollout_tail_items(session_id, rollout_path, &mut cursor).await {
+        Ok(items) => items,
         Err(err) => {
             warn!(
                 "Failed to read rollout history for {session_id} from {}: {err}",
                 rollout_path.display()
             );
-            return Vec::new();
+            Vec::new()
         }
     };
 
-    let mut seq = 1u64;
-    let mut items = Vec::new();
-    let mut parse_errors = 0usize;
+    RolloutSeedHistory {
+        items,
+        tail_cursor: cursor,
+    }
+}
 
-    for line in text.lines() {
-        if line.trim().is_empty() {
+async fn read_rollout_tail_items(
+    session_id: Uuid,
+    rollout_path: &Path,
+    cursor: &mut RolloutTailCursor,
+) -> IoResult<Vec<SessionStreamItem>> {
+    let metadata = tokio::fs::metadata(rollout_path).await?;
+    let file_len = metadata.len();
+    if file_len < cursor.file_offset {
+        cursor.file_offset = 0;
+        cursor.next_seq = 1;
+        cursor.partial_line.clear();
+    }
+
+    if file_len == cursor.file_offset && cursor.partial_line.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut file = tokio::fs::File::open(rollout_path).await?;
+    file.seek(SeekFrom::Start(cursor.file_offset)).await?;
+
+    let mut delta = Vec::new();
+    file.read_to_end(&mut delta).await?;
+    cursor.file_offset = file_len;
+
+    if delta.is_empty() && cursor.partial_line.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut buffer = Vec::with_capacity(cursor.partial_line.len() + delta.len());
+    if !cursor.partial_line.is_empty() {
+        buffer.extend_from_slice(&cursor.partial_line);
+        cursor.partial_line.clear();
+    }
+    buffer.extend_from_slice(&delta);
+
+    let mut items = Vec::new();
+    let mut line_start = 0usize;
+
+    for (idx, byte) in buffer.iter().enumerate() {
+        if *byte != b'\n' {
             continue;
         }
 
-        let rollout_line: RolloutLine = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => {
-                parse_errors = parse_errors.saturating_add(1);
-                continue;
-            }
-        };
-
-        let stream_item = match rollout_line.item {
-            RolloutItem::Event(event) => {
-                let payload = match serde_json::to_value(&event.msg) {
-                    Ok(payload) => payload,
-                    Err(_) => continue,
-                };
-
-                SessionStreamItem::CoreEvent {
-                    session_id,
-                    seq,
-                    event: CoreEventPayload {
-                        id: event.id,
-                        event_seq: event.event_seq,
-                        kind: event.msg.to_string(),
-                        order: event.order.as_ref().map(|order| WebOrderMeta {
-                            request_ordinal: order.request_ordinal,
-                            output_index: order.output_index,
-                            sequence_number: order.sequence_number,
-                        }),
-                        payload,
-                    },
-                }
-            }
-            RolloutItem::EventMsg(event_msg) => {
-                let payload = match serde_json::to_value(&event_msg) {
-                    Ok(payload) => payload,
-                    Err(_) => continue,
-                };
-
-                SessionStreamItem::CoreEvent {
-                    session_id,
-                    seq,
-                    event: CoreEventPayload {
-                        id: format!("replay-{seq}"),
-                        event_seq: seq,
-                        kind: event_msg.to_string(),
-                        order: None,
-                        payload,
-                    },
-                }
-            }
-            RolloutItem::ResponseItem(response_item) => {
-                let Some(payload) = response_item_seed_payload(response_item) else {
-                    continue;
-                };
-
-                SessionStreamItem::CoreEvent {
-                    session_id,
-                    seq,
-                    event: CoreEventPayload {
-                        id: format!("replay-response-{seq}"),
-                        event_seq: seq,
-                        kind: "rollout.response_item".to_string(),
-                        order: None,
-                        payload,
-                    },
-                }
-            }
-            _ => continue,
-        };
-
-        items.push(stream_item);
-        seq = seq.saturating_add(1);
+        let line = &buffer[line_start..idx];
+        parse_rollout_tail_line(session_id, line, cursor, &mut items);
+        line_start = idx.saturating_add(1);
     }
 
-    if parse_errors > 0 {
-        warn!(
-            "Skipped {parse_errors} unreadable rollout lines while seeding history for {session_id}"
-        );
+    if line_start < buffer.len() {
+        cursor.partial_line.extend_from_slice(&buffer[line_start..]);
     }
 
-    items
+    Ok(items)
+}
+
+fn parse_rollout_tail_line(
+    session_id: Uuid,
+    line: &[u8],
+    cursor: &mut RolloutTailCursor,
+    items: &mut Vec<SessionStreamItem>,
+) {
+    let Ok(raw_line) = std::str::from_utf8(line) else {
+        return;
+    };
+
+    let trimmed = raw_line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+        return;
+    };
+
+    if let Some(item) = rollout_line_to_stream_item(session_id, cursor.next_seq, rollout_line) {
+        items.push(item);
+        cursor.next_seq = cursor.next_seq.saturating_add(1);
+    }
+}
+
+fn rollout_line_to_stream_item(
+    session_id: Uuid,
+    seq: u64,
+    rollout_line: RolloutLine,
+) -> Option<SessionStreamItem> {
+    match rollout_line.item {
+        RolloutItem::Event(event) => {
+            let payload = serde_json::to_value(&event.msg).ok()?;
+
+            Some(SessionStreamItem::CoreEvent {
+                session_id,
+                seq,
+                event: CoreEventPayload {
+                    id: event.id,
+                    event_seq: event.event_seq,
+                    kind: event.msg.to_string(),
+                    order: event.order.as_ref().map(|order| WebOrderMeta {
+                        request_ordinal: order.request_ordinal,
+                        output_index: order.output_index,
+                        sequence_number: order.sequence_number,
+                    }),
+                    payload,
+                },
+            })
+        }
+        RolloutItem::EventMsg(event_msg) => {
+            let payload = serde_json::to_value(&event_msg).ok()?;
+
+            Some(SessionStreamItem::CoreEvent {
+                session_id,
+                seq,
+                event: CoreEventPayload {
+                    id: format!("replay-{seq}"),
+                    event_seq: seq,
+                    kind: event_msg.to_string(),
+                    order: None,
+                    payload,
+                },
+            })
+        }
+        RolloutItem::ResponseItem(response_item) => {
+            let payload = response_item_seed_payload(response_item)?;
+
+            Some(SessionStreamItem::CoreEvent {
+                session_id,
+                seq,
+                event: CoreEventPayload {
+                    id: format!("replay-response-{seq}"),
+                    event_seq: seq,
+                    kind: "rollout.response_item".to_string(),
+                    order: None,
+                    payload,
+                },
+            })
+        }
+        _ => None,
+    }
 }
 
 fn response_item_seed_payload(item: ResponseItem) -> Option<serde_json::Value> {
@@ -1497,6 +1633,9 @@ fn host_is_loopback(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use tokio::time::timeout;
@@ -1507,6 +1646,45 @@ mod tests {
             seq,
             level: "info".to_string(),
             message: format!("payload-{seq}"),
+        }
+    }
+
+    fn make_temp_rollout_path() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("code-web-server-rollout-tail-{}.jsonl", Uuid::new_v4()));
+        path
+    }
+
+    fn append_rollout_line(path: &Path, line: &RolloutLine) {
+        let serialized = serde_json::to_string(line).expect("serialize rollout line");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open temp rollout path");
+        writeln!(file, "{serialized}").expect("append rollout line");
+    }
+
+    fn response_rollout_line(role: &str, text: &str) -> RolloutLine {
+        let content = if role == "user" {
+            vec![ContentItem::InputText {
+                text: text.to_string(),
+            }]
+        } else {
+            vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }]
+        };
+
+        RolloutLine {
+            timestamp: "2026-02-15T00:00:00Z".to_string(),
+            item: RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: role.to_string(),
+                content,
+                end_turn: None,
+                phase: None,
+            }),
         }
     }
 
@@ -1722,5 +1900,35 @@ mod tests {
 
         handle_a.abort();
         handle_b.abort();
+    }
+
+    #[tokio::test]
+    async fn rollout_tail_parser_emits_appended_lines_incrementally() {
+        let path = make_temp_rollout_path();
+        let session_id = Uuid::new_v4();
+
+        append_rollout_line(&path, &response_rollout_line("user", "first"));
+
+        let mut cursor = RolloutTailCursor::default();
+        let initial = read_rollout_tail_items(session_id, &path, &mut cursor)
+            .await
+            .expect("initial load");
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].seq(), 1);
+
+        append_rollout_line(&path, &response_rollout_line("assistant", "second"));
+
+        let delta = read_rollout_tail_items(session_id, &path, &mut cursor)
+            .await
+            .expect("delta load");
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].seq(), 2);
+
+        let none = read_rollout_tail_items(session_id, &path, &mut cursor)
+            .await
+            .expect("empty poll");
+        assert!(none.is_empty());
+
+        let _ = std::fs::remove_file(path);
     }
 }
