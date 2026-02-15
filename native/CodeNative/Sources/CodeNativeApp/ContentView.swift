@@ -81,6 +81,7 @@ struct ContentView: View {
     @State private var showConnectionPopover = false
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
+    @State private var cachedTranscriptItems: [SessionStreamItem] = []
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @FocusState private var composerIsFocused: Bool
@@ -566,7 +567,8 @@ struct ContentView: View {
                 await store.connect()
             }
         }
-        .onChange(of: store.selectedSessionItems.last?.id) { _, _ in
+        .onChange(of: store.selectedSessionItems) { _, _ in
+            refreshTranscriptCache()
             handleAssistantSpeech()
             if let activeTranscriptItemID,
                !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
@@ -576,6 +578,7 @@ struct ContentView: View {
         .onChange(of: store.selectedSessionID) { _, _ in
             activeTranscriptItemID = nil
             composerDraft = store.composerText
+            refreshTranscriptCache()
             #if os(iOS)
             showThreadPicker = false
             #else
@@ -608,11 +611,13 @@ struct ContentView: View {
         #if os(macOS)
         .onAppear {
             composerDraft = store.composerText
+            refreshTranscriptCache()
             focusComposerEditor(forceActivateApp: true)
         }
         #else
         .onAppear {
             composerDraft = store.composerText
+            refreshTranscriptCache()
         }
         #endif
     }
@@ -1225,10 +1230,13 @@ struct ContentView: View {
     }
 
     private var transcriptItems: [SessionStreamItem] {
+        cachedTranscriptItems
+    }
+
+    private func refreshTranscriptCache() {
         let visible = store.selectedSessionItems.filter { !$0.shouldHideFromTranscript && !$0.isReplayOmittedNotice }
         let replayPruned = pruneReplayHistoryCardsWhenRedundant(in: visible)
-
-        return dedupeAssistantMessagesWithinTurn(
+        cachedTranscriptItems = dedupeAssistantMessagesWithinTurn(
             in: collapseConsecutiveReasoningCards(
                 in: dedupeObsoleteBackgroundEvents(
                     in: collapseTokenUsageBursts(
@@ -2379,7 +2387,12 @@ struct ContentView: View {
     }
 
     private func submitComposerAction() {
-        let text = composerDraft
+        let text = composerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return
+        }
+
+        composerDraft = ""
         Task {
             await store.submitComposer(text: text)
         }
@@ -2915,6 +2928,7 @@ struct ContentView: View {
         composerDraft = finalText
 
         if shouldSubmit && autoSubmitVoice && !normalized.isEmpty {
+            composerDraft = ""
             Task {
                 await store.submitComposer(text: finalText)
             }
@@ -3521,12 +3535,17 @@ private struct MacComposerTextView: NSViewRepresentable {
             let isReturnKey = event.keyCode == 36 || event.keyCode == 76
             if isReturnKey {
                 let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                if modifiers.contains(.shift) {
+                let hasShift = modifiers.contains(.shift)
+                let hasCommand = modifiers.contains(.command)
+                let hasOption = modifiers.contains(.option)
+                let hasControl = modifiers.contains(.control)
+
+                if hasShift && !hasCommand && !hasOption && !hasControl {
                     insertNewline(nil)
                     return
                 }
 
-                if modifiers.isEmpty {
+                if !hasShift && !hasCommand && !hasOption && !hasControl {
                     onSubmit?()
                     return
                 }
@@ -3572,12 +3591,11 @@ private struct AssistantTranscriptLine: View {
 
     private var renderedText: Text {
         let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
-        let markdown = normalized.replacingOccurrences(of: "\n", with: "  \n")
 
         if let attributed = try? AttributedString(
-            markdown: markdown,
+            markdown: normalized,
             options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .full,
+                interpretedSyntax: .inlineOnlyPreservingWhitespace,
                 failurePolicy: .returnPartiallyParsedIfPossible
             )
         ) {
