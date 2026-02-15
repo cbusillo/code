@@ -289,6 +289,69 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testSessionActivityClearsUnavailableState() throws {
+        let store = SessionMirrorStore()
+        let staleSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000421")!
+        let requestId = "native_421"
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(staleSessionId.uuidString)",
+                  "conversation_id": "\(staleSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 2,
+                  "title": "Demo"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        store.recordPendingAttachRequestForTesting(requestId: requestId, sessionID: staleSessionId)
+        try applyServerEnvelope(
+            """
+            {
+              "type": "error",
+              "request_id": "\(requestId)",
+              "message": "Failed to resume session \(staleSessionId.uuidString): internal error"
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertNotNil(store.unavailableSessionError(for: staleSessionId))
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(staleSessionId.uuidString)",
+                  "conversation_id": "\(staleSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 9,
+                  "title": "Demo"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertNil(store.unavailableSessionError(for: staleSessionId))
+    }
+
+    @MainActor
     func testSessionListReplacesUnavailableSelectedSession() throws {
         let store = SessionMirrorStore()
         let staleSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000511")!

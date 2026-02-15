@@ -52,6 +52,7 @@ final class SessionMirrorStore: ObservableObject {
     private var requestCounter: UInt64 = 0
     private var attachmentGeneration: UInt64 = 0
     private var pendingAttachRequestSessionIDs: [String: UUID] = [:]
+    private var unavailableSessionActivitySnapshot: [UUID: UInt64] = [:]
 
     private lazy var decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -364,6 +365,7 @@ final class SessionMirrorStore: ObservableObject {
         case .sessionList(let message):
             sessions = message.sessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
             pruneUnavailableSessionsToKnownIDs()
+            clearRecoveredUnavailableSessions()
 
             if let selectedSessionID,
                sessions.contains(where: { $0.id == selectedSessionID }),
@@ -630,6 +632,21 @@ final class SessionMirrorStore: ObservableObject {
     private func pruneUnavailableSessionsToKnownIDs() {
         let knownSessionIDs = Set(sessions.map(\.id))
         unavailableSessionErrors = unavailableSessionErrors.filter { knownSessionIDs.contains($0.key) }
+        unavailableSessionActivitySnapshot = unavailableSessionActivitySnapshot.filter {
+            knownSessionIDs.contains($0.key)
+        }
+    }
+
+    private func clearRecoveredUnavailableSessions() {
+        for session in sessions {
+            guard let markedActivity = unavailableSessionActivitySnapshot[session.id] else {
+                continue
+            }
+
+            if sessionActivityUnixMs(session) > markedActivity {
+                clearSessionUnavailable(session.id)
+            }
+        }
     }
 
     private func clearPendingAttachRequests(for sessionID: UUID) {
@@ -638,10 +655,16 @@ final class SessionMirrorStore: ObservableObject {
 
     private func markSessionUnavailable(_ sessionID: UUID, message: String) {
         unavailableSessionErrors[sessionID] = message
+        if let session = sessions.first(where: { $0.id == sessionID }) {
+            unavailableSessionActivitySnapshot[sessionID] = sessionActivityUnixMs(session)
+        } else {
+            unavailableSessionActivitySnapshot[sessionID] = 0
+        }
     }
 
     private func clearSessionUnavailable(_ sessionID: UUID) {
         unavailableSessionErrors.removeValue(forKey: sessionID)
+        unavailableSessionActivitySnapshot.removeValue(forKey: sessionID)
     }
 
     private func preferredAutoSelectedSession(
