@@ -9,12 +9,6 @@ import UIKit
 #endif
 
 struct ContentView: View {
-    private struct ComposerQuickAction: Hashable {
-        let prompt: String
-        let compactLabel: String
-        let icon: String
-    }
-
     @ObservedObject var store: SessionMirrorStore
     @Environment(\.openURL) private var openURL
     #if os(iOS)
@@ -142,63 +136,6 @@ struct ContentView: View {
         ]
     }
 
-    private var composerQuickActions: [ComposerQuickAction] {
-        if store.selectedSessionItems.isEmpty {
-            return [
-                ComposerQuickAction(
-                    prompt: "Summarize this thread in 5 bullets.",
-                    compactLabel: "Summarize",
-                    icon: "list.bullet"
-                ),
-                ComposerQuickAction(
-                    prompt: "What should we do next?",
-                    compactLabel: "Next step",
-                    icon: "figure.walk.motion"
-                ),
-                ComposerQuickAction(
-                    prompt: "Draft a minimal implementation plan.",
-                    compactLabel: "Plan",
-                    icon: "checklist"
-                )
-            ]
-        }
-
-        return [
-            ComposerQuickAction(
-                prompt: "Summarize progress and open risks.",
-                compactLabel: "Progress",
-                icon: "chart.line.uptrend.xyaxis"
-            ),
-            ComposerQuickAction(
-                prompt: "Propose the next 3 implementation steps.",
-                compactLabel: "Next 3",
-                icon: "arrowshape.turn.up.right"
-            ),
-            ComposerQuickAction(
-                prompt: "Generate a focused patch plan for the top issue.",
-                compactLabel: "Patch plan",
-                icon: "wrench.and.screwdriver"
-            )
-        ]
-    }
-
-    private var primaryComposerQuickActions: [ComposerQuickAction] {
-        if isCompactPhoneLayout {
-            return Array(composerQuickActions.prefix(2))
-        }
-        return composerQuickActions
-    }
-
-    private var overflowComposerQuickActions: [ComposerQuickAction] {
-        guard isCompactPhoneLayout,
-              composerQuickActions.count > 2
-        else {
-            return []
-        }
-
-        return Array(composerQuickActions.dropFirst(2))
-    }
-
     private var isCompactPhoneLayout: Bool {
         #if os(iOS)
         return UIDevice.current.userInterfaceIdiom == .phone && horizontalSizeClass == .compact
@@ -250,10 +187,6 @@ struct ContentView: View {
 
     private var transcriptRowSpacing: CGFloat {
         selectedTranscriptDensity.rowSpacing + (isCompactPhoneLayout ? -1 : 0)
-    }
-
-    private var shouldCollapseCompactComposerQuickActions: Bool {
-        isCompactPhoneLayout
     }
 
     private var compactComposerConfigLabel: String {
@@ -585,28 +518,6 @@ struct ContentView: View {
             _ = voiceInput.stopRecording()
             voiceOutput.stop()
         }
-        #if os(iOS)
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Button("Dismiss") {
-                    composerIsFocused = false
-                }
-
-                Spacer()
-
-                if hasComposerText {
-                    Button("Clear") {
-                        store.composerText = ""
-                    }
-                }
-
-                Button("Send") {
-                    submitComposerAction()
-                }
-                .disabled(!canSubmit)
-            }
-        }
-        #endif
     }
 
     @ViewBuilder
@@ -1685,108 +1596,7 @@ struct ContentView: View {
     private var composerControlRows: some View {
         #if os(iOS)
         VStack(spacing: 0) {
-            if canSendTurns,
-               !hasComposerText,
-               !shouldCollapseCompactComposerQuickActions {
-                if isCompactPhoneLayout {
-                    HStack(spacing: 8) {
-                        ForEach(Array(primaryComposerQuickActions.enumerated()), id: \.offset) { index, action in
-                            Button {
-                                applyComposerQuickAction(action.prompt)
-                            } label: {
-                                Label(action.compactLabel, systemImage: action.icon)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.white.opacity(0.84))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("composer.quick.\(index)")
-                        }
-
-                        if !overflowComposerQuickActions.isEmpty {
-                            Menu {
-                                ForEach(Array(overflowComposerQuickActions.enumerated()), id: \.offset) { offset, action in
-                                    Button {
-                                        applyComposerQuickAction(action.prompt)
-                                    } label: {
-                                        Label(action.prompt, systemImage: action.icon)
-                                    }
-                                    .accessibilityIdentifier("composer.quick.\(offset + primaryComposerQuickActions.count)")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.white.opacity(0.82))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("composer.quick.more")
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.top, isCompactPhoneLayout ? 6 : 8)
-                    .padding(.bottom, isCompactPhoneLayout ? 2 : 4)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(Array(composerQuickActions.enumerated()), id: \.offset) { index, action in
-                                Button {
-                                    applyComposerQuickAction(action.prompt)
-                                } label: {
-                                    Label(action.prompt, systemImage: action.icon)
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.white.opacity(0.84))
-                                        .lineLimit(1)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("composer.quick.\(index)")
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
-                    }
-                    .padding(.bottom, 4)
-                }
-            }
-
             HStack(spacing: 8) {
-                if isCompactPhoneLayout,
-                   canSendTurns,
-                   !hasComposerText,
-                   shouldCollapseCompactComposerQuickActions {
-                    Menu {
-                        ForEach(Array(composerQuickActions.enumerated()), id: \.offset) { index, action in
-                            Button {
-                                applyComposerQuickAction(action.prompt)
-                            } label: {
-                                Label(action.prompt, systemImage: action.icon)
-                            }
-                            .accessibilityIdentifier("composer.quick.\(index)")
-                        }
-                    } label: {
-                        Label("Prompts", systemImage: "sparkles")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.84))
-                            .lineLimit(1)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("composer.quick.more")
-                }
-
                 if isCompactPhoneLayout {
                     Menu {
                         Section("Model") {
@@ -1896,9 +1706,9 @@ struct ContentView: View {
             }
             .font(.caption)
             .foregroundStyle(composerControlForegroundStyle)
-            .padding(.horizontal, 12)
-            .padding(.top, isCompactPhoneLayout ? 6 : 8)
-            .padding(.bottom, isCompactPhoneLayout ? 4 : 4)
+            .padding(.horizontal, isCompactPhoneLayout ? 16 : 12)
+            .padding(.top, isCompactPhoneLayout ? 5 : 8)
+            .padding(.bottom, isCompactPhoneLayout ? 3 : 4)
 
             if let helper = composerHelperText {
                 HStack(spacing: 8) {
@@ -2328,11 +2138,6 @@ struct ContentView: View {
         }
     }
 
-    private func applyComposerQuickAction(_ prompt: String) {
-        store.composerText = prompt
-        composerIsFocused = true
-    }
-
     private func copyLastAssistantResponseToPasteboard() {
         #if os(iOS)
         guard let text = lastAssistantResponseText else {
@@ -2357,7 +2162,7 @@ struct ContentView: View {
     private var composerEditorHeight: CGFloat {
         let text = store.composerText
         guard !text.isEmpty else {
-            return isCompactPhoneLayout ? 38 : 48
+            return isCompactPhoneLayout ? 36 : 48
         }
 
         let newlineCount = text.reduce(into: 1) { count, character in
@@ -2368,8 +2173,8 @@ struct ContentView: View {
         let wrappedLineEstimate = max(1, text.count / 72)
         let lines = max(newlineCount, wrappedLineEstimate)
         let height = CGFloat(lines * 20 + 20)
-        let minHeight: CGFloat = isCompactPhoneLayout ? 38 : 48
-        let maxHeight: CGFloat = isCompactPhoneLayout ? 144 : 176
+        let minHeight: CGFloat = isCompactPhoneLayout ? 36 : 48
+        let maxHeight: CGFloat = isCompactPhoneLayout ? 140 : 176
         return min(maxHeight, max(minHeight, height))
     }
 
