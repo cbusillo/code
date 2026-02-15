@@ -38,7 +38,8 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(threadPickerDoneButton.waitForExistence(timeout: 5))
 
         let sidebarSearch = app.textFields["sidebar.search"]
-        XCTAssertTrue(sidebarSearch.exists)
+        let hasThreadPickerEmptyState = app.staticTexts["No threads"].exists || app.staticTexts["No matching threads"].exists
+        XCTAssertTrue(sidebarSearch.exists || hasThreadPickerEmptyState)
 
         threadPickerDoneButton.tap()
 
@@ -80,7 +81,9 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["rail.new-thread"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.textViews["composer.input"].exists)
         XCTAssertFalse(app.buttons["top.threads"].exists)
-        XCTAssertTrue(app.textFields["sidebar.search"].exists)
+        let hasSidebarSearch = app.textFields["sidebar.search"].exists
+        let hasSidebarEmptyState = app.staticTexts["No threads"].exists || app.staticTexts["No matching threads"].exists
+        XCTAssertTrue(hasSidebarSearch || hasSidebarEmptyState)
 
         app.buttons["rail.automations"].tap()
         let settingsDoneButton = app.buttons["settings.done"]

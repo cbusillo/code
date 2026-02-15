@@ -230,6 +230,24 @@ struct ContentView: View {
         return "\(sessionDisplaySubtitle(for: session)) • \(eventLabel)"
     }
 
+    private var topBarSubtitleText: String {
+        if let session = store.selectedSession {
+            return sessionSubtitleLine(for: session)
+        }
+
+        if store.connectionState == .connected {
+            if isCompactPhoneLayout {
+                return "Ready to start a new thread"
+            }
+            return "Create or select a thread to start mirroring"
+        }
+
+        if isCompactPhoneLayout {
+            return "Connect to begin"
+        }
+        return "Connect to begin mirroring"
+    }
+
     private var transcriptRowSpacing: CGFloat {
         selectedTranscriptDensity.rowSpacing + (isCompactPhoneLayout ? -1 : 0)
     }
@@ -431,6 +449,17 @@ struct ContentView: View {
 
         return filteredSessions
             .filter { $0.id != selectedID }
+            .sorted(by: { sessionActivityUnixMs($0) > sessionActivityUnixMs($1) })
+            .prefix(4)
+            .map { $0 }
+    }
+
+    private var emptyQuickSwitchSessions: [SessionSummary] {
+        guard store.selectedSessionID == nil else {
+            return []
+        }
+
+        return filteredSessions
             .sorted(by: { sessionActivityUnixMs($0) > sessionActivityUnixMs($1) })
             .prefix(4)
             .map { $0 }
@@ -831,7 +860,7 @@ struct ContentView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 } else {
-                    Text(store.selectedSession.map(sessionSubtitleLine(for:)) ?? "")
+                    Text(topBarSubtitleText)
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.62))
                         .lineLimit(1)
@@ -1947,7 +1976,7 @@ struct ContentView: View {
 
     private var emptyState: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: isCompactPhoneLayout ? 28 : 44)
+            Spacer(minLength: emptyStateTopSpacing)
 
             VStack(spacing: 14) {
                 Image(systemName: emptyStateSymbol)
@@ -1982,9 +2011,9 @@ struct ContentView: View {
                     .accessibilityIdentifier("empty.settings")
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
-            .frame(maxWidth: isCompactPhoneLayout ? .infinity : 460)
+            .padding(.horizontal, isCompactPhoneLayout ? 20 : 24)
+            .padding(.vertical, isCompactPhoneLayout ? 18 : 20)
+            .frame(maxWidth: isCompactPhoneLayout ? 360 : 460)
             .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -1992,8 +2021,80 @@ struct ContentView: View {
             )
             .padding(.horizontal, isCompactPhoneLayout ? 20 : 32)
 
-            Spacer()
+            if !emptyQuickSwitchSessions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Recent threads")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.68))
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(emptyQuickSwitchSessions) { session in
+                                Button {
+                                    store.selectedSessionID = session.id
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(sessionSidebarTitle(for: session))
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.white.opacity(0.9))
+                                            .lineLimit(1)
+                                        Text(relativeAgeLabel(for: session))
+                                            .font(.caption2)
+                                            .foregroundStyle(.white.opacity(0.54))
+                                            .lineLimit(1)
+                                    }
+                                    .frame(width: isCompactPhoneLayout ? 156 : 180, alignment: .leading)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: isCompactPhoneLayout ? 360 : 460, alignment: .leading)
+                .padding(.top, 12)
+                .padding(.horizontal, isCompactPhoneLayout ? 20 : 32)
+            }
+
+            if showsIPadSplitLayout {
+                Text("You can also create threads from the sidebar.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.top, 14)
+            }
+
+            Spacer(minLength: emptyStateBottomSpacing)
         }
+    }
+
+    private var emptyStateTopSpacing: CGFloat {
+        if isCompactPhoneLayout {
+            return 20
+        }
+
+        if showsIPadSplitLayout {
+            return 32
+        }
+
+        return 44
+    }
+
+    private var emptyStateBottomSpacing: CGFloat {
+        if isCompactPhoneLayout {
+            return 88
+        }
+
+        if showsIPadSplitLayout {
+            return 180
+        }
+
+        return 120
     }
 
     private var emptyStateSymbol: String {
