@@ -82,6 +82,7 @@ struct ContentView: View {
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
     @State private var composerDraft = ""
+    @State private var composerMeasuredHeight: CGFloat = 34
     @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
@@ -1705,6 +1706,19 @@ struct ContentView: View {
         VStack(spacing: 10) {
             VStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
+                    #if os(macOS)
+                    MacComposerTextView(
+                        text: $composerDraft,
+                        isFocused: composerIsFocused,
+                        measuredHeight: $composerMeasuredHeight,
+                        onFocusChange: { composerIsFocused = $0 },
+                        onSubmit: submitComposerAction
+                    )
+                    .frame(height: composerEditorHeight)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .accessibilityIdentifier("composer.input")
+                    #else
                     TextEditor(text: $composerDraft)
                         .font(.body)
                         .foregroundStyle(.white.opacity(0.9))
@@ -1714,18 +1728,14 @@ struct ContentView: View {
                         .padding(.horizontal, 12)
                         .padding(.top, isCompactPhoneLayout ? 6 : 8)
                         .accessibilityIdentifier("composer.input")
-                        #if os(macOS)
-                        .onTapGesture {
-                            focusComposerEditor(forceActivateApp: true)
-                        }
-                        #endif
+                    #endif
 
                     if composerDraft.isEmpty {
                         Text("Ask for follow-up changes")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.42))
                             .padding(.horizontal, isCompactPhoneLayout ? 16 : 18)
-                            .padding(.top, isCompactPhoneLayout ? 12 : 14)
+                            .padding(.top, isCompactPhoneLayout ? 12 : 10)
                             .allowsHitTesting(false)
                     }
                 }
@@ -1786,7 +1796,7 @@ struct ContentView: View {
     }
 
     private var composerControlBottomPadding: CGFloat {
-        isCompactPhoneLayout ? 2 : 8
+        isCompactPhoneLayout ? 2 : 4
     }
 
     private var compactComposerBottomFillHeight: CGFloat {
@@ -2382,6 +2392,11 @@ struct ContentView: View {
     }
 
     private var composerEditorHeight: CGFloat {
+        #if os(macOS)
+        let minHeight: CGFloat = 30
+        let maxHeight: CGFloat = 120
+        return min(maxHeight, max(minHeight, composerMeasuredHeight))
+        #else
         let text = composerDraft
         guard !text.isEmpty else {
             return isCompactPhoneLayout ? 36 : 48
@@ -2392,12 +2407,14 @@ struct ContentView: View {
                 count += 1
             }
         }
-        let wrappedLineEstimate = max(1, text.count / 72)
-        let lines = max(newlineCount, wrappedLineEstimate)
-        let height = CGFloat(lines * 20 + 20)
+        let lineCount = max(1, newlineCount)
+        let lineHeight: CGFloat = 20
+        let verticalPadding: CGFloat = isCompactPhoneLayout ? 14 : 18
+        let height = CGFloat(lineCount) * lineHeight + verticalPadding
         let minHeight: CGFloat = isCompactPhoneLayout ? 36 : 48
         let maxHeight: CGFloat = isCompactPhoneLayout ? 140 : 176
         return min(maxHeight, max(minHeight, height))
+        #endif
     }
 
     private var selectedSessionRepoLabel: String {
@@ -3375,6 +3392,152 @@ private struct QuickPromptCard: View {
     }
 }
 
+#if os(macOS)
+private struct MacComposerTextView: NSViewRepresentable {
+    @Binding var text: String
+    var isFocused: Bool
+    @Binding var measuredHeight: CGFloat
+    let onFocusChange: (Bool) -> Void
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .noBorder
+
+        let textView = SubmitAwareTextView()
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.textColor = NSColor.white.withAlphaComponent(0.9)
+        textView.insertionPointColor = NSColor.white.withAlphaComponent(0.95)
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = true
+        textView.allowsUndo = true
+        textView.textContainerInset = NSSize(width: 0, height: 4)
+        textView.delegate = context.coordinator
+        textView.onSubmit = onSubmit
+        textView.string = text
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.minSize = NSSize(width: 0, height: 24)
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+
+        scrollView.documentView = textView
+
+        DispatchQueue.main.async {
+            measuredHeight = Self.measuredEditorHeight(for: textView)
+        }
+
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+
+        guard let textView = nsView.documentView as? SubmitAwareTextView else {
+            return
+        }
+
+        if textView.string != text {
+            textView.string = text
+        }
+
+        textView.onSubmit = onSubmit
+
+        DispatchQueue.main.async {
+            measuredHeight = Self.measuredEditorHeight(for: textView)
+        }
+
+        if isFocused,
+           let window = nsView.window,
+           window.firstResponder !== textView {
+            window.makeFirstResponder(textView)
+        }
+    }
+
+    static func measuredEditorHeight(for textView: NSTextView) -> CGFloat {
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer
+        else {
+            return 34
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let used = layoutManager.usedRect(for: textContainer)
+        let verticalInset = textView.textContainerInset.height * 2
+        return ceil(max(24, used.height + verticalInset + 2))
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MacComposerTextView
+
+        init(parent: MacComposerTextView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else {
+                return
+            }
+
+            let updated = textView.string
+            if parent.text != updated {
+                parent.text = updated
+            }
+
+            parent.measuredHeight = MacComposerTextView.measuredEditorHeight(for: textView)
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            _ = notification
+            if !parent.isFocused {
+                parent.onFocusChange(true)
+            }
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            _ = notification
+            if parent.isFocused {
+                parent.onFocusChange(false)
+            }
+        }
+    }
+
+    final class SubmitAwareTextView: NSTextView {
+        var onSubmit: (() -> Void)?
+
+        override func keyDown(with event: NSEvent) {
+            let isReturnKey = event.keyCode == 36 || event.keyCode == 76
+            if isReturnKey {
+                let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                if modifiers.contains(.shift) {
+                    insertNewline(nil)
+                    return
+                }
+
+                if modifiers.isEmpty {
+                    onSubmit?()
+                    return
+                }
+            }
+
+            super.keyDown(with: event)
+        }
+    }
+}
+#endif
+
 private struct AssistantTranscriptLine: View {
     let text: String
     let density: TranscriptDensity
@@ -3408,8 +3571,11 @@ private struct AssistantTranscriptLine: View {
     }
 
     private var renderedText: Text {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let markdown = normalized.replacingOccurrences(of: "\n", with: "  \n")
+
         if let attributed = try? AttributedString(
-            markdown: text,
+            markdown: markdown,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .full,
                 failurePolicy: .returnPartiallyParsedIfPossible
@@ -3418,7 +3584,7 @@ private struct AssistantTranscriptLine: View {
             return Text(attributed)
         }
 
-        return Text(text)
+        return Text(verbatim: normalized)
     }
 
     private var collapsedLineLimit: Int {
@@ -3461,21 +3627,14 @@ private struct AssistantTranscriptLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(Color.white.opacity(0.22))
-                    .frame(width: 2)
-                    .padding(.top, 2)
-
-                renderedText
-                    .font(usesCompactPhoneTypography ? .callout : .body)
-                    .foregroundStyle(.white.opacity(0.93))
-                    .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
-                    .textSelection(.enabled)
-                    .lineLimit(isCollapsed ? collapsedLineLimit : nil)
-                    .fixedSize(horizontal: false, vertical: !isCollapsed)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            renderedText
+                .font(usesCompactPhoneTypography ? .callout : .body)
+                .foregroundStyle(.white.opacity(0.93))
+                .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                .textSelection(.enabled)
+                .lineLimit(isCollapsed ? collapsedLineLimit : nil)
+                .fixedSize(horizontal: false, vertical: !isCollapsed)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             if shouldClampInitially {
                 Button(isExpanded ? "Collapse" : "Show more") {
