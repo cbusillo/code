@@ -7,7 +7,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
 use code_core::config::Config;
-use code_core::agent_defaults::build_model_guide_description;
+use code_core::agent_defaults::{
+    build_model_guide_description,
+    enabled_agent_model_specs_for_auth,
+    filter_agent_model_names_for_auth,
+};
 use code_core::config_types::{AutoDriveSettings, ReasoningEffort, TextVerbosity};
 use code_core::debug_logger::DebugLogger;
 use code_core::codex::compact::resolve_compact_prompt_text;
@@ -57,7 +61,8 @@ const MAX_QUEUED_CONVERSATION_UPDATES: usize = 24;
 const DEBUG_JSON_MAX_CHARS: usize = 1200;
 const CLI_PROMPT_MIN_CHARS: usize = 4;
 const CLI_PROMPT_MAX_CHARS: usize = 600;
-const AUTO_DRIVE_CLI_MODELS: &[&str] = &["gpt-5.3-codex", "gpt-5.3-codex-spark"];
+const AUTO_DRIVE_CLI_MODEL_PRIMARY: &str = "gpt-5.3-codex";
+const AUTO_DRIVE_CLI_MODEL_SPARK: &str = "gpt-5.3-codex-spark";
 const AUTO_DRIVE_CLI_REASONING_LEVELS: &[&str] = &["medium", "high", "xhigh"];
 
 static HARD_LIMIT_TRIMMED_ITEMS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -84,6 +89,56 @@ fn supported_text_verbosity_for_model(model: &str) -> &'static [TextVerbosity] {
     } else {
         ALL_TEXT_VERBOSITY
     }
+}
+
+fn default_auto_drive_cli_models() -> Vec<String> {
+    vec![
+        AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string(),
+        AUTO_DRIVE_CLI_MODEL_SPARK.to_string(),
+    ]
+}
+
+fn auto_drive_cli_models_for_auth(
+    auth_mode: Option<code_app_server_protocol::AuthMode>,
+    supports_pro_only_models: bool,
+) -> Vec<String> {
+    let mut models = vec![AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()];
+    if auth_mode.is_some_and(code_app_server_protocol::AuthMode::is_chatgpt)
+        && supports_pro_only_models
+    {
+        models.push(AUTO_DRIVE_CLI_MODEL_SPARK.to_string());
+    }
+    models
+}
+
+fn spark_fallback_model(model: &str) -> Option<&'static str> {
+    if model.eq_ignore_ascii_case("gpt-5.3-codex-spark") {
+        Some("gpt-5.3-codex")
+    } else if model.eq_ignore_ascii_case("code-gpt-5.3-codex-spark") {
+        Some("code-gpt-5.3-codex")
+    } else {
+        None
+    }
+}
+
+fn is_usage_limit_stream_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("usage limit")
+        || lower.contains("usage_limit_reached")
+        || lower.contains("usage_not_included")
+}
+
+fn error_mentions_usage_limit(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(code_err) = cause.downcast_ref::<CodexErr>() {
+            return match code_err {
+                CodexErr::UsageLimitReached(_) | CodexErr::UsageNotIncluded => true,
+                CodexErr::Stream(message, _, _) => is_usage_limit_stream_error_message(message),
+                _ => false,
+            };
+        }
+        false
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -444,6 +499,7 @@ impl Default for TurnDescriptor {
 mod tests {
     use super::*;
     use anyhow::anyhow;
+    use code_app_server_protocol::AuthMode;
     use code_core::agent_defaults::DEFAULT_AGENT_NAMES;
     use code_core::error::{RetryLimitReachedError, UsageLimitReachedError};
     use serde_json::json;
@@ -466,7 +522,11 @@ mod tests {
             "codex-plan".to_string(),
             "codex-research".to_string(),
         ];
-        let schema = build_schema(&active_agents, SchemaFeatures::default());
+        let schema = build_schema(
+            &active_agents,
+            SchemaFeatures::default(),
+            &default_auto_drive_cli_models(),
+        );
         let props = schema
             .get("properties")
             .and_then(|v| v.as_object())
@@ -568,7 +628,11 @@ mod tests {
     #[test]
     fn schema_sets_cli_milestone_instruction_min_without_max_length() {
         let active_agents: Vec<String> = Vec::new();
-        let schema = build_schema(&active_agents, SchemaFeatures::default());
+        let schema = build_schema(
+            &active_agents,
+            SchemaFeatures::default(),
+            &default_auto_drive_cli_models(),
+        );
         let prompt_schema = schema
             .get("properties")
             .and_then(|v| v.as_object())
@@ -688,6 +752,7 @@ mod tests {
                 .map(|name| (*name).to_string())
                 .collect::<Vec<_>>(),
             SchemaFeatures::default(),
+            &default_auto_drive_cli_models(),
         );
         let props = schema
             .get("properties")
@@ -729,6 +794,7 @@ mod tests {
                 include_agents: false,
                 ..SchemaFeatures::default()
             },
+            &default_auto_drive_cli_models(),
         );
         let props = schema
             .get("properties")
@@ -755,6 +821,7 @@ mod tests {
                 include_cli_model_routing: false,
                 ..SchemaFeatures::default()
             },
+            &default_auto_drive_cli_models(),
         );
         let props = schema
             .get("properties")
@@ -771,10 +838,29 @@ mod tests {
     }
 
     #[test]
+    fn schema_cli_model_enum_respects_allowed_models() {
+        let allowed_cli_models = vec![AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()];
+        let schema = build_schema(&Vec::new(), SchemaFeatures::default(), &allowed_cli_models);
+        let cli_model_enum = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("cli_model"))
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("enum"))
+            .and_then(|v| v.as_array())
+            .expect("cli_model enum");
+
+        assert_eq!(
+            cli_model_enum,
+            &vec![json!(AUTO_DRIVE_CLI_MODEL_PRIMARY), Value::Null]
+        );
+    }
+
+    #[test]
     fn schema_marks_goal_required_with_bootstrap_description() {
         let mut features = SchemaFeatures::default();
         features.include_goal_field = true;
-        let schema = build_schema(&Vec::new(), features);
+        let schema = build_schema(&Vec::new(), features, &default_auto_drive_cli_models());
         let required = schema
             .get("required")
             .and_then(|v| v.as_array())
@@ -870,6 +956,7 @@ mod tests {
             raw,
             DecisionParseOptions {
                 require_cli_model_routing: true,
+                ..DecisionParseOptions::default()
             },
         )
         .expect_err("routing-enabled parse should require model fields");
@@ -892,6 +979,7 @@ mod tests {
             raw,
             DecisionParseOptions {
                 require_cli_model_routing: true,
+                ..DecisionParseOptions::default()
             },
         )
         .expect("routing-enabled decision should parse");
@@ -899,6 +987,45 @@ mod tests {
         let cli = decision.cli.expect("cli action expected");
         assert_eq!(cli.model_override.as_deref(), Some("gpt-5.3-codex-spark"));
         assert_eq!(cli.reasoning_effort_override, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn parse_decision_rejects_spark_when_not_allowed() {
+        let raw = r#"{
+            "finish_status": "continue",
+            "status_title": "Fixing tests",
+            "status_sent_to_user": "Running clear failing-test loops.",
+            "cli_milestone_instruction": "Take the failing test from red to green and report the passing evidence.",
+            "cli_model": "gpt-5.3-codex-spark",
+            "cli_reasoning_effort": "high"
+        }"#;
+
+        let err = parse_decision(
+            raw,
+            DecisionParseOptions {
+                require_cli_model_routing: true,
+                allowed_cli_models: vec![AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()],
+            },
+        )
+        .expect_err("non-pro routing should reject spark");
+
+        assert!(err.to_string().contains("unsupported cli_model"));
+        assert!(err.to_string().contains(AUTO_DRIVE_CLI_MODEL_PRIMARY));
+    }
+
+    #[test]
+    fn auto_drive_cli_models_gates_spark_by_auth() {
+        let pro_models = auto_drive_cli_models_for_auth(Some(AuthMode::Chatgpt), true);
+        assert!(pro_models.contains(&AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()));
+        assert!(pro_models.contains(&AUTO_DRIVE_CLI_MODEL_SPARK.to_string()));
+
+        let non_pro_models = auto_drive_cli_models_for_auth(Some(AuthMode::Chatgpt), false);
+        assert!(non_pro_models.contains(&AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()));
+        assert!(!non_pro_models.contains(&AUTO_DRIVE_CLI_MODEL_SPARK.to_string()));
+
+        let api_key_models = auto_drive_cli_models_for_auth(Some(AuthMode::ApiKey), false);
+        assert!(api_key_models.contains(&AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()));
+        assert!(!api_key_models.contains(&AUTO_DRIVE_CLI_MODEL_SPARK.to_string()));
     }
 
     #[test]
@@ -1136,6 +1263,30 @@ mod tests {
     }
 
     #[test]
+    fn usage_limit_stream_errors_are_detected() {
+        let err = anyhow!(CodexErr::Stream(
+            "[transport] Transport error: You've hit your usage limit. Try again in 5 days 47 minutes."
+                .to_string(),
+            None,
+            None,
+        ));
+        assert!(error_mentions_usage_limit(&err));
+    }
+
+    #[test]
+    fn spark_models_have_non_spark_fallback() {
+        assert_eq!(
+            spark_fallback_model("gpt-5.3-codex-spark"),
+            Some("gpt-5.3-codex")
+        );
+        assert_eq!(
+            spark_fallback_model("code-gpt-5.3-codex-spark"),
+            Some("code-gpt-5.3-codex")
+        );
+        assert!(spark_fallback_model("gpt-5.3-codex").is_none());
+    }
+
+    #[test]
     fn push_unique_guidance_trims_and_dedupes() {
         let mut guidance = vec!["Keep CLI prompts short".to_string()];
         push_unique_guidance(&mut guidance, "  keep cli prompts short  ");
@@ -1314,9 +1465,19 @@ struct ParsedCoordinatorDecision {
     model_slug: String,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 struct DecisionParseOptions {
     require_cli_model_routing: bool,
+    allowed_cli_models: Vec<String>,
+}
+
+impl Default for DecisionParseOptions {
+    fn default() -> Self {
+        Self {
+            require_cli_model_routing: false,
+            allowed_cli_models: default_auto_drive_cli_models(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1449,6 +1610,13 @@ fn run_auto_loop(
         preferred_auth,
         responses_originator_header,
     );
+    let auth_mode_for_model_access = auth_mgr
+        .auth()
+        .map(|auth| auth.mode)
+        .or(Some(preferred_auth));
+    let supports_pro_only_models = auth_mgr.supports_pro_only_models();
+    let allowed_cli_models =
+        auto_drive_cli_models_for_auth(auth_mode_for_model_access, supports_pro_only_models);
     let model_provider = config.model_provider.clone();
     let model_reasoning_summary = config.model_reasoning_summary;
     let model_text_verbosity = config.model_text_verbosity;
@@ -1462,7 +1630,20 @@ fn run_auto_loop(
     });
     let coordinator_turn_cap = config.auto_drive.coordinator_turn_cap;
     let config = Arc::new(config);
-    let active_agent_names = get_enabled_agents(&config.agents);
+    let mut active_agent_names = filter_agent_model_names_for_auth(
+        get_enabled_agents(&config.agents),
+        auth_mode_for_model_access,
+        supports_pro_only_models,
+    );
+    if active_agent_names.is_empty() {
+        active_agent_names = enabled_agent_model_specs_for_auth(
+            auth_mode_for_model_access,
+            supports_pro_only_models,
+        )
+        .into_iter()
+        .map(|spec| spec.slug.to_string())
+        .collect();
+    }
     let client = Arc::new(ModelClient::new(
         config.clone(),
         Some(auth_mgr),
@@ -1557,7 +1738,7 @@ fn run_auto_loop(
             pending_conversation = None;
         }
     }
-    let mut schema = build_schema(&active_agent_names, schema_features);
+    let mut schema = build_schema(&active_agent_names, schema_features, &allowed_cli_models);
     let platform = std::env::consts::OS;
     debug!("[Auto coordinator] starting: goal={goal_text} platform={platform}");
 
@@ -1638,6 +1819,7 @@ fn run_auto_loop(
                 &cancel_token,
                 &active_model_slug,
                 schema_features.include_cli_model_routing,
+                &allowed_cli_models,
             ) {
                 Ok(ParsedCoordinatorDecision {
                     status,
@@ -1707,7 +1889,8 @@ fn run_auto_loop(
                         primary_goal_message = format!("**Primary Goal**\n{goal_text}");
                         if schema_features.include_goal_field {
                             schema_features.include_goal_field = false;
-                            schema = build_schema(&active_agent_names, schema_features);
+                            schema =
+                                build_schema(&active_agent_names, schema_features, &allowed_cli_models);
                         }
                     }
                     decision_seq = decision_seq.wrapping_add(1);
@@ -2198,7 +2381,7 @@ impl Default for SchemaFeatures {
     }
 }
 
-fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
+fn build_schema(active_agents: &[String], features: SchemaFeatures, cli_models: &[String]) -> Value {
     let models_enum_values: Vec<Value> = active_agents
         .iter()
         .map(|name| Value::String(name.clone()))
@@ -2296,12 +2479,25 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
     required.push(Value::String("cli_milestone_instruction".to_string()));
 
     if features.include_cli_model_routing {
+        let mut cli_model_enum: Vec<Value> = cli_models
+            .iter()
+            .map(|model| Value::String(model.clone()))
+            .collect();
+        cli_model_enum.push(Value::Null);
+        let cli_models_description = if cli_models.is_empty() {
+            "CLI model for this turn. Set to null only when finishing.".to_string()
+        } else {
+            format!(
+                "CLI model for this turn. Allowed values: {}. Set to null only when finishing.",
+                cli_models.join(", ")
+            )
+        };
         properties.insert(
             "cli_model".to_string(),
             json!({
                 "type": ["string", "null"],
-                "enum": ["gpt-5.3-codex", "gpt-5.3-codex-spark", null],
-                "description": "CLI model for this turn. Use gpt-5.3-codex for planning/problem-solving (xhigh/high/medium) and gpt-5.3-codex-spark for clear coding loops or failing-test iteration (high). Set to null only when finishing."
+                "enum": cli_model_enum,
+                "description": cli_models_description,
             }),
         );
         required.push(Value::String("cli_model".to_string()));
@@ -2440,6 +2636,7 @@ fn request_coordinator_decision(
     cancel_token: &CancellationToken,
     preferred_model_slug: &str,
     require_cli_model_routing: bool,
+    allowed_cli_models: &[String],
 ) -> Result<ParsedCoordinatorDecision, DecisionFailure> {
     let RequestStreamResult {
         output_text,
@@ -2474,6 +2671,7 @@ fn request_coordinator_decision(
         &output_text,
         DecisionParseOptions {
             require_cli_model_routing,
+            allowed_cli_models: allowed_cli_models.to_vec(),
         },
     )
         .map_err(|err| DecisionFailure::new(err, "coordinator_decision", Some(output_text.clone())))?;
@@ -2644,10 +2842,37 @@ fn request_decision_with_model(
     let tx = event_tx.clone();
     let cancel = cancel_token.clone();
     let mut rate_limit_switch_state = RateLimitSwitchState::default();
+    let selected_model = Arc::new(Mutex::new(model_slug.to_string()));
+    let selected_model_for_retry = Arc::clone(&selected_model);
+    let mut did_usage_limit_model_fallback = false;
     let classify = |error: &anyhow::Error| {
+        if !did_usage_limit_model_fallback && error_mentions_usage_limit(error) {
+            let active_model = selected_model_for_retry
+                .lock()
+                .ok()
+                .map(|guard| guard.clone())
+                .unwrap_or_else(|| model_slug.to_string());
+            if let Some(fallback_model) = spark_fallback_model(&active_model) {
+                did_usage_limit_model_fallback = true;
+                if let Ok(mut guard) = selected_model_for_retry.lock() {
+                    *guard = fallback_model.to_string();
+                }
+                event_tx.send(AutoCoordinatorEvent::Action {
+                    message: format!(
+                        "Usage limit reached for {active_model}; retrying with {fallback_model}…"
+                    ),
+                });
+                return RetryDecision::RateLimited {
+                    wait_until: Instant::now(),
+                    reason: "usage limit reached; switched to non-spark model".to_string(),
+                };
+            }
+        }
+
         classify_model_error_with_auto_switch(client, &mut rate_limit_switch_state, event_tx, error)
     };
     let options = RetryOptions::with_defaults(retry_max_elapsed(time_budget_deadline));
+    let selected_model_for_run = Arc::clone(&selected_model);
 
     let result = runtime.block_on(async move {
         retry_with_backoff(
@@ -2657,6 +2882,11 @@ fn request_decision_with_model(
                 let time_budget_message = time_budget_message.clone();
                 let loop_warning = loop_warning.clone();
                 let conversation = Arc::clone(&conversation);
+                let model_slug = selected_model_for_run
+                    .lock()
+                    .ok()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_else(|| model_slug.to_string());
                 let prompt = build_user_turn_prompt(
                     &developer_intro,
                     &primary_goal,
@@ -2665,7 +2895,7 @@ fn request_decision_with_model(
                     loop_warning.as_deref(),
                     &schema,
                     conversation.as_ref(),
-                    model_slug,
+                    &model_slug,
                     instructions.as_deref(),
                 );
                 let tx_inner = tx.clone();
@@ -3320,7 +3550,7 @@ fn classify_recoverable_decision_error(err: &anyhow::Error) -> Option<Recoverabl
         return Some(RecoverableDecisionError {
             summary: "unsupported CLI model routing selection".to_string(),
             guidance: Some(
-                "Use `cli_model` in {gpt-5.3-codex, gpt-5.3-codex-spark} and `cli_reasoning_effort` in {medium, high, xhigh}."
+                "Use a `cli_model` value listed in the schema and `cli_reasoning_effort` in {medium, high, xhigh}."
                     .to_string(),
             ),
         });
@@ -3765,16 +3995,21 @@ fn parse_cli_reasoning_effort(value: &str) -> Result<ReasoningEffort> {
     }
 }
 
-fn normalize_cli_model(value: &str) -> Result<String> {
+fn normalize_cli_model(value: &str, allowed_cli_models: &[String]) -> Result<String> {
     let trimmed = value.trim();
-    for model in AUTO_DRIVE_CLI_MODELS {
+    for model in allowed_cli_models {
         if trimmed.eq_ignore_ascii_case(model) {
-            return Ok((*model).to_string());
+            return Ok(model.to_string());
         }
     }
+    let expected_models = if allowed_cli_models.is_empty() {
+        "<none>".to_string()
+    } else {
+        allowed_cli_models.join(", ")
+    };
     Err(anyhow!(
         "unsupported cli_model '{trimmed}'; expected one of: {}",
-        AUTO_DRIVE_CLI_MODELS.join(", ")
+        expected_models
     ))
 }
 
@@ -3796,7 +4031,7 @@ fn validate_cli_model_selection(
                 anyhow!("model response missing cli_reasoning_effort for continue")
             })?;
 
-            let model = normalize_cli_model(&model)?;
+            let model = normalize_cli_model(&model, &options.allowed_cli_models)?;
             let reasoning = parse_cli_reasoning_effort(&reasoning)?;
             Ok((Some(model), Some(reasoning)))
         }
