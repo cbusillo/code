@@ -329,6 +329,9 @@ final class SessionMirrorStore: ObservableObject {
             clientId = message.clientId
             connectionState = .connected
             statusLine = "Connected as \(message.clientId.prefix(8))"
+            Task { @MainActor in
+                await self.refreshSessions()
+            }
 
         case .sessionList(let message):
             sessions = message.sessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })

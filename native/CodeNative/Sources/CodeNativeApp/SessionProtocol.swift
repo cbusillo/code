@@ -1332,6 +1332,12 @@ extension SessionStreamItem {
             return true
         }
 
+        // Composer updates drive the input box state and should not render as
+        // transcript cards.
+        if type == "composer" {
+            return true
+        }
+
         if type == "system",
            let message {
             let normalized = message.lowercased()

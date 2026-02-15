@@ -107,6 +107,23 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertTrue(detached.shouldHideFromTranscript)
     }
 
+    func testComposerUpdatesAreSuppressedInTranscript() {
+        let composer = SessionStreamItem(
+            type: "composer",
+            sessionId: UUID(uuidString: "00000000-0000-0000-0000-00000000abcd")!,
+            seq: 13,
+            event: nil,
+            rev: nil,
+            text: "draft",
+            cursor: 5,
+            sourceClientId: nil,
+            level: nil,
+            message: nil
+        )
+
+        XCTAssertTrue(composer.shouldHideFromTranscript)
+    }
+
     func testTokenCountBodyUsesCondensedLabels() {
         let breakdownItem = makeCoreEventItem(
             seq: 13,
