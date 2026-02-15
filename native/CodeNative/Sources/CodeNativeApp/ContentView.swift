@@ -81,6 +81,7 @@ struct ContentView: View {
     @State private var showConnectionPopover = false
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
+    @State private var composerDraft = ""
     @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
@@ -122,7 +123,7 @@ struct ContentView: View {
     }
 
     private var hasComposerText: Bool {
-        !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var showVoiceBadge: Bool {
@@ -573,11 +574,21 @@ struct ContentView: View {
         }
         .onChange(of: store.selectedSessionID) { _, _ in
             activeTranscriptItemID = nil
+            composerDraft = store.composerText
             #if os(iOS)
             showThreadPicker = false
             #else
             focusComposerEditor(forceActivateApp: true)
             #endif
+        }
+        .onChange(of: store.composerText) { _, newValue in
+            guard newValue != composerDraft else {
+                return
+            }
+
+            if !composerIsFocused || newValue.isEmpty {
+                composerDraft = newValue
+            }
         }
         .onChange(of: store.sessions) { _, _ in
             ensureVisibleSelection()
@@ -595,7 +606,12 @@ struct ContentView: View {
         }
         #if os(macOS)
         .onAppear {
+            composerDraft = store.composerText
             focusComposerEditor(forceActivateApp: true)
+        }
+        #else
+        .onAppear {
+            composerDraft = store.composerText
         }
         #endif
     }
@@ -1616,7 +1632,7 @@ struct ContentView: View {
                         lineLimit: welcomePromptCardLineLimit,
                         minHeight: welcomePromptCardMinHeight
                     ) {
-                        store.composerText = prompt
+                        composerDraft = prompt
                     }
                     .padding(.horizontal, 2)
                 }
@@ -1634,7 +1650,7 @@ struct ContentView: View {
                         lineLimit: welcomePromptCardLineLimit,
                         minHeight: welcomePromptCardMinHeight
                     ) {
-                        store.composerText = prompt
+                        composerDraft = prompt
                     }
                 }
             }
@@ -1689,7 +1705,7 @@ struct ContentView: View {
         VStack(spacing: 10) {
             VStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
-                    TextEditor(text: $store.composerText)
+                    TextEditor(text: $composerDraft)
                         .font(.body)
                         .foregroundStyle(.white.opacity(0.9))
                         .scrollContentBackground(.hidden)
@@ -1704,7 +1720,7 @@ struct ContentView: View {
                         }
                         #endif
 
-                    if store.composerText.isEmpty {
+                    if composerDraft.isEmpty {
                         Text("Ask for follow-up changes")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.42))
@@ -1857,7 +1873,7 @@ struct ContentView: View {
 
                     if hasComposerText {
                         Button {
-                            store.composerText = ""
+                            composerDraft = ""
                         } label: {
                             Image(systemName: "xmark")
                                 .font(.caption2.weight(.semibold))
@@ -1953,7 +1969,7 @@ struct ContentView: View {
 
                     if hasComposerText {
                         Button {
-                            store.composerText = ""
+                            composerDraft = ""
                         } label: {
                             Image(systemName: "xmark")
                                 .font(.caption2.weight(.semibold))
@@ -2301,7 +2317,7 @@ struct ContentView: View {
     }
 
     private var canSubmit: Bool {
-        canSendTurns && !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        canSendTurns && !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func presentSettings(_ category: SettingsCategory) {
@@ -2353,8 +2369,9 @@ struct ContentView: View {
     }
 
     private func submitComposerAction() {
+        let text = composerDraft
         Task {
-            await store.submitComposer()
+            await store.submitComposer(text: text)
         }
     }
 
@@ -2365,7 +2382,7 @@ struct ContentView: View {
     }
 
     private var composerEditorHeight: CGFloat {
-        let text = store.composerText
+        let text = composerDraft
         guard !text.isEmpty else {
             return isCompactPhoneLayout ? 36 : 48
         }
@@ -2869,7 +2886,7 @@ struct ContentView: View {
         Task {
             await voiceInput.startRecording { text, _ in
                 Task { @MainActor in
-                    store.composerText = text
+                    composerDraft = text
                 }
             }
         }
@@ -2878,11 +2895,11 @@ struct ContentView: View {
     private func stopVoiceCapture(shouldSubmit: Bool) {
         let finalText = voiceInput.stopRecording()
         let normalized = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        store.composerText = finalText
+        composerDraft = finalText
 
         if shouldSubmit && autoSubmitVoice && !normalized.isEmpty {
             Task {
-                await store.submitComposer()
+                await store.submitComposer(text: finalText)
             }
         }
     }

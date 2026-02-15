@@ -4,7 +4,10 @@ import OSLog
 @MainActor
 final class SessionMirrorStore: ObservableObject {
     private static let logger = Logger(subsystem: "com.every.code.native", category: "session-mirror")
-    private static let catalogRefreshIntervalNanoseconds: UInt64 = 3_000_000_000
+    // Large catalogs can contain hundreds of sessions; keep periodic refreshes
+    // sparse so list decoding doesn't interrupt typing responsiveness.
+    private static let catalogRefreshIntervalNanoseconds: UInt64 = 15_000_000_000
+    private static let sessionListRequestTimeoutSeconds: TimeInterval = 20
 
     enum ConnectionState: String {
         case disconnected
@@ -53,6 +56,8 @@ final class SessionMirrorStore: ObservableObject {
     private var attachmentGeneration: UInt64 = 0
     private var pendingAttachRequestSessionIDs: [String: UUID] = [:]
     private var unavailableSessionActivitySnapshot: [UUID: UInt64] = [:]
+    private var sessionListRequestID: String?
+    private var sessionListRequestStartedAt: Date?
 
     private lazy var decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -134,7 +139,17 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     func refreshSessions() async {
-        await send(OutboundMessage.listSessions(requestId: nextRequestID()))
+        if let sessionListRequestID,
+           let startedAt = sessionListRequestStartedAt,
+           Date().timeIntervalSince(startedAt) < Self.sessionListRequestTimeoutSeconds {
+            Self.logger.debug("Skipping list_sessions; request \(sessionListRequestID, privacy: .public) still pending")
+            return
+        }
+
+        let requestId = nextRequestID()
+        sessionListRequestID = requestId
+        sessionListRequestStartedAt = Date()
+        await send(OutboundMessage.listSessions(requestId: requestId))
     }
 
     func createSession(cwd: String?) async {
@@ -143,12 +158,12 @@ final class SessionMirrorStore: ObservableObject {
         await send(CreateSessionMessage(requestId: nextRequestID(), cwd: value))
     }
 
-    func submitComposer() async {
+    func submitComposer(text explicitText: String? = nil) async {
         guard let selectedSessionID else {
             return
         }
 
-        let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = (explicitText ?? composerText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             return
         }
@@ -219,6 +234,8 @@ final class SessionMirrorStore: ObservableObject {
         clientId = nil
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
         pendingAttachRequestSessionIDs.removeAll()
+        sessionListRequestID = nil
+        sessionListRequestStartedAt = nil
         if error != nil {
             lastError = error
             recordTransportFailure(context: status, details: error)
@@ -363,6 +380,8 @@ final class SessionMirrorStore: ObservableObject {
             }
 
         case .sessionList(let message):
+            sessionListRequestID = nil
+            sessionListRequestStartedAt = nil
             sessions = message.sessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
             pruneUnavailableSessionsToKnownIDs()
             clearRecoveredUnavailableSessions()
@@ -427,6 +446,10 @@ final class SessionMirrorStore: ObservableObject {
             }
 
         case .error(let message):
+            if message.requestId == sessionListRequestID {
+                sessionListRequestID = nil
+                sessionListRequestStartedAt = nil
+            }
             lastError = message.message
             if let requestId = message.requestId,
                let failedSessionID = pendingAttachRequestSessionIDs.removeValue(forKey: requestId) {
