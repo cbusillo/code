@@ -3742,9 +3742,9 @@ private struct AssistantTranscriptLine: View {
 
                 case .unorderedListItem(let level, let value):
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("•")
+                        Text(unorderedMarker(for: level))
                             .font((usesCompactPhoneTypography ? Font.callout : Font.body).weight(.semibold))
-                            .foregroundStyle(Color.teal.opacity(0.9))
+                            .foregroundStyle(unorderedMarkerColor(for: level))
                         AssistantInlineMarkdownText(text: value)
                             .font(usesCompactPhoneTypography ? .callout : .body)
                             .foregroundStyle(.white.opacity(0.93))
@@ -4030,6 +4030,30 @@ private struct AssistantTranscriptLine: View {
         }
 
         return (digits, content)
+    }
+
+    private func unorderedMarker(for level: Int) -> String {
+        if level == 0 {
+            return "-"
+        }
+
+        if level == 1 {
+            return "•"
+        }
+
+        return "◦"
+    }
+
+    private func unorderedMarkerColor(for level: Int) -> Color {
+        if level == 0 {
+            return Color.cyan.opacity(0.92)
+        }
+
+        if level == 1 {
+            return Color.teal.opacity(0.9)
+        }
+
+        return Color.teal.opacity(0.72)
     }
 }
 
