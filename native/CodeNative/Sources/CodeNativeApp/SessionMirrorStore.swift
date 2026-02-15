@@ -16,6 +16,7 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var statusLine: String = "Disconnected"
     @Published private(set) var sessions: [SessionSummary] = []
     @Published private(set) var itemsBySession: [UUID: [SessionStreamItem]] = [:]
+    @Published private(set) var unavailableSessionErrors: [UUID: String] = [:]
     @Published var composerText: String = ""
     @Published var selectedSessionID: UUID? {
         didSet {
@@ -48,6 +49,7 @@ final class SessionMirrorStore: ObservableObject {
     private var userInitiatedDisconnect: Bool = false
     private var requestCounter: UInt64 = 0
     private var attachmentGeneration: UInt64 = 0
+    private var pendingAttachRequestSessionIDs: [String: UUID] = [:]
 
     private lazy var decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -73,6 +75,18 @@ final class SessionMirrorStore: ObservableObject {
             return []
         }
         return itemsBySession[selectedSessionID] ?? []
+    }
+
+    var unavailableSessionIDs: Set<UUID> {
+        Set(unavailableSessionErrors.keys)
+    }
+
+    func isSessionUnavailable(_ sessionID: UUID) -> Bool {
+        unavailableSessionErrors[sessionID] != nil
+    }
+
+    func unavailableSessionError(for sessionID: UUID) -> String? {
+        unavailableSessionErrors[sessionID]
     }
 
     func connect() async {
@@ -197,6 +211,7 @@ final class SessionMirrorStore: ObservableObject {
         expectedAttachedSessionID = nil
         clientId = nil
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
+        pendingAttachRequestSessionIDs.removeAll()
         if error != nil {
             lastError = error
             recordTransportFailure(context: status, details: error)
@@ -317,6 +332,7 @@ final class SessionMirrorStore: ObservableObject {
 
         case .sessionList(let message):
             sessions = message.sessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
+            pruneUnavailableSessionsToKnownIDs()
 
             if let selectedSessionID,
                sessions.contains(where: { $0.id == selectedSessionID }) {
@@ -338,6 +354,8 @@ final class SessionMirrorStore: ObservableObject {
                 fromSeq: message.fromSeq
             )
             itemsBySession[message.sessionId] = merged
+            clearPendingAttachRequests(for: message.sessionId)
+            clearSessionUnavailable(message.sessionId)
 
             if !SessionStreamReducer.shouldAcceptSessionAttached(
                 selectedSessionID: selectedSessionID,
@@ -376,7 +394,15 @@ final class SessionMirrorStore: ObservableObject {
 
         case .error(let message):
             lastError = message.message
-            statusLine = "Server error"
+            if let requestId = message.requestId,
+               let failedSessionID = pendingAttachRequestSessionIDs.removeValue(forKey: requestId) {
+                markSessionUnavailable(failedSessionID, message: message.message)
+                if selectedSessionID == failedSessionID {
+                    statusLine = "Thread unavailable"
+                }
+            } else {
+                statusLine = "Server error"
+            }
 
         case .ack:
             break
@@ -441,14 +467,17 @@ final class SessionMirrorStore: ObservableObject {
         }
 
         let fromSeq = itemsBySession[newSessionID]?.last?.seq ?? 0
+        let requestId = nextRequestID()
 
         guard generation == attachmentGeneration else {
             return
         }
 
+        pendingAttachRequestSessionIDs[requestId] = newSessionID
+
         await send(
             OutboundMessage.attachSession(
-                requestId: nextRequestID(),
+                requestId: requestId,
                 sessionId: newSessionID,
                 fromSeq: fromSeq
             )
@@ -562,6 +591,23 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
+    private func pruneUnavailableSessionsToKnownIDs() {
+        let knownSessionIDs = Set(sessions.map(\.id))
+        unavailableSessionErrors = unavailableSessionErrors.filter { knownSessionIDs.contains($0.key) }
+    }
+
+    private func clearPendingAttachRequests(for sessionID: UUID) {
+        pendingAttachRequestSessionIDs = pendingAttachRequestSessionIDs.filter { $0.value != sessionID }
+    }
+
+    private func markSessionUnavailable(_ sessionID: UUID, message: String) {
+        unavailableSessionErrors[sessionID] = message
+    }
+
+    private func clearSessionUnavailable(_ sessionID: UUID) {
+        unavailableSessionErrors.removeValue(forKey: sessionID)
+    }
+
     private func preferredAutoSelectedSession(in sessions: [SessionSummary]) -> SessionSummary? {
         sessions.last(where: { !isAutoReviewSession($0) }) ?? sessions.last
     }
@@ -577,6 +623,10 @@ final class SessionMirrorStore: ObservableObject {
 extension SessionMirrorStore {
     func applyEnvelopeForTesting(_ envelope: ServerEnvelope) {
         apply(envelope)
+    }
+
+    func recordPendingAttachRequestForTesting(requestId: String, sessionID: UUID) {
+        pendingAttachRequestSessionIDs[requestId] = sessionID
     }
 
     func ingestRawPayloadForTesting(_ payload: String) {

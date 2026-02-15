@@ -180,6 +180,61 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAttachErrorMarksSessionUnavailableAndClearsAfterSuccessfulAttach() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000311")!
+        let requestId = "native_311"
+        let errorMessage = "Failed to resume session \(sessionId.uuidString): internal error; agent loop died unexpectedly"
+
+        store.recordPendingAttachRequestForTesting(requestId: requestId, sessionID: sessionId)
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "error",
+              "request_id": "\(requestId)",
+              "message": "\(errorMessage)"
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.unavailableSessionError(for: sessionId), errorMessage)
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(sessionId.uuidString)",
+              "from_seq": 0,
+              "items": []
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertNil(store.unavailableSessionError(for: sessionId))
+    }
+
+    @MainActor
+    func testNonAttachErrorDoesNotMarkSessionUnavailable() throws {
+        let store = SessionMirrorStore()
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "error",
+              "request_id": "native_901",
+              "message": "Failed to submit turn: missing session"
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertTrue(store.unavailableSessionIDs.isEmpty)
+    }
+
+    @MainActor
     private func applyServerEnvelope(
         _ rawJSON: String,
         to store: SessionMirrorStore

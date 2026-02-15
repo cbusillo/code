@@ -337,7 +337,9 @@ struct ContentView: View {
     }
 
     private var visibleSessions: [SessionSummary] {
-        store.sessions.filter { !isHiddenSession($0) }
+        store.sessions.filter { session in
+            !isHiddenSession(session) && !store.isSessionUnavailable(session.id)
+        }
     }
 
     private var filteredSessions: [SessionSummary] {
@@ -368,6 +370,18 @@ struct ContentView: View {
 
     private var totalHiddenSessionCount: Int {
         hiddenSessionCountByRepo.values.reduce(0, +)
+    }
+
+    private var unavailableSessionCount: Int {
+        store.unavailableSessionErrors.count
+    }
+
+    private var selectedSessionUnavailableError: String? {
+        guard let selectedSession = store.selectedSession else {
+            return nil
+        }
+
+        return store.unavailableSessionError(for: selectedSession.id)
     }
 
     private var sessionTitleCounts: [String: Int] {
@@ -614,6 +628,12 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
 
+                            if unavailableSessionCount > 0 {
+                                Text("\(unavailableSessionCount) unavailable threads are hidden.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
                             if threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 Button("Create first thread") {
                                     Task {
@@ -638,6 +658,15 @@ struct ContentView: View {
 
                             if totalHiddenSessionCount > 0 {
                                 Text("\(totalHiddenSessionCount) hidden")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary.opacity(0.9))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.04), in: Capsule(style: .continuous))
+                            }
+
+                            if unavailableSessionCount > 0 {
+                                Text("\(unavailableSessionCount) unavailable")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary.opacity(0.9))
                                     .padding(.horizontal, 6)
@@ -971,7 +1000,11 @@ struct ContentView: View {
                 ScrollView {
                     VStack(spacing: transcriptRowSpacing) {
                         if transcriptItems.isEmpty {
-                            welcomePanel(for: session)
+                            if let unavailableError = selectedSessionUnavailableError {
+                                unavailableSessionPanel(for: session, error: unavailableError)
+                            } else {
+                                welcomePanel(for: session)
+                            }
                         } else {
                             ForEach(transcriptItems) { item in
                                 transcriptRow(item: item)
@@ -1430,6 +1463,50 @@ struct ContentView: View {
         }
         .padding(.top, isCompactPhoneLayout ? 8 : (showsIPadSplitLayout ? 18 : 36))
         .frame(maxWidth: showsIPadSplitLayout ? 900 : .infinity)
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private func unavailableSessionPanel(for session: SessionSummary, error: String) -> some View {
+        VStack(spacing: isCompactPhoneLayout ? 14 : 18) {
+            if !isCompactPhoneLayout {
+                Spacer(minLength: showsIPadSplitLayout ? 10 : 30)
+            }
+
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.orange.opacity(0.9))
+                .frame(width: 52, height: 52)
+                .background(Color.orange.opacity(0.15), in: Circle())
+
+            VStack(spacing: 8) {
+                Text("Could not load this thread")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                Text(sessionDisplayTitle(for: session))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button("Start a new thread") {
+                Task {
+                    await store.createSession(cwd: nil)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+
+            if !isCompactPhoneLayout {
+                Spacer(minLength: showsIPadSplitLayout ? 8 : 22)
+            }
+        }
+        .padding(.top, isCompactPhoneLayout ? 8 : (showsIPadSplitLayout ? 16 : 32))
+        .frame(maxWidth: showsIPadSplitLayout ? 760 : .infinity)
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
