@@ -576,7 +576,7 @@ struct ContentView: View {
             #if os(iOS)
             showThreadPicker = false
             #else
-            composerIsFocused = true
+            focusComposerEditor(forceActivateApp: true)
             #endif
         }
         .onChange(of: store.sessions) { _, _ in
@@ -593,6 +593,11 @@ struct ContentView: View {
             _ = voiceInput.stopRecording()
             voiceOutput.stop()
         }
+        #if os(macOS)
+        .onAppear {
+            focusComposerEditor(forceActivateApp: true)
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -1693,6 +1698,11 @@ struct ContentView: View {
                         .padding(.horizontal, 12)
                         .padding(.top, isCompactPhoneLayout ? 6 : 8)
                         .accessibilityIdentifier("composer.input")
+                        #if os(macOS)
+                        .onTapGesture {
+                            focusComposerEditor(forceActivateApp: true)
+                        }
+                        #endif
 
                     if store.composerText.isEmpty {
                         Text("Ask for follow-up changes")
@@ -1703,6 +1713,12 @@ struct ContentView: View {
                             .allowsHitTesting(false)
                     }
                 }
+                .contentShape(Rectangle())
+                #if os(macOS)
+                .onTapGesture {
+                    focusComposerEditor(forceActivateApp: true)
+                }
+                #endif
 
                 composerControlRows
             }
@@ -2297,13 +2313,34 @@ struct ContentView: View {
         Task {
             if store.connectionState != .connected {
                 await store.connect()
+                #if os(macOS)
+                focusComposerEditor(forceActivateApp: true)
+                #endif
                 return
             }
 
             if store.selectedSession == nil {
                 await store.createSession(cwd: nil)
             }
+
+            #if os(macOS)
+            focusComposerEditor(forceActivateApp: true)
+            #endif
         }
+    }
+
+    private func focusComposerEditor(forceActivateApp: Bool) {
+        composerIsFocused = true
+
+        #if os(macOS)
+        guard forceActivateApp else {
+            return
+        }
+
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.keyWindow?.makeKeyAndOrderFront(nil)
+        #endif
     }
 
     private func copyLastAssistantResponseToPasteboard() {
