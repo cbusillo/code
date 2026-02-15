@@ -252,6 +252,10 @@ struct ContentView: View {
         selectedTranscriptDensity.rowSpacing + (isCompactPhoneLayout ? -1 : 0)
     }
 
+    private var shouldCollapseCompactComposerQuickActions: Bool {
+        isCompactPhoneLayout && store.selectedSessionItems.count > 24
+    }
+
     private var usesExpandedTopTitle: Bool {
         isCompactPhoneLayout && store.selectedSessionItems.isEmpty
     }
@@ -1582,33 +1586,58 @@ struct ContentView: View {
                         .frame(height: composerEditorHeight)
                         .focused($composerIsFocused)
                         .padding(.horizontal, 12)
-                        .padding(.top, 8)
+                        .padding(.top, isCompactPhoneLayout ? 6 : 8)
                         .accessibilityIdentifier("composer.input")
 
                     if store.composerText.isEmpty {
                         Text("Ask for follow-up changes")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.42))
-                            .padding(.horizontal, 18)
-                            .padding(.top, 14)
+                            .padding(.horizontal, isCompactPhoneLayout ? 16 : 18)
+                            .padding(.top, isCompactPhoneLayout ? 12 : 14)
                             .allowsHitTesting(false)
                     }
                 }
 
                 composerControlRows
             }
-            .background(Color.white.opacity(isCompactPhoneLayout ? 0.065 : 0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.white.opacity(isCompactPhoneLayout ? 0.14 : 0.09), lineWidth: 1)
-            )
+            .background {
+                if isCompactPhoneLayout {
+                    UnevenRoundedRectangle(
+                        cornerRadii: .init(topLeading: 20, bottomLeading: 0, bottomTrailing: 0, topTrailing: 20),
+                        style: .continuous
+                    )
+                    .fill(Color.white.opacity(0.065))
+                } else {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.white.opacity(0.05))
+                }
+            }
+            .overlay {
+                if isCompactPhoneLayout {
+                    UnevenRoundedRectangle(
+                        cornerRadii: .init(topLeading: 20, bottomLeading: 0, bottomTrailing: 0, topTrailing: 20),
+                        style: .continuous
+                    )
+                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                } else {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                }
+            }
         }
         .padding(.horizontal, composerHorizontalPadding)
         .padding(.bottom, composerBottomPadding)
+        #if os(iOS)
+        .ignoresSafeArea(.container, edges: isCompactPhoneLayout ? .bottom : [])
+        #endif
     }
 
     private var composerHorizontalPadding: CGFloat {
         #if os(iOS)
+        if isCompactPhoneLayout {
+            return 0
+        }
         return showsIPadSplitLayout ? 16 : 22
         #else
         return 22
@@ -1617,17 +1646,25 @@ struct ContentView: View {
 
     private var composerBottomPadding: CGFloat {
         #if os(iOS)
+        if isCompactPhoneLayout {
+            return 0
+        }
         return showsIPadSplitLayout ? 8 : 10
         #else
         return 18
         #endif
     }
 
+    private var composerControlBottomPadding: CGFloat {
+        isCompactPhoneLayout ? 2 : 8
+    }
+
     private var composerControlRows: some View {
         #if os(iOS)
         VStack(spacing: 0) {
             if canSendTurns,
-               !hasComposerText {
+               !hasComposerText,
+               !shouldCollapseCompactComposerQuickActions {
                 if isCompactPhoneLayout {
                     HStack(spacing: 8) {
                         ForEach(Array(primaryComposerQuickActions.enumerated()), id: \.offset) { index, action in
@@ -1672,8 +1709,8 @@ struct ContentView: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 12)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
+                    .padding(.top, isCompactPhoneLayout ? 6 : 8)
+                    .padding(.bottom, isCompactPhoneLayout ? 2 : 4)
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -1701,6 +1738,32 @@ struct ContentView: View {
             }
 
             HStack(spacing: 8) {
+                if isCompactPhoneLayout,
+                   canSendTurns,
+                   !hasComposerText,
+                   shouldCollapseCompactComposerQuickActions {
+                    Menu {
+                        ForEach(Array(composerQuickActions.enumerated()), id: \.offset) { index, action in
+                            Button {
+                                applyComposerQuickAction(action.prompt)
+                            } label: {
+                                Label(action.prompt, systemImage: action.icon)
+                            }
+                            .accessibilityIdentifier("composer.quick.\(index)")
+                        }
+                    } label: {
+                        Label("Prompts", systemImage: "sparkles")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.84))
+                            .lineLimit(1)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("composer.quick.more")
+                }
+
                 Menu {
                     ForEach(modelOptions, id: \.self) { option in
                         Button(option) {
@@ -1728,8 +1791,8 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(composerControlForegroundStyle)
             .padding(.horizontal, 12)
-            .padding(.top, 8)
-            .padding(.bottom, 4)
+            .padding(.top, isCompactPhoneLayout ? 6 : 8)
+            .padding(.bottom, isCompactPhoneLayout ? 2 : 4)
 
             if let helper = composerHelperText {
                 HStack(spacing: 8) {
@@ -1754,7 +1817,7 @@ struct ContentView: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 2)
+                .padding(.bottom, isCompactPhoneLayout ? 1 : 2)
             }
 
             HStack(spacing: 8) {
@@ -1766,7 +1829,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
-                .frame(width: 24, height: 24)
+                .frame(width: isCompactPhoneLayout ? 22 : 24, height: isCompactPhoneLayout ? 22 : 24)
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
                 .accessibilityIdentifier("composer.mic-toggle")
@@ -1779,7 +1842,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white.opacity(0.62))
-                .frame(width: 24, height: 24)
+                .frame(width: isCompactPhoneLayout ? 22 : 24, height: isCompactPhoneLayout ? 22 : 24)
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
                 .accessibilityIdentifier("composer.stop")
@@ -1796,7 +1859,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.62))
-                    .frame(width: 24, height: 24)
+                    .frame(width: isCompactPhoneLayout ? 22 : 24, height: isCompactPhoneLayout ? 22 : 24)
                     .background(Color.white.opacity(0.05), in: Circle())
                     .accessibilityIdentifier("composer.clear")
                 }
@@ -1816,7 +1879,7 @@ struct ContentView: View {
                         .foregroundStyle(canSubmit ? .black : .white.opacity(0.6))
                 }
                 .buttonStyle(.plain)
-                .frame(width: 28, height: 28)
+                .frame(width: isCompactPhoneLayout ? 26 : 28, height: isCompactPhoneLayout ? 26 : 28)
                 .background(
                     canSubmit ? Color.white : Color.white.opacity(0.24),
                     in: Circle()
@@ -1830,8 +1893,8 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(composerControlForegroundStyle)
             .padding(.horizontal, 12)
-            .padding(.top, 2)
-            .padding(.bottom, 8)
+            .padding(.top, isCompactPhoneLayout ? 1 : 2)
+            .padding(.bottom, composerControlBottomPadding)
         }
         #else
         VStack(spacing: 0) {
@@ -2186,7 +2249,7 @@ struct ContentView: View {
     private var composerEditorHeight: CGFloat {
         let text = store.composerText
         guard !text.isEmpty else {
-            return 48
+            return isCompactPhoneLayout ? 42 : 48
         }
 
         let newlineCount = text.reduce(into: 1) { count, character in
@@ -2197,7 +2260,9 @@ struct ContentView: View {
         let wrappedLineEstimate = max(1, text.count / 72)
         let lines = max(newlineCount, wrappedLineEstimate)
         let height = CGFloat(lines * 20 + 20)
-        return min(176, max(48, height))
+        let minHeight: CGFloat = isCompactPhoneLayout ? 42 : 48
+        let maxHeight: CGFloat = isCompactPhoneLayout ? 160 : 176
+        return min(maxHeight, max(minHeight, height))
     }
 
     private var selectedSessionRepoLabel: String {
