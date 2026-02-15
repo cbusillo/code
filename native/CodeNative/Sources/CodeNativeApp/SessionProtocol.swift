@@ -1431,6 +1431,37 @@ extension SessionStreamItem {
         return false
     }
 
+    var isOptionalActivityEvent: Bool {
+        guard type == "core_event",
+              let payloadType = event?.payload?.typeHint
+        else {
+            return false
+        }
+
+        if payloadType == "agent_reasoning_section_break"
+            || payloadType == "agent_reasoning"
+            || payloadType == "task_started"
+            || payloadType == "task_complete"
+            || payloadType == "token_count"
+            || payloadType == "plan_update"
+            || payloadType == "exec_command_begin"
+            || payloadType == "exec_command_output_delta"
+            || payloadType == "background_event"
+        {
+            return true
+        }
+
+        if payloadType.contains("browser") {
+            return true
+        }
+
+        if payloadType.contains("tool_call") && !payloadType.contains("view_image_tool_call") {
+            return true
+        }
+
+        return false
+    }
+
     private func isImagePlaceholderMessage(_ message: String) -> Bool {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("[image:") && trimmed.hasSuffix("]")

@@ -68,6 +68,7 @@ struct ContentView: View {
     @AppStorage("code_native_glass_window") private var glassWindow = true
     @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = true
     @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
+    @AppStorage("code_native_show_activity_events") private var showActivityEvents = true
     @AppStorage("code_native_selected_model") private var selectedModel = "GPT-5.3-Codex"
     @AppStorage("code_native_reasoning_level") private var selectedReasoningLevel = "High"
     @AppStorage("code_native_sandbox_mode") private var selectedSandboxMode = "Local"
@@ -567,13 +568,16 @@ struct ContentView: View {
                 await store.connect()
             }
         }
-        .onChange(of: store.selectedSessionItems) { _, _ in
+        .onChange(of: store.selectedSessionItems.last?.id) { _, _ in
             refreshTranscriptCache()
             handleAssistantSpeech()
             if let activeTranscriptItemID,
                !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
                 self.activeTranscriptItemID = nil
             }
+        }
+        .onChange(of: store.selectedSessionItems.last?.rev) { _, _ in
+            refreshTranscriptCache()
         }
         .onChange(of: store.selectedSessionID) { _, _ in
             activeTranscriptItemID = nil
@@ -596,6 +600,9 @@ struct ContentView: View {
         }
         .onChange(of: store.sessions) { _, _ in
             ensureVisibleSelection()
+        }
+        .onChange(of: showActivityEvents) { _, _ in
+            refreshTranscriptCache()
         }
         #if os(iOS)
         .onChange(of: showsIPadSplitLayout) { _, isSplit in
@@ -634,6 +641,7 @@ struct ContentView: View {
             openDestinationRaw: $openDestinationRaw,
             followupModeRaw: $followupModeRaw,
             multilineBehaviorRaw: $multilineBehaviorRaw,
+            showActivityEvents: $showActivityEvents,
             preventSleep: $preventSleep,
             glassWindow: $glassWindow,
             initialCategory: settingsCategory
@@ -1234,7 +1242,9 @@ struct ContentView: View {
     }
 
     private func refreshTranscriptCache() {
-        let visible = store.selectedSessionItems.filter { !$0.shouldHideFromTranscript && !$0.isReplayOmittedNotice }
+        let visible = store.selectedSessionItems.filter {
+            shouldIncludeInTranscript($0) && !$0.isReplayOmittedNotice
+        }
         let replayPruned = pruneReplayHistoryCardsWhenRedundant(in: visible)
         cachedTranscriptItems = dedupeAssistantMessagesWithinTurn(
             in: collapseConsecutiveReasoningCards(
@@ -1247,6 +1257,14 @@ struct ContentView: View {
                 )
             )
         )
+    }
+
+    private func shouldIncludeInTranscript(_ item: SessionStreamItem) -> Bool {
+        if !item.shouldHideFromTranscript {
+            return true
+        }
+
+        return showActivityEvents && item.isOptionalActivityEvent
     }
 
     private func pruneReplayHistoryCardsWhenRedundant(in items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -1720,7 +1738,7 @@ struct ContentView: View {
                         isFocused: composerIsFocused,
                         measuredHeight: $composerMeasuredHeight,
                         onFocusChange: { composerIsFocused = $0 },
-                        onSubmit: submitComposerAction
+                        onSubmit: { submitComposerAction(text: $0) }
                     )
                     .frame(height: composerEditorHeight)
                     .padding(.horizontal, 12)
@@ -1765,6 +1783,22 @@ struct ContentView: View {
                 } else {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if let activity = composerActivityBadge {
+                    Label(activity.label, systemImage: activity.icon)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(activity.tint)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.black.opacity(0.46), in: Capsule(style: .continuous))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(activity.tint.opacity(0.38), lineWidth: 1)
+                        )
+                        .padding(.leading, 14)
+                        .offset(y: -11)
                 }
             }
         }
@@ -2073,6 +2107,13 @@ struct ContentView: View {
                 }
                 #endif
 
+                Button {
+                    showActivityEvents.toggle()
+                } label: {
+                    Label(showActivityEvents ? "Activity on" : "Activity off", systemImage: showActivityEvents ? "waveform.path.ecg" : "waveform.path.ecg.rectangle")
+                }
+                .buttonStyle(.borderless)
+
                 Spacer()
 
                 Button {
@@ -2338,6 +2379,55 @@ struct ContentView: View {
         canSendTurns && !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private struct ComposerActivityBadge {
+        let label: String
+        let icon: String
+        let tint: Color
+    }
+
+    private var composerActivityBadge: ComposerActivityBadge? {
+        for item in store.selectedSessionItems.reversed() {
+            guard item.type == "core_event",
+                  let payloadType = item.event?.payload?.typeHint
+            else {
+                continue
+            }
+
+            if payloadType == "agent_message" || payloadType == "user_message" || payloadType == "turn_aborted" {
+                return nil
+            }
+
+            if payloadType == "agent_reasoning" || payloadType == "agent_reasoning_section_break" || payloadType == "task_started" {
+                return ComposerActivityBadge(label: "Thinking…", icon: "brain.head.profile", tint: Color.yellow.opacity(0.92))
+            }
+
+            if payloadType == "exec_command_begin" || payloadType == "exec_command_output_delta" {
+                return ComposerActivityBadge(label: "Executing…", icon: "terminal", tint: Color.green.opacity(0.9))
+            }
+
+            if payloadType == "turn_diff" || payloadType == "patch_apply_end" {
+                return ComposerActivityBadge(label: "Diffing…", icon: "doc.text.magnifyingglass", tint: Color.cyan.opacity(0.9))
+            }
+
+            if payloadType == "background_event" {
+                let message = item.body.lowercased()
+                if message.contains("browser") {
+                    return ComposerActivityBadge(label: "Browsing…", icon: "globe", tint: Color.blue.opacity(0.9))
+                }
+                if message.contains("review") {
+                    return ComposerActivityBadge(label: "Reviewing…", icon: "checklist", tint: Color.purple.opacity(0.86))
+                }
+                return ComposerActivityBadge(label: "Working…", icon: "sparkles", tint: Color.teal.opacity(0.9))
+            }
+
+            if payloadType == "exec_approval_request" || payloadType == "apply_patch_approval_request" {
+                return ComposerActivityBadge(label: "Awaiting approval", icon: "hand.raised", tint: Color.orange.opacity(0.9))
+            }
+        }
+
+        return nil
+    }
+
     private func presentSettings(_ category: SettingsCategory) {
         settingsCategory = category
         showSettings = true
@@ -2386,8 +2476,8 @@ struct ContentView: View {
         #endif
     }
 
-    private func submitComposerAction() {
-        let text = composerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func submitComposerAction(text overrideText: String? = nil) {
+        let text = (overrideText ?? composerDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             return
         }
@@ -3412,7 +3502,7 @@ private struct MacComposerTextView: NSViewRepresentable {
     var isFocused: Bool
     @Binding var measuredHeight: CGFloat
     let onFocusChange: (Bool) -> Void
-    let onSubmit: () -> Void
+    let onSubmit: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -3438,7 +3528,10 @@ private struct MacComposerTextView: NSViewRepresentable {
         textView.allowsUndo = true
         textView.textContainerInset = NSSize(width: 0, height: 4)
         textView.delegate = context.coordinator
-        textView.onSubmit = onSubmit
+        textView.onSubmit = { [weak textView, weak coordinator = context.coordinator] in
+            coordinator?.cancelPendingSync()
+            onSubmit(textView?.string ?? "")
+        }
         textView.string = text
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -3464,13 +3557,13 @@ private struct MacComposerTextView: NSViewRepresentable {
         }
 
         if textView.string != text {
+            context.coordinator.cancelPendingSync()
             textView.string = text
         }
 
-        textView.onSubmit = onSubmit
-
-        DispatchQueue.main.async {
-            measuredHeight = Self.measuredEditorHeight(for: textView)
+        textView.onSubmit = { [weak textView, weak coordinator = context.coordinator] in
+            coordinator?.cancelPendingSync()
+            onSubmit(textView?.string ?? "")
         }
 
         if isFocused,
@@ -3495,6 +3588,7 @@ private struct MacComposerTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MacComposerTextView
+        private var pendingSync: DispatchWorkItem?
 
         init(parent: MacComposerTextView) {
             self.parent = parent
@@ -3506,11 +3600,26 @@ private struct MacComposerTextView: NSViewRepresentable {
             }
 
             let updated = textView.string
-            if parent.text != updated {
-                parent.text = updated
+            parent.measuredHeight = MacComposerTextView.measuredEditorHeight(for: textView)
+
+            pendingSync?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else {
+                    return
+                }
+
+                if self.parent.text != updated {
+                    self.parent.text = updated
+                }
             }
 
-            parent.measuredHeight = MacComposerTextView.measuredEditorHeight(for: textView)
+            pendingSync = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+        }
+
+        func cancelPendingSync() {
+            pendingSync?.cancel()
+            pendingSync = nil
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -3562,8 +3671,16 @@ private struct AssistantTranscriptLine: View {
     let density: TranscriptDensity
     let isActive: Bool
     let onActivate: () -> Void
-    @State private var isExpanded = false
     @State private var isHoveringCopyActions = false
+
+    private enum MarkdownBlock: Hashable {
+        case paragraph(String)
+        case heading(level: Int, text: String)
+        case unorderedListItem(String)
+        case orderedListItem(number: String, text: String)
+        case quote(String)
+        case code(language: String?, text: String)
+    }
 
     init(
         text: String,
@@ -3589,42 +3706,8 @@ private struct AssistantTranscriptLine: View {
         #endif
     }
 
-    private var renderedText: Text {
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
-
-        if let attributed = try? AttributedString(
-            markdown: normalized,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace,
-                failurePolicy: .returnPartiallyParsedIfPossible
-            )
-        ) {
-            return Text(attributed)
-        }
-
-        return Text(verbatim: normalized)
-    }
-
-    private var collapsedLineLimit: Int {
-        usesCompactPhoneTypography ? 12 : 16
-    }
-
-    private var estimatedLineCount: Int {
-        let wrapWidth = usesCompactPhoneTypography ? 52 : 78
-        return text
-            .components(separatedBy: "\n")
-            .reduce(into: 0) { count, line in
-                let wrapped = max(1, (line.count + wrapWidth - 1) / wrapWidth)
-                count += wrapped
-            }
-    }
-
-    private var shouldClampInitially: Bool {
-        estimatedLineCount > collapsedLineLimit + 4 || text.count > 900
-    }
-
-    private var isCollapsed: Bool {
-        shouldClampInitially && !isExpanded
+    private var blocks: [MarkdownBlock] {
+        parseMarkdownBlocks(from: text)
     }
 
     private var canCopyText: Bool {
@@ -3644,26 +3727,69 @@ private struct AssistantTranscriptLine: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            renderedText
-                .font(usesCompactPhoneTypography ? .callout : .body)
-                .foregroundStyle(.white.opacity(0.93))
-                .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
-                .textSelection(.enabled)
-                .lineLimit(isCollapsed ? collapsedLineLimit : nil)
-                .fixedSize(horizontal: false, vertical: !isCollapsed)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .paragraph(let value):
+                    AssistantInlineMarkdownText(text: value)
+                        .font(usesCompactPhoneTypography ? .callout : .body)
+                        .foregroundStyle(.white.opacity(0.93))
+                        .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-            if shouldClampInitially {
-                Button(isExpanded ? "Collapse" : "Show more") {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isExpanded.toggle()
+                case .heading(let level, let value):
+                    AssistantInlineMarkdownText(text: value)
+                        .font(headingFont(for: level))
+                        .foregroundStyle(headingColor(for: level))
+                        .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                case .unorderedListItem(let value):
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("•")
+                            .font((usesCompactPhoneTypography ? Font.callout : Font.body).weight(.semibold))
+                            .foregroundStyle(Color.teal.opacity(0.9))
+                        AssistantInlineMarkdownText(text: value)
+                            .font(usesCompactPhoneTypography ? .callout : .body)
+                            .foregroundStyle(.white.opacity(0.93))
+                            .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                            .textSelection(.enabled)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                case .orderedListItem(let number, let value):
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("\(number).")
+                            .font((usesCompactPhoneTypography ? Font.callout : Font.body).monospaced().weight(.semibold))
+                            .foregroundStyle(Color.blue.opacity(0.85))
+                        AssistantInlineMarkdownText(text: value)
+                            .font(usesCompactPhoneTypography ? .callout : .body)
+                            .foregroundStyle(.white.opacity(0.93))
+                            .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                case .quote(let value):
+                    HStack(alignment: .top, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(Color.cyan.opacity(0.45))
+                            .frame(width: 3)
+                        AssistantInlineMarkdownText(text: value)
+                            .font(usesCompactPhoneTypography ? .callout : .body)
+                            .foregroundStyle(.white.opacity(0.88))
+                            .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                case .code(let language, let value):
+                    AssistantCodeBlock(language: language, code: value)
                 }
-                .buttonStyle(.plain)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.78))
-                .padding(.leading, 12)
             }
         }
         .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
@@ -3708,6 +3834,281 @@ private struct AssistantTranscriptLine: View {
                 }
             }
         }
+    }
+
+    private func copyTextToPasteboard(_ value: String) {
+        #if os(macOS)
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(value, forType: .string)
+        #elseif os(iOS)
+        UIPasteboard.general.string = value
+        #endif
+    }
+
+    private func headingFont(for level: Int) -> Font {
+        switch level {
+        case 1:
+            return .title3.weight(.semibold)
+        case 2:
+            return .headline.weight(.semibold)
+        default:
+            return .subheadline.weight(.semibold)
+        }
+    }
+
+    private func headingColor(for level: Int) -> Color {
+        switch level {
+        case 1:
+            return Color.blue.opacity(0.95)
+        case 2:
+            return Color.blue.opacity(0.9)
+        default:
+            return Color.blue.opacity(0.82)
+        }
+    }
+
+    private func parseMarkdownBlocks(from value: String) -> [MarkdownBlock] {
+        let normalized = value.replacingOccurrences(of: "\r\n", with: "\n")
+        guard !normalized.isEmpty else {
+            return []
+        }
+
+        let lines = normalized.components(separatedBy: "\n")
+        var blocks: [MarkdownBlock] = []
+        var proseBuffer: [String] = []
+        var codeBuffer: [String] = []
+        var codeLanguage: String?
+        var inCodeBlock = false
+
+        func flushProse() {
+            guard !proseBuffer.isEmpty else {
+                return
+            }
+
+            blocks.append(contentsOf: parseProseLines(proseBuffer))
+            proseBuffer.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                if inCodeBlock {
+                    let code = codeBuffer.joined(separator: "\n")
+                    blocks.append(.code(language: codeLanguage, text: code))
+                    codeBuffer.removeAll(keepingCapacity: true)
+                    codeLanguage = nil
+                    inCodeBlock = false
+                } else {
+                    flushProse()
+                    let languageHint = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    codeLanguage = languageHint.isEmpty ? nil : languageHint
+                    inCodeBlock = true
+                }
+                continue
+            }
+
+            if inCodeBlock {
+                codeBuffer.append(line)
+            } else {
+                proseBuffer.append(line)
+            }
+        }
+
+        if inCodeBlock {
+            let code = codeBuffer.joined(separator: "\n")
+            blocks.append(.code(language: codeLanguage, text: code))
+        }
+
+        flushProse()
+
+        return blocks
+    }
+
+    private func parseProseLines(_ lines: [String]) -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
+        var paragraphBuffer: [String] = []
+
+        func flushParagraph() {
+            let paragraph = paragraphBuffer
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !paragraph.isEmpty else {
+                paragraphBuffer.removeAll(keepingCapacity: true)
+                return
+            }
+
+            blocks.append(.paragraph(paragraph))
+            paragraphBuffer.removeAll(keepingCapacity: true)
+        }
+
+        for raw in lines {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                continue
+            }
+
+            if trimmed.hasPrefix("#") {
+                flushParagraph()
+                let level = min(3, trimmed.prefix { $0 == "#" }.count)
+                let title = trimmed.drop(while: { $0 == "#" || $0 == " " })
+                blocks.append(.heading(level: level, text: String(title)))
+                continue
+            }
+
+            if trimmed.hasPrefix(">") {
+                flushParagraph()
+                let quote = trimmed.drop(while: { $0 == ">" || $0 == " " })
+                blocks.append(.quote(String(quote)))
+                continue
+            }
+
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                flushParagraph()
+                let value = trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)
+                blocks.append(.unorderedListItem(value))
+                continue
+            }
+
+            if let ordered = parseOrderedListItem(from: trimmed) {
+                flushParagraph()
+                blocks.append(.orderedListItem(number: ordered.number, text: ordered.text))
+                continue
+            }
+
+            paragraphBuffer.append(raw)
+        }
+
+        flushParagraph()
+        return blocks
+    }
+
+    private func parseOrderedListItem(from line: String) -> (number: String, text: String)? {
+        var digits = ""
+        var index = line.startIndex
+
+        while index < line.endIndex,
+              line[index].isNumber {
+            digits.append(line[index])
+            index = line.index(after: index)
+        }
+
+        guard !digits.isEmpty,
+              index < line.endIndex,
+              line[index] == "."
+        else {
+            return nil
+        }
+
+        index = line.index(after: index)
+        guard index < line.endIndex,
+              line[index] == " "
+        else {
+            return nil
+        }
+
+        let content = line[line.index(after: index)...].trimmingCharacters(in: .whitespaces)
+        guard !content.isEmpty else {
+            return nil
+        }
+
+        return (digits, content)
+    }
+}
+
+private struct AssistantInlineMarkdownText: View {
+    let text: String
+
+    private var renderedText: Text {
+        if let attributed = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                failurePolicy: .returnPartiallyParsedIfPossible
+            )
+        ) {
+            return Text(attributed)
+        }
+
+        return Text(verbatim: text)
+    }
+
+    var body: some View {
+        renderedText
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AssistantCodeBlock: View {
+    let language: String?
+    let code: String
+    @State private var isHovering = false
+
+    private var displayLanguage: String {
+        let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "code" : trimmed.lowercased()
+    }
+
+    private var showsCopyButton: Bool {
+        #if os(macOS)
+        return isHovering
+        #else
+        return true
+        #endif
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(displayLanguage)
+                    .font(.caption2.monospaced().weight(.semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.9))
+
+                Spacer(minLength: 8)
+
+                Button {
+                    copyTextToPasteboard(code)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .opacity(showsCopyButton ? 1 : 0)
+                .animation(.easeInOut(duration: 0.14), value: showsCopyButton)
+                .allowsHitTesting(showsCopyButton)
+                .accessibilityLabel("Copy code block")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.white.opacity(0.04))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(Color.green.opacity(0.92))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+        }
+        .background(Color.black.opacity(0.26), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        #if os(macOS)
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        #endif
     }
 
     private func copyTextToPasteboard(_ value: String) {
@@ -5285,6 +5686,7 @@ private struct NativeSettingsView: View {
     @Binding var openDestinationRaw: String
     @Binding var followupModeRaw: String
     @Binding var multilineBehaviorRaw: String
+    @Binding var showActivityEvents: Bool
     @Binding var preventSleep: Bool
     @Binding var glassWindow: Bool
     let initialCategory: SettingsCategory
@@ -5397,6 +5799,11 @@ private struct NativeSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: isCompactSettingsLayout ? nil : 280)
+            }
+
+            SettingsRow(title: "Show activity events", description: "Include reasoning, exec, browser, and coordinator activity in the transcript.") {
+                Toggle("", isOn: $showActivityEvents)
+                    .labelsHidden()
             }
 
             SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
