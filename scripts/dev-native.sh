@@ -130,7 +130,14 @@ start_backend() {
 
 wait_for_backend_ready() {
 	local attempts=0
-	local max_attempts=100
+	local max_wait_seconds="${DEV_NATIVE_BACKEND_WAIT_SECONDS:-240}"
+	local poll_interval_seconds="0.2"
+
+	if ! [[ "$max_wait_seconds" =~ ^[0-9]+$ ]]; then
+		max_wait_seconds=240
+	fi
+
+	local max_attempts=$((max_wait_seconds * 5))
 
 	while ((attempts < max_attempts)); do
 		if lsof -ti "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -142,11 +149,12 @@ wait_for_backend_ready() {
 			return 1
 		fi
 
-		sleep 0.2
+		sleep "$poll_interval_seconds"
 		attempts=$((attempts + 1))
 	done
 
-	echo "[dev-native] timed out waiting for backend to listen on :$PORT" >&2
+	echo "[dev-native] timed out waiting ${max_wait_seconds}s for backend to listen on :$PORT" >&2
+	echo "[dev-native] first-run Rust compiles can take several minutes; try increasing DEV_NATIVE_BACKEND_WAIT_SECONDS." >&2
 	return 1
 }
 
