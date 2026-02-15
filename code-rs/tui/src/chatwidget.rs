@@ -1312,6 +1312,12 @@ const AUTO_REVIEW_BASELINE_FILENAME: &str = "auto-review-baseline";
 const AUTO_REVIEW_FALLBACK_MAX: usize = 3;
 const AUTO_REVIEW_FALLBACK_MAX_AGE_SECS: u64 = 12 * 60 * 60; // 12h
 const AUTO_REVIEW_STALE_SECS: u64 = 5 * 60;
+const MAX_PROCESSED_AUTO_REVIEW_AGENTS: usize = 512;
+const MAX_AGENTS_TERMINAL_ENTRIES: usize = 256;
+const MAX_AGENT_RUNTIME_ENTRIES: usize = 768;
+const MAX_HISTORY_CELLS_HARD_LIMIT: usize = 2400;
+const HISTORY_CELLS_TRIM_TARGET: usize = 1800;
+const MAX_PENDING_DISPATCHED_USER_MESSAGES: usize = 256;
 
 fn auto_review_repo_dir(git_root: &Path) -> Result<PathBuf, String> {
     let repo_name = git_root
@@ -1620,6 +1626,8 @@ pub(crate) struct ChatWidget<'a> {
     review_guard: Option<ReviewGuard>,
     background_review_guard: Option<ReviewGuard>,
     processed_auto_review_agents: HashSet<String>,
+    processed_auto_review_agent_order: VecDeque<String>,
+    auto_review_processed_evicted_total: u64,
     // New: coordinator-provided hints for the next Auto turn
     pending_turn_descriptor: Option<TurnDescriptor>,
     pending_auto_turn_config: Option<TurnConfig>,
@@ -1627,6 +1635,10 @@ pub(crate) struct ChatWidget<'a> {
     active_plan_title: Option<String>,
     /// Runtime timing per-agent (by id) to improve visibility in the HUD
     agent_runtime: HashMap<String, AgentRuntime>,
+    agent_runtime_pruned_total: u64,
+    agents_terminal_pruned_total: u64,
+    history_cells_trimmed_total: u64,
+    pending_dispatched_trimmed_total: u64,
     pending_agent_updates: HashMap<String, PendingAgentUpdate>,
     // Sparkline data for showing agent activity (using RefCell for interior mutability)
     // Each tuple is (value, is_completed) where is_completed indicates if any agent was complete at that time
@@ -1974,6 +1986,7 @@ struct AgentTerminalEntry {
     result: Option<String>,
     error: Option<String>,
     logs: Vec<AgentLogEntry>,
+    last_seen_at: Instant,
 }
 
 impl AgentTerminalEntry {
@@ -1996,6 +2009,7 @@ impl AgentTerminalEntry {
             result: None,
             error: None,
             logs: Vec::new(),
+            last_seen_at: Instant::now(),
         }
     }
 
@@ -6542,6 +6556,8 @@ impl ChatWidget<'_> {
             review_guard: None,
             background_review_guard: None,
             processed_auto_review_agents: HashSet::new(),
+            processed_auto_review_agent_order: VecDeque::new(),
+            auto_review_processed_evicted_total: 0,
             pending_turn_descriptor: None,
             render_request_cache: RefCell::new(Vec::new()),
             render_request_cache_dirty: Cell::new(true),
@@ -6550,6 +6566,10 @@ impl ChatWidget<'_> {
             overall_task_status: "preparing".to_string(),
             active_plan_title: None,
             agent_runtime: HashMap::new(),
+            agent_runtime_pruned_total: 0,
+            agents_terminal_pruned_total: 0,
+            history_cells_trimmed_total: 0,
+            pending_dispatched_trimmed_total: 0,
             pending_agent_updates: HashMap::new(),
             sparkline_data: std::cell::RefCell::new(Vec::new()),
             last_sparkline_update: std::cell::RefCell::new(std::time::Instant::now()),
@@ -6919,6 +6939,8 @@ impl ChatWidget<'_> {
             review_guard: None,
             background_review_guard: None,
             processed_auto_review_agents: HashSet::new(),
+            processed_auto_review_agent_order: VecDeque::new(),
+            auto_review_processed_evicted_total: 0,
             pending_turn_descriptor: None,
             render_request_cache: RefCell::new(Vec::new()),
             render_request_cache_dirty: Cell::new(true),
@@ -6927,6 +6949,10 @@ impl ChatWidget<'_> {
             overall_task_status: "preparing".to_string(),
             active_plan_title: None,
             agent_runtime: HashMap::new(),
+            agent_runtime_pruned_total: 0,
+            agents_terminal_pruned_total: 0,
+            history_cells_trimmed_total: 0,
+            pending_dispatched_trimmed_total: 0,
             pending_agent_updates: HashMap::new(),
             sparkline_data: std::cell::RefCell::new(Vec::new()),
             last_sparkline_update: std::cell::RefCell::new(std::time::Instant::now()),
@@ -9747,6 +9773,10 @@ impl ChatWidget<'_> {
         self.refresh_explore_trailing_flags();
         self.refresh_reasoning_collapsed_visibility();
         self.mark_history_dirty();
+        let trimmed = self.enforce_history_cell_limit();
+        if trimmed > 0 {
+            pos = pos.saturating_sub(trimmed);
+        }
         pos
     }
 
@@ -9947,6 +9977,10 @@ impl ChatWidget<'_> {
         self.refresh_explore_trailing_flags();
         self.refresh_reasoning_collapsed_visibility();
         self.mark_history_dirty();
+        let trimmed = self.enforce_history_cell_limit();
+        if trimmed > 0 {
+            pos = pos.saturating_sub(trimmed);
+        }
         pos
     }
 
@@ -10756,6 +10790,50 @@ impl ChatWidget<'_> {
         self.request_redraw();
         self.refresh_explore_trailing_flags();
         self.mark_history_dirty();
+    }
+
+    fn enforce_history_cell_limit(&mut self) -> usize {
+        if self.history_cells.len() <= MAX_HISTORY_CELLS_HARD_LIMIT {
+            return 0;
+        }
+
+        let remove_count = self
+            .history_cells
+            .len()
+            .saturating_sub(HISTORY_CELLS_TRIM_TARGET);
+        if remove_count == 0 {
+            return 0;
+        }
+
+        tracing::warn!(
+            "history cell backlog exceeded {}; trimming {} oldest cells",
+            MAX_HISTORY_CELLS_HARD_LIMIT,
+            remove_count
+        );
+
+        for _ in 0..remove_count {
+            if self.history_cells.is_empty() {
+                break;
+            }
+            self.history_remove_at(0);
+        }
+
+        self.history_cells_trimmed_total = self
+            .history_cells_trimmed_total
+            .saturating_add(remove_count as u64);
+        tracing::warn!(
+            removed = remove_count,
+            retained = self.history_cells.len(),
+            total_trimmed = self.history_cells_trimmed_total,
+            "history cell hard-limit compaction applied"
+        );
+
+        let current_offset = self.layout.scroll_offset.get();
+        let removed_offset = remove_count.min(u16::MAX as usize) as u16;
+        self.layout
+            .scroll_offset
+            .set(current_offset.saturating_sub(removed_offset));
+        remove_count
     }
 
     fn history_replace_and_maybe_merge(&mut self, idx: usize, cell: Box<dyn HistoryCell>) {
@@ -13078,6 +13156,25 @@ impl ChatWidget<'_> {
 
         if let Some(model_echo) = combined_message_text {
             self.pending_dispatched_user_messages.push_back(model_echo);
+            let mut dropped = 0usize;
+            while self.pending_dispatched_user_messages.len()
+                > MAX_PENDING_DISPATCHED_USER_MESSAGES
+            {
+                if self.pending_dispatched_user_messages.pop_front().is_some() {
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+            if dropped > 0 {
+                self.pending_dispatched_trimmed_total = self
+                    .pending_dispatched_trimmed_total
+                    .saturating_add(dropped as u64);
+                tracing::warn!(
+                    dropped,
+                    retained = self.pending_dispatched_user_messages.len(),
+                    total_trimmed = self.pending_dispatched_trimmed_total,
+                    "trimmed pending dispatched user message backlog"
+                );
+            }
         }
 
         let suppress_history = suppress_persistence;
@@ -15092,6 +15189,8 @@ impl ChatWidget<'_> {
                     }
                 }
 
+                self.prune_agent_runtime_cache(&agents);
+
                 self.update_agents_terminal_state(&agents, context.clone(), task.clone());
 
                 self.observe_auto_review_status(&agents);
@@ -16821,6 +16920,7 @@ impl ChatWidget<'_> {
         let agents = self.auto_state.subagents_enabled;
         let cross = self.auto_state.cross_check_enabled;
         let qa = self.auto_state.qa_automation_enabled;
+        let model_routing = self.config.auto_drive.model_routing_enabled;
         let mode = self.auto_state.continue_mode;
         let view = AutoDriveSettingsView::new(
             self.app_event_tx.clone(),
@@ -16831,6 +16931,7 @@ impl ChatWidget<'_> {
             agents,
             cross,
             qa,
+            model_routing,
             mode,
         );
         AutoDriveSettingsContent::new(view)
@@ -17463,6 +17564,7 @@ impl ChatWidget<'_> {
     ) {
         self.agents_terminal.shared_context = context;
         self.agents_terminal.shared_task = task;
+        let now = Instant::now();
 
         let mut saw_new_agent = false;
         for info in agents {
@@ -17505,6 +17607,7 @@ impl ChatWidget<'_> {
             entry.batch_id = info.batch_id.clone();
             entry.model = info.model.clone();
             entry.source_kind = info.source_kind.clone();
+            entry.last_seen_at = now;
 
             let AgentBatchMetadata { label, prompt: meta_prompt, context: meta_context } = batch_metadata;
             let auto_review_label = matches!(entry.source_kind, Some(AgentSourceKind::AutoReview))
@@ -17578,6 +17681,7 @@ impl ChatWidget<'_> {
         }
 
         self.agents_terminal.clamp_selected_index();
+        self.prune_agents_terminal_entries();
 
         if saw_new_agent && self.agents_terminal.active {
             self.layout.scroll_offset.set(0);
@@ -18552,6 +18656,7 @@ fi\n\
         agents_enabled: bool,
         cross_check_enabled: bool,
         qa_automation_enabled: bool,
+        model_routing_enabled: bool,
         continue_mode: AutoContinueMode,
     ) {
         let mut changed = false;
@@ -18571,6 +18676,10 @@ fi\n\
             self.auto_state.qa_automation_enabled = qa_automation_enabled;
             changed = true;
         }
+        if self.config.auto_drive.model_routing_enabled != model_routing_enabled {
+            self.config.auto_drive.model_routing_enabled = model_routing_enabled;
+            changed = true;
+        }
         if self.auto_state.continue_mode != continue_mode {
             let effects = self.auto_state.update_continue_mode(continue_mode);
             self.auto_apply_controller_effects(effects);
@@ -18585,6 +18694,7 @@ fi\n\
         self.config.auto_drive.agents_enabled = agents_enabled;
         self.config.auto_drive.cross_check_enabled = cross_check_enabled;
         self.config.auto_drive.qa_automation_enabled = qa_automation_enabled;
+        self.config.auto_drive.model_routing_enabled = model_routing_enabled;
         self.config.auto_drive.continue_mode = auto_continue_to_config(continue_mode);
         self.restore_auto_resolve_attempts_if_lost();
 
@@ -18632,6 +18742,8 @@ fi\n\
             self.auto_state.current_status_title = None;
             self.auto_state.current_cli_prompt = None;
             self.auto_state.current_cli_context = None;
+            self.auto_state.current_cli_model_override = None;
+            self.auto_state.current_cli_reasoning_effort_override = None;
             self.auto_state.hide_cli_context_in_ui = false;
             self.auto_state.last_broadcast_summary = None;
             self.auto_state.current_summary_index = None;
@@ -18671,6 +18783,8 @@ fi\n\
             self.auto_state.current_status_title = None;
             self.auto_state.current_cli_prompt = None;
             self.auto_state.current_cli_context = None;
+            self.auto_state.current_cli_model_override = None;
+            self.auto_state.current_cli_reasoning_effort_override = None;
             self.auto_state.hide_cli_context_in_ui = false;
             self.auto_state.last_broadcast_summary = None;
             self.auto_state.current_summary_index = None;
@@ -18823,8 +18937,16 @@ fi\n\
             .and_then(|action| action.context.clone());
         let cli_context = Self::normalize_status_field(cli_context_raw);
         let cli_prompt = cli.as_ref().map(|action| action.prompt.clone());
+        let cli_model_override = cli
+            .as_ref()
+            .and_then(|action| action.model_override.clone());
+        let cli_reasoning_effort_override = cli
+            .as_ref()
+            .and_then(|action| action.reasoning_effort_override);
 
         self.auto_state.current_cli_context = cli_context.clone();
+        self.auto_state.current_cli_model_override = cli_model_override.clone();
+        self.auto_state.current_cli_reasoning_effort_override = cli_reasoning_effort_override;
         self.auto_state.hide_cli_context_in_ui = planning_turn;
         self.auto_state.suppress_next_cli_display = planning_turn;
         if let Some(ref prompt_text) = cli_prompt {
@@ -18923,7 +19045,13 @@ fi\n\
                         ));
                     }
                 } else {
-                    self.schedule_auto_cli_prompt(seq, prompt_text);
+                    self.schedule_auto_cli_prompt_with_override(
+                        seq,
+                        prompt_text,
+                        cli_model_override,
+                        cli_reasoning_effort_override,
+                        None,
+                    );
                 }
             }
             AutoCoordinatorStatus::Success => {
@@ -19070,19 +19198,33 @@ Have we met every part of this goal and is there no further work to do?"#
     }
 
     fn schedule_auto_cli_prompt(&mut self, decision_seq: u64, prompt_text: String) {
-        self.schedule_auto_cli_prompt_with_override(decision_seq, prompt_text, None);
+        self.schedule_auto_cli_prompt_with_override(
+            decision_seq,
+            prompt_text,
+            None,
+            None,
+            None,
+        );
     }
 
     fn schedule_auto_cli_prompt_with_override(
         &mut self,
         decision_seq: u64,
         prompt_text: String,
+        cli_model_override: Option<String>,
+        cli_reasoning_effort_override: Option<ReasoningEffort>,
         countdown_override: Option<u8>,
     ) {
         self.auto_state.suppress_next_cli_display = false;
         let effects = self
             .auto_state
-            .schedule_cli_prompt(decision_seq, prompt_text, countdown_override);
+            .schedule_cli_prompt(
+                decision_seq,
+                prompt_text,
+                cli_model_override,
+                cli_reasoning_effort_override,
+                countdown_override,
+            );
         self.auto_apply_controller_effects(effects);
     }
 
@@ -19711,6 +19853,8 @@ Have we met every part of this goal and is there no further work to do?"#
         }
 
         self.auto_state.current_cli_context = None;
+        self.auto_state.current_cli_model_override = None;
+        self.auto_state.current_cli_reasoning_effort_override = None;
         self.auto_state.hide_cli_context_in_ui = false;
         self.auto_state.current_cli_prompt = Some(String::new());
         self.auto_pending_goal_request = true;
@@ -19724,7 +19868,13 @@ Have we met every part of this goal and is there no further work to do?"#
         } else {
             None
         };
-        self.schedule_auto_cli_prompt_with_override(0, String::new(), override_seconds);
+        self.schedule_auto_cli_prompt_with_override(
+            0,
+            String::new(),
+            None,
+            None,
+            override_seconds,
+        );
         true
     }
 
@@ -19762,6 +19912,9 @@ Have we met every part of this goal and is there no further work to do?"#
         } else {
             self.auto_turn_review_state = None;
         }
+
+        self.auto_apply_cli_turn_model_override();
+
         self.bottom_pane.update_status_text(String::new());
         self.bottom_pane.set_task_running(false);
         let mut message: UserMessage = full_prompt.into();
@@ -19774,9 +19927,28 @@ Have we met every part of this goal and is there no further work to do?"#
         self.submit_user_message(message);
         self.auto_state.pending_agent_actions.clear();
         self.auto_state.pending_agent_timing = None;
+        self.auto_state.current_cli_model_override = None;
+        self.auto_state.current_cli_reasoning_effort_override = None;
         self.auto_rebuild_live_ring();
         self.request_redraw();
         self.auto_state.suppress_next_cli_display = false;
+    }
+
+    fn auto_apply_cli_turn_model_override(&mut self) {
+        if !self.config.auto_drive.model_routing_enabled {
+            return;
+        }
+
+        let Some(model) = self.auto_state.current_cli_model_override.clone() else {
+            return;
+        };
+
+        let effort = self
+            .auto_state
+            .current_cli_reasoning_effort_override
+            .unwrap_or(ReasoningEffort::High);
+
+        self.apply_model_selection_inner(model, Some(effort), false, false);
     }
 
     fn auto_pause_for_manual_edit(&mut self, force: bool) {
@@ -24260,10 +24432,11 @@ Have we met every part of this goal and is there no further work to do?"#
             format!("Model: {}", model_text)
         };
         Some(format!(
-            "{} · Agents: {} · Diagnostics: {} · Continue: {}",
+            "{} · Agents: {} · Diagnostics: {} · Model routing: {} · Continue: {}",
             model_segment,
             Self::on_off_label(self.auto_state.subagents_enabled),
             Self::on_off_label(diagnostics_enabled),
+            Self::on_off_label(self.config.auto_drive.model_routing_enabled),
             self.auto_state.continue_mode.label()
         ))
     }
@@ -29825,6 +29998,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn auto_review_triggers_when_enabled_and_diff_seen() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let _guard = AutoReviewStubGuard::install(|| {});
         let _capture_guard = CaptureCommitStubGuard::install(|_, _| {
             Ok(GhostCommit::new("baseline".to_string(), None))
@@ -29842,6 +30016,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn auto_review_does_not_duplicate_while_running() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         let _guard = AutoReviewStubGuard::install(move || {
@@ -29867,6 +30042,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn auto_review_skips_when_no_changes_since_reviewed_snapshot() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let _rt = enter_test_runtime_guard();
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
@@ -29989,12 +30165,16 @@ use code_core::protocol::OrderMeta;
             })
         });
         assert!(notice_present, "actionable auto review notice should be visible");
-        assert!(chat.pending_agent_notes.is_empty(), "idle path should inject via hidden message, not queue notes");
-        let developer_seen = chat
-            .pending_dispatched_user_messages
-            .iter()
-            .any(|msg| msg.contains("[developer]"));
-        assert!(developer_seen, "developer note should be sent in hidden message");
+        assert!(chat.pending_agent_notes.is_empty());
+        assert!(chat.pending_dispatched_user_messages.is_empty());
+        let developer_seen = chat.history_cells.iter().any(|cell| {
+            cell.display_lines_trimmed().iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("[developer] Background auto-review"))
+            })
+        });
+        assert!(developer_seen, "developer note should be rendered as a background notice");
     }
 
     #[test]
@@ -30036,13 +30216,18 @@ use code_core::protocol::OrderMeta;
             Some("ghost123".to_string()),
         );
 
-        // Busy path still injects a developer note immediately so the user sees it in the transcript.
         assert!(chat.pending_agent_notes.is_empty());
-        let developer_sent = chat
-            .pending_dispatched_user_messages
-            .iter()
-            .any(|msg| msg.contains("[developer]") && msg.contains("Merge the worktree") && msg.contains("auto-review-branch"));
-        assert!(developer_sent, "developer merge-hint note should be injected even while busy");
+        assert!(chat.pending_dispatched_user_messages.is_empty());
+        let developer_seen = chat.history_cells.iter().any(|cell| {
+            cell.display_lines_trimmed().iter().any(|line| {
+                line.spans.iter().any(|span| {
+                    span.content.contains("[developer]")
+                        && span.content.contains("Merge the worktree")
+                        && span.content.contains("auto-review-branch")
+                })
+            })
+        });
+        assert!(developer_seen, "developer merge-hint note should be visible even while busy");
     }
 
     #[test]
@@ -30086,13 +30271,18 @@ use code_core::protocol::OrderMeta;
 
         chat.observe_auto_review_status(&[agent]);
 
-        // Idle path: should send hidden developer note immediately (not queued)
         assert!(chat.pending_agent_notes.is_empty());
-        let developer_sent = chat
-            .pending_dispatched_user_messages
-            .iter()
-            .any(|msg| msg.contains("[developer]") && msg.contains("Merge the worktree") && msg.contains("auto-review-branch"));
-        assert!(developer_sent, "developer merge-hint note should be injected when idle");
+        assert!(chat.pending_dispatched_user_messages.is_empty());
+        let developer_seen = chat.history_cells.iter().any(|cell| {
+            cell.display_lines_trimmed().iter().any(|line| {
+                line.spans.iter().any(|span| {
+                    span.content.contains("[developer]")
+                        && span.content.contains("Merge the worktree")
+                        && span.content.contains("auto-review-branch")
+                })
+            })
+        });
+        assert!(developer_seen, "developer merge-hint note should be visible when idle");
     }
 
     #[test]
@@ -30138,11 +30328,190 @@ use code_core::protocol::OrderMeta;
         chat.observe_auto_review_status(&[agent]);
 
         assert!(chat.pending_agent_notes.is_empty());
-        let developer_sent = chat
-            .pending_dispatched_user_messages
-            .iter()
-            .any(|msg| msg.contains("[developer]") && msg.contains("Merge the worktree") && msg.contains("auto-review-branch"));
-        assert!(developer_sent, "developer merge-hint note should be injected when busy");
+        assert!(chat.pending_dispatched_user_messages.is_empty());
+        let developer_seen = chat.history_cells.iter().any(|cell| {
+            cell.display_lines_trimmed().iter().any(|line| {
+                line.spans.iter().any(|span| {
+                    span.content.contains("[developer]")
+                        && span.content.contains("Merge the worktree")
+                        && span.content.contains("auto-review-branch")
+                })
+            })
+        });
+        assert!(developer_seen, "developer merge-hint note should be visible when busy");
+    }
+
+    #[test]
+    fn esc_stop_auto_drive_keeps_background_review_non_blocking() {
+        let _rt = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.auto_state.goal = Some("keep running".to_string());
+        chat.auto_state.started_at = Some(Instant::now());
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-esc".to_string()),
+            snapshot: Some("ghost999".to_string()),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut last_esc_time = None;
+        assert!(chat.handle_app_esc(esc, &mut last_esc_time));
+        assert!(!chat.auto_state.is_active(), "Esc should stop Auto Drive immediately");
+        let pending_before_review = chat.pending_dispatched_user_messages.len();
+
+        chat.on_background_review_finished(
+            PathBuf::from("/tmp/wt"),
+            "auto-review-branch".to_string(),
+            true,
+            1,
+            Some("summary".to_string()),
+            None,
+            Some("agent-esc".to_string()),
+            Some("ghost999".to_string()),
+        );
+
+        let pending_after_review = chat.pending_dispatched_user_messages.len();
+        assert_eq!(
+            pending_after_review,
+            pending_before_review,
+            "background review completion must not inject hidden foreground turns"
+        );
+        assert!(!chat.is_task_running(), "background review should not hold task-running state");
+
+        chat.submit_text_message("after esc".to_string());
+        assert!(
+            chat.pending_dispatched_user_messages
+                .iter()
+                .any(|msg| msg.contains("after esc")),
+            "typing should resume immediately after Esc even while auto review events complete"
+        );
+        assert!(chat.queued_user_messages.is_empty());
+    }
+
+    #[test]
+    fn heavy_agent_churn_with_auto_review_keeps_bounds_and_typing() {
+        let _rt = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.config.tui.auto_review_enabled = true;
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.auto_state.goal = Some("long churn".to_string());
+        chat.auto_state.started_at = Some(Instant::now());
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-auto-review".to_string()),
+            snapshot: Some("ghost-long".to_string()),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let total_agents = 2200usize;
+        let chunk_size = 55usize;
+        let chunks = total_agents / chunk_size;
+
+        for chunk in 0..chunks {
+            let mut agents = Vec::with_capacity(chunk_size + 1);
+            for offset in 0..chunk_size {
+                let idx = chunk * chunk_size + offset;
+                agents.push(code_core::protocol::AgentInfo {
+                    id: format!("agent-churn-{idx}"),
+                    name: format!("Agent {idx}"),
+                    status: "completed".to_string(),
+                    batch_id: Some(format!("batch-{}", idx / 5)),
+                    model: Some("code-gpt-5.3-codex".to_string()),
+                    last_progress: Some("done".to_string()),
+                    result: Some("ok".to_string()),
+                    error: None,
+                    elapsed_ms: None,
+                    token_count: None,
+                    last_activity_at: None,
+                    seconds_since_last_activity: None,
+                    source_kind: None,
+                });
+            }
+
+            let auto_status = if chunk + 1 == chunks {
+                "completed"
+            } else {
+                "running"
+            };
+            agents.push(code_core::protocol::AgentInfo {
+                id: "agent-auto-review".to_string(),
+                name: "Auto Review".to_string(),
+                status: auto_status.to_string(),
+                batch_id: Some("auto-review-branch".to_string()),
+                model: Some("code-review".to_string()),
+                last_progress: Some("[auto-review] phase: reviewing".to_string()),
+                result: Some(
+                    r#"{
+                        "findings":[{"title":"bug","body":"details","confidence_score":0.5,"priority":1,"code_location":{"absolute_file_path":"src/lib.rs","line_range":{"start":1,"end":1}}}],
+                        "overall_correctness":"incorrect",
+                        "overall_explanation":"needs work",
+                        "overall_confidence_score":0.6
+                    }"#
+                    .to_string(),
+                ),
+                error: None,
+                elapsed_ms: None,
+                token_count: None,
+                last_activity_at: None,
+                seconds_since_last_activity: None,
+                source_kind: Some(AgentSourceKind::AutoReview),
+            });
+
+            chat.handle_code_event(Event {
+                id: format!("status-{chunk}"),
+                event_seq: chunk as u64,
+                msg: EventMsg::AgentStatusUpdate(AgentStatusUpdateEvent {
+                    agents,
+                    context: None,
+                    task: None,
+                }),
+                order: None,
+            });
+        }
+
+        assert!(chat.agents_terminal.entries.len() <= MAX_AGENTS_TERMINAL_ENTRIES);
+        assert!(chat.agent_runtime.len() <= MAX_AGENT_RUNTIME_ENTRIES);
+        assert!(chat.processed_auto_review_agents.len() <= MAX_PROCESSED_AUTO_REVIEW_AGENTS);
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut last_esc_time = None;
+        assert!(chat.handle_app_esc(esc, &mut last_esc_time));
+        assert!(!chat.auto_state.is_active(), "Esc should always exit Auto Drive");
+
+        let pending_before_review = chat.pending_dispatched_user_messages.len();
+        chat.on_background_review_finished(
+            PathBuf::from("/tmp/wt"),
+            "auto-review-branch".to_string(),
+            true,
+            1,
+            Some("summary".to_string()),
+            None,
+            Some("agent-auto-review".to_string()),
+            Some("ghost-long".to_string()),
+        );
+        assert_eq!(
+            chat.pending_dispatched_user_messages.len(),
+            pending_before_review,
+            "background review completion must stay out-of-band"
+        );
+
+        chat.submit_text_message("typing after churn".to_string());
+        assert!(
+            chat.pending_dispatched_user_messages
+                .iter()
+                .any(|msg| msg.contains("typing after churn")),
+            "typing should remain responsive after heavy churn"
+        );
     }
 
     #[test]
@@ -30662,6 +31031,37 @@ use code_core::protocol::OrderMeta;
             overall_explanation: "needs fixes".to_string(),
             overall_confidence_score: 0.5,
         }
+    }
+
+    #[test]
+    fn history_insert_enforces_hard_limit_and_keeps_recent_tail() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        for idx in 0..(MAX_HISTORY_CELLS_HARD_LIMIT + 75) {
+            insert_plain_cell(chat, &[&format!("history-line-{idx}")]);
+        }
+
+        assert!(chat.history_cells.len() <= MAX_HISTORY_CELLS_HARD_LIMIT);
+        assert!(chat.history_cells.len() >= HISTORY_CELLS_TRIM_TARGET);
+
+        let oldest_present = chat.history_cells.iter().any(|cell| {
+            cell.display_lines_trimmed().iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("history-line-0"))
+            })
+        });
+        assert!(!oldest_present, "oldest history entries should be compacted away");
+
+        let newest = format!("history-line-{}", MAX_HISTORY_CELLS_HARD_LIMIT + 74);
+        let newest_present = chat.history_cells.iter().any(|cell| {
+            cell.display_lines_trimmed().iter().any(|line| {
+                line.spans.iter().any(|span| span.content.contains(&newest))
+            })
+        });
+        assert!(newest_present, "most recent history entries should remain visible");
     }
 
     #[test]
@@ -31217,6 +31617,8 @@ use code_core::protocol::OrderMeta;
                     prompt: "echo ready".to_string(),
                     context: None,
                     suppress_ui_context: false,
+                    model_override: None,
+                    reasoning_effort_override: None,
                 }),
                 None,
                 Vec::new(),
@@ -31253,6 +31655,8 @@ use code_core::protocol::OrderMeta;
                     prompt: "echo start".to_string(),
                     context: None,
                     suppress_ui_context: false,
+                    model_override: None,
+                    reasoning_effort_override: None,
                 }),
                 None,
                 Vec::new(),
@@ -31340,6 +31744,8 @@ use code_core::protocol::OrderMeta;
                     prompt: "echo work".to_string(),
                     context: None,
                     suppress_ui_context: false,
+                    model_override: None,
+                    reasoning_effort_override: None,
                 }),
                 None,
                 Vec::new(),
@@ -32066,6 +32472,8 @@ use code_core::protocol::OrderMeta;
                 prompt: "Run cargo test".to_string(),
                 context: Some("use --all-features".to_string()),
                 suppress_ui_context: false,
+                model_override: None,
+                reasoning_effort_override: None,
             }),
             Some(AutoTurnAgentsTiming::Parallel),
             vec![AutoTurnAgentsAction {
@@ -32102,8 +32510,78 @@ use code_core::protocol::OrderMeta;
                         .iter()
                         .any(|span| span.content.contains(notice))
                 })
-            });
+        });
         assert!(write_notice_present);
+    }
+
+    #[test]
+    fn auto_submit_prompt_applies_routed_cli_model_override() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.config.auto_drive.model_routing_enabled = true;
+        chat.config.model = "gpt-5.3-codex".to_string();
+        chat.config.model_reasoning_effort = ReasoningEffort::Medium;
+
+        chat.auto_handle_decision(
+            5,
+            AutoCoordinatorStatus::Continue,
+            Some("Fixing tests".to_string()),
+            Some("Running targeted loop.".to_string()),
+            None,
+            Some(AutoTurnCliAction {
+                prompt: "Run the failing test and keep iterating until it passes.".to_string(),
+                context: None,
+                suppress_ui_context: false,
+                model_override: Some("gpt-5.3-codex-spark".to_string()),
+                reasoning_effort_override: Some(ReasoningEffort::High),
+            }),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        chat.auto_submit_prompt();
+
+        assert_eq!(chat.config.model, "gpt-5.3-codex-spark");
+        assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::High);
+    }
+
+    #[test]
+    fn auto_submit_prompt_preserves_model_when_routing_disabled() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.config.auto_drive.model_routing_enabled = false;
+        chat.config.model = "gpt-5.3-codex".to_string();
+        chat.config.model_reasoning_effort = ReasoningEffort::Medium;
+
+        chat.auto_handle_decision(
+            6,
+            AutoCoordinatorStatus::Continue,
+            Some("Fixing tests".to_string()),
+            Some("Running targeted loop.".to_string()),
+            None,
+            Some(AutoTurnCliAction {
+                prompt: "Run the failing test and keep iterating until it passes.".to_string(),
+                context: None,
+                suppress_ui_context: false,
+                model_override: Some("gpt-5.3-codex-spark".to_string()),
+                reasoning_effort_override: Some(ReasoningEffort::High),
+            }),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        chat.auto_submit_prompt();
+
+        assert_eq!(chat.config.model, "gpt-5.3-codex");
+        assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::Medium);
     }
 
     #[test]
@@ -34291,7 +34769,7 @@ impl ChatWidget<'_> {
                     self.clear_auto_review_indicator();
                     self.background_review = None;
                     self.background_review_guard = None;
-                    self.processed_auto_review_agents.insert(agent.id.clone());
+                    self.remember_processed_auto_review_agent(&agent.id);
                     continue;
                 }
             }
@@ -34358,13 +34836,13 @@ impl ChatWidget<'_> {
                     // times (especially after cancellation/resend). If the background
                     // review state is already cleared and we cannot resolve the worktree,
                     // do not surface a misleading blank-path error.
-                    self.processed_auto_review_agents.insert(agent.id.clone());
+                    self.remember_processed_auto_review_agent(&agent.id);
                     continue;
                 };
                 let Some(worktree_path) =
                     resolve_auto_review_worktree_path(&self.config.cwd, &branch)
                 else {
-                    self.processed_auto_review_agents.insert(agent.id.clone());
+                    self.remember_processed_auto_review_agent(&agent.id);
                     continue;
                 };
                 (worktree_path, branch, None)
@@ -34372,7 +34850,7 @@ impl ChatWidget<'_> {
 
             let (has_findings, findings, summary) = Self::parse_agent_review_result(agent.result.as_deref());
 
-            self.processed_auto_review_agents.insert(agent.id.clone());
+            self.remember_processed_auto_review_agent(&agent.id);
             self.on_background_review_finished(
                 worktree_path,
                 branch,
@@ -34534,6 +35012,136 @@ impl ChatWidget<'_> {
     fn clear_auto_review_indicator(&mut self) {
         self.auto_review_status = None;
         self.bottom_pane.set_auto_review_status(None);
+    }
+
+    fn remember_processed_auto_review_agent(&mut self, agent_id: &str) {
+        if agent_id.trim().is_empty() {
+            return;
+        }
+
+        if !self
+            .processed_auto_review_agents
+            .insert(agent_id.to_string())
+        {
+            return;
+        }
+
+        self
+            .processed_auto_review_agent_order
+            .push_back(agent_id.to_string());
+
+        let mut evicted = 0usize;
+        while self.processed_auto_review_agents.len() > MAX_PROCESSED_AUTO_REVIEW_AGENTS {
+            let Some(oldest) = self.processed_auto_review_agent_order.pop_front() else {
+                break;
+            };
+            if self.processed_auto_review_agents.remove(&oldest) {
+                evicted = evicted.saturating_add(1);
+            }
+        }
+
+        if evicted > 0 {
+            self.auto_review_processed_evicted_total = self
+                .auto_review_processed_evicted_total
+                .saturating_add(evicted as u64);
+            tracing::debug!(
+                evicted,
+                retained = self.processed_auto_review_agents.len(),
+                total_evicted = self.auto_review_processed_evicted_total,
+                "trimmed processed auto-review agent cache"
+            );
+        }
+    }
+
+    fn prune_agent_runtime_cache(&mut self, current_agents: &[code_core::protocol::AgentInfo]) {
+        if self.agent_runtime.len() <= MAX_AGENT_RUNTIME_ENTRIES {
+            return;
+        }
+
+        let active_ids: HashSet<&str> = current_agents.iter().map(|agent| agent.id.as_str()).collect();
+        let mut terminal_candidates: Vec<(Instant, String)> = self
+            .agent_runtime
+            .iter()
+            .filter(|(id, runtime)| {
+                !active_ids.contains(id.as_str()) && runtime.completed_at.is_some()
+            })
+            .filter_map(|(id, runtime)| runtime.completed_at.map(|ts| (ts, id.clone())))
+            .collect();
+
+        if terminal_candidates.is_empty() {
+            return;
+        }
+
+        terminal_candidates.sort_by_key(|(completed_at, _)| *completed_at);
+        let mut pruned = 0usize;
+        for (_, id) in terminal_candidates {
+            if self.agent_runtime.len() <= MAX_AGENT_RUNTIME_ENTRIES {
+                break;
+            }
+            if self.agent_runtime.remove(&id).is_some() {
+                pruned = pruned.saturating_add(1);
+            }
+        }
+
+        if pruned > 0 {
+            self.agent_runtime_pruned_total = self
+                .agent_runtime_pruned_total
+                .saturating_add(pruned as u64);
+            tracing::debug!(
+                pruned,
+                retained = self.agent_runtime.len(),
+                total_pruned = self.agent_runtime_pruned_total,
+                "trimmed agent runtime cache"
+            );
+        }
+    }
+
+    fn prune_agents_terminal_entries(&mut self) {
+        if self.agents_terminal.entries.len() <= MAX_AGENTS_TERMINAL_ENTRIES {
+            return;
+        }
+
+        let mut removable: Vec<(Instant, String)> = self
+            .agents_terminal
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.status,
+                    AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Cancelled
+                )
+            })
+            .map(|(id, entry)| (entry.last_seen_at, id.clone()))
+            .collect();
+
+        removable.sort_by_key(|(seen_at, _)| *seen_at);
+
+        let mut pruned = 0usize;
+        for (_, id) in removable {
+            if self.agents_terminal.entries.len() <= MAX_AGENTS_TERMINAL_ENTRIES {
+                break;
+            }
+
+            if self.agents_terminal.entries.remove(&id).is_some() {
+                pruned = pruned.saturating_add(1);
+            }
+            self.agents_terminal.order.retain(|agent_id| agent_id != &id);
+            self.agents_terminal.scroll_offsets.remove(&format!("agent:{id}"));
+        }
+
+        self.agents_terminal.clamp_selected_index();
+
+        if pruned > 0 {
+            self.agents_terminal_pruned_total = self
+                .agents_terminal_pruned_total
+                .saturating_add(pruned as u64);
+            tracing::debug!(
+                pruned,
+                retained = self.agents_terminal.entries.len(),
+                total_pruned = self.agents_terminal_pruned_total,
+                "trimmed agents terminal entries"
+            );
+        }
     }
 
     fn last_assistant_cell_index(&self) -> Option<usize> {
@@ -34743,10 +35351,7 @@ impl ChatWidget<'_> {
         }
 
         if let Some(note) = developer_note {
-            // Immediately inject as a developer message so the user sees it in the
-            // transcript, even if tasks/streams are still running. Do not defer to
-            // pending_agent_notes; that path can be lost if the session ends.
-            self.submit_hidden_text_message_with_preface(String::new(), note);
+            self.record_background_review_note(note);
         }
 
         // Auto review completion should never leave the composer spinner active.
@@ -34761,6 +35366,24 @@ impl ChatWidget<'_> {
         );
         self.maybe_resume_auto_after_review();
         self.request_redraw();
+    }
+
+    fn record_background_review_note(&mut self, note: String) {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        self.history_push_plain_paragraphs(PlainMessageKind::Notice, [trimmed.to_string()]);
+
+        if let Err(err) = self
+            .code_op_tx
+            .send(Op::AddToHistory {
+                text: trimmed.to_string(),
+            })
+        {
+            tracing::error!("failed to persist background review note: {err}");
+        }
     }
 
     fn handle_auto_review_completion_state(

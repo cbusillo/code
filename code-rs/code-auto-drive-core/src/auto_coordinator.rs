@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
@@ -51,9 +52,16 @@ const RATE_LIMIT_JITTER_MAX: Duration = Duration::from_secs(3);
 const MAX_RETRY_ELAPSED: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_DECISION_RECOVERY_ATTEMPTS: u32 = 3;
 const MESSAGE_LIMIT_FALLBACK: usize = 120;
+const HARD_MESSAGE_LIMIT: usize = 320;
+const MAX_QUEUED_CONVERSATION_UPDATES: usize = 24;
 const DEBUG_JSON_MAX_CHARS: usize = 1200;
 const CLI_PROMPT_MIN_CHARS: usize = 4;
 const CLI_PROMPT_MAX_CHARS: usize = 600;
+const AUTO_DRIVE_CLI_MODELS: &[&str] = &["gpt-5.3-codex", "gpt-5.3-codex-spark"];
+const AUTO_DRIVE_CLI_REASONING_LEVELS: &[&str] = &["medium", "high", "xhigh"];
+
+static HARD_LIMIT_TRIMMED_ITEMS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static QUEUED_UPDATE_DROPS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 #[error("auto coordinator cancelled")]
@@ -185,6 +193,8 @@ pub struct AutoTurnCliAction {
     pub prompt: String,
     pub context: Option<String>,
     pub suppress_ui_context: bool,
+    pub model_override: Option<String>,
+    pub reasoning_effort_override: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,15 +471,25 @@ mod tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("schema properties");
-        assert!(!props.contains_key("goal"));
+        assert!(props.contains_key("goal"), "goal property missing");
+        assert!(props.contains_key("phase"), "phase property missing");
+        assert!(
+            props.contains_key("finish_evidence"),
+            "finish_evidence property missing"
+        );
         assert!(props.contains_key("status_title"), "status_title property missing");
         assert!(
             props.contains_key("status_sent_to_user"),
             "status_sent_to_user property missing"
         );
         assert!(
-            props.contains_key("prompt_sent_to_cli"),
-            "prompt_sent_to_cli property missing"
+            props.contains_key("cli_milestone_instruction"),
+            "cli_milestone_instruction property missing"
+        );
+        assert!(props.contains_key("cli_model"), "cli_model property missing");
+        assert!(
+            props.contains_key("cli_reasoning_effort"),
+            "cli_reasoning_effort property missing"
         );
         assert!(props.contains_key("agents"), "agents property missing");
         assert!(!props.contains_key("code_review"));
@@ -480,9 +500,21 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .expect("root required");
+        assert!(schema_required.contains(&json!("finish_status")));
+        assert!(schema_required.contains(&json!("phase")));
+        assert!(schema_required.contains(&json!("goal")));
         assert!(schema_required.contains(&json!("status_title")));
         assert!(schema_required.contains(&json!("status_sent_to_user")));
-        assert!(schema_required.contains(&json!("prompt_sent_to_cli")));
+        assert!(schema_required.contains(&json!("cli_milestone_instruction")));
+        assert!(schema_required.contains(&json!("cli_model")));
+        assert!(schema_required.contains(&json!("cli_reasoning_effort")));
+        assert!(schema_required.contains(&json!("finish_evidence")));
+        assert!(schema_required.contains(&json!("agents")));
+        assert_eq!(
+            schema_required.len(),
+            props.len(),
+            "strict schema requires every property to be listed in required"
+        );
 
         let agents_obj = props
             .get("agents")
@@ -527,18 +559,22 @@ mod tests {
 
         assert!(!props.contains_key("code_review"));
         assert!(!props.contains_key("cross_check"));
+        assert!(
+            schema.get("allOf").is_none(),
+            "schema should avoid unsupported allOf"
+        );
     }
 
     #[test]
-    fn schema_sets_prompt_sent_to_cli_min_but_no_max_length() {
+    fn schema_sets_cli_milestone_instruction_min_without_max_length() {
         let active_agents: Vec<String> = Vec::new();
         let schema = build_schema(&active_agents, SchemaFeatures::default());
         let prompt_schema = schema
             .get("properties")
             .and_then(|v| v.as_object())
-            .and_then(|obj| obj.get("prompt_sent_to_cli"))
+            .and_then(|obj| obj.get("cli_milestone_instruction"))
             .and_then(|v| v.as_object())
-            .expect("prompt_sent_to_cli schema");
+            .expect("cli_milestone_instruction schema");
 
         assert_eq!(
             prompt_schema.get("minLength"),
@@ -549,6 +585,72 @@ mod tests {
             !prompt_schema.contains_key("maxLength"),
             "schema should omit maxLength to avoid provider truncation"
         );
+    }
+
+    #[test]
+    fn enforce_hard_message_limit_keeps_goal_and_recent_tail() {
+        let total_messages = HARD_MESSAGE_LIMIT + 48;
+        let mut items = Vec::with_capacity(total_messages + 1);
+        items.push(make_message("user", "Primary goal should survive".to_string()));
+        for idx in 0..total_messages {
+            items.push(make_message("assistant", format!("assistant-msg-{idx}")));
+        }
+
+        let trimmed = enforce_hard_message_limit(items);
+        assert_eq!(trimmed.len(), HARD_MESSAGE_LIMIT);
+
+        let first_is_goal = matches!(
+            trimmed.first(),
+            Some(ResponseItem::Message { role, content, .. })
+                if role == "user"
+                    && content
+                        .iter()
+                        .any(|item| matches!(item, ContentItem::InputText { text } if text == "Primary goal should survive"))
+        );
+        assert!(first_is_goal, "oldest user goal should be preserved");
+
+        let latest_tail = format!("assistant-msg-{}", total_messages - 1);
+        let has_latest = trimmed.iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { content, .. }
+                    if content
+                        .iter()
+                        .any(|entry| matches!(entry, ContentItem::OutputText { text } if text == &latest_tail))
+            )
+        });
+        assert!(has_latest, "latest assistant message should be retained");
+    }
+
+    #[test]
+    fn queue_update_capped_discards_oldest_overflow() {
+        let mut queue: VecDeque<Arc<[ResponseItem]>> = VecDeque::new();
+
+        for idx in 0..(MAX_QUEUED_CONVERSATION_UPDATES + 7) {
+            let update = Arc::<[ResponseItem]>::from(vec![make_message(
+                "assistant",
+                format!("queued-{idx}"),
+            )]);
+            queue_update_capped(&mut queue, update);
+        }
+
+        assert_eq!(queue.len(), MAX_QUEUED_CONVERSATION_UPDATES);
+
+        let first_text = queue
+            .front()
+            .and_then(|conversation| conversation.first())
+            .and_then(|item| match item {
+                ResponseItem::Message { content, .. } => content.first(),
+                _ => None,
+            })
+            .and_then(|content| match content {
+                ContentItem::OutputText { text } => Some(text.clone()),
+                ContentItem::InputText { text } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("queued message text");
+
+        assert_eq!(first_text, "queued-7");
     }
 
     #[test]
@@ -633,12 +735,39 @@ mod tests {
             .and_then(|v| v.as_object())
             .expect("schema properties");
         assert!(!props.contains_key("agents"));
+        assert!(props.contains_key("cli_model"));
+        assert!(props.contains_key("cli_reasoning_effort"));
         let required = schema
             .get("required")
             .and_then(|v| v.as_array())
             .expect("required array");
         assert!(!required.contains(&json!("agents")));
-        assert!(!required.contains(&json!("goal")));
+        assert!(required.contains(&json!("goal")));
+        assert!(required.contains(&json!("cli_model")));
+        assert!(required.contains(&json!("cli_reasoning_effort")));
+    }
+
+    #[test]
+    fn schema_omits_cli_model_routing_when_disabled() {
+        let schema = build_schema(
+            &Vec::new(),
+            SchemaFeatures {
+                include_cli_model_routing: false,
+                ..SchemaFeatures::default()
+            },
+        );
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("schema properties");
+        assert!(!props.contains_key("cli_model"));
+        assert!(!props.contains_key("cli_reasoning_effort"));
+        let required = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("required array");
+        assert!(!required.contains(&json!("cli_model")));
+        assert!(!required.contains(&json!("cli_reasoning_effort")));
     }
 
     #[test]
@@ -660,6 +789,8 @@ mod tests {
             .get("goal")
             .and_then(|v| v.as_object())
             .expect("goal schema");
+        assert_eq!(goal.get("type"), Some(&json!("string")));
+        assert_eq!(goal.get("minLength"), Some(&json!(4)));
         let description = goal
             .get("description")
             .and_then(|v| v.as_str())
@@ -689,7 +820,7 @@ mod tests {
             "finish_status": "continue",
             "status_title": "Dispatching fix",
             "status_sent_to_user": "Ran smoke tests while validating the fix.",
-            "prompt_sent_to_cli": "Apply the patch for the failing test",
+            "cli_milestone_instruction": "Apply the patch for the failing test",
             "agents": {
                 "timing": "blocking",
                 "list": [
@@ -698,7 +829,8 @@ mod tests {
             }
         }"#;
 
-        let (decision, _) = parse_decision(raw).expect("parse new schema decision");
+        let (decision, _) = parse_decision(raw, DecisionParseOptions::default())
+            .expect("parse new schema decision");
         assert_eq!(decision.status, AutoCoordinatorStatus::Continue);
         assert_eq!(
             decision.status_sent_to_user.as_deref(),
@@ -726,18 +858,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_decision_requires_cli_model_and_reasoning_when_enabled() {
+        let raw = r#"{
+            "finish_status": "continue",
+            "status_title": "Dispatching fix",
+            "status_sent_to_user": "Running failing test loop.",
+            "cli_milestone_instruction": "Run the failing test, apply a minimal fix, and iterate until green."
+        }"#;
+
+        let err = parse_decision(
+            raw,
+            DecisionParseOptions {
+                require_cli_model_routing: true,
+            },
+        )
+        .expect_err("routing-enabled parse should require model fields");
+
+        assert!(err.to_string().contains("missing cli_model"));
+    }
+
+    #[test]
+    fn parse_decision_accepts_cli_model_and_reasoning_when_enabled() {
+        let raw = r#"{
+            "finish_status": "continue",
+            "status_title": "Fixing tests",
+            "status_sent_to_user": "Running clear failing-test loops.",
+            "cli_milestone_instruction": "Take the failing test from red to green and report the passing evidence.",
+            "cli_model": "gpt-5.3-codex-spark",
+            "cli_reasoning_effort": "high"
+        }"#;
+
+        let (decision, _) = parse_decision(
+            raw,
+            DecisionParseOptions {
+                require_cli_model_routing: true,
+            },
+        )
+        .expect("routing-enabled decision should parse");
+
+        let cli = decision.cli.expect("cli action expected");
+        assert_eq!(cli.model_override.as_deref(), Some("gpt-5.3-codex-spark"));
+        assert_eq!(cli.reasoning_effort_override, Some(ReasoningEffort::High));
+    }
+
+    #[test]
     fn parse_decision_new_schema_array_backcompat() {
         let raw = r#"{
             "finish_status": "continue",
             "status_title": "Running tests",
             "status_sent_to_user": "Outlined fix before execution.",
-            "prompt_sent_to_cli": "Run cargo test",
+            "cli_milestone_instruction": "Run cargo test",
             "agents": [
                 {"prompt": "Investigate benchmark", "write": false}
             ]
         }"#;
 
-        let (decision, _) = parse_decision(raw).expect("parse array-style agents");
+        let (decision, _) = parse_decision(raw, DecisionParseOptions::default())
+            .expect("parse array-style agents");
         assert_eq!(decision.status, AutoCoordinatorStatus::Continue);
         assert!(decision.cli.is_some());
         assert_eq!(decision.agents.len(), 1);
@@ -754,10 +931,11 @@ mod tests {
         let raw = r#"{
             "finish_status": "continue",
             "progress": {"past": "Drafted fix", "current": "Running unit tests"},
-            "prompt_sent_to_cli": "Run cargo test --package core"
+            "cli_milestone_instruction": "Run cargo test --package core"
         }"#;
 
-        let (decision, _) = parse_decision(raw).expect("parse legacy decision");
+        let (decision, _) = parse_decision(raw, DecisionParseOptions::default())
+            .expect("parse legacy decision");
         assert_eq!(decision.status, AutoCoordinatorStatus::Continue);
         assert_eq!(
             decision.status_sent_to_user.as_deref(),
@@ -777,18 +955,119 @@ mod tests {
     }
 
     #[test]
+    fn parse_decision_continue_rejects_finish_evidence() {
+        let raw = r#"{
+            "finish_status": "continue",
+            "status_title": "Implementing",
+            "status_sent_to_user": "Driving the implementation milestone.",
+            "cli_milestone_instruction": "Deliver the feature end-to-end and validate.",
+            "finish_evidence": {
+                "primary_outcome_achieved": "done",
+                "validation_checks_passed": ["cargo test"],
+                "edge_cases_handled": []
+            }
+        }"#;
+
+        let err = parse_decision(raw, DecisionParseOptions::default())
+            .expect_err("continue should reject finish evidence");
+        assert!(
+            err.to_string()
+                .contains("finish_evidence must be null when finish_status is continue")
+        );
+    }
+
+    #[test]
+    fn parse_decision_finish_requires_finish_evidence() {
+        let raw = r#"{
+            "finish_status": "finish_success",
+            "status_title": "Completed",
+            "status_sent_to_user": "Everything is green.",
+            "cli_milestone_instruction": null
+        }"#;
+
+        let err = parse_decision(raw, DecisionParseOptions::default())
+            .expect_err("finish status should require evidence");
+        assert!(err.to_string().contains("missing finish_evidence"));
+    }
+
+    #[test]
+    fn parse_decision_finish_rejects_cli_prompt() {
+        let raw = r#"{
+            "finish_status": "finish_success",
+            "status_title": "Completed",
+            "status_sent_to_user": "Everything is green.",
+            "cli_milestone_instruction": "Keep working",
+            "finish_evidence": {
+                "primary_outcome_achieved": "Resolved primary task.",
+                "validation_checks_passed": ["cargo test --workspace"],
+                "edge_cases_handled": ["empty input"]
+            }
+        }"#;
+
+        let err = parse_decision(raw, DecisionParseOptions::default())
+            .expect_err("finish statuses require null CLI prompt");
+        assert!(
+            err.to_string()
+                .contains("must set cli_milestone_instruction to null")
+        );
+    }
+
+    #[test]
+    fn parse_decision_finish_accepts_finish_evidence() {
+        let raw = r#"{
+            "finish_status": "finish_success",
+            "phase": "lockdown",
+            "status_title": "Completed",
+            "status_sent_to_user": "All checks are green.",
+            "cli_milestone_instruction": null,
+            "finish_evidence": {
+                "primary_outcome_achieved": "Resolved primary task end-to-end.",
+                "validation_checks_passed": ["cargo test --workspace", "./build-fast.sh"],
+                "edge_cases_handled": ["empty payload", "large payload"]
+            }
+        }"#;
+
+        let (decision, _) = parse_decision(raw, DecisionParseOptions::default())
+            .expect("finish decision should parse");
+        assert_eq!(decision.status, AutoCoordinatorStatus::Success);
+        assert!(decision.cli.is_none());
+    }
+
+    #[test]
+    fn parse_decision_finish_requires_nonempty_validation_checks() {
+        let raw = r#"{
+            "finish_status": "finish_success",
+            "status_title": "Completed",
+            "status_sent_to_user": "All checks are green.",
+            "cli_milestone_instruction": null,
+            "finish_evidence": {
+                "primary_outcome_achieved": "Resolved primary task end-to-end.",
+                "validation_checks_passed": [],
+                "edge_cases_handled": ["empty payload"]
+            }
+        }"#;
+
+        let err = parse_decision(raw, DecisionParseOptions::default())
+            .expect_err("finish decision should require validations");
+        assert!(
+            err.to_string()
+                .contains("validation_checks_passed must include at least one")
+        );
+    }
+
+    #[test]
     fn classify_missing_cli_prompt_is_recoverable() {
-        let err = anyhow!("model response missing prompt_sent_to_cli for continue");
+        let err = anyhow!("model response missing cli_milestone_instruction for continue");
         let info = classify_recoverable_decision_error(&err).expect("recoverable error");
         assert!(info
             .summary
-            .contains("prompt_sent_to_cli"));
+            .contains("cli_milestone_instruction"));
         assert!(
             info
                 .guidance
                 .as_ref()
                 .expect("guidance")
-                .contains("prompt_sent_to_cli")
+                .contains("cli_milestone_instruction")
         );
     }
 
@@ -802,6 +1081,16 @@ mod tests {
             .as_ref()
             .expect("guidance")
             .contains("agents[*].prompt"));
+    }
+
+    #[test]
+    fn classify_missing_field_is_recoverable() {
+        let err = anyhow!("finish_evidence.validation_checks_passed is missing");
+        let info = classify_recoverable_decision_error(&err).expect("recoverable error");
+        assert!(
+            info.summary
+                .contains("finish_evidence.validation_checks_passed")
+        );
     }
 
     #[test]
@@ -907,17 +1196,35 @@ mod tests {
 struct CoordinatorDecisionNew {
     finish_status: String,
     #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
     status_title: Option<String>,
     #[serde(default)]
     status_sent_to_user: Option<String>,
     #[serde(default)]
     progress: Option<ProgressPayload>,
     #[serde(default)]
-    prompt_sent_to_cli: Option<String>,
+    cli_milestone_instruction: Option<String>,
+    #[serde(default)]
+    cli_model: Option<String>,
+    #[serde(default)]
+    cli_reasoning_effort: Option<String>,
     #[serde(default)]
     agents: Option<AgentsField>,
     #[serde(default)]
+    finish_evidence: Option<FinishEvidencePayload>,
+    #[serde(default)]
     goal: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinishEvidencePayload {
+    #[serde(default)]
+    primary_outcome_achieved: Option<String>,
+    #[serde(default)]
+    validation_checks_passed: Option<Vec<String>>,
+    #[serde(default)]
+    edge_cases_handled: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -993,6 +1300,7 @@ struct CoordinatorDecisionLegacy {
     goal: Option<String>,
 }
 
+#[derive(Debug)]
 struct ParsedCoordinatorDecision {
     status: AutoCoordinatorStatus,
     status_title: Option<String>,
@@ -1006,11 +1314,18 @@ struct ParsedCoordinatorDecision {
     model_slug: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DecisionParseOptions {
+    require_cli_model_routing: bool,
+}
+
 #[derive(Debug, Clone)]
 struct CliAction {
     prompt: String,
     context: Option<String>,
     suppress_ui_context: bool,
+    model_override: Option<String>,
+    reasoning_effort_override: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Clone)]
@@ -1210,8 +1525,9 @@ fn run_auto_loop(
         schema_features.include_goal_field = true;
     }
     let include_agents = schema_features.include_agents;
-    let mut pending_conversation =
-        Some(Arc::<[ResponseItem]>::from(filter_popular_commands(initial_conversation)));
+    let mut pending_conversation = Some(Arc::<[ResponseItem]>::from(
+        enforce_hard_message_limit(filter_popular_commands(initial_conversation)),
+    ));
     let mut decision_seq: u64 = 0;
     let mut pending_ack_seq: Option<u64> = None;
     let mut queued_updates: VecDeque<Arc<[ResponseItem]>> = VecDeque::new();
@@ -1222,6 +1538,8 @@ fn run_auto_loop(
                 prompt: seed.cli_prompt.clone(),
                 context: Some(seed.goal_message.clone()),
                 suppress_ui_context: true,
+                model_override: None,
+                reasoning_effort_override: None,
             };
             let event = AutoCoordinatorEvent::Decision {
                 seq: decision_seq,
@@ -1244,7 +1562,6 @@ fn run_auto_loop(
     debug!("[Auto coordinator] starting: goal={goal_text} platform={platform}");
 
     let mut stopped = false;
-    let mut requests_completed: u64 = 0;
     let mut consecutive_decision_failures: u32 = 0;
     let mut session_metrics = SessionMetrics::default();
     let mut coordinator_turns_seen: u32 = 0;
@@ -1261,7 +1578,7 @@ fn run_auto_loop(
         if let Some(conv) = pending_conversation.take() {
             if let Some(pending_seq) = pending_ack_seq {
                 tracing::debug!(target: "auto_drive::coordinator", pending_seq, "queueing conversation until ack");
-                queued_updates.push_back(conv);
+                queue_update_capped(&mut queued_updates, conv);
             } else {
                 next_conversation = Some(conv);
             }
@@ -1289,6 +1606,7 @@ fn run_auto_loop(
                 &active_model_slug,
                 &compact_prompt_text,
             );
+            conv = enforce_hard_message_limit(conv);
             let conv = Arc::<[ResponseItem]>::from(conv);
             if matches!(compaction_result, CompactionResult::Completed { .. }) {
                 event_tx.send(AutoCoordinatorEvent::CompactedHistory {
@@ -1319,6 +1637,7 @@ fn run_auto_loop(
                 &event_tx,
                 &cancel_token,
                 &active_model_slug,
+                schema_features.include_cli_model_routing,
             ) {
                 Ok(ParsedCoordinatorDecision {
                     status,
@@ -1458,7 +1777,7 @@ fn run_auto_loop(
                         if consecutive_decision_failures <= MAX_DECISION_RECOVERY_ATTEMPTS {
                             let attempt = consecutive_decision_failures;
 
-                            const OVERLONG_MSG: &str = "ERROR: Your last prompt_sent_to_cli was greater than 600 characters and was not sent to the CLI. Please try again with a shorter prompt. You must keep prompts succinct (<=600 chars) to give the CLI autonomy to decide how to best execute the task.";
+                            const OVERLONG_MSG: &str = "ERROR: Your last cli_milestone_instruction was greater than 600 characters and was not sent to the CLI. Please try again with a shorter prompt. You must keep prompts succinct (<=600 chars) to give the CLI autonomy to decide how to best execute the task.";
 
                             let mut already_shared_raw = false;
                             if let Some(raw) = raw_output.as_ref() {
@@ -1518,7 +1837,11 @@ fn run_auto_loop(
                             }
                             let retry_snapshot = retry_conversation
                                 .take()
-                                .map(Arc::<[ResponseItem]>::from)
+                                .map(|conversation| {
+                                    Arc::<[ResponseItem]>::from(enforce_hard_message_limit(
+                                        filter_popular_commands(conversation),
+                                    ))
+                                })
                                 .unwrap_or_else(|| Arc::clone(&conv));
                             // Keep the model and UI in sync with the full conversation, but avoid spamming a compaction notice.
                             let _ = event_tx.send(AutoCoordinatorEvent::CompactedHistory {
@@ -1599,7 +1922,10 @@ fn run_auto_loop(
                         if let Some(response_text) = user_response.clone() {
                             updated_conversation.push(make_message("assistant", response_text.clone()));
                         }
-                        pending_conversation = Some(Arc::<[ResponseItem]>::from(updated_conversation));
+                        let updated_conversation =
+                            enforce_hard_message_limit(filter_popular_commands(updated_conversation));
+                        pending_conversation =
+                            Some(Arc::<[ResponseItem]>::from(updated_conversation));
                         event_tx.send(AutoCoordinatorEvent::UserReply {
                             user_response,
                             cli_command,
@@ -1631,17 +1957,18 @@ fn run_auto_loop(
                 }
             }
             Ok(AutoCoordinatorCommand::UpdateConversation(conv)) => {
-                requests_completed = requests_completed.saturating_add(1);
                 consecutive_decision_failures = 0;
                 let conv = conv.as_ref().to_vec();
-                let filtered = Arc::<[ResponseItem]>::from(filter_popular_commands(conv));
+                let filtered = Arc::<[ResponseItem]>::from(enforce_hard_message_limit(
+                    filter_popular_commands(conv),
+                ));
                 if let Some(pending_seq) = pending_ack_seq {
                     tracing::debug!(target: "auto_drive::coordinator", pending_seq, "queueing update while awaiting ack");
                     session_metrics.record_replay();
-                    queued_updates.push_back(filtered);
+                    queue_update_capped(&mut queued_updates, filtered);
                 } else if pending_conversation.is_some() {
                     session_metrics.record_replay();
-                    queued_updates.push_back(filtered);
+                    queue_update_capped(&mut queued_updates, filtered);
                 } else {
                     pending_conversation = Some(filtered);
                 }
@@ -1663,6 +1990,65 @@ fn filter_popular_commands(items: Vec<ResponseItem>) -> Vec<ResponseItem> {
         .into_iter()
         .filter(|item| !is_popular_commands_message(item))
         .collect()
+}
+
+fn enforce_hard_message_limit(items: Vec<ResponseItem>) -> Vec<ResponseItem> {
+    if items.len() <= HARD_MESSAGE_LIMIT {
+        return items;
+    }
+
+    let original_len = items.len();
+
+    let mut trimmed: Vec<ResponseItem> = Vec::with_capacity(HARD_MESSAGE_LIMIT);
+    let goal_index = items.iter().position(
+        |item| matches!(item, ResponseItem::Message { role, .. } if role == "user"),
+    );
+
+    if let Some(idx) = goal_index {
+        trimmed.push(items[idx].clone());
+    }
+
+    let remaining = HARD_MESSAGE_LIMIT.saturating_sub(trimmed.len());
+    let tail_start = items.len().saturating_sub(remaining);
+    for (idx, item) in items.into_iter().enumerate().skip(tail_start) {
+        if goal_index == Some(idx) {
+            continue;
+        }
+        trimmed.push(item);
+    }
+
+    if trimmed.len() > HARD_MESSAGE_LIMIT {
+        let drop = trimmed.len() - HARD_MESSAGE_LIMIT;
+        trimmed.drain(0..drop);
+    }
+
+    let dropped = original_len.saturating_sub(trimmed.len());
+    if dropped > 0 {
+        let total = HARD_LIMIT_TRIMMED_ITEMS_TOTAL.fetch_add(dropped as u64, Ordering::Relaxed)
+            + dropped as u64;
+        debug!(
+            dropped,
+            original_len,
+            retained = trimmed.len(),
+            total_trimmed = total,
+            "auto coordinator trimmed conversation to hard message limit"
+        );
+    }
+
+    trimmed
+}
+
+fn queue_update_capped(queue: &mut VecDeque<Arc<[ResponseItem]>>, update: Arc<[ResponseItem]>) {
+    if queue.len() >= MAX_QUEUED_CONVERSATION_UPDATES {
+        queue.pop_front();
+        let total = QUEUED_UPDATE_DROPS_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+        warn!(
+            cap = MAX_QUEUED_CONVERSATION_UPDATES,
+            total_dropped = total,
+            "auto coordinator dropped oldest queued conversation update"
+        );
+    }
+    queue.push_back(update);
 }
 
 fn is_popular_commands_message(item: &ResponseItem) -> bool {
@@ -1735,7 +2121,7 @@ fn build_initial_planning_seed(goal_text: &str, include_agents: bool) -> Option<
     };
 
     let response_json = format!(
-        "{{\"finish_status\":\"continue\",\"status_title\":\"Planning\",\"status_sent_to_user\":\"Started initial planning phase\",\"prompt_sent_to_cli\":\"{cli_prompt}\"}}"
+        "{{\"finish_status\":\"continue\",\"status_title\":\"Planning\",\"status_sent_to_user\":\"Started initial planning phase\",\"cli_milestone_instruction\":\"{cli_prompt}\"}}"
     );
 
     Some(InitialPlanningSeed {
@@ -1789,6 +2175,7 @@ fn run_git_command<const N: usize>(args: [&str; N]) -> Option<String> {
 struct SchemaFeatures {
     include_agents: bool,
     include_goal_field: bool,
+    include_cli_model_routing: bool,
 }
 
 impl SchemaFeatures {
@@ -1796,6 +2183,7 @@ impl SchemaFeatures {
         Self {
             include_agents: settings.agents_enabled,
             include_goal_field: false,
+            include_cli_model_routing: settings.model_routing_enabled,
         }
     }
 }
@@ -1805,6 +2193,7 @@ impl Default for SchemaFeatures {
         Self {
             include_agents: true,
             include_goal_field: false,
+            include_cli_model_routing: true,
         }
     }
 }
@@ -1829,6 +2218,7 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
 
     let models_request_property = json!({
         "type": "array",
+        "maxItems": 4,
         "description": models_description,
         "items": models_items_schema,
     });
@@ -1841,23 +2231,37 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
         json!({
             "type": "string",
             "enum": ["continue", "finish_success", "finish_failed"],
-            "description": "Prefer 'continue' unless the mission is fully complete or truly blocked. Always consider what further work might be possible to confirm the goal is complete before ending."
+            "description": "Prefer 'continue' until the solution is rock solid. Do not finish if there are obvious edge cases or missing tests to write. You MUST populate the 'finish_evidence' object when finishing."
         }),
     );
     required.push(Value::String("finish_status".to_string()));
 
-    if features.include_goal_field {
-        properties.insert(
-            "goal".to_string(),
-            json!({
-                "type": "string",
-                "minLength": 4,
-                "maxLength": 200,
-                "description": "Provide the single primary coding goal derived from the recent conversation history to begin Auto Drive without a user-supplied prompt."
-            }),
-        );
-        required.push(Value::String("goal".to_string()));
-    }
+    properties.insert(
+        "phase".to_string(),
+        json!({
+            "type": ["string", "null"],
+            "enum": ["explore", "implement", "validate", "lockdown", null],
+            "description": "Optional: tracks mission state. Use 'explore' for recon/planning, 'implement' for coding, and 'validate/lockdown' to trigger deep validation before finishing."
+        }),
+    );
+    required.push(Value::String("phase".to_string()));
+
+    let goal_schema = if features.include_goal_field {
+        json!({
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 200,
+            "description": "Provide the single primary coding goal derived from the recent conversation history to begin Auto Drive without a user-supplied prompt."
+        })
+    } else {
+        json!({
+            "type": ["string", "null"],
+            "maxLength": 200,
+            "description": "Use only when bootstrapping/clarifying the mission goal is required."
+        })
+    };
+    properties.insert("goal".to_string(), goal_schema);
+    required.push(Value::String("goal".to_string()));
 
     properties.insert(
         "status_title".to_string(),
@@ -1865,7 +2269,7 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
             "type": ["string", "null"],
             "minLength": 2,
             "maxLength": 80,
-            "description": "1-4 words, present-tense, what you asked the CLI to work on now."
+            "description": "1-4 words, present-tense milestone headline."
         }),
     );
     required.push(Value::String("status_title".to_string()));
@@ -1876,24 +2280,42 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
             "type": ["string", "null"],
             "minLength": 4,
             "maxLength": 600,
-            "description": "1-2 sentences shown to the user explaining what you asked the CLI to work on now. Will be shown in the UI to keep the user updated on the progress."
+            "description": "1-2 sentences explaining the high-level milestone the CLI (and any agents) are tackling."
         }),
     );
     required.push(Value::String("status_sent_to_user".to_string()));
 
-    // NOTE: We intentionally omit `maxLength` here. Some providers truncate
-    // responses to satisfy schema length caps, which would hide overlong
-    // prompts. We validate length after parsing and treat >600 as recoverable
-    // so the coordinator can retry with guidance instead of silently chopping.
     properties.insert(
-        "prompt_sent_to_cli".to_string(),
+        "cli_milestone_instruction".to_string(),
         json!({
             "type": ["string", "null"],
             "minLength": CLI_PROMPT_MIN_CHARS,
-            "description": "Instruction sent to the CLI to push it forward with the task (4-600 chars). Write this like a human maintainer pushing the CLI forwards, without digging too deep into the technical side. Provide when finish_status is 'continue'. Keep it high-level; the CLI has more context and tools than you do. e.g. 'Execute the first two steps of the plan you provided in parellel using agents.' NEVER ask the CLI to show you files so you solve problems directly. ALWAYS allow the CLI to take control. You are the COORDINATOR not the WORKER. Prompts over 600 characters will be rejected as this indicates the CLI is not being given sufficient autonomy."
+            "description": "Single milestone instruction to the CLI. Outcome-focused, non-procedural. Keep this between 4 and 600 characters; set to null ONLY when finishing."
         }),
     );
-    required.push(Value::String("prompt_sent_to_cli".to_string()));
+    required.push(Value::String("cli_milestone_instruction".to_string()));
+
+    if features.include_cli_model_routing {
+        properties.insert(
+            "cli_model".to_string(),
+            json!({
+                "type": ["string", "null"],
+                "enum": ["gpt-5.3-codex", "gpt-5.3-codex-spark", null],
+                "description": "CLI model for this turn. Use gpt-5.3-codex for planning/problem-solving (xhigh/high/medium) and gpt-5.3-codex-spark for clear coding loops or failing-test iteration (high). Set to null only when finishing."
+            }),
+        );
+        required.push(Value::String("cli_model".to_string()));
+
+        properties.insert(
+            "cli_reasoning_effort".to_string(),
+            json!({
+                "type": ["string", "null"],
+                "enum": ["medium", "high", "xhigh", null],
+                "description": "Reasoning effort for the selected CLI model this turn. Prefer xhigh for hard planning, high for main coding loops, and medium for straightforward execution. Set to null only when finishing."
+            }),
+        );
+        required.push(Value::String("cli_reasoning_effort".to_string()));
+    }
 
     if features.include_agents {
         properties.insert(
@@ -1901,40 +2323,38 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
             json!({
                 "type": ["object", "null"],
                 "additionalProperties": false,
-                "description": "Parallel help agents for the CLI to spawn. Use often. Agents are faster, parallelize work and allow exploration of a range of approaches.",
+                "description": "Optional parallel helper agents. Default to null. Use strategically for parallel research, diverse planning, or parallel isolated implementation using fast models (spark/flash). Do NOT use for trivial CLI tool usage (like running tests or grep).",
                 "properties": {
                     "timing": {
                         "type": "string",
-                        "enum": ["parallel", "blocking"],
-                        "description": "Parallel: run while the CLI works. Blocking: wait for results before the CLI executes the prompt you provided."
+                        "enum": ["parallel", "blocking"]
                     },
                     "list": {
                         "type": "array",
-                        "maxItems": 5,
+                        "maxItems": 4,
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
                             "properties": {
                                 "write": {
                                     "type": "boolean",
-                                    "description": "Creates an isolated worktree for each agent and enable writes to that worktree. Default false so that the agent can only read files."
+                                    "description": "If true, agent can write in isolated worktree. Set to true for coding implementation."
                                 },
                                 "context": {
                                     "type": ["string", "null"],
                                     "maxLength": 1500,
-                                    "description": "Background details (agents can not see the conversation - you must provide ALL neccessary information here). You might want to include parts of the plan or conversation history relevant to the work given to the agent."
+                                    "description": "All necessary background (agents do not see chat history)."
                                 },
                                 "prompt": {
                                     "type": "string",
                                     "minLength": 8,
                                     "maxLength": 400,
-                                    "description": "Outcome-oriented instruction (what to produce)."
+                                    "description": "Outcome-oriented instruction for the agent."
                                 },
                                 "models": models_request_property.clone()
                             },
                             "required": ["prompt", "context", "write", "models"]
                         },
-                        "description": "Up to 3 batches per turn with up to 4 agents in each. Use agents whenever it will help to source a variety of opinions when planning/researching or when there a mulitple workstreams which can be extecuted at once. Instruct the agent to carefully merge in the results of the agents work. Another great reason to use agents is that it helps to split the work up in small batches with a new context history - this speeds up work and dramatically improve focus. Having said that, the CLI has to be responible for merging in the results and producing the final product, so you need to balance the work given to the agents vs work given to the CLI at each step."
                     },
                 },
                 "required": ["timing", "list"]
@@ -1942,6 +2362,42 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
         );
         required.push(Value::String("agents".to_string()));
     }
+
+    properties.insert(
+        "finish_evidence".to_string(),
+        json!({
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "description": "MANDATORY when finish_status is not 'continue'. Leave null if 'continue'. Concrete proof that the task is entirely complete, edge cases are handled, and no further work is needed.",
+            "properties": {
+                "primary_outcome_achieved": {
+                    "type": "string",
+                    "maxLength": 600,
+                    "description": "Summary of what was achieved and fully resolved end-to-end."
+                },
+                "validation_checks_passed": {
+                    "type": "array",
+                    "maxItems": 12,
+                    "items": {
+                        "type": "string",
+                        "maxLength": 140
+                    },
+                    "description": "Specific validation commands executed by the CLI that are now passing (e.g., 'npm test', 'cargo clippy', 'browser UX verified')."
+                },
+                "edge_cases_handled": {
+                    "type": "array",
+                    "maxItems": 12,
+                    "items": {
+                        "type": "string",
+                        "maxLength": 180
+                    },
+                    "description": "Specific edge cases that were actively handled and verified before finishing. (Leave empty if none apply, but do NOT use this to list unhandled risks)."
+                }
+            },
+            "required": ["primary_outcome_achieved", "validation_checks_passed", "edge_cases_handled"]
+        }),
+    );
+    required.push(Value::String("finish_evidence".to_string()));
 
     let mut schema = serde_json::Map::new();
     schema.insert(
@@ -1952,6 +2408,9 @@ fn build_schema(active_agents: &[String], features: SchemaFeatures) -> Value {
     schema.insert("additionalProperties".to_string(), Value::Bool(false));
     schema.insert("properties".to_string(), Value::Object(properties));
     schema.insert("required".to_string(), Value::Array(required));
+    // Avoid JSON schema combinators like allOf/if/then here because the
+    // Responses API validator currently rejects them for text.format.schema.
+    // We enforce conditional requirements in parse-time validation instead.
 
     Value::Object(schema)
 }
@@ -1980,6 +2439,7 @@ fn request_coordinator_decision(
     event_tx: &AutoCoordinatorEventSender,
     cancel_token: &CancellationToken,
     preferred_model_slug: &str,
+    require_cli_model_routing: bool,
 ) -> Result<ParsedCoordinatorDecision, DecisionFailure> {
     let RequestStreamResult {
         output_text,
@@ -2010,7 +2470,12 @@ fn request_coordinator_decision(
             Some(output_text),
         ));
     }
-    let (mut decision, value) = parse_decision(&output_text)
+    let (mut decision, value) = parse_decision(
+        &output_text,
+        DecisionParseOptions {
+            require_cli_model_routing,
+        },
+    )
         .map_err(|err| DecisionFailure::new(err, "coordinator_decision", Some(output_text.clone())))?;
     debug!("[Auto coordinator] model decision: {:?}", value);
     decision.response_items = response_items;
@@ -2764,15 +3229,98 @@ fn classify_recoverable_decision_error(err: &anyhow::Error) -> Option<Recoverabl
     let text = err.to_string();
     let lower = text.to_ascii_lowercase();
 
-    if lower.contains("missing prompt_sent_to_cli")
+    if lower.contains("missing cli_milestone_instruction")
         || lower.contains("missing cli prompt for continue")
         || lower.contains("missing cli prompt for `finish_status")
         || lower.contains("missing cli prompt")
     {
         return Some(RecoverableDecisionError {
-            summary: "missing `prompt_sent_to_cli` for `finish_status: \"continue\"`".to_string(),
+            summary: "missing `cli_milestone_instruction` for `finish_status: \"continue\"`"
+                .to_string(),
             guidance: Some(
-                "Include a non-empty `prompt_sent_to_cli` string whenever `finish_status` is `\"continue\"`."
+                "Include a non-empty `cli_milestone_instruction` string whenever `finish_status` is `\"continue\"`."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("missing finish_evidence") {
+        return Some(RecoverableDecisionError {
+            summary: "missing `finish_evidence` for finish status".to_string(),
+            guidance: Some(
+                "Include a `finish_evidence` object whenever `finish_status` is `finish_success` or `finish_failed`."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("missing cli_model") {
+        return Some(RecoverableDecisionError {
+            summary: "missing `cli_model` for continue turn".to_string(),
+            guidance: Some(
+                "When Auto Drive model routing is enabled, include `cli_model` on every continue turn."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("missing cli_reasoning_effort") {
+        return Some(RecoverableDecisionError {
+            summary: "missing `cli_reasoning_effort` for continue turn".to_string(),
+            guidance: Some(
+                "When Auto Drive model routing is enabled, include `cli_reasoning_effort` on every continue turn."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("validation_checks_passed must include at least one") {
+        return Some(RecoverableDecisionError {
+            summary: "finish evidence is missing passing validation checks".to_string(),
+            guidance: Some(
+                "Provide at least one concrete passing validation check in `finish_evidence.validation_checks_passed` before finishing."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("finish_evidence must be null") {
+        return Some(RecoverableDecisionError {
+            summary: "`finish_evidence` must be null for continue turns".to_string(),
+            guidance: Some(
+                "Set `finish_evidence` to null (or omit it) when `finish_status` is `continue`."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("must set cli_milestone_instruction to null") {
+        return Some(RecoverableDecisionError {
+            summary: "`cli_milestone_instruction` must be null for finish statuses".to_string(),
+            guidance: Some(
+                "When finishing (`finish_success`/`finish_failed`), set `cli_milestone_instruction` to null and include `finish_evidence`."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("must set cli_model to null")
+        || lower.contains("must set cli_reasoning_effort to null")
+    {
+        return Some(RecoverableDecisionError {
+            summary: "CLI model routing fields must be null for finish statuses".to_string(),
+            guidance: Some(
+                "When finishing (`finish_success`/`finish_failed`), set `cli_model` and `cli_reasoning_effort` to null."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if lower.contains("unsupported cli_model") || lower.contains("unsupported cli_reasoning_effort") {
+        return Some(RecoverableDecisionError {
+            summary: "unsupported CLI model routing selection".to_string(),
+            guidance: Some(
+                "Use `cli_model` in {gpt-5.3-codex, gpt-5.3-codex-spark} and `cli_reasoning_effort` in {medium, high, xhigh}."
                     .to_string(),
             ),
         });
@@ -2780,12 +3328,12 @@ fn classify_recoverable_decision_error(err: &anyhow::Error) -> Option<Recoverabl
 
     if lower.contains("length limit")
         || lower.contains("cut off")
-        || lower.contains("exceeds") && lower.contains("prompt_sent_to_cli")
+        || lower.contains("exceeds") && lower.contains("cli_milestone_instruction")
     {
         return Some(RecoverableDecisionError {
             summary: "model output was cut off by a length cap".to_string(),
             guidance: Some(
-                "Regenerate with a shorter `prompt_sent_to_cli` (<=600 chars) and more concise status text so the response fits within provider limits."
+                "Regenerate with a shorter `cli_milestone_instruction` (<=600 chars) and more concise status text so the response fits within provider limits."
                     .to_string(),
             ),
         });
@@ -2808,6 +3356,22 @@ fn classify_recoverable_decision_error(err: &anyhow::Error) -> Option<Recoverabl
                 let summary = format!("`{field_trimmed}` was empty");
                 let guidance = format!(
                     "Provide a meaningful value for `{field_trimmed}` instead of leaving it blank."
+                );
+                return Some(RecoverableDecisionError {
+                    summary,
+                    guidance: Some(guidance),
+                });
+            }
+        }
+    }
+
+    if lower.contains(" is missing") {
+        if let Some((field, _)) = text.split_once(" is missing") {
+            let field_trimmed = field.trim().trim_matches('`');
+            if !field_trimmed.is_empty() {
+                let summary = format!("`{field_trimmed}` was missing");
+                let guidance = format!(
+                    "Include `{field_trimmed}` with a meaningful value before retrying."
                 );
                 return Some(RecoverableDecisionError {
                     summary,
@@ -2872,7 +3436,7 @@ fn push_unique_guidance(guidance: &mut Vec<String>, message: &str) {
 }
 
 
-fn parse_decision(raw: &str) -> Result<(ParsedCoordinatorDecision, Value)> {
+fn parse_decision(raw: &str, options: DecisionParseOptions) -> Result<(ParsedCoordinatorDecision, Value)> {
     let value: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(_) => {
@@ -2885,7 +3449,7 @@ fn parse_decision(raw: &str) -> Result<(ParsedCoordinatorDecision, Value)> {
     match serde_json::from_value::<CoordinatorDecisionNew>(value.clone()) {
         Ok(decision) => {
             let status = parse_finish_status(&decision.finish_status)?;
-            let parsed = convert_decision_new(decision, status)?;
+            let parsed = convert_decision_new(decision, status, options)?;
             Ok((parsed, value))
         }
         Err(new_err) => {
@@ -2899,7 +3463,7 @@ fn parse_decision(raw: &str) -> Result<(ParsedCoordinatorDecision, Value)> {
                 anyhow!("decoding coordinator decision failed: new_schema_err={new_err}; legacy_err={legacy_err}; payload_snippet={snippet}")
             })?;
             let status = parse_finish_status(&decision.finish_status)?;
-            let parsed = convert_decision_legacy(decision, status)?;
+            let parsed = convert_decision_legacy(decision, status, options)?;
             Ok((parsed, value))
         }
     }
@@ -2918,16 +3482,23 @@ fn parse_finish_status(finish_status: &str) -> Result<AutoCoordinatorStatus> {
 fn convert_decision_new(
     decision: CoordinatorDecisionNew,
     status: AutoCoordinatorStatus,
+    options: DecisionParseOptions,
 ) -> Result<ParsedCoordinatorDecision> {
     let CoordinatorDecisionNew {
         finish_status: _,
+        phase,
         status_title,
         status_sent_to_user,
         progress,
-        prompt_sent_to_cli,
+        cli_milestone_instruction,
+        cli_model,
+        cli_reasoning_effort,
         agents: agent_payloads,
+        finish_evidence,
         goal,
     } = decision;
+
+    validate_phase(phase)?;
 
     let mut status_title = clean_optional(status_title);
     let mut status_sent_to_user = clean_optional(status_sent_to_user);
@@ -2945,25 +3516,37 @@ fn convert_decision_new(
 
     let goal = clean_optional(goal);
 
-    let cli_prompt = clean_optional(prompt_sent_to_cli);
+    let cli_prompt = clean_optional(cli_milestone_instruction);
+    let cli_model = clean_optional(cli_model);
+    let cli_reasoning_effort = clean_optional(cli_reasoning_effort);
+
+    validate_finish_evidence_for_status(status, finish_evidence)?;
+    let (cli_model, cli_reasoning_effort) =
+        validate_cli_model_selection(status, cli_model, cli_reasoning_effort, options)?;
 
     let cli = match (status, cli_prompt) {
         (AutoCoordinatorStatus::Continue, Some(prompt)) => {
-            let prompt = clean_required(&prompt, "prompt_sent_to_cli")?;
+            let prompt = clean_required(&prompt, "cli_milestone_instruction")?;
             ensure_cli_prompt_length(&prompt)?;
 
             Some(CliAction {
                 prompt,
                 context: None,
                 suppress_ui_context: false,
+                model_override: cli_model,
+                reasoning_effort_override: cli_reasoning_effort,
             })
         }
         (AutoCoordinatorStatus::Continue, None) => {
             return Err(anyhow!(
-                "model response missing prompt_sent_to_cli for continue"
+                "model response missing cli_milestone_instruction for continue"
             ));
         }
-        (_, Some(_prompt)) => None,
+        (_, Some(_prompt)) => {
+            return Err(anyhow!(
+                "model response must set cli_milestone_instruction to null when finish_status is finish_success or finish_failed"
+            ));
+        }
         (_, None) => None,
     };
 
@@ -3025,6 +3608,7 @@ fn convert_decision_new(
 fn convert_decision_legacy(
     decision: CoordinatorDecisionLegacy,
     status: AutoCoordinatorStatus,
+    options: DecisionParseOptions,
 ) -> Result<ParsedCoordinatorDecision> {
     let CoordinatorDecisionLegacy {
         finish_status: _,
@@ -3040,20 +3624,34 @@ fn convert_decision_legacy(
     let context = clean_optional(cli_context);
     let goal = clean_optional(goal);
 
+    if matches!(status, AutoCoordinatorStatus::Success | AutoCoordinatorStatus::Failed) {
+        return Err(anyhow!(
+            "legacy model response missing finish_evidence for finish_status finish_success or finish_failed"
+        ));
+    }
+
+    if options.require_cli_model_routing {
+        return Err(anyhow!(
+            "legacy model response missing cli_model and cli_reasoning_effort for continue"
+        ));
+    }
+
     let cli = match (status, cli_prompt) {
         (AutoCoordinatorStatus::Continue, Some(prompt)) => Some(CliAction {
             prompt: clean_required(&prompt, "cli_prompt")?,
             context: context.clone(),
             suppress_ui_context: false,
+            model_override: None,
+            reasoning_effort_override: None,
         }),
         (AutoCoordinatorStatus::Continue, None) => {
             return Err(anyhow!("legacy model response missing cli_prompt for continue"));
         }
-        (_, Some(prompt)) => Some(CliAction {
-            prompt: clean_required(&prompt, "cli_prompt")?,
-            context: context.clone(),
-            suppress_ui_context: false,
-        }),
+        (_, Some(_prompt)) => {
+            return Err(anyhow!(
+                "model response must set cli_milestone_instruction to null when finish_status is finish_success or finish_failed"
+            ));
+        }
         (_, None) => None,
     };
 
@@ -3125,16 +3723,157 @@ fn clean_required(value: &str, field: &str) -> Result<String> {
     }
 }
 
+fn clean_required_list(values: Option<Vec<String>>, field: &str) -> Result<Vec<String>> {
+    let values = values.ok_or_else(|| anyhow!("{field} is missing"))?;
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(idx, value)| clean_required(&value, &format!("{field}[{idx}]")))
+        .collect()
+}
+
+fn validate_phase(phase: Option<String>) -> Result<()> {
+    let Some(phase) = clean_optional(phase) else {
+        return Ok(());
+    };
+
+    match phase.as_str() {
+        "explore" | "implement" | "validate" | "lockdown" => Ok(()),
+        _ => Err(anyhow!(
+            "unexpected phase '{phase}'; use one of: explore, implement, validate, lockdown"
+        )),
+    }
+}
+
+fn parse_cli_reasoning_effort(value: &str) -> Result<ReasoningEffort> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if !AUTO_DRIVE_CLI_REASONING_LEVELS
+        .iter()
+        .any(|level| normalized == *level)
+    {
+        return Err(anyhow!(
+            "unsupported cli_reasoning_effort '{normalized}'; expected one of: {}",
+            AUTO_DRIVE_CLI_REASONING_LEVELS.join(", ")
+        ));
+    }
+
+    match normalized.as_str() {
+        "medium" => Ok(ReasoningEffort::Medium),
+        "high" => Ok(ReasoningEffort::High),
+        "xhigh" => Ok(ReasoningEffort::XHigh),
+        _ => Err(anyhow!("unsupported cli_reasoning_effort '{normalized}'")),
+    }
+}
+
+fn normalize_cli_model(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    for model in AUTO_DRIVE_CLI_MODELS {
+        if trimmed.eq_ignore_ascii_case(model) {
+            return Ok((*model).to_string());
+        }
+    }
+    Err(anyhow!(
+        "unsupported cli_model '{trimmed}'; expected one of: {}",
+        AUTO_DRIVE_CLI_MODELS.join(", ")
+    ))
+}
+
+fn validate_cli_model_selection(
+    status: AutoCoordinatorStatus,
+    cli_model: Option<String>,
+    cli_reasoning_effort: Option<String>,
+    options: DecisionParseOptions,
+) -> Result<(Option<String>, Option<ReasoningEffort>)> {
+    if !options.require_cli_model_routing {
+        return Ok((None, None));
+    }
+
+    match status {
+        AutoCoordinatorStatus::Continue => {
+            let model = cli_model
+                .ok_or_else(|| anyhow!("model response missing cli_model for continue"))?;
+            let reasoning = cli_reasoning_effort.ok_or_else(|| {
+                anyhow!("model response missing cli_reasoning_effort for continue")
+            })?;
+
+            let model = normalize_cli_model(&model)?;
+            let reasoning = parse_cli_reasoning_effort(&reasoning)?;
+            Ok((Some(model), Some(reasoning)))
+        }
+        AutoCoordinatorStatus::Success | AutoCoordinatorStatus::Failed => {
+            if cli_model.is_some() {
+                return Err(anyhow!(
+                    "model response must set cli_model to null when finish_status is finish_success or finish_failed"
+                ));
+            }
+            if cli_reasoning_effort.is_some() {
+                return Err(anyhow!(
+                    "model response must set cli_reasoning_effort to null when finish_status is finish_success or finish_failed"
+                ));
+            }
+            Ok((None, None))
+        }
+    }
+}
+
+fn validate_finish_evidence_for_status(
+    status: AutoCoordinatorStatus,
+    finish_evidence: Option<FinishEvidencePayload>,
+) -> Result<()> {
+    match status {
+        AutoCoordinatorStatus::Continue => {
+            if finish_evidence.is_some() {
+                return Err(anyhow!(
+                    "finish_evidence must be null when finish_status is continue"
+                ));
+            }
+            Ok(())
+        }
+        AutoCoordinatorStatus::Success | AutoCoordinatorStatus::Failed => {
+            let finish_evidence = finish_evidence.ok_or_else(|| {
+                anyhow!(
+                    "model response missing finish_evidence for finish_status finish_success or finish_failed"
+                )
+            })?;
+
+            let FinishEvidencePayload {
+                primary_outcome_achieved,
+                validation_checks_passed,
+                edge_cases_handled,
+            } = finish_evidence;
+
+            let _primary_outcome_achieved = clean_required(
+                &primary_outcome_achieved
+                    .ok_or_else(|| anyhow!("finish_evidence.primary_outcome_achieved is missing"))?,
+                "finish_evidence.primary_outcome_achieved",
+            )?;
+            let validation_checks_passed = clean_required_list(
+                validation_checks_passed,
+                "finish_evidence.validation_checks_passed",
+            )?;
+            if validation_checks_passed.is_empty() {
+                return Err(anyhow!(
+                    "finish_evidence.validation_checks_passed must include at least one passing validation check"
+                ));
+            }
+            let _edge_cases_handled =
+                clean_required_list(edge_cases_handled, "finish_evidence.edge_cases_handled")?;
+
+            Ok(())
+        }
+    }
+}
+
 fn ensure_cli_prompt_length(prompt: &str) -> Result<()> {
     let len = prompt.chars().count();
     if len < CLI_PROMPT_MIN_CHARS {
         return Err(anyhow!(
-            "prompt_sent_to_cli must be at least {CLI_PROMPT_MIN_CHARS} characters; keep it concise but not empty"
+            "cli_milestone_instruction must be at least {CLI_PROMPT_MIN_CHARS} characters; keep it concise but not empty"
         ));
     }
     if len > CLI_PROMPT_MAX_CHARS {
         return Err(anyhow!(
-            "prompt_sent_to_cli exceeds {CLI_PROMPT_MAX_CHARS} characters; keep prompts succinct (<=600 chars) and let the CLI decide how to execute the task"
+            "cli_milestone_instruction exceeds {CLI_PROMPT_MAX_CHARS} characters; keep prompts succinct (<=600 chars) and let the CLI decide how to execute the task"
         ));
     }
 
@@ -3146,6 +3885,8 @@ fn cli_action_to_event(action: &CliAction) -> AutoTurnCliAction {
         prompt: action.prompt.clone(),
         context: action.context.clone(),
         suppress_ui_context: action.suppress_ui_context,
+        model_override: action.model_override.clone(),
+        reasoning_effort_override: action.reasoning_effort_override,
     }
 }
 
