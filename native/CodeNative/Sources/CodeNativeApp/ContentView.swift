@@ -522,24 +522,25 @@ struct ContentView: View {
         }
         .preferredColorScheme(selectedThemeMode.colorScheme)
         .sheet(isPresented: $showSettings) {
-            #if os(iOS)
             NavigationStack {
                 settingsSheetContent
                     .navigationTitle("Settings")
+                    #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
+                    #endif
                     .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
+                        ToolbarItem(placement: .cancellationAction) {
                             Button("Done") {
                                 showSettings = false
                             }
+                            .keyboardShortcut(.cancelAction)
                             .accessibilityIdentifier("settings.done")
                         }
                     }
             }
+            #if os(iOS)
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
-            #else
-            settingsSheetContent
             #endif
         }
         #if os(iOS)
