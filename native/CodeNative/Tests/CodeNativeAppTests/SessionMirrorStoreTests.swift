@@ -375,6 +375,82 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAutoSelectPrefersUsefulTitledSessionOverUntitledNewestSession() throws {
+        let store = SessionMirrorStore()
+        let titledSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000611")!
+        let untitledNewestSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000699")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(titledSessionId.uuidString)",
+                  "conversation_id": "\(titledSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 10,
+                  "title": "Fix iOS layout spacing"
+                },
+                {
+                  "id": "\(untitledNewestSessionId.uuidString)",
+                  "conversation_id": "\(untitledNewestSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 2,
+                  "last_event_at_unix_ms": 20,
+                  "title": null
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, titledSessionId)
+    }
+
+    @MainActor
+    func testAutoSelectFallsBackToNewestWhenNoUsefulTitleExists() throws {
+        let store = SessionMirrorStore()
+        let olderSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000711")!
+        let newestSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000799")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(olderSessionId.uuidString)",
+                  "conversation_id": "\(olderSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 10,
+                  "title": "go ahead"
+                },
+                {
+                  "id": "\(newestSessionId.uuidString)",
+                  "conversation_id": "\(newestSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 2,
+                  "last_event_at_unix_ms": 20,
+                  "title": null
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, newestSessionId)
+    }
+
+    @MainActor
     private func applyServerEnvelope(
         _ rawJSON: String,
         to store: SessionMirrorStore

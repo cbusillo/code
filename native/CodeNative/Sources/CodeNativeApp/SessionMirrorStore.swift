@@ -620,15 +620,52 @@ final class SessionMirrorStore: ObservableObject {
         in sessions: [SessionSummary],
         excluding excludedSessionIDs: Set<UUID> = []
     ) -> SessionSummary? {
-        sessions.last(where: {
+        let eligibleSessions = sessions.filter {
             !excludedSessionIDs.contains($0.id)
                 && !isSessionUnavailable($0.id)
                 && !isAutoReviewSession($0)
-        })
-            ?? sessions.last(where: {
-                !excludedSessionIDs.contains($0.id)
-                    && !isSessionUnavailable($0.id)
-            })
+                && !SessionVisibility.isHidden($0)
+        }
+
+        if let titled = eligibleSessions.reversed().first(where: hasUsefulAutoSelectionTitle) {
+            return titled
+        }
+
+        return eligibleSessions.last
+    }
+
+    private func hasUsefulAutoSelectionTitle(_ session: SessionSummary) -> Bool {
+        guard let rawTitle = session.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawTitle.isEmpty
+        else {
+            return false
+        }
+
+        let normalized = rawTitle.lowercased()
+        let lowSignalTitles: Set<String> = [
+            "ok",
+            "okay",
+            "yes",
+            "yep",
+            "thanks",
+            "thank you",
+            "go ahead",
+            "continue",
+            "done",
+            "great",
+            "cool",
+            "test"
+        ]
+
+        if lowSignalTitles.contains(normalized) {
+            return false
+        }
+
+        if normalized.contains("every code harness") {
+            return false
+        }
+
+        return true
     }
 
     private func isAutoReviewSession(_ session: SessionSummary) -> Bool {
