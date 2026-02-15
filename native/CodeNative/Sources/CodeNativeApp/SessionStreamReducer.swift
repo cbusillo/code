@@ -1,9 +1,13 @@
 import Foundation
 
 enum SessionStreamReducer {
+    // Keep the full local stream so transcript scrolling can always reach the
+    // beginning of the attached session.
+    private static let maxItems: Int? = nil
+
     private static func normalizedBySequence(
         _ items: [SessionStreamItem],
-        maxItems: Int
+        maxItems: Int?
     ) -> [SessionStreamItem] {
         var seen: Set<UInt64> = []
         var ordered: [SessionStreamItem] = []
@@ -13,6 +17,10 @@ enum SessionStreamReducer {
             if seen.insert(item.seq).inserted {
                 ordered.append(item)
             }
+        }
+
+        guard let maxItems else {
+            return ordered
         }
 
         return Array(ordered.suffix(maxItems))
@@ -39,7 +47,7 @@ enum SessionStreamReducer {
         existing: [SessionStreamItem],
         incoming: [SessionStreamItem],
         fromSeq: UInt64,
-        maxItems: Int = 2_000
+        maxItems: Int? = SessionStreamReducer.maxItems
     ) -> [SessionStreamItem] {
         let normalizedExisting = normalizedBySequence(existing, maxItems: maxItems)
 
@@ -61,13 +69,17 @@ enum SessionStreamReducer {
             existingSeq.insert(item.seq)
         }
 
+        guard let maxItems else {
+            return merged
+        }
+
         return Array(merged.suffix(maxItems))
     }
 
     static func appendLiveItem(
         items: [SessionStreamItem],
         newItem: SessionStreamItem,
-        maxItems: Int = 2_000
+        maxItems: Int? = SessionStreamReducer.maxItems
     ) -> [SessionStreamItem] {
         let normalized = normalizedBySequence(items, maxItems: maxItems)
 
@@ -78,7 +90,9 @@ enum SessionStreamReducer {
 
         var next = normalized
         next.append(newItem)
-        if next.count > maxItems {
+
+        if let maxItems,
+           next.count > maxItems {
             next.removeFirst(next.count - maxItems)
         }
         return next

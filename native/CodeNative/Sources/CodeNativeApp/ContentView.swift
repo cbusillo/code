@@ -4925,6 +4925,10 @@ private struct TranscriptCard: View {
     }
 
     private var cardBackground: Color {
+        if item.isTaskLifecycleEvent {
+            return Color.white.opacity(0.04)
+        }
+
         if item.isTurnAbortedEvent {
             return Color.orange.opacity(0.13)
         }
@@ -4962,6 +4966,10 @@ private struct TranscriptCard: View {
     }
 
     private var cardBorder: Color {
+        if item.isTaskLifecycleEvent {
+            return Color.white.opacity(0.12)
+        }
+
         if item.isTurnAbortedEvent {
             return Color.orange.opacity(0.34)
         }
@@ -4999,6 +5007,10 @@ private struct TranscriptCard: View {
     }
 
     private var usesMonospacedBody: Bool {
+        if item.isTaskLifecycleEvent {
+            return false
+        }
+
         if item.isPatchApplyEndEvent {
             return false
         }
@@ -5020,7 +5032,7 @@ private struct TranscriptCard: View {
     }
 
     private var usesCompactBodyText: Bool {
-        item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent
+        item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isTaskLifecycleEvent
     }
 
     private var monospacedBodyFont: Font {
@@ -5033,6 +5045,10 @@ private struct TranscriptCard: View {
     }
 
     private var showsMetaHeader: Bool {
+        if item.isTaskLifecycleEvent {
+            return false
+        }
+
         if item.turnDiffText != nil {
             return false
         }
@@ -5075,6 +5091,10 @@ private struct TranscriptCard: View {
     }
 
     private var shouldDrawBorder: Bool {
+        if item.isTaskLifecycleEvent {
+            return true
+        }
+
         if item.isBackgroundEvent {
             return true
         }
@@ -5090,6 +5110,10 @@ private struct TranscriptCard: View {
     }
 
     private var collapsedBodyLimit: Int {
+        if item.isTaskLifecycleEvent {
+            return 420
+        }
+
         if item.isPatchApplyEndEvent {
             return 500
         }
@@ -5374,26 +5398,30 @@ private struct TranscriptCard: View {
                         Spacer(minLength: 0)
                     }
                 }
-            } else if item.isBackgroundEvent {
-                let lines = item.body.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                let headline = lines.first ?? "Background event"
-                let details = Array(lines.dropFirst().prefix(2)).joined(separator: "\n")
+            } else if item.isTaskLifecycleEvent || item.isBackgroundEvent {
+                let lines = normalizedActivityLines(from: item.body)
+                let headline = lines.first ?? (item.isTaskLifecycleEvent ? "Task activity" : "Background activity")
+                let details = Array(lines.dropFirst()).joined(separator: "\n")
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 7) {
-                        Image(systemName: "checkmark.seal.fill")
+                        Image(systemName: item.isTaskLifecycleEvent ? "hourglass" : "waveform.path.ecg")
                             .font(.caption)
-                            .foregroundStyle(Color.green.opacity(0.9))
+                            .foregroundStyle(item.isTaskLifecycleEvent ? Color.orange.opacity(0.9) : Color.green.opacity(0.9))
                         Text(headline)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.95))
                     }
 
                     if !details.isEmpty {
-                        Text(details)
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.78))
-                            .lineSpacing(2)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(details)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.white.opacity(0.82))
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
             } else if let exec = item.execCommandInfo {
@@ -5692,6 +5720,14 @@ private struct TranscriptCard: View {
             normalized = next
         }
         return normalized
+    }
+
+    private func normalizedActivityLines(from value: String) -> [String] {
+        let normalized = normalizeExecOutput(value)
+        return normalized
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private func execStatusText(for info: ExecCommandInfo) -> String {

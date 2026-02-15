@@ -229,11 +229,11 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         if payloadType == "task_started" {
-            return "Task started"
+            return summarizeTaskLifecycle(object: object, phase: "started")
         }
 
         if payloadType == "task_complete" {
-            return "Task complete"
+            return summarizeTaskLifecycle(object: object, phase: "complete")
         }
 
         if payloadType == "turn_aborted" {
@@ -371,6 +371,33 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         return "Turn stopped"
+    }
+
+    private func summarizeTaskLifecycle(object: [String: JSONValue], phase: String) -> String {
+        let headline = "Task \(phase)"
+
+        let candidates: [String?] = [
+            object["message"]?.stringValue,
+            object["title"]?.stringValue,
+            object["task"]?.stringValue,
+            object["summary"]?.stringValue,
+            object["detail"]?.stringValue,
+            object["payload"]?.objectValue?["message"]?.stringValue,
+            object["payload"]?.objectValue?["title"]?.stringValue,
+        ]
+
+        for candidate in candidates {
+            guard let candidate else {
+                continue
+            }
+
+            let normalized = normalizeStructuredText(candidate).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                return "\(headline)\n\(normalized)"
+            }
+        }
+
+        return headline
     }
 
     private func summarizeSessionAttached(_ object: [String: JSONValue]) -> String {
@@ -1032,6 +1059,16 @@ extension SessionStreamItem {
             return false
         }
         return event?.payload?.typeHint == "background_event"
+    }
+
+    var isTaskLifecycleEvent: Bool {
+        guard type == "core_event",
+              let payloadType = event?.payload?.typeHint
+        else {
+            return false
+        }
+
+        return payloadType == "task_started" || payloadType == "task_complete"
     }
 
     var isTurnAbortedEvent: Bool {
