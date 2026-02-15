@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_lines)]
 
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::io::SeekFrom;
@@ -685,7 +686,15 @@ impl SessionHub {
             return Err(format!("Session {session_id} is archived or deleted"));
         }
 
-        let rollout_path = catalog.entry_rollout_path(&entry);
+        let catalog_rollout_path = catalog.entry_rollout_path(&entry);
+        let rollout_path = select_best_rollout_path_for_session(&catalog_rollout_path, session_id);
+        if rollout_path != catalog_rollout_path {
+            info!(
+                "Using more active rollout path for session {session_id}: {} (catalog: {})",
+                rollout_path.display(),
+                catalog_rollout_path.display()
+            );
+        }
         let mut config = self.base_config.as_ref().clone();
         config.cwd = entry.cwd_real.clone();
 
@@ -1344,6 +1353,101 @@ fn merge_session_summaries(existing: &SessionSummary, incoming: &SessionSummary)
     }
 }
 
+fn select_best_rollout_path_for_session(entry_rollout_path: &Path, session_id: Uuid) -> PathBuf {
+    let parent_dir = match entry_rollout_path.parent() {
+        Some(parent) => parent,
+        None => return entry_rollout_path.to_path_buf(),
+    };
+
+    let suffix = format!("-{session_id}.jsonl");
+
+    let mut best = RolloutPathCandidate::new(entry_rollout_path.to_path_buf());
+
+    let read_dir = match std::fs::read_dir(parent_dir) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return best.path,
+    };
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path == best.path || !path.is_file() {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if !file_name.ends_with(&suffix) {
+            continue;
+        }
+
+        let candidate = RolloutPathCandidate::new(path);
+        if candidate.is_better_than(&best) {
+            best = candidate;
+        }
+    }
+
+    best.path
+}
+
+struct RolloutPathCandidate {
+    path: PathBuf,
+    has_activity: bool,
+    modified_at: SystemTime,
+    byte_len: u64,
+}
+
+impl RolloutPathCandidate {
+    fn new(path: PathBuf) -> Self {
+        let metadata = std::fs::metadata(&path).ok();
+        let modified_at = metadata
+            .as_ref()
+            .and_then(|value| value.modified().ok())
+            .unwrap_or(UNIX_EPOCH);
+        let byte_len = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+
+        Self {
+            has_activity: rollout_path_has_activity(&path),
+            path,
+            modified_at,
+            byte_len,
+        }
+    }
+
+    fn is_better_than(&self, other: &Self) -> bool {
+        (self.has_activity, self.modified_at, self.byte_len)
+            > (other.has_activity, other.modified_at, other.byte_len)
+    }
+}
+
+fn rollout_path_has_activity(path: &Path) -> bool {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut non_empty_lines = 0usize;
+
+    for line_result in reader.lines() {
+        let Ok(line) = line_result else {
+            return false;
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        non_empty_lines = non_empty_lines.saturating_add(1);
+        if non_empty_lines > 1 {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn truncate_attach_history(
     mut history: Vec<SessionStreamItem>,
     requested_from_seq: u64,
@@ -1655,6 +1759,13 @@ mod tests {
         path
     }
 
+    fn make_temp_rollout_dir() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("code-web-server-rollout-dir-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp rollout dir");
+        dir
+    }
+
     fn append_rollout_line(path: &Path, line: &RolloutLine) {
         let serialized = serde_json::to_string(line).expect("serialize rollout line");
         let mut file = OpenOptions::new()
@@ -1686,6 +1797,29 @@ mod tests {
                 phase: None,
             }),
         }
+    }
+
+    #[test]
+    fn select_best_rollout_path_prefers_active_sibling() {
+        let session_id = Uuid::new_v4();
+        let temp_dir = make_temp_rollout_dir();
+
+        let stale_path = temp_dir.join(format!("rollout-stale-{session_id}.jsonl"));
+        let active_path = temp_dir.join(format!("rollout-active-{session_id}.jsonl"));
+
+        std::fs::write(&stale_path, "{\"type\":\"session_meta\"}\n")
+            .expect("write stale rollout");
+
+        std::fs::write(
+            &active_path,
+            "{\"type\":\"session_meta\"}\n{\"type\":\"event\"}\n",
+        )
+        .expect("write active rollout");
+
+        let selected = select_best_rollout_path_for_session(&stale_path, session_id);
+        assert_eq!(selected, active_path);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     async fn recv_stream_seq(out_rx: &mut mpsc::Receiver<ServerMessage>) -> u64 {
