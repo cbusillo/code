@@ -568,16 +568,13 @@ struct ContentView: View {
                 await store.connect()
             }
         }
-        .onChange(of: store.selectedSessionItems.last?.id) { _, _ in
+        .onChange(of: store.selectedSessionItems) { _, _ in
             refreshTranscriptCache()
             handleAssistantSpeech()
             if let activeTranscriptItemID,
                !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
                 self.activeTranscriptItemID = nil
             }
-        }
-        .onChange(of: store.selectedSessionItems.last?.rev) { _, _ in
-            refreshTranscriptCache()
         }
         .onChange(of: store.selectedSessionID) { _, _ in
             activeTranscriptItemID = nil
@@ -1785,7 +1782,7 @@ struct ContentView: View {
                         .stroke(Color.white.opacity(0.09), lineWidth: 1)
                 }
             }
-            .overlay(alignment: .topLeading) {
+            .overlay(alignment: .top) {
                 if let activity = composerActivityBadge {
                     Label(activity.label, systemImage: activity.icon)
                         .font(.caption2.weight(.semibold))
@@ -1797,7 +1794,6 @@ struct ContentView: View {
                             Capsule(style: .continuous)
                                 .stroke(activity.tint.opacity(0.38), lineWidth: 1)
                         )
-                        .padding(.leading, 14)
                         .offset(y: -11)
                 }
             }
@@ -3614,7 +3610,7 @@ private struct MacComposerTextView: NSViewRepresentable {
             }
 
             pendingSync = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
         }
 
         func cancelPendingSync() {
@@ -3671,13 +3667,14 @@ private struct AssistantTranscriptLine: View {
     let density: TranscriptDensity
     let isActive: Bool
     let onActivate: () -> Void
+    private let parsedBlocks: [MarkdownBlock]
     @State private var isHoveringCopyActions = false
 
     private enum MarkdownBlock: Hashable {
         case paragraph(String)
         case heading(level: Int, text: String)
-        case unorderedListItem(String)
-        case orderedListItem(number: String, text: String)
+        case unorderedListItem(level: Int, text: String)
+        case orderedListItem(level: Int, number: String, text: String)
         case quote(String)
         case code(language: String?, text: String)
     }
@@ -3692,6 +3689,7 @@ private struct AssistantTranscriptLine: View {
         self.density = density
         self.isActive = isActive
         self.onActivate = onActivate
+        self.parsedBlocks = Self.parseMarkdownBlocks(from: text)
     }
 
     #if os(iOS)
@@ -3704,10 +3702,6 @@ private struct AssistantTranscriptLine: View {
         #else
         return false
         #endif
-    }
-
-    private var blocks: [MarkdownBlock] {
-        parseMarkdownBlocks(from: text)
     }
 
     private var canCopyText: Bool {
@@ -3728,7 +3722,7 @@ private struct AssistantTranscriptLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(parsedBlocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .paragraph(let value):
                     AssistantInlineMarkdownText(text: value)
@@ -3746,7 +3740,7 @@ private struct AssistantTranscriptLine: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                case .unorderedListItem(let value):
+                case .unorderedListItem(let level, let value):
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("•")
                             .font((usesCompactPhoneTypography ? Font.callout : Font.body).weight(.semibold))
@@ -3757,9 +3751,10 @@ private struct AssistantTranscriptLine: View {
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                             .textSelection(.enabled)
                     }
+                    .padding(.leading, CGFloat(level * 14))
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                case .orderedListItem(let number, let value):
+                case .orderedListItem(let level, let number, let value):
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("\(number).")
                             .font((usesCompactPhoneTypography ? Font.callout : Font.body).monospaced().weight(.semibold))
@@ -3770,6 +3765,7 @@ private struct AssistantTranscriptLine: View {
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                             .textSelection(.enabled)
                     }
+                    .padding(.leading, CGFloat(level * 14))
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 case .quote(let value):
@@ -3868,7 +3864,7 @@ private struct AssistantTranscriptLine: View {
         }
     }
 
-    private func parseMarkdownBlocks(from value: String) -> [MarkdownBlock] {
+    private static func parseMarkdownBlocks(from value: String) -> [MarkdownBlock] {
         let normalized = value.replacingOccurrences(of: "\r\n", with: "\n")
         guard !normalized.isEmpty else {
             return []
@@ -3926,7 +3922,7 @@ private struct AssistantTranscriptLine: View {
         return blocks
     }
 
-    private func parseProseLines(_ lines: [String]) -> [MarkdownBlock] {
+    private static func parseProseLines(_ lines: [String]) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         var paragraphBuffer: [String] = []
 
@@ -3945,6 +3941,8 @@ private struct AssistantTranscriptLine: View {
 
         for raw in lines {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            let indentSpaces = leadingIndentCount(in: raw)
+            let listLevel = max(0, indentSpaces / 2)
 
             if trimmed.isEmpty {
                 flushParagraph()
@@ -3969,13 +3967,13 @@ private struct AssistantTranscriptLine: View {
             if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
                 flushParagraph()
                 let value = trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)
-                blocks.append(.unorderedListItem(value))
+                blocks.append(.unorderedListItem(level: listLevel, text: value))
                 continue
             }
 
             if let ordered = parseOrderedListItem(from: trimmed) {
                 flushParagraph()
-                blocks.append(.orderedListItem(number: ordered.number, text: ordered.text))
+                blocks.append(.orderedListItem(level: listLevel, number: ordered.number, text: ordered.text))
                 continue
             }
 
@@ -3986,7 +3984,23 @@ private struct AssistantTranscriptLine: View {
         return blocks
     }
 
-    private func parseOrderedListItem(from line: String) -> (number: String, text: String)? {
+    private static func leadingIndentCount(in line: String) -> Int {
+        var count = 0
+        for char in line {
+            if char == " " {
+                count += 1
+                continue
+            }
+            if char == "\t" {
+                count += 4
+                continue
+            }
+            break
+        }
+        return count
+    }
+
+    private static func parseOrderedListItem(from line: String) -> (number: String, text: String)? {
         var digits = ""
         var index = line.startIndex
 
