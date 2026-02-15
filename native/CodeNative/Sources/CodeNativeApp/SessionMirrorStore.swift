@@ -4,6 +4,7 @@ import OSLog
 @MainActor
 final class SessionMirrorStore: ObservableObject {
     private static let logger = Logger(subsystem: "com.every.code.native", category: "session-mirror")
+    private static let catalogRefreshIntervalNanoseconds: UInt64 = 3_000_000_000
 
     enum ConnectionState: String {
         case disconnected
@@ -43,6 +44,7 @@ final class SessionMirrorStore: ObservableObject {
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var catalogRefreshTask: Task<Void, Never>?
     private var attachedSessionID: UUID?
     private var expectedAttachedSessionID: UUID?
     private var clientId: String?
@@ -112,6 +114,8 @@ final class SessionMirrorStore: ObservableObject {
         userInitiatedDisconnect = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        catalogRefreshTask?.cancel()
+        catalogRefreshTask = nil
 
         let task = URLSession.shared.webSocketTask(with: url)
         task.resume()
@@ -203,6 +207,8 @@ final class SessionMirrorStore: ObservableObject {
         receiveTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
+        catalogRefreshTask?.cancel()
+        catalogRefreshTask = nil
 
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
@@ -222,6 +228,27 @@ final class SessionMirrorStore: ObservableObject {
         if error != nil,
            !userInitiatedDisconnect {
             scheduleReconnect()
+        }
+    }
+
+    private func startCatalogRefreshLoopIfNeeded() {
+        guard catalogRefreshTask == nil else {
+            return
+        }
+
+        catalogRefreshTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.catalogRefreshIntervalNanoseconds)
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                guard self.connectionState == .connected else {
+                    continue
+                }
+
+                await self.refreshSessions()
+            }
         }
     }
 
@@ -329,6 +356,7 @@ final class SessionMirrorStore: ObservableObject {
             clientId = message.clientId
             connectionState = .connected
             statusLine = "Connected as \(message.clientId.prefix(8))"
+            startCatalogRefreshLoopIfNeeded()
             Task { @MainActor in
                 await self.refreshSessions()
             }
