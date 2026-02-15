@@ -712,7 +712,9 @@ impl SessionHub {
         let query = SessionQuery {
             cwd: None,
             git_root: None,
-            sources: vec![SessionSource::Cli, SessionSource::VSCode, SessionSource::Exec],
+            // Native clients should mirror user-authored interactive sessions only.
+            // Excluding Exec avoids internal automation/review runs in thread lists.
+            sources: vec![SessionSource::Cli, SessionSource::VSCode],
             min_user_messages: 1,
             include_archived: false,
             include_deleted: false,

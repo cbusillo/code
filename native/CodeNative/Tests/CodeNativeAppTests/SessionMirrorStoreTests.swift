@@ -235,6 +235,146 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAttachErrorOnSelectedSessionAutoSelectsNextAvailableSession() throws {
+        let store = SessionMirrorStore()
+        let staleSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000411")!
+        let healthySessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000499")!
+        let requestId = "native_411"
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(healthySessionId.uuidString)",
+                  "conversation_id": "\(healthySessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Healthy"
+                },
+                {
+                  "id": "\(staleSessionId.uuidString)",
+                  "conversation_id": "\(staleSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 2,
+                  "last_event_at_unix_ms": 2,
+                  "title": "Stale"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, staleSessionId)
+
+        store.recordPendingAttachRequestForTesting(requestId: requestId, sessionID: staleSessionId)
+        try applyServerEnvelope(
+            """
+            {
+              "type": "error",
+              "request_id": "\(requestId)",
+              "message": "Failed to resume session \(staleSessionId.uuidString): internal error"
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, healthySessionId)
+        XCTAssertNotNil(store.unavailableSessionError(for: staleSessionId))
+    }
+
+    @MainActor
+    func testSessionListReplacesUnavailableSelectedSession() throws {
+        let store = SessionMirrorStore()
+        let staleSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000511")!
+        let healthySessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000599")!
+        let requestId = "native_511"
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(healthySessionId.uuidString)",
+                  "conversation_id": "\(healthySessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Healthy"
+                },
+                {
+                  "id": "\(staleSessionId.uuidString)",
+                  "conversation_id": "\(staleSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 2,
+                  "last_event_at_unix_ms": 2,
+                  "title": "Stale"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, staleSessionId)
+
+        store.recordPendingAttachRequestForTesting(requestId: requestId, sessionID: staleSessionId)
+        try applyServerEnvelope(
+            """
+            {
+              "type": "error",
+              "request_id": "\(requestId)",
+              "message": "Failed to resume session \(staleSessionId.uuidString): internal error"
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, healthySessionId)
+
+        // A subsequent session_list should keep the healthy thread selected and
+        // avoid snapping back to the known-unavailable one.
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(healthySessionId.uuidString)",
+                  "conversation_id": "\(healthySessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 3,
+                  "title": "Healthy"
+                },
+                {
+                  "id": "\(staleSessionId.uuidString)",
+                  "conversation_id": "\(staleSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 2,
+                  "last_event_at_unix_ms": 4,
+                  "title": "Stale"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, healthySessionId)
+    }
+
+    @MainActor
     private func applyServerEnvelope(
         _ rawJSON: String,
         to store: SessionMirrorStore

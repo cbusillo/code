@@ -335,7 +335,8 @@ final class SessionMirrorStore: ObservableObject {
             pruneUnavailableSessionsToKnownIDs()
 
             if let selectedSessionID,
-               sessions.contains(where: { $0.id == selectedSessionID }) {
+               sessions.contains(where: { $0.id == selectedSessionID }),
+               !isSessionUnavailable(selectedSessionID) {
                 ensureAttachmentForSelectedSession(selectedSessionID)
                 return
             }
@@ -399,6 +400,10 @@ final class SessionMirrorStore: ObservableObject {
                 markSessionUnavailable(failedSessionID, message: message.message)
                 if selectedSessionID == failedSessionID {
                     statusLine = "Thread unavailable"
+                    selectedSessionID = preferredAutoSelectedSession(
+                        in: sessions,
+                        excluding: [failedSessionID]
+                    )?.id
                 }
             } else {
                 statusLine = "Server error"
@@ -608,8 +613,19 @@ final class SessionMirrorStore: ObservableObject {
         unavailableSessionErrors.removeValue(forKey: sessionID)
     }
 
-    private func preferredAutoSelectedSession(in sessions: [SessionSummary]) -> SessionSummary? {
-        sessions.last(where: { !isAutoReviewSession($0) }) ?? sessions.last
+    private func preferredAutoSelectedSession(
+        in sessions: [SessionSummary],
+        excluding excludedSessionIDs: Set<UUID> = []
+    ) -> SessionSummary? {
+        sessions.last(where: {
+            !excludedSessionIDs.contains($0.id)
+                && !isSessionUnavailable($0.id)
+                && !isAutoReviewSession($0)
+        })
+            ?? sessions.last(where: {
+                !excludedSessionIDs.contains($0.id)
+                    && !isSessionUnavailable($0.id)
+            })
     }
 
     private func isAutoReviewSession(_ session: SessionSummary) -> Bool {
