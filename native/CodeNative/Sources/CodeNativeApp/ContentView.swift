@@ -253,7 +253,14 @@ struct ContentView: View {
     }
 
     private var shouldCollapseCompactComposerQuickActions: Bool {
-        isCompactPhoneLayout && store.selectedSessionItems.count > 24
+        isCompactPhoneLayout
+    }
+
+    private var compactComposerConfigLabel: String {
+        let compactModel = selectedModel
+            .replacingOccurrences(of: "-Codex", with: "")
+            .replacingOccurrences(of: "-Mini", with: "")
+        return "\(compactModel) · \(selectedReasoningLevel)"
     }
 
     private var usesExpandedTopTitle: Bool {
@@ -1620,24 +1627,11 @@ struct ContentView: View {
 
                 composerControlRows
             }
-            .background {
-                if isCompactPhoneLayout {
-                    UnevenRoundedRectangle(
-                        cornerRadii: .init(topLeading: 20, bottomLeading: 0, bottomTrailing: 0, topTrailing: 20),
-                        style: .continuous
-                    )
-                    .fill(Color.white.opacity(0.065))
-                } else {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.white.opacity(0.05))
-                }
-            }
+            .background(isCompactPhoneLayout ? Color.white.opacity(0.065) : Color.white.opacity(0.05))
+            .clipShape(isCompactPhoneLayout ? AnyShape(TopRoundedPanelShape(radius: 20)) : AnyShape(RoundedRectangle(cornerRadius: 18, style: .continuous)))
             .overlay {
                 if isCompactPhoneLayout {
-                    UnevenRoundedRectangle(
-                        cornerRadii: .init(topLeading: 20, bottomLeading: 0, bottomTrailing: 0, topTrailing: 20),
-                        style: .continuous
-                    )
+                    TopRoundedPanelOutlineShape(radius: 20)
                     .stroke(Color.white.opacity(0.14), lineWidth: 1)
                 } else {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -1647,6 +1641,15 @@ struct ContentView: View {
         }
         .padding(.horizontal, composerHorizontalPadding)
         .padding(.bottom, composerBottomPadding)
+        .background(alignment: .bottom) {
+            if isCompactPhoneLayout {
+                Rectangle()
+                    .fill(Color.white.opacity(0.065))
+                    .frame(height: compactComposerBottomFillHeight)
+                    .offset(y: compactComposerBottomFillHeight)
+                    .ignoresSafeArea(.container, edges: .bottom)
+            }
+        }
     }
 
     private var composerHorizontalPadding: CGFloat {
@@ -1673,6 +1676,10 @@ struct ContentView: View {
 
     private var composerControlBottomPadding: CGFloat {
         isCompactPhoneLayout ? 2 : 8
+    }
+
+    private var compactComposerBottomFillHeight: CGFloat {
+        isCompactPhoneLayout ? 34 : 0
     }
 
     private var composerControlRows: some View {
@@ -1780,35 +1787,118 @@ struct ContentView: View {
                     .accessibilityIdentifier("composer.quick.more")
                 }
 
-                Menu {
-                    ForEach(modelOptions, id: \.self) { option in
-                        Button(option) {
-                            selectedModel = option
+                if isCompactPhoneLayout {
+                    Menu {
+                        Section("Model") {
+                            ForEach(modelOptions, id: \.self) { option in
+                                Button(option) {
+                                    selectedModel = option
+                                }
+                            }
                         }
-                    }
-                } label: {
-                    Label(selectedModel, systemImage: "chevron.down")
-                }
-                .menuStyle(.borderlessButton)
 
-                Menu {
-                    ForEach(reasoningOptions, id: \.self) { option in
-                        Button(option) {
-                            selectedReasoningLevel = option
+                        Section("Reasoning") {
+                            ForEach(reasoningOptions, id: \.self) { option in
+                                Button(option) {
+                                    selectedReasoningLevel = option
+                                }
+                            }
                         }
+                    } label: {
+                        Label(compactComposerConfigLabel, systemImage: "slider.horizontal.3")
                     }
-                } label: {
-                    Label("Reasoning: \(selectedReasoningLevel)", systemImage: "chevron.down")
-                }
-                .menuStyle(.borderlessButton)
+                    .menuStyle(.borderlessButton)
+                } else {
+                    Menu {
+                        ForEach(modelOptions, id: \.self) { option in
+                            Button(option) {
+                                selectedModel = option
+                            }
+                        }
+                    } label: {
+                        Label(selectedModel, systemImage: "chevron.down")
+                    }
+                    .menuStyle(.borderlessButton)
 
-                Spacer(minLength: 10)
+                    Menu {
+                        ForEach(reasoningOptions, id: \.self) { option in
+                            Button(option) {
+                                selectedReasoningLevel = option
+                            }
+                        }
+                    } label: {
+                        Label("Reasoning: \(selectedReasoningLevel)", systemImage: "chevron.down")
+                    }
+                    .menuStyle(.borderlessButton)
+                }
+
+                if isCompactPhoneLayout {
+                    Spacer(minLength: 6)
+
+                    Button {
+                        handleVoiceToggleTap()
+                    } label: {
+                        Image(systemName: voiceInput.isRecording ? "mic.fill" : "mic")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .disabled(!canSendTurns)
+                    .accessibilityIdentifier("composer.mic-toggle")
+
+                    Button {
+                        interruptTurnAction()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.62))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .disabled(!canSendTurns)
+                    .accessibilityIdentifier("composer.stop")
+
+                    if hasComposerText {
+                        Button {
+                            store.composerText = ""
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .frame(width: 22, height: 22)
+                        .background(Color.white.opacity(0.05), in: Circle())
+                        .accessibilityIdentifier("composer.clear")
+                    }
+
+                    Button {
+                        submitComposerAction()
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(canSubmit ? .black : .white.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        canSubmit ? Color.white : Color.white.opacity(0.24),
+                        in: Circle()
+                    )
+                    .disabled(!canSubmit)
+                    .accessibilityIdentifier("composer.send")
+                } else {
+                    Spacer(minLength: 10)
+                }
             }
             .font(.caption)
             .foregroundStyle(composerControlForegroundStyle)
             .padding(.horizontal, 12)
             .padding(.top, isCompactPhoneLayout ? 6 : 8)
-            .padding(.bottom, isCompactPhoneLayout ? 2 : 4)
+            .padding(.bottom, isCompactPhoneLayout ? 4 : 4)
 
             if let helper = composerHelperText {
                 HStack(spacing: 8) {
@@ -1836,81 +1926,83 @@ struct ContentView: View {
                 .padding(.bottom, isCompactPhoneLayout ? 1 : 2)
             }
 
-            HStack(spacing: 8) {
-                Button {
-                    handleVoiceToggleTap()
-                } label: {
-                    Image(systemName: voiceInput.isRecording ? "mic.fill" : "mic")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
-                .frame(width: isCompactPhoneLayout ? 22 : 24, height: isCompactPhoneLayout ? 22 : 24)
-                .background(Color.white.opacity(0.05), in: Circle())
-                .disabled(!canSendTurns)
-                .accessibilityIdentifier("composer.mic-toggle")
-
-                Button {
-                    interruptTurnAction()
-                } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.caption2.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.62))
-                .frame(width: isCompactPhoneLayout ? 22 : 24, height: isCompactPhoneLayout ? 22 : 24)
-                .background(Color.white.opacity(0.05), in: Circle())
-                .disabled(!canSendTurns)
-                .accessibilityIdentifier("composer.stop")
-                #if os(macOS)
-                .keyboardShortcut(".", modifiers: [.command])
-                #endif
-
-                if hasComposerText {
+            if !isCompactPhoneLayout {
+                HStack(spacing: 8) {
                     Button {
-                        store.composerText = ""
+                        handleVoiceToggleTap()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: voiceInput.isRecording ? "mic.fill" : "mic")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
+                    .frame(width: 24, height: 24)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .disabled(!canSendTurns)
+                    .accessibilityIdentifier("composer.mic-toggle")
+
+                    Button {
+                        interruptTurnAction()
+                    } label: {
+                        Image(systemName: "stop.fill")
                             .font(.caption2.weight(.semibold))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.62))
-                    .frame(width: isCompactPhoneLayout ? 22 : 24, height: isCompactPhoneLayout ? 22 : 24)
+                    .frame(width: 24, height: 24)
                     .background(Color.white.opacity(0.05), in: Circle())
-                    .accessibilityIdentifier("composer.clear")
-                }
+                    .disabled(!canSendTurns)
+                    .accessibilityIdentifier("composer.stop")
+                    #if os(macOS)
+                    .keyboardShortcut(".", modifiers: [.command])
+                    #endif
 
-                Spacer(minLength: 6)
+                    if hasComposerText {
+                        Button {
+                            store.composerText = ""
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .frame(width: 24, height: 24)
+                        .background(Color.white.opacity(0.05), in: Circle())
+                        .accessibilityIdentifier("composer.clear")
+                    }
 
-                if showVoiceBadge {
-                    VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
-                        .font(.caption2)
-                }
+                    Spacer(minLength: 6)
 
-                Button {
-                    submitComposerAction()
-                } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(canSubmit ? .black : .white.opacity(0.6))
+                    if showVoiceBadge {
+                        VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
+                            .font(.caption2)
+                    }
+
+                    Button {
+                        submitComposerAction()
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(canSubmit ? .black : .white.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        canSubmit ? Color.white : Color.white.opacity(0.24),
+                        in: Circle()
+                    )
+                    .disabled(!canSubmit)
+                    .accessibilityIdentifier("composer.send")
+                    #if os(macOS)
+                    .keyboardShortcut(.return, modifiers: [.command])
+                    #endif
                 }
-                .buttonStyle(.plain)
-                .frame(width: isCompactPhoneLayout ? 26 : 28, height: isCompactPhoneLayout ? 26 : 28)
-                .background(
-                    canSubmit ? Color.white : Color.white.opacity(0.24),
-                    in: Circle()
-                )
-                .disabled(!canSubmit)
-                .accessibilityIdentifier("composer.send")
-                #if os(macOS)
-                .keyboardShortcut(.return, modifiers: [.command])
-                #endif
+                .font(.caption)
+                .foregroundStyle(composerControlForegroundStyle)
+                .padding(.horizontal, 12)
+                .padding(.top, 2)
+                .padding(.bottom, composerControlBottomPadding)
             }
-            .font(.caption)
-            .foregroundStyle(composerControlForegroundStyle)
-            .padding(.horizontal, 12)
-            .padding(.top, isCompactPhoneLayout ? 1 : 2)
-            .padding(.bottom, composerControlBottomPadding)
         }
         #else
         VStack(spacing: 0) {
@@ -2265,7 +2357,7 @@ struct ContentView: View {
     private var composerEditorHeight: CGFloat {
         let text = store.composerText
         guard !text.isEmpty else {
-            return isCompactPhoneLayout ? 42 : 48
+            return isCompactPhoneLayout ? 38 : 48
         }
 
         let newlineCount = text.reduce(into: 1) { count, character in
@@ -2276,8 +2368,8 @@ struct ContentView: View {
         let wrappedLineEstimate = max(1, text.count / 72)
         let lines = max(newlineCount, wrappedLineEstimate)
         let height = CGFloat(lines * 20 + 20)
-        let minHeight: CGFloat = isCompactPhoneLayout ? 42 : 48
-        let maxHeight: CGFloat = isCompactPhoneLayout ? 160 : 176
+        let minHeight: CGFloat = isCompactPhoneLayout ? 38 : 48
+        let maxHeight: CGFloat = isCompactPhoneLayout ? 144 : 176
         return min(maxHeight, max(minHeight, height))
     }
 
@@ -5078,5 +5170,54 @@ private struct SettingsInfoCard: View {
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct TopRoundedPanelShape: Shape {
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let clampedRadius = min(radius, rect.width / 2, rect.height / 2)
+        var path = Path()
+
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + clampedRadius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + clampedRadius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX - clampedRadius, y: rect.minY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + clampedRadius),
+            control: CGPoint(x: rect.maxX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+
+        return path
+    }
+}
+
+private struct TopRoundedPanelOutlineShape: Shape {
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let clampedRadius = min(radius, rect.width / 2, rect.height / 2)
+        var path = Path()
+
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + clampedRadius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + clampedRadius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX - clampedRadius, y: rect.minY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + clampedRadius),
+            control: CGPoint(x: rect.maxX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+
+        return path
     }
 }
