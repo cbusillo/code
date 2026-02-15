@@ -3725,17 +3725,21 @@ private struct AssistantTranscriptLine: View {
             ForEach(Array(parsedBlocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .paragraph(let value):
-                    AssistantInlineMarkdownText(text: value)
+                    AssistantInlineMarkdownText(
+                        text: value,
+                        baseColor: Color.white.opacity(0.93)
+                    )
                         .font(usesCompactPhoneTypography ? .callout : .body)
-                        .foregroundStyle(.white.opacity(0.93))
                         .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                 case .heading(let level, let value):
-                    AssistantInlineMarkdownText(text: value)
+                    AssistantInlineMarkdownText(
+                        text: value,
+                        baseColor: headingColor(for: level)
+                    )
                         .font(headingFont(for: level))
-                        .foregroundStyle(headingColor(for: level))
                         .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3745,9 +3749,11 @@ private struct AssistantTranscriptLine: View {
                         Text(unorderedMarker(for: level))
                             .font((usesCompactPhoneTypography ? Font.callout : Font.body).weight(.semibold))
                             .foregroundStyle(unorderedMarkerColor(for: level))
-                        AssistantInlineMarkdownText(text: value)
+                        AssistantInlineMarkdownText(
+                            text: value,
+                            baseColor: Color.white.opacity(0.93)
+                        )
                             .font(usesCompactPhoneTypography ? .callout : .body)
-                            .foregroundStyle(.white.opacity(0.93))
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                             .textSelection(.enabled)
                     }
@@ -3759,9 +3765,11 @@ private struct AssistantTranscriptLine: View {
                         Text("\(number).")
                             .font((usesCompactPhoneTypography ? Font.callout : Font.body).monospaced().weight(.semibold))
                             .foregroundStyle(Color.blue.opacity(0.85))
-                        AssistantInlineMarkdownText(text: value)
+                        AssistantInlineMarkdownText(
+                            text: value,
+                            baseColor: Color.white.opacity(0.93)
+                        )
                             .font(usesCompactPhoneTypography ? .callout : .body)
-                            .foregroundStyle(.white.opacity(0.93))
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                             .textSelection(.enabled)
                     }
@@ -3773,9 +3781,11 @@ private struct AssistantTranscriptLine: View {
                         RoundedRectangle(cornerRadius: 2, style: .continuous)
                             .fill(Color.cyan.opacity(0.45))
                             .frame(width: 3)
-                        AssistantInlineMarkdownText(text: value)
+                        AssistantInlineMarkdownText(
+                            text: value,
+                            baseColor: Color.white.opacity(0.88)
+                        )
                             .font(usesCompactPhoneTypography ? .callout : .body)
-                            .foregroundStyle(.white.opacity(0.88))
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
                             .textSelection(.enabled)
                     }
@@ -4058,25 +4068,60 @@ private struct AssistantTranscriptLine: View {
 }
 
 private struct AssistantInlineMarkdownText: View {
-    let text: String
+    private let attributed: AttributedString
 
-    private var renderedText: Text {
-        if let attributed = try? AttributedString(
+    init(text: String, baseColor: Color = Color.white.opacity(0.93)) {
+        self.attributed = Self.makeStyledAttributedString(from: text, baseColor: baseColor)
+    }
+
+    var body: some View {
+        Text(attributed)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private static func makeStyledAttributedString(from text: String, baseColor: Color) -> AttributedString {
+        let parsed = try? AttributedString(
             markdown: text,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace,
                 failurePolicy: .returnPartiallyParsedIfPossible
             )
-        ) {
-            return Text(attributed)
-        }
+        )
 
-        return Text(verbatim: text)
+        var attributed = parsed ?? AttributedString(text)
+        styleRuns(&attributed, baseColor: baseColor)
+        return attributed
     }
 
-    var body: some View {
-        renderedText
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private static func styleRuns(_ attributed: inout AttributedString, baseColor: Color) {
+        for run in attributed.runs {
+            let range = run.range
+            let intent = run.inlinePresentationIntent
+
+            if run.link != nil {
+                attributed[range].foregroundColor = Color.blue.opacity(0.92)
+                attributed[range].underlineStyle = .single
+                continue
+            }
+
+            if intent?.contains(.code) == true {
+                attributed[range].foregroundColor = Color.cyan.opacity(0.94)
+                attributed[range].backgroundColor = Color.white.opacity(0.1)
+                continue
+            }
+
+            if intent?.contains(.emphasized) == true {
+                attributed[range].foregroundColor = Color.orange.opacity(0.92)
+                continue
+            }
+
+            if intent?.contains(.stronglyEmphasized) == true {
+                attributed[range].foregroundColor = Color.white
+                continue
+            }
+
+            attributed[range].foregroundColor = baseColor
+        }
     }
 }
 
