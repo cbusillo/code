@@ -176,10 +176,14 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         if payloadType == "user_message",
            let message = object["message"]?.stringValue {
-            if isImagePlaceholderMessage(message) {
+            let sanitizedMessage = sanitizeUserMessage(message)
+            if sanitizedMessage.isEmpty {
+                return ""
+            }
+            if isImagePlaceholderMessage(sanitizedMessage) {
                 return "Shared image"
             }
-            return normalizeStructuredText(message)
+            return normalizeStructuredText(sanitizedMessage)
         }
 
         if payloadType == "replay_history" {
@@ -1113,7 +1117,10 @@ extension SessionStreamItem {
             let role = replayMessageRole(from: itemObject)
 
             let text = replayMessageText(from: itemObject)
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if role == .user {
+                trimmed = sanitizeUserMessage(trimmed)
+            }
             guard !trimmed.isEmpty else {
                 continue
             }
@@ -1196,9 +1203,15 @@ extension SessionStreamItem {
     }
 
     private func shouldSkipReplayMessage(role: ReplayHistoryMessage.Role, text: String) -> Bool {
-        if role == .user,
-           isImagePlaceholderMessage(text) {
-            return true
+        if role == .user {
+            let sanitized = sanitizeUserMessage(text)
+            if sanitized.isEmpty {
+                return true
+            }
+
+            if isImagePlaceholderMessage(sanitized) {
+                return true
+            }
         }
 
         if role == .assistant {
@@ -1219,7 +1232,8 @@ extension SessionStreamItem {
         else {
             return nil
         }
-        return message
+        let sanitized = sanitizeUserMessage(message)
+        return sanitized.isEmpty ? nil : sanitized
     }
 
     var isImagePlaceholderUserMessage: Bool {
@@ -1399,9 +1413,15 @@ extension SessionStreamItem {
         if payloadType == "user_message",
            let payload = event?.payload,
            let object = payload.objectValue,
-           let message = object["message"]?.stringValue,
-           isImagePlaceholderMessage(message) {
-            return true
+           let message = object["message"]?.stringValue {
+            let sanitizedMessage = sanitizeUserMessage(message)
+            if sanitizedMessage.isEmpty {
+                return true
+            }
+
+            if isImagePlaceholderMessage(sanitizedMessage) {
+                return true
+            }
         }
 
         return false
@@ -1410,6 +1430,35 @@ extension SessionStreamItem {
     private func isImagePlaceholderMessage(_ message: String) -> Bool {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("[image:") && trimmed.hasSuffix("]")
+    }
+
+    private func sanitizeUserMessage(_ message: String) -> String {
+        let stripped = stripSystemStatusFooter(from: message)
+        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripSystemStatusFooter(from message: String) -> String {
+        let normalized = message.replacingOccurrences(of: "\r\n", with: "\n")
+        guard let markerRange = normalized.range(of: "== System Status ==", options: [.caseInsensitive]) else {
+            return message
+        }
+
+        let prefix = normalized[..<markerRange.lowerBound]
+        if !prefix.isEmpty,
+           !prefix.hasSuffix("\n") {
+            return message
+        }
+
+        let footer = normalized[markerRange.lowerBound...]
+        let normalizedFooter = footer.lowercased()
+        let hasSystemMarker = normalizedFooter.contains("[automatic message added by system]")
+        let hasStatusFields = normalizedFooter.contains("\ncwd:")
+            && normalizedFooter.contains("\nbranch:")
+        guard hasSystemMarker || hasStatusFields else {
+            return message
+        }
+
+        return String(prefix)
     }
 
     private func isInternalAssistantStatusMessage(_ message: String) -> Bool {

@@ -185,6 +185,37 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.tokenUsageBreakdown?.reasoning, 120)
     }
 
+    func testUserMessageStripsSystemStatusFooter() {
+        let item = makeCoreEventItem(
+            seq: 16,
+            payload: .object([
+                "type": .string("user_message"),
+                "message": .string(
+                    "Need help reviewing this patch.\n\n== System Status ==\n[automatic message added by system]\n\ncwd: /Users/cbusillo/Developer/code\nbranch: native-apple-apps\nreasoning: High"
+                )
+            ])
+        )
+
+        XCTAssertEqual(item.userMessageText, "Need help reviewing this patch.")
+        XCTAssertEqual(item.body, "Need help reviewing this patch.")
+        XCTAssertFalse(item.shouldHideFromTranscript)
+    }
+
+    func testSystemStatusOnlyUserMessageIsHidden() {
+        let item = makeCoreEventItem(
+            seq: 17,
+            payload: .object([
+                "type": .string("user_message"),
+                "message": .string(
+                    "== System Status ==\n[automatic message added by system]\n\ncwd: /Users/cbusillo/Developer/code\nbranch: native-apple-apps\nreasoning: High"
+                )
+            ])
+        )
+
+        XCTAssertNil(item.userMessageText)
+        XCTAssertTrue(item.shouldHideFromTranscript)
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",
