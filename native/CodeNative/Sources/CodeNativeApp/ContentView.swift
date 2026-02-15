@@ -8,6 +8,22 @@ import AppKit
 import UIKit
 #endif
 
+private func formatCompactTokenCount(_ value: Int) -> String {
+    let absolute = Double(abs(value))
+    let sign = value < 0 ? "-" : ""
+    if absolute >= 1_000_000 {
+        let shortened = String(format: "%.1f", absolute / 1_000_000)
+            .replacingOccurrences(of: ".0", with: "")
+        return "\(sign)\(shortened)M"
+    }
+    if absolute >= 1_000 {
+        let shortened = String(format: "%.1f", absolute / 1_000)
+            .replacingOccurrences(of: ".0", with: "")
+        return "\(sign)\(shortened)k"
+    }
+    return "\(value)"
+}
+
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
     @Environment(\.openURL) private var openURL
@@ -155,6 +171,10 @@ struct ContentView: View {
             return nil
         }
 
+        if let tokenUsage = selectedSessionTokenUsageSummary {
+            return "\(sessionDisplaySubtitle(for: session)) • \(tokenUsage)"
+        }
+
         let eventCount = store.selectedSessionItems.count
         let eventLabel: String
         if eventCount == 0 {
@@ -165,6 +185,38 @@ struct ContentView: View {
             eventLabel = "\(eventCount) events"
         }
         return "\(sessionDisplaySubtitle(for: session)) • \(eventLabel)"
+    }
+
+    private var selectedSessionTokenUsageSummary: String? {
+        guard let tokenUsage = store.selectedSessionItems
+            .reversed()
+            .compactMap(\.tokenUsageBreakdown)
+            .first
+        else {
+            return nil
+        }
+
+        var parts: [String] = []
+        if let input = tokenUsage.input,
+           input > 0 {
+            parts.append("In \(formatCompactTokenCount(input))")
+        }
+        if let output = tokenUsage.output,
+           output > 0 {
+            parts.append("Out \(formatCompactTokenCount(output))")
+        }
+        if let reasoning = tokenUsage.reasoning,
+           reasoning > 0 {
+            parts.append("R \(formatCompactTokenCount(reasoning))")
+        }
+
+        if parts.isEmpty,
+           let total = tokenUsage.total,
+           total > 0 {
+            parts.append("Total \(formatCompactTokenCount(total))")
+        }
+
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var topBarSubtitleText: String {
@@ -847,6 +899,25 @@ struct ContentView: View {
                         .truncationMode(.tail)
                 }
 
+                if !isCompactPhoneLayout,
+                   let tokenUsage = selectedSessionTokenUsageSummary {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chart.bar.fill")
+                            .font(.caption2.weight(.semibold))
+                        Text(tokenUsage)
+                            .font(.caption2.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.white.opacity(0.82))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                    )
+                }
+
                 Spacer(minLength: 8)
 
                 if store.connectionState != .connected {
@@ -1067,7 +1138,14 @@ struct ContentView: View {
 
         return HStack(spacing: 0) {
             if item.cardStyle == .assistant {
-                AssistantTranscriptLine(text: item.body, density: selectedTranscriptDensity)
+                AssistantTranscriptLine(
+                    text: item.body,
+                    density: selectedTranscriptDensity,
+                    isActive: activeTranscriptItemID == item.id,
+                    onActivate: {
+                        activeTranscriptItemID = item.id
+                    }
+                )
                     .frame(maxWidth: assistantTranscriptMaxWidth, alignment: .leading)
                 Spacer(minLength: transcriptBubbleGutter)
             } else if item.prefersCenteredBubble {
@@ -3245,11 +3323,21 @@ private struct QuickPromptCard: View {
 private struct AssistantTranscriptLine: View {
     let text: String
     let density: TranscriptDensity
+    let isActive: Bool
+    let onActivate: () -> Void
     @State private var isExpanded = false
+    @State private var isHoveringCopyActions = false
 
-    init(text: String, density: TranscriptDensity = .comfortable) {
+    init(
+        text: String,
+        density: TranscriptDensity = .comfortable,
+        isActive: Bool = false,
+        onActivate: @escaping () -> Void = {}
+    ) {
         self.text = text
         self.density = density
+        self.isActive = isActive
+        self.onActivate = onActivate
     }
 
     #if os(iOS)
@@ -3304,26 +3392,20 @@ private struct AssistantTranscriptLine: View {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var showsCopyActions: Bool {
+        guard canCopyText else {
+            return false
+        }
+
+        #if os(macOS)
+        return isActive || isHoveringCopyActions
+        #else
+        return isActive
+        #endif
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if canCopyText {
-                HStack {
-                    Spacer()
-
-                    Button {
-                        copyTextToPasteboard(text)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(6)
-                            .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Copy message")
-                }
-            }
-
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(Color.white.opacity(0.22))
@@ -3355,6 +3437,45 @@ private struct AssistantTranscriptLine: View {
         .padding(.horizontal, usesCompactPhoneTypography ? 2 : 4)
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottomTrailing) {
+            Button {
+                copyTextToPasteboard(text)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.40), in: Capsule(style: .continuous))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy message")
+            .padding(.trailing, usesCompactPhoneTypography ? 2 : 6)
+            .padding(.bottom, 4)
+            .opacity(showsCopyActions ? 1 : 0)
+            .animation(.easeInOut(duration: 0.16), value: showsCopyActions)
+            .allowsHitTesting(showsCopyActions)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onActivate()
+        }
+        #if os(macOS)
+        .onHover { hovering in
+            isHoveringCopyActions = hovering
+        }
+        #endif
+        .contextMenu {
+            if canCopyText {
+                Button("Copy text") {
+                    copyTextToPasteboard(text)
+                }
+            }
+        }
     }
 
     private func copyTextToPasteboard(_ value: String) {
@@ -4061,6 +4182,7 @@ private struct TranscriptCard: View {
     @State private var selectedDecision: ApprovalDecisionChoice = .approved
     @State private var isExpanded = false
     @State private var diffExpansionSteps = 0
+    @State private var isHoveringCopyActions = false
 
     private var effectiveLineSpacing: CGFloat {
         usesCompactPhoneLayout ? min(2, density.lineSpacing) : density.lineSpacing
@@ -4394,32 +4516,28 @@ private struct TranscriptCard: View {
         return isActive ? 18 : 7
     }
 
+    private var showsCopyActions: Bool {
+        guard copyableBodyText != nil else {
+            return false
+        }
+
+        #if os(macOS)
+        return isActive || isHoveringCopyActions
+        #else
+        return isActive
+        #endif
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: max(8, density.rowSpacing - 2)) {
-            if showsMetaHeader || copyableBodyText != nil {
+            if showsMetaHeader {
                 HStack {
-                    if showsMetaHeader {
-                        Text(item.title)
-                            .font(.caption.weight(.semibold))
-                            .textCase(.uppercase)
-                            .foregroundStyle(metaHeaderColor)
-                    }
+                    Text(item.title)
+                        .font(.caption.weight(.semibold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(metaHeaderColor)
 
                     Spacer()
-
-                    if let copyableBodyText {
-                        Button {
-                            copyTextToPasteboard(copyableBodyText)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(6)
-                                .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Copy card text")
-                    }
                 }
             }
 
@@ -4725,6 +4843,31 @@ private struct TranscriptCard: View {
                     .stroke(Color.white.opacity(0.16), lineWidth: 1)
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let copyableBodyText {
+                Button {
+                    copyTextToPasteboard(copyableBodyText)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.86))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.40), in: Capsule(style: .continuous))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Copy card text")
+                .padding(.trailing, max(6, effectiveCardHorizontalPadding - 4))
+                .padding(.bottom, max(4, effectiveCardVerticalPadding - 2))
+                .opacity(showsCopyActions ? 1 : 0)
+                .animation(.easeInOut(duration: 0.16), value: showsCopyActions)
+                .allowsHitTesting(showsCopyActions)
+            }
+        }
         .contextMenu {
             if !item.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button("Copy text") {
@@ -4732,6 +4875,11 @@ private struct TranscriptCard: View {
                 }
             }
         }
+        #if os(macOS)
+        .onHover { hovering in
+            isHoveringCopyActions = hovering
+        }
+        #endif
         .onTapGesture {
             onActivate()
         }
@@ -4777,22 +4925,6 @@ private struct TranscriptCard: View {
         formatted = formatted.replacingOccurrences(of: "-codex", with: "-Codex")
         formatted = formatted.replacingOccurrences(of: "-mini", with: "-Mini")
         return formatted
-    }
-
-    private func formatCompactTokenCount(_ value: Int) -> String {
-        let absolute = Double(abs(value))
-        let sign = value < 0 ? "-" : ""
-        if absolute >= 1_000_000 {
-            let shortened = String(format: "%.1f", absolute / 1_000_000)
-                .replacingOccurrences(of: ".0", with: "")
-            return "\(sign)\(shortened)M"
-        }
-        if absolute >= 1_000 {
-            let shortened = String(format: "%.1f", absolute / 1_000)
-                .replacingOccurrences(of: ".0", with: "")
-            return "\(sign)\(shortened)k"
-        }
-        return "\(value)"
     }
 
     @ViewBuilder

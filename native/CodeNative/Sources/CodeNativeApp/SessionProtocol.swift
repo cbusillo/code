@@ -1388,6 +1388,10 @@ extension SessionStreamItem {
             return true
         }
 
+        if payloadType == "token_count" {
+            return true
+        }
+
         if payloadType == "plan_update" {
             return true
         }

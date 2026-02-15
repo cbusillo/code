@@ -185,9 +185,27 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.tokenUsageBreakdown?.reasoning, 120)
     }
 
-    func testUserMessageStripsSystemStatusFooter() {
+    func testTokenCountEventsAreHiddenFromTranscript() {
         let item = makeCoreEventItem(
             seq: 16,
+            payload: .object([
+                "type": .string("token_count"),
+                "info": .object([
+                    "last_token_usage": .object([
+                        "total_tokens": .number(1200),
+                        "input_tokens": .number(900),
+                        "output_tokens": .number(300)
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertTrue(item.shouldHideFromTranscript)
+    }
+
+    func testUserMessageStripsSystemStatusFooter() {
+        let item = makeCoreEventItem(
+            seq: 17,
             payload: .object([
                 "type": .string("user_message"),
                 "message": .string(
@@ -203,7 +221,7 @@ final class SessionProtocolTranscriptTests: XCTestCase {
 
     func testSystemStatusOnlyUserMessageIsHidden() {
         let item = makeCoreEventItem(
-            seq: 17,
+            seq: 18,
             payload: .object([
                 "type": .string("user_message"),
                 "message": .string(
