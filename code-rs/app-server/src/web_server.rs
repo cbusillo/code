@@ -39,11 +39,13 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-const HISTORY_LIMIT: usize = 4_096;
-const ATTACH_REPLAY_LIMIT: usize = 800;
-const ATTACH_REPLAY_BYTE_LIMIT: usize = 500_000;
-const ATTACH_REPLAY_ITEM_BYTE_LIMIT: usize = 128_000;
-const COMPACT_REPLAY_ITEM_MAX_CHARS: usize = 420;
+const ATTACH_REPLAY_LIMIT: usize = 10_000;
+const ATTACH_REPLAY_BYTE_LIMIT: usize = 4_000_000;
+const ATTACH_REPLAY_ITEM_BYTE_LIMIT: usize = 500_000;
+const COMPACT_REPLAY_ITEM_MAX_CHARS: usize = 1_200;
+const HISTORY_PAGE_LIMIT: usize = 600;
+const HISTORY_PAGE_LIMIT_MAX: usize = 2_000;
+const HISTORY_PAGE_BYTE_LIMIT: usize = 1_200_000;
 const ROLLOUT_TAIL_POLL_INTERVAL_MS: u64 = 350;
 const NO_STORE: &str = "no-store, max-age=0";
 
@@ -222,21 +224,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 from_seq,
             } => {
                 match state.hub.attach_session(session_id, from_seq).await {
-                    Ok((history, stream)) => {
+                    Ok((history_batch, stream)) => {
                         let replay_bytes: usize =
-                            history.iter().map(estimate_stream_item_json_size).sum();
+                            history_batch.items.iter().map(estimate_stream_item_json_size).sum();
                         info!(
                             "Attach replay for {session_id}: {} items, {replay_bytes} bytes (from_seq={})",
-                            history.len(),
+                            history_batch.items.len(),
                             from_seq.unwrap_or(0)
                         );
 
-                        let high_water = history.last().map_or(from_seq.unwrap_or(0), SessionStreamItem::seq);
+                        let high_water = history_batch
+                            .items
+                            .last()
+                            .map_or(from_seq.unwrap_or(0), SessionStreamItem::seq);
 
                         let _ = out_tx.send(ServerMessage::SessionAttached {
                             session_id,
                             from_seq: from_seq.unwrap_or(0),
-                            items: history,
+                            has_more_before: history_batch.has_more_before,
+                            items: history_batch.items,
                         }).await;
 
                         let handle = spawn_session_forwarder(out_tx.clone(), stream, high_water);
@@ -252,6 +258,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             request_id,
                             message,
                         }).await;
+                    }
+                }
+            }
+            ClientMessage::LoadHistoryBefore {
+                request_id,
+                session_id,
+                before_seq,
+                limit,
+            } => {
+                match state
+                    .hub
+                    .load_history_before(session_id, before_seq, limit)
+                    .await
+                {
+                    Ok(history_batch) => {
+                        let _ = out_tx
+                            .send(ServerMessage::SessionHistoryPage {
+                                request_id: request_id.clone(),
+                                session_id,
+                                before_seq,
+                                has_more_before: history_batch.has_more_before,
+                                items: history_batch.items,
+                            })
+                            .await;
+                        let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
+                    }
+                    Err(message) => {
+                        let _ = out_tx
+                            .send(ServerMessage::Error {
+                                request_id,
+                                message,
+                            })
+                            .await;
                     }
                 }
             }
@@ -422,6 +461,12 @@ enum ClientMessage {
         session_id: Uuid,
         from_seq: Option<u64>,
     },
+    LoadHistoryBefore {
+        request_id: Option<String>,
+        session_id: Uuid,
+        before_seq: u64,
+        limit: Option<usize>,
+    },
     DetachSession {
         request_id: Option<String>,
         session_id: Uuid,
@@ -471,6 +516,14 @@ enum ServerMessage {
     SessionAttached {
         session_id: Uuid,
         from_seq: u64,
+        has_more_before: bool,
+        items: Vec<SessionStreamItem>,
+    },
+    SessionHistoryPage {
+        request_id: Option<String>,
+        session_id: Uuid,
+        before_seq: u64,
+        has_more_before: bool,
         items: Vec<SessionStreamItem>,
     },
     SessionDetached {
@@ -573,7 +626,7 @@ impl SessionHub {
         &self,
         session_id: Uuid,
         from_seq: Option<u64>,
-    ) -> Result<(Vec<SessionStreamItem>, broadcast::Receiver<SessionStreamItem>), String> {
+    ) -> Result<(HistoryBatch, broadcast::Receiver<SessionStreamItem>), String> {
         let session = self.session_for_id(session_id).await?;
         let requested_from_seq = from_seq.unwrap_or(0);
 
@@ -582,6 +635,20 @@ impl SessionHub {
         let history = session.history_since(requested_from_seq).await;
         let history = truncate_attach_history(history, requested_from_seq);
         Ok((history, receiver))
+    }
+
+    async fn load_history_before(
+        &self,
+        session_id: Uuid,
+        before_seq: u64,
+        limit: Option<usize>,
+    ) -> Result<HistoryBatch, String> {
+        let session = self.session_for_id(session_id).await?;
+        let history = session.history_before(before_seq).await;
+        let page_limit = limit
+            .unwrap_or(HISTORY_PAGE_LIMIT)
+            .clamp(1, HISTORY_PAGE_LIMIT_MAX);
+        Ok(truncate_history_before_page(history, before_seq, page_limit))
     }
 
     async fn set_composer(
@@ -792,11 +859,7 @@ impl LiveSession {
     ) -> Arc<Self> {
         let conversation_id: Uuid = new_conversation.conversation_id.into();
         let session_id = forced_session_id.unwrap_or(conversation_id);
-        let mut initial_history = seed_history;
-        if initial_history.len() > HISTORY_LIMIT {
-            let excess = initial_history.len().saturating_sub(HISTORY_LIMIT);
-            initial_history.drain(0..excess);
-        }
+        let initial_history = seed_history;
         let next_seq = initial_history
             .last()
             .map_or(1, |item| item.seq().saturating_add(1));
@@ -933,6 +996,15 @@ impl LiveSession {
             .collect()
     }
 
+    async fn history_before(&self, before_seq: u64) -> Vec<SessionStreamItem> {
+        let history = self.history.read().await;
+        history
+            .iter()
+            .filter(|item| item.seq() < before_seq)
+            .cloned()
+            .collect()
+    }
+
     async fn push_core_event(&self, event: Event) {
         let payload = match serde_json::to_value(&event.msg) {
             Ok(payload) => payload,
@@ -979,10 +1051,6 @@ impl LiveSession {
                 return;
             }
             history.push(item.clone());
-            if history.len() > HISTORY_LIMIT {
-                let excess = history.len().saturating_sub(HISTORY_LIMIT);
-                history.drain(0..excess);
-            }
         }
 
         let _ = self.stream.send(item);
@@ -1448,10 +1516,16 @@ fn rollout_path_has_activity(path: &Path) -> bool {
     false
 }
 
+#[derive(Debug)]
+struct HistoryBatch {
+    items: Vec<SessionStreamItem>,
+    has_more_before: bool,
+}
+
 fn truncate_attach_history(
     mut history: Vec<SessionStreamItem>,
     requested_from_seq: u64,
-) -> Vec<SessionStreamItem> {
+) -> HistoryBatch {
     history = history
         .into_iter()
         .filter(|item| item.seq() > requested_from_seq)
@@ -1459,16 +1533,54 @@ fn truncate_attach_history(
         .collect();
 
     if requested_from_seq != 0 {
-        return history;
+        return HistoryBatch {
+            items: history,
+            has_more_before: false,
+        };
     }
 
-    if history.len() > ATTACH_REPLAY_LIMIT {
-        let keep_from = history.len().saturating_sub(ATTACH_REPLAY_LIMIT);
+    truncate_history_tail_with_limits(history, ATTACH_REPLAY_LIMIT, ATTACH_REPLAY_BYTE_LIMIT)
+}
+
+fn truncate_history_before_page(
+    mut history: Vec<SessionStreamItem>,
+    before_seq: u64,
+    page_limit: usize,
+) -> HistoryBatch {
+    if before_seq <= 1 {
+        return HistoryBatch {
+            items: Vec::new(),
+            has_more_before: false,
+        };
+    }
+
+    history = history
+        .into_iter()
+        .filter(|item| item.seq() < before_seq)
+        .map(sanitize_stream_item_for_transport)
+        .collect();
+
+    truncate_history_tail_with_limits(history, page_limit, HISTORY_PAGE_BYTE_LIMIT)
+}
+
+fn truncate_history_tail_with_limits(
+    mut history: Vec<SessionStreamItem>,
+    item_limit: usize,
+    byte_limit: usize,
+) -> HistoryBatch {
+    let mut has_more_before = false;
+
+    if item_limit > 0 && history.len() > item_limit {
+        let keep_from = history.len().saturating_sub(item_limit);
         history.drain(0..keep_from);
+        has_more_before = true;
     }
 
     if history.is_empty() {
-        return history;
+        return HistoryBatch {
+            items: history,
+            has_more_before,
+        };
     }
 
     let mut keep_from = history.len();
@@ -1476,7 +1588,7 @@ fn truncate_attach_history(
 
     for index in (0..history.len()).rev() {
         let item_bytes = estimate_stream_item_json_size(&history[index]);
-        let would_exceed = total_bytes.saturating_add(item_bytes) > ATTACH_REPLAY_BYTE_LIMIT;
+        let would_exceed = total_bytes.saturating_add(item_bytes) > byte_limit;
         if keep_from < history.len() && would_exceed {
             break;
         }
@@ -1487,9 +1599,19 @@ fn truncate_attach_history(
 
     if keep_from > 0 {
         history.drain(0..keep_from);
+        has_more_before = true;
     }
 
-    history
+    if let Some(first) = history.first()
+        && first.seq() > 1
+    {
+        has_more_before = true;
+    }
+
+    HistoryBatch {
+        items: history,
+        has_more_before,
+    }
 }
 
 fn estimate_stream_item_json_size(item: &SessionStreamItem) -> usize {
@@ -1576,7 +1698,7 @@ fn compact_replay_history_core_event_for_transport(
         return None;
     }
 
-    for keep in [48usize, 32, 24, 16, 10, 6, 4, 2, 1] {
+    for keep in [240usize, 200, 160, 120, 96, 64, 48, 32, 24, 16, 10, 6, 4, 2, 1] {
         let keep_count = compact_messages.len().min(keep);
         let start = compact_messages.len().saturating_sub(keep_count);
         let kept_messages = compact_messages[start..].to_vec();
@@ -1846,15 +1968,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         let truncated = truncate_attach_history(history, 0);
-        assert!(!truncated.is_empty());
+        assert!(!truncated.items.is_empty());
 
         let total_bytes = truncated
+            .items
             .iter()
             .map(estimate_stream_item_json_size)
             .sum::<usize>();
 
         assert!(total_bytes <= ATTACH_REPLAY_BYTE_LIMIT);
-        assert_eq!(truncated.last().map(SessionStreamItem::seq), Some(20));
+        assert_eq!(truncated.items.last().map(SessionStreamItem::seq), Some(20));
+        assert!(truncated.has_more_before);
     }
 
     #[test]
@@ -1869,9 +1993,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         let replay = truncate_attach_history(history.clone(), 2);
-        assert_eq!(replay.len(), 3);
-        assert_eq!(replay.first().map(SessionStreamItem::seq), Some(3));
-        assert_eq!(replay.last().map(SessionStreamItem::seq), Some(5));
+        assert_eq!(replay.items.len(), 3);
+        assert_eq!(replay.items.first().map(SessionStreamItem::seq), Some(3));
+        assert_eq!(replay.items.last().map(SessionStreamItem::seq), Some(5));
+        assert!(!replay.has_more_before);
     }
 
     #[test]
@@ -1886,7 +2011,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let replay = truncate_attach_history(history, 5);
-        assert!(replay.is_empty());
+        assert!(replay.items.is_empty());
+        assert!(!replay.has_more_before);
     }
 
     #[test]
@@ -1902,16 +2028,80 @@ mod tests {
 
         let replay = truncate_attach_history(history, 399);
 
-        assert_eq!(replay.first().map(SessionStreamItem::seq), Some(400));
-        assert_eq!(replay.last().map(SessionStreamItem::seq), Some(1_500));
-        assert_eq!(replay.len(), 1_101);
+        assert_eq!(replay.items.first().map(SessionStreamItem::seq), Some(400));
+        assert_eq!(replay.items.last().map(SessionStreamItem::seq), Some(1_500));
+        assert_eq!(replay.items.len(), 1_101);
+        assert!(!replay.has_more_before);
 
         let total_bytes = replay
+            .items
             .iter()
             .map(estimate_stream_item_json_size)
             .sum::<usize>();
 
         assert!(total_bytes > ATTACH_REPLAY_BYTE_LIMIT);
+    }
+
+    #[test]
+    fn truncate_attach_history_respects_native_websocket_budget() {
+        let history = vec![SessionStreamItem::System {
+            session_id: Uuid::nil(),
+            seq: 1,
+            level: "info".to_string(),
+            message: "x".repeat(1_500_000),
+        }];
+
+        let truncated = truncate_attach_history(history, 0);
+        assert!(!truncated.items.is_empty());
+
+        let total_bytes = truncated
+            .items
+            .iter()
+            .map(estimate_stream_item_json_size)
+            .sum::<usize>();
+
+        assert!(
+            total_bytes <= 1_000_000,
+            "initial attach replay should stay below native websocket frame budget, got {total_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn truncate_history_before_page_returns_older_slice_with_more_flag() {
+        let history = (1_u64..=1_000)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: format!("item-{seq}"),
+            })
+            .collect::<Vec<_>>();
+
+        let page = truncate_history_before_page(history, 801, 200);
+
+        assert_eq!(page.items.len(), 200);
+        assert_eq!(page.items.first().map(SessionStreamItem::seq), Some(601));
+        assert_eq!(page.items.last().map(SessionStreamItem::seq), Some(800));
+        assert!(page.has_more_before);
+    }
+
+    #[test]
+    fn truncate_history_before_page_reports_end_when_reaching_start() {
+        let history = (1_u64..=120)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: format!("item-{seq}"),
+            })
+            .collect::<Vec<_>>();
+
+        let page = truncate_history_before_page(history, 121, 200);
+
+        assert_eq!(page.items.len(), 120);
+        assert_eq!(page.items.first().map(SessionStreamItem::seq), Some(1));
+        assert_eq!(page.items.last().map(SessionStreamItem::seq), Some(120));
+        assert!(!page.has_more_before);
     }
 
     #[tokio::test]

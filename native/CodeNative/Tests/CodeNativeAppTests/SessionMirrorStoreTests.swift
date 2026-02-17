@@ -124,6 +124,97 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testStorePrependsHistoryPagesAndTracksHasMoreFlag() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000119")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(sessionId.uuidString)",
+                  "conversation_id": "\(sessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Session"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(sessionId.uuidString)",
+              "from_seq": 0,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":10,"level":"info","message":"ten"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":11,"level":"info","message":"eleven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":12,"level":"info","message":"twelve"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [10, 11, 12])
+        XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_777",
+              "session_id": "\(sessionId.uuidString)",
+              "before_seq": 10,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":7,"level":"info","message":"seven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":8,"level":"info","message":"eight"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":9,"level":"info","message":"nine"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [7, 8, 9, 10, 11, 12])
+        XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_778",
+              "session_id": "\(sessionId.uuidString)",
+              "before_seq": 7,
+              "has_more_before": false,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":1,"level":"info","message":"one"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":2,"level":"info","message":"two"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":3,"level":"info","message":"three"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":4,"level":"info","message":"four"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":5,"level":"info","message":"five"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":6,"level":"info","message":"six"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        XCTAssertFalse(store.hasMoreHistoryBefore(sessionId))
+    }
+
+    @MainActor
     func testStoreRejectsStaleSessionAttachedForAttachmentState() throws {
         let store = SessionMirrorStore()
         let selectedSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000211")!

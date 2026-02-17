@@ -78,6 +78,31 @@ final class SessionStreamReducerTests: XCTestCase {
         XCTAssertEqual(appended.map(\.seq), [3, 4, 5, 6])
     }
 
+    func testMergeOlderHistoryPagePrependsUniqueRows() {
+        let existing = [
+            makeSystemItem(seq: 8),
+            makeSystemItem(seq: 9),
+            makeSystemItem(seq: 10),
+        ]
+
+        let incoming = [
+            makeSystemItem(seq: 5),
+            makeSystemItem(seq: 6),
+            makeSystemItem(seq: 7),
+            makeSystemItem(seq: 8),
+            makeSystemItem(seq: 8),
+        ]
+
+        let merged = SessionStreamReducer.mergeOlderHistoryPage(
+            existing: existing,
+            incoming: incoming,
+            beforeSeq: 8,
+            maxItems: 20
+        )
+
+        XCTAssertEqual(merged.map(\.seq), [5, 6, 7, 8, 9, 10])
+    }
+
     func testShouldAcceptSessionAttachedRejectsStaleExpectedSession() {
         let selected = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         let expected = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!

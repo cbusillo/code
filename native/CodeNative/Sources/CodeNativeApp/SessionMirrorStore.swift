@@ -21,6 +21,7 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var sessions: [SessionSummary] = []
     @Published private(set) var itemsBySession: [UUID: [SessionStreamItem]] = [:]
     @Published private(set) var unavailableSessionErrors: [UUID: String] = [:]
+    @Published private(set) var historyPageLoadInFlightSessionIDs: Set<UUID> = []
     @Published var composerText: String = ""
     @Published var selectedSessionID: UUID? {
         didSet {
@@ -55,6 +56,8 @@ final class SessionMirrorStore: ObservableObject {
     private var requestCounter: UInt64 = 0
     private var attachmentGeneration: UInt64 = 0
     private var pendingAttachRequestSessionIDs: [String: UUID] = [:]
+    private var pendingHistoryPageRequestSessionIDs: [String: UUID] = [:]
+    private var hasMoreHistoryBeforeBySessionID: [UUID: Bool] = [:]
     private var unavailableSessionActivitySnapshot: [UUID: UInt64] = [:]
     private var sessionListRequestID: String?
     private var sessionListRequestStartedAt: Date?
@@ -97,6 +100,22 @@ final class SessionMirrorStore: ObservableObject {
         unavailableSessionErrors[sessionID]
     }
 
+    func hasMoreHistoryBefore(_ sessionID: UUID) -> Bool {
+        if let hasMore = hasMoreHistoryBeforeBySessionID[sessionID] {
+            return hasMore
+        }
+
+        if let oldestSeq = itemsBySession[sessionID]?.first?.seq {
+            return oldestSeq > 1
+        }
+
+        return false
+    }
+
+    func isLoadingOlderHistory(for sessionID: UUID) -> Bool {
+        historyPageLoadInFlightSessionIDs.contains(sessionID)
+    }
+
     func connect() async {
         guard connectionState == .disconnected else {
             return
@@ -124,6 +143,7 @@ final class SessionMirrorStore: ObservableObject {
         catalogRefreshTask = nil
 
         let task = URLSession.shared.webSocketTask(with: url)
+        task.maximumMessageSize = 8_000_000
         task.resume()
 
         webSocket = task
@@ -234,6 +254,9 @@ final class SessionMirrorStore: ObservableObject {
         clientId = nil
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
         pendingAttachRequestSessionIDs.removeAll()
+        pendingHistoryPageRequestSessionIDs.removeAll()
+        hasMoreHistoryBeforeBySessionID.removeAll()
+        historyPageLoadInFlightSessionIDs.removeAll()
         sessionListRequestID = nil
         sessionListRequestStartedAt = nil
         if error != nil {
@@ -385,6 +408,7 @@ final class SessionMirrorStore: ObservableObject {
             sessions = message.sessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
             pruneUnavailableSessionsToKnownIDs()
             clearRecoveredUnavailableSessions()
+            pruneHistoryPaginationStateToKnownSessionIDs()
 
             if let selectedSessionID,
                sessions.contains(where: { $0.id == selectedSessionID }),
@@ -408,6 +432,12 @@ final class SessionMirrorStore: ObservableObject {
             )
             itemsBySession[message.sessionId] = merged
             clearPendingAttachRequests(for: message.sessionId)
+            historyPageLoadInFlightSessionIDs.remove(message.sessionId)
+            if message.fromSeq == 0 {
+                hasMoreHistoryBeforeBySessionID[message.sessionId] = message.hasMoreBefore ?? false
+            } else if message.hasMoreBefore == true {
+                hasMoreHistoryBeforeBySessionID[message.sessionId] = true
+            }
             clearSessionUnavailable(message.sessionId)
 
             if !SessionStreamReducer.shouldAcceptSessionAttached(
@@ -421,6 +451,21 @@ final class SessionMirrorStore: ObservableObject {
             attachedSessionID = message.sessionId
             expectedAttachedSessionID = nil
             statusLine = "Attached to \(message.sessionId.uuidString.prefix(8))"
+
+        case .sessionHistoryPage(let message):
+            if let requestId = message.requestId {
+                pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId)
+            }
+            historyPageLoadInFlightSessionIDs.remove(message.sessionId)
+
+            let existing = itemsBySession[message.sessionId] ?? []
+            let merged = SessionStreamReducer.mergeOlderHistoryPage(
+                existing: existing,
+                incoming: message.items,
+                beforeSeq: message.beforeSeq
+            )
+            itemsBySession[message.sessionId] = merged
+            hasMoreHistoryBeforeBySessionID[message.sessionId] = message.hasMoreBefore
 
         case .sessionDetached(let message):
             if attachedSessionID == message.sessionId {
@@ -452,6 +497,10 @@ final class SessionMirrorStore: ObservableObject {
             }
             lastError = message.message
             if let requestId = message.requestId,
+               let historySessionID = pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId) {
+                historyPageLoadInFlightSessionIDs.remove(historySessionID)
+                statusLine = "History load failed"
+            } else if let requestId = message.requestId,
                let failedSessionID = pendingAttachRequestSessionIDs.removeValue(forKey: requestId) {
                 markSessionUnavailable(failedSessionID, message: message.message)
                 if selectedSessionID == failedSessionID {
@@ -517,6 +566,7 @@ final class SessionMirrorStore: ObservableObject {
         if let oldSessionID {
             await send(OutboundMessage.detachSession(requestId: nextRequestID(), sessionId: oldSessionID))
             attachedSessionID = nil
+            historyPageLoadInFlightSessionIDs.remove(oldSessionID)
 
             guard generation == attachmentGeneration else {
                 return
@@ -543,6 +593,44 @@ final class SessionMirrorStore: ObservableObject {
                 fromSeq: fromSeq
             )
         )
+    }
+
+    func requestOlderHistoryIfNeeded(for sessionID: UUID) {
+        guard connectionState == .connected else {
+            return
+        }
+
+        guard let oldestSeq = itemsBySession[sessionID]?.first?.seq else {
+            return
+        }
+
+        if oldestSeq <= 1 {
+            hasMoreHistoryBeforeBySessionID[sessionID] = false
+            return
+        }
+
+        if historyPageLoadInFlightSessionIDs.contains(sessionID) {
+            return
+        }
+
+        if hasMoreHistoryBeforeBySessionID[sessionID] == false {
+            return
+        }
+
+        let requestId = nextRequestID()
+        historyPageLoadInFlightSessionIDs.insert(sessionID)
+        pendingHistoryPageRequestSessionIDs[requestId] = sessionID
+
+        Task {
+            await self.send(
+                OutboundMessage.loadHistoryBefore(
+                    requestId: requestId,
+                    sessionId: sessionID,
+                    beforeSeq: oldestSeq,
+                    limit: 600
+                )
+            )
+        }
     }
 
     private func send(_ message: OutboundMessage) async {
@@ -674,6 +762,19 @@ final class SessionMirrorStore: ObservableObject {
 
     private func clearPendingAttachRequests(for sessionID: UUID) {
         pendingAttachRequestSessionIDs = pendingAttachRequestSessionIDs.filter { $0.value != sessionID }
+    }
+
+    private func pruneHistoryPaginationStateToKnownSessionIDs() {
+        let knownSessionIDs = Set(sessions.map(\.id))
+        hasMoreHistoryBeforeBySessionID = hasMoreHistoryBeforeBySessionID.filter {
+            knownSessionIDs.contains($0.key)
+        }
+        historyPageLoadInFlightSessionIDs = Set(historyPageLoadInFlightSessionIDs.filter {
+            knownSessionIDs.contains($0)
+        })
+        pendingHistoryPageRequestSessionIDs = pendingHistoryPageRequestSessionIDs.filter {
+            knownSessionIDs.contains($0.value)
+        }
     }
 
     private func markSessionUnavailable(_ sessionID: UUID, message: String) {

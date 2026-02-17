@@ -62,6 +62,7 @@ struct ContentView: View {
     @AppStorage("code_native_thread_density") private var threadDensityRaw = ThreadDensity.comfortable.rawValue
     @AppStorage("code_native_transcript_density") private var transcriptDensityRaw = TranscriptDensity.comfortable.rawValue
     @AppStorage("code_native_open_destination") private var openDestinationRaw = OpenDestination.finder.rawValue
+    @AppStorage("code_native_session_ide_map") private var sessionIDEMapRaw = "{}"
     @AppStorage("code_native_followup_mode") private var followupModeRaw = FollowupMode.steer.rawValue
     @AppStorage("code_native_multiline_behavior") private var multilineBehaviorRaw = MultilineBehavior.cmdEnter.rawValue
     @AppStorage("code_native_prevent_sleep") private var preventSleep = false
@@ -83,6 +84,7 @@ struct ContentView: View {
     @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
+    @State private var taskActivityByStartItemID: [String: [String]] = [:]
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @FocusState private var composerIsFocused: Bool
@@ -525,6 +527,9 @@ struct ContentView: View {
             #endif
         }
         .preferredColorScheme(selectedThemeMode.colorScheme)
+        .environment(\.openURL, OpenURLAction { url in
+            handleOpenURL(url)
+        })
         .sheet(isPresented: $showSettings) {
             NavigationStack {
                 settingsSheetContent
@@ -1001,6 +1006,26 @@ struct ContentView: View {
             }
         }
         #else
+        if let session = store.selectedSession {
+            let availableIDEs = availableSessionIDEs()
+            Menu {
+                ForEach(availableIDEs) { ide in
+                    Button {
+                        setSessionIDE(ide, for: session.id)
+                    } label: {
+                        if ide == selectedIDE(for: session.id) {
+                            Label(ide.label, systemImage: "checkmark")
+                        } else {
+                            Text(ide.label)
+                        }
+                    }
+                }
+            } label: {
+                Label(selectedIDE(for: session.id).label, systemImage: "chevron.down")
+            }
+            .menuStyle(.borderlessButton)
+        }
+
         TopBarButton(icon: "folder", title: "Open", accessibilityID: "top.open") {
             openSelectedWorkspace()
         }
@@ -1114,7 +1139,7 @@ struct ContentView: View {
         ScrollViewReader { proxy in
             GeometryReader { geometry in
                 ScrollView {
-                    VStack(spacing: transcriptRowSpacing) {
+                    LazyVStack(spacing: transcriptRowSpacing) {
                         if transcriptItems.isEmpty {
                             if let unavailableError = selectedSessionUnavailableError {
                                 unavailableSessionPanel(for: session, error: unavailableError)
@@ -1122,6 +1147,32 @@ struct ContentView: View {
                                 welcomePanel(for: session)
                             }
                         } else {
+                            let firstItemID = transcriptItems.first?.id
+                            Color.clear
+                                .frame(height: 1)
+                                .id(firstItemID.map { "transcript.top.\($0)" } ?? "transcript.top")
+                                .onAppear {
+                                    store.requestOlderHistoryIfNeeded(for: session.id)
+                                }
+
+                            if store.isLoadingOlderHistory(for: session.id) {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Loading earlier history…")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.vertical, 4)
+                            } else if !store.hasMoreHistoryBefore(session.id) {
+                                Text("Start of session")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding(.vertical, 2)
+                            }
+
                             ForEach(transcriptItems) { item in
                                 transcriptRow(item: item)
                             }
@@ -1158,6 +1209,7 @@ struct ContentView: View {
             item: item,
             isActive: activeTranscriptItemID == item.id,
             density: selectedTranscriptDensity,
+            taskActivityLines: taskActivityByStartItemID[item.id] ?? [],
             onActivate: {
                 activeTranscriptItemID = item.id
             },
@@ -1173,6 +1225,7 @@ struct ContentView: View {
             if item.cardStyle == .assistant {
                 AssistantTranscriptLine(
                     text: item.body,
+                    sessionID: item.sessionId,
                     density: selectedTranscriptDensity,
                     isActive: activeTranscriptItemID == item.id,
                     onActivate: {
@@ -1243,12 +1296,14 @@ struct ContentView: View {
             shouldIncludeInTranscript($0) && !$0.isReplayOmittedNotice
         }
         let replayPruned = pruneReplayHistoryCardsWhenRedundant(in: visible)
+        let taskMerged = mergeTaskActivityIntoTaskCards(in: replayPruned)
+        taskActivityByStartItemID = taskMerged.activityByStartItemID
         cachedTranscriptItems = dedupeAssistantMessagesWithinTurn(
             in: collapseConsecutiveReasoningCards(
                 in: dedupeObsoleteBackgroundEvents(
                     in: collapseTokenUsageBursts(
                         in: removeRedundantPatchSummaries(
-                            from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: replayPruned))
+                            from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: taskMerged.items))
                         )
                     )
                 )
@@ -1424,6 +1479,71 @@ struct ContentView: View {
         }
 
         return keptReversed.reversed()
+    }
+
+    private func mergeTaskActivityIntoTaskCards(in items: [SessionStreamItem]) -> (
+        items: [SessionStreamItem],
+        activityByStartItemID: [String: [String]]
+    ) {
+        var mergedItems: [SessionStreamItem] = []
+        mergedItems.reserveCapacity(items.count)
+
+        var activityByStartItemID: [String: [String]] = [:]
+        var activeTaskStartItemID: String?
+        var activeTaskSeenLines: Set<String> = []
+
+        for item in items {
+            if let phase = item.taskLifecyclePhase {
+                switch phase {
+                case .started:
+                    mergedItems.append(item)
+                    activeTaskStartItemID = item.id
+                    activeTaskSeenLines.removeAll(keepingCapacity: true)
+
+                case .complete:
+                    if let activeTaskStartItemID {
+                        appendTaskActivityLines(
+                            from: item.body,
+                            into: &activityByStartItemID[activeTaskStartItemID, default: []],
+                            seenLines: &activeTaskSeenLines
+                        )
+                    } else {
+                        mergedItems.append(item)
+                    }
+
+                    activeTaskStartItemID = nil
+                    activeTaskSeenLines.removeAll(keepingCapacity: true)
+                }
+
+                continue
+            }
+
+            if item.isBackgroundEvent,
+               let activeTaskStartItemID {
+                appendTaskActivityLines(
+                    from: item.body,
+                    into: &activityByStartItemID[activeTaskStartItemID, default: []],
+                    seenLines: &activeTaskSeenLines
+                )
+                continue
+            }
+
+            mergedItems.append(item)
+        }
+
+        return (items: mergedItems, activityByStartItemID: activityByStartItemID)
+    }
+
+    private func appendTaskActivityLines(
+        from body: String,
+        into lines: inout [String],
+        seenLines: inout Set<String>
+    ) {
+        for line in normalizedStructuredActivityLines(from: body) {
+            if seenLines.insert(line).inserted {
+                lines.append(line)
+            }
+        }
     }
 
     private func collapseConsecutiveReasoningCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -2986,8 +3106,16 @@ struct ContentView: View {
 
         #if os(macOS)
         switch destination {
-        case .finder, .editor:
+        case .finder:
             NSWorkspace.shared.open(url)
+        case .editor:
+            _ = openFileURLInSelectedIDE(
+                url,
+                sessionID: session.id,
+                line: nil,
+                column: nil,
+                fallbackToDefaultApp: true
+            )
         }
         #else
         switch destination {
@@ -2996,6 +3124,160 @@ struct ContentView: View {
         }
         #endif
     }
+
+    private func handleOpenURL(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "code-native-file" else {
+            return .systemAction(url)
+        }
+
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return .discarded
+        }
+
+        let values = (components.queryItems ?? []).reduce(into: [String: String]()) { result, item in
+            result[item.name] = item.value ?? ""
+        }
+        guard let rawPath = values["path"],
+              !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return .discarded
+        }
+
+        let sessionID = values["session"].flatMap(UUID.init(uuidString:))
+        let line = values["line"].flatMap(Int.init)
+        let column = values["column"].flatMap(Int.init)
+        let resolvedURL = resolvedFileURL(path: rawPath, preferredSessionID: sessionID)
+
+        #if os(macOS)
+        _ = openFileURLInSelectedIDE(
+            resolvedURL,
+            sessionID: sessionID,
+            line: line,
+            column: column,
+            fallbackToDefaultApp: true
+        )
+        #else
+        openURL(resolvedURL)
+        #endif
+
+        return .handled
+    }
+
+    private func resolvedFileURL(path: String, preferredSessionID: UUID?) -> URL {
+        let raw = path.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if raw.hasPrefix("/") {
+            return URL(fileURLWithPath: raw).standardizedFileURL
+        }
+
+        let normalized = normalizedRelativePath(raw)
+        if let session = resolvedSession(for: preferredSessionID) {
+            let candidate = URL(fileURLWithPath: session.cwd)
+                .appendingPathComponent(normalized)
+                .standardizedFileURL
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        return URL(fileURLWithPath: normalized).standardizedFileURL
+    }
+
+    private func normalizedRelativePath(_ raw: String) -> String {
+        if raw.hasPrefix("a/") || raw.hasPrefix("b/") {
+            return String(raw.dropFirst(2))
+        }
+        return raw
+    }
+
+    private func resolvedSession(for preferredSessionID: UUID?) -> SessionSummary? {
+        if let preferredSessionID,
+           let session = store.sessions.first(where: { $0.id == preferredSessionID }) {
+            return session
+        }
+
+        if let selected = store.selectedSession {
+            return selected
+        }
+
+        return store.sessions.last
+    }
+
+    private func selectedIDE(for sessionID: UUID) -> SessionIDESelection {
+        let map = decodedSessionIDEMap()
+        if let raw = map[sessionID.uuidString],
+           let ide = SessionIDESelection(rawValue: raw),
+           ide.isAvailable {
+            return ide
+        }
+        return .systemDefault
+    }
+
+    private func setSessionIDE(_ ide: SessionIDESelection, for sessionID: UUID) {
+        var map = decodedSessionIDEMap()
+        if ide == .systemDefault {
+            map.removeValue(forKey: sessionID.uuidString)
+        } else {
+            map[sessionID.uuidString] = ide.rawValue
+        }
+        encodedSessionIDEMap(map)
+    }
+
+    private func availableSessionIDEs() -> [SessionIDESelection] {
+        SessionIDESelection.allCases.filter(\.isAvailable)
+    }
+
+    private func decodedSessionIDEMap() -> [String: String] {
+        guard let data = sessionIDEMapRaw.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+        else {
+            return [:]
+        }
+        return decoded
+    }
+
+    private func encodedSessionIDEMap(_ map: [String: String]) {
+        guard let data = try? JSONEncoder().encode(map),
+              let encoded = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+
+        sessionIDEMapRaw = encoded
+    }
+
+    #if os(macOS)
+    private func openFileURLInSelectedIDE(
+        _ fileURL: URL,
+        sessionID: UUID?,
+        line: Int?,
+        column: Int?,
+        fallbackToDefaultApp: Bool
+    ) -> Bool {
+        let ide = sessionID.map(selectedIDE(for:)) ?? .systemDefault
+
+        if let deepLink = ide.deepLinkURL(for: fileURL, line: line, column: column),
+           NSWorkspace.shared.open(deepLink) {
+            return true
+        }
+
+        if let appURL = ide.applicationURL {
+            NSWorkspace.shared.open(
+                [fileURL],
+                withApplicationAt: appURL,
+                configuration: NSWorkspace.OpenConfiguration(),
+                completionHandler: nil
+            )
+            return true
+        }
+
+        if fallbackToDefaultApp {
+            return NSWorkspace.shared.open(fileURL)
+        }
+
+        return false
+    }
+    #endif
 
     private func startVoiceCapture() {
         voiceOutput.stop()
@@ -3248,6 +3530,140 @@ private enum FollowupMode: String, CaseIterable, Identifiable {
             return "Steer"
         }
     }
+}
+
+private enum SessionIDESelection: String, CaseIterable, Identifiable {
+    case systemDefault
+    case cursor
+    case vsCode
+    case zed
+    case intelliJ
+    case pyCharm
+    case xcode
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .systemDefault:
+            return "System IDE"
+        case .cursor:
+            return "Cursor"
+        case .vsCode:
+            return "VS Code"
+        case .zed:
+            return "Zed"
+        case .intelliJ:
+            return "IntelliJ"
+        case .pyCharm:
+            return "PyCharm"
+        case .xcode:
+            return "Xcode"
+        }
+    }
+
+    #if os(macOS)
+    var bundleIdentifiers: [String] {
+        switch self {
+        case .systemDefault:
+            return []
+        case .cursor:
+            return ["com.todesktop.230313mzl4w4u92"]
+        case .vsCode:
+            return ["com.microsoft.VSCode"]
+        case .zed:
+            return ["dev.zed.Zed"]
+        case .intelliJ:
+            return ["com.jetbrains.intellij", "com.jetbrains.intellij.ce"]
+        case .pyCharm:
+            return ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce"]
+        case .xcode:
+            return ["com.apple.dt.Xcode"]
+        }
+    }
+
+    var applicationURL: URL? {
+        for bundleIdentifier in bundleIdentifiers {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    var fileURLScheme: String? {
+        switch self {
+        case .systemDefault, .xcode:
+            return nil
+        case .cursor:
+            return "cursor"
+        case .vsCode:
+            return "vscode"
+        case .zed:
+            return "zed"
+        case .intelliJ:
+            return "idea"
+        case .pyCharm:
+            return "pycharm"
+        }
+    }
+
+    var isAvailable: Bool {
+        if self == .systemDefault {
+            return true
+        }
+
+        if applicationURL != nil {
+            return true
+        }
+
+        guard let fileURLScheme,
+              let schemeProbe = URL(string: "\(fileURLScheme)://open")
+        else {
+            return false
+        }
+
+        return NSWorkspace.shared.urlForApplication(toOpen: schemeProbe) != nil
+    }
+
+    func deepLinkURL(for fileURL: URL, line: Int?, column: Int?) -> URL? {
+        guard let fileURLScheme else {
+            return nil
+        }
+
+        if self == .intelliJ || self == .pyCharm {
+            var components = URLComponents()
+            components.scheme = fileURLScheme
+            components.host = "open"
+
+            var queryItems = [URLQueryItem(name: "file", value: fileURL.path)]
+            if let line {
+                queryItems.append(URLQueryItem(name: "line", value: String(line)))
+            }
+            if let column {
+                queryItems.append(URLQueryItem(name: "column", value: String(column)))
+            }
+
+            components.queryItems = queryItems
+            return components.url
+        }
+
+        let encodedPath = fileURL.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileURL.path
+        var value = "\(fileURLScheme)://file\(encodedPath)"
+        if let line {
+            value += ":\(line)"
+            if let column {
+                value += ":\(column)"
+            }
+        }
+
+        return URL(string: value)
+    }
+    #else
+    var isAvailable: Bool {
+        self == .systemDefault
+    }
+    #endif
 }
 
 private enum MultilineBehavior: String, CaseIterable, Identifiable {
@@ -3664,6 +4080,7 @@ private struct MacComposerTextView: NSViewRepresentable {
 
 private struct AssistantTranscriptLine: View {
     let text: String
+    let sessionID: UUID
     let density: TranscriptDensity
     let isActive: Bool
     let onActivate: () -> Void
@@ -3681,11 +4098,13 @@ private struct AssistantTranscriptLine: View {
 
     init(
         text: String,
+        sessionID: UUID,
         density: TranscriptDensity = .comfortable,
         isActive: Bool = false,
         onActivate: @escaping () -> Void = {}
     ) {
         self.text = text
+        self.sessionID = sessionID
         self.density = density
         self.isActive = isActive
         self.onActivate = onActivate
@@ -3727,7 +4146,8 @@ private struct AssistantTranscriptLine: View {
                 case .paragraph(let value):
                     AssistantInlineMarkdownText(
                         text: value,
-                        baseColor: Color.white.opacity(0.93)
+                        baseColor: Color.white.opacity(0.93),
+                        sessionID: sessionID
                     )
                         .font(usesCompactPhoneTypography ? .callout : .body)
                         .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
@@ -3737,7 +4157,8 @@ private struct AssistantTranscriptLine: View {
                 case .heading(let level, let value):
                     AssistantInlineMarkdownText(
                         text: value,
-                        baseColor: headingColor(for: level)
+                        baseColor: headingColor(for: level),
+                        sessionID: sessionID
                     )
                         .font(headingFont(for: level))
                         .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
@@ -3751,7 +4172,8 @@ private struct AssistantTranscriptLine: View {
                             .foregroundStyle(unorderedMarkerColor(for: level))
                         AssistantInlineMarkdownText(
                             text: value,
-                            baseColor: Color.white.opacity(0.93)
+                            baseColor: Color.white.opacity(0.93),
+                            sessionID: sessionID
                         )
                             .font(usesCompactPhoneTypography ? .callout : .body)
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
@@ -3767,7 +4189,8 @@ private struct AssistantTranscriptLine: View {
                             .foregroundStyle(Color.blue.opacity(0.85))
                         AssistantInlineMarkdownText(
                             text: value,
-                            baseColor: Color.white.opacity(0.93)
+                            baseColor: Color.white.opacity(0.93),
+                            sessionID: sessionID
                         )
                             .font(usesCompactPhoneTypography ? .callout : .body)
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
@@ -3783,7 +4206,8 @@ private struct AssistantTranscriptLine: View {
                             .frame(width: 3)
                         AssistantInlineMarkdownText(
                             text: value,
-                            baseColor: Color.white.opacity(0.88)
+                            baseColor: Color.white.opacity(0.88),
+                            sessionID: sessionID
                         )
                             .font(usesCompactPhoneTypography ? .callout : .body)
                             .lineSpacing(usesCompactPhoneTypography ? 2 : density.lineSpacing)
@@ -4070,8 +4494,8 @@ private struct AssistantTranscriptLine: View {
 private struct AssistantInlineMarkdownText: View {
     private let attributed: AttributedString
 
-    init(text: String, baseColor: Color = Color.white.opacity(0.93)) {
-        self.attributed = Self.makeStyledAttributedString(from: text, baseColor: baseColor)
+    init(text: String, baseColor: Color = Color.white.opacity(0.93), sessionID: UUID?) {
+        self.attributed = Self.makeStyledAttributedString(from: text, baseColor: baseColor, sessionID: sessionID)
     }
 
     var body: some View {
@@ -4079,9 +4503,16 @@ private struct AssistantInlineMarkdownText: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private static func makeStyledAttributedString(from text: String, baseColor: Color) -> AttributedString {
+    private struct FileReferenceToken {
+        let path: String
+        let line: Int?
+        let column: Int?
+    }
+
+    private static func makeStyledAttributedString(from text: String, baseColor: Color, sessionID: UUID?) -> AttributedString {
+        let linkedText = injectFileLinks(into: text, sessionID: sessionID)
         let parsed = try? AttributedString(
-            markdown: text,
+            markdown: linkedText,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace,
                 failurePolicy: .returnPartiallyParsedIfPossible
@@ -4122,6 +4553,227 @@ private struct AssistantInlineMarkdownText: View {
 
             attributed[range].foregroundColor = baseColor
         }
+    }
+
+    private static func injectFileLinks(into text: String, sessionID: UUID?) -> String {
+        guard let sessionID else {
+            return text
+        }
+
+        let leadingTrimSet = CharacterSet(charactersIn: "([<{\"'")
+        let trailingTrimSet = CharacterSet(charactersIn: ".,;!?)>]}\"'")
+
+        var output = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character.isWhitespace {
+                output.append(character)
+                index = text.index(after: index)
+                continue
+            }
+
+            let tokenStart = index
+            while index < text.endIndex,
+                  !text[index].isWhitespace {
+                index = text.index(after: index)
+            }
+
+            let token = String(text[tokenStart..<index])
+            let linked = linkedTokenMarkdown(
+                token,
+                sessionID: sessionID,
+                leadingTrimSet: leadingTrimSet,
+                trailingTrimSet: trailingTrimSet
+            )
+            output.append(linked ?? token)
+        }
+
+        return output
+    }
+
+    private static func linkedTokenMarkdown(
+        _ token: String,
+        sessionID: UUID,
+        leadingTrimSet: CharacterSet,
+        trailingTrimSet: CharacterSet
+    ) -> String? {
+        guard !token.contains("]("),
+              !token.contains("::"),
+              !token.hasPrefix("http://"),
+              !token.hasPrefix("https://")
+        else {
+            return nil
+        }
+
+        var core = token
+        var leading = ""
+        var trailing = ""
+
+        while let first = core.unicodeScalars.first,
+              leadingTrimSet.contains(first) {
+            leading.append(core.removeFirst())
+        }
+
+        while let last = core.unicodeScalars.last,
+              trailingTrimSet.contains(last) {
+            trailing.insert(core.removeLast(), at: trailing.startIndex)
+        }
+
+        if core.hasPrefix("`") && core.hasSuffix("`") && core.count > 2 {
+            core.removeFirst()
+            core.removeLast()
+        }
+
+        guard let fileReference = parseFileReference(from: core) else {
+            return nil
+        }
+
+        let display = core
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+        let link = fileLinkURL(
+            path: fileReference.path,
+            line: fileReference.line,
+            column: fileReference.column,
+            sessionID: sessionID
+        )
+
+        guard !link.isEmpty else {
+            return nil
+        }
+
+        return "\(leading)[\(display)](\(link))\(trailing)"
+    }
+
+    private static func parseFileReference(from candidate: String) -> FileReferenceToken? {
+        guard !candidate.isEmpty,
+              !candidate.contains("://")
+        else {
+            return nil
+        }
+
+        var path = candidate
+        var line: Int?
+        var column: Int?
+
+        if let hashRange = path.range(of: "#L", options: .backwards) {
+            let suffix = String(path[hashRange.upperBound...])
+            if let components = parseLineColumnSuffix(suffix) {
+                line = components.line
+                column = components.column
+                path = String(path[..<hashRange.lowerBound])
+            }
+        } else if let components = parseTrailingLineColumn(in: path) {
+            path = components.path
+            line = components.line
+            column = components.column
+        }
+
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isLikelyFilePath(trimmedPath) else {
+            return nil
+        }
+
+        return FileReferenceToken(path: trimmedPath, line: line, column: column)
+    }
+
+    private static func parseTrailingLineColumn(in value: String) -> (path: String, line: Int?, column: Int?)? {
+        let segments = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard segments.count >= 2,
+              let last = segments.last,
+              Int(last) != nil
+        else {
+            return nil
+        }
+
+        if segments.count >= 3,
+           let column = Int(segments[segments.count - 1]),
+           let line = Int(segments[segments.count - 2]) {
+            let path = segments.dropLast(2).joined(separator: ":")
+            return (path: path, line: line, column: column)
+        }
+
+        guard let parsedLine = Int(segments[segments.count - 1]) else {
+            return nil
+        }
+
+        let path = segments.dropLast(1).joined(separator: ":")
+        return (path: path, line: parsedLine, column: nil)
+    }
+
+    private static func parseLineColumnSuffix(_ value: String) -> (line: Int, column: Int?)? {
+        if let columnMarker = value.range(of: "C") {
+            let linePart = String(value[..<columnMarker.lowerBound])
+            let columnPart = String(value[columnMarker.upperBound...])
+            if let line = Int(linePart),
+               let column = Int(columnPart) {
+                return (line: line, column: column)
+            }
+            return nil
+        }
+
+        if let line = Int(value) {
+            return (line: line, column: nil)
+        }
+
+        return nil
+    }
+
+    private static func isLikelyFilePath(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value != ".",
+              value != ".."
+        else {
+            return false
+        }
+
+        if value.hasPrefix("~/") || value.hasPrefix("/") {
+            return true
+        }
+
+        if value.contains("/") {
+            return true
+        }
+
+        let lowercase = value.lowercased()
+        let knownFileNames = [
+            "cargo.toml", "cargo.lock", "package.json", "package-lock.json",
+            "pnpm-lock.yaml", "yarn.lock", "readme.md"
+        ]
+        if knownFileNames.contains(lowercase) {
+            return true
+        }
+
+        guard let dot = value.lastIndex(of: "."),
+              dot > value.startIndex
+        else {
+            return false
+        }
+
+        let ext = value[value.index(after: dot)...]
+        return (1...12).contains(ext.count)
+    }
+
+    private static func fileLinkURL(path: String, line: Int?, column: Int?, sessionID: UUID) -> String {
+        var components = URLComponents()
+        components.scheme = "code-native-file"
+        components.host = "open"
+
+        var queryItems = [
+            URLQueryItem(name: "session", value: sessionID.uuidString),
+            URLQueryItem(name: "path", value: path),
+        ]
+
+        if let line {
+            queryItems.append(URLQueryItem(name: "line", value: String(line)))
+        }
+        if let column {
+            queryItems.append(URLQueryItem(name: "column", value: String(column)))
+        }
+
+        components.queryItems = queryItems
+        return components.url?.absoluteString ?? ""
     }
 }
 
@@ -4884,10 +5536,42 @@ private enum DiffLineKind: Hashable {
     }
 }
 
+private func normalizedStructuredActivityLines(from value: String) -> [String] {
+    var normalized = value.replacingOccurrences(of: "\r\n", with: "\n")
+    for _ in 0..<3 {
+        let next = normalized
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\t", with: "\t")
+            .replacingOccurrences(of: "\\\"", with: "\"")
+        if next == normalized {
+            break
+        }
+        normalized = next
+    }
+
+    return normalized
+        .components(separatedBy: "\n")
+        .compactMap { line in
+            let withoutTrailingWhitespace = line.replacingOccurrences(
+                of: "\\s+$",
+                with: "",
+                options: .regularExpression
+            )
+            let hasVisibleContent = !withoutTrailingWhitespace
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+            if !hasVisibleContent {
+                return nil
+            }
+            return withoutTrailingWhitespace
+        }
+}
+
 private struct TranscriptCard: View {
     let item: SessionStreamItem
     let isActive: Bool
     let density: TranscriptDensity
+    let taskActivityLines: [String]
     let onActivate: () -> Void
     let onApproval: (ApprovalDecisionChoice) -> Void
 
@@ -5399,31 +6083,7 @@ private struct TranscriptCard: View {
                     }
                 }
             } else if item.isTaskLifecycleEvent || item.isBackgroundEvent {
-                let lines = normalizedActivityLines(from: item.body)
-                let headline = lines.first ?? (item.isTaskLifecycleEvent ? "Task activity" : "Background activity")
-                let details = Array(lines.dropFirst()).joined(separator: "\n")
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 7) {
-                        Image(systemName: item.isTaskLifecycleEvent ? "hourglass" : "waveform.path.ecg")
-                            .font(.caption)
-                            .foregroundStyle(item.isTaskLifecycleEvent ? Color.orange.opacity(0.9) : Color.green.opacity(0.9))
-                        Text(headline)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.95))
-                    }
-
-                    if !details.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            Text(details)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.white.opacity(0.82))
-                                .lineSpacing(2)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                }
+                taskActivityContent
             } else if let exec = item.execCommandInfo {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
@@ -5723,11 +6383,49 @@ private struct TranscriptCard: View {
     }
 
     private func normalizedActivityLines(from value: String) -> [String] {
-        let normalized = normalizeExecOutput(value)
-        return normalized
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        normalizedStructuredActivityLines(from: value)
+    }
+
+    private var taskActivityHeadline: String {
+        let lines = normalizedActivityLines(from: item.body)
+        return lines.first ?? (item.isTaskLifecycleEvent ? "Task activity" : "Background activity")
+    }
+
+    private var taskActivityDetails: String {
+        let lines = normalizedActivityLines(from: item.body)
+        let detailLines: [String]
+        if item.isTaskLifecycleEvent {
+            detailLines = Array(lines.dropFirst()) + taskActivityLines
+        } else {
+            detailLines = Array(lines.dropFirst())
+        }
+
+        return detailLines.joined(separator: "\n")
+    }
+
+    @ViewBuilder
+    private var taskActivityContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: item.isTaskLifecycleEvent ? "hourglass" : "waveform.path.ecg")
+                    .font(.caption)
+                    .foregroundStyle(item.isTaskLifecycleEvent ? Color.orange.opacity(0.9) : Color.green.opacity(0.9))
+                Text(taskActivityHeadline)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+            }
+
+            if !taskActivityDetails.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(taskActivityDetails)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
     }
 
     private func execStatusText(for info: ExecCommandInfo) -> String {

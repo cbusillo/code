@@ -97,4 +97,20 @@ enum SessionStreamReducer {
         }
         return next
     }
+
+    static func mergeOlderHistoryPage(
+        existing: [SessionStreamItem],
+        incoming: [SessionStreamItem],
+        beforeSeq: UInt64,
+        maxItems: Int? = SessionStreamReducer.maxItems
+    ) -> [SessionStreamItem] {
+        let normalizedExisting = normalizedBySequence(existing, maxItems: maxItems)
+
+        let olderItems = incoming.filter { $0.seq < beforeSeq }
+        if olderItems.isEmpty {
+            return normalizedExisting
+        }
+
+        return normalizedBySequence(olderItems + normalizedExisting, maxItems: maxItems)
+    }
 }

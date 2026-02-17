@@ -53,6 +53,15 @@ struct SessionSummary: Decodable, Hashable, Identifiable {
 struct SessionAttachedMessage: Decodable {
     let sessionId: UUID
     let fromSeq: UInt64
+    let hasMoreBefore: Bool?
+    let items: [SessionStreamItem]
+}
+
+struct SessionHistoryPageMessage: Decodable {
+    let requestId: String?
+    let sessionId: UUID
+    let beforeSeq: UInt64
+    let hasMoreBefore: Bool
     let items: [SessionStreamItem]
 }
 
@@ -733,6 +742,7 @@ enum ServerEnvelope: Decodable {
     case sessionList(SessionListMessage)
     case sessionCreated(SessionCreatedMessage)
     case sessionAttached(SessionAttachedMessage)
+    case sessionHistoryPage(SessionHistoryPageMessage)
     case sessionDetached(SessionDetachedMessage)
     case sessionStream(SessionStreamMessage)
     case error(ErrorMessage)
@@ -756,6 +766,8 @@ enum ServerEnvelope: Decodable {
             self = .sessionCreated(try SessionCreatedMessage(from: decoder))
         case "session_attached":
             self = .sessionAttached(try SessionAttachedMessage(from: decoder))
+        case "session_history_page":
+            self = .sessionHistoryPage(try SessionHistoryPageMessage(from: decoder))
         case "session_detached":
             self = .sessionDetached(try SessionDetachedMessage(from: decoder))
         case "session_stream":
@@ -775,17 +787,51 @@ struct OutboundMessage: Encodable {
     let requestId: String?
     let sessionId: UUID?
     let fromSeq: UInt64?
+    let beforeSeq: UInt64?
+    let limit: Int?
 
     static func listSessions(requestId: String) -> Self {
-        Self(type: "list_sessions", requestId: requestId, sessionId: nil, fromSeq: nil)
+        Self(
+            type: "list_sessions",
+            requestId: requestId,
+            sessionId: nil,
+            fromSeq: nil,
+            beforeSeq: nil,
+            limit: nil
+        )
     }
 
     static func attachSession(requestId: String, sessionId: UUID, fromSeq: UInt64) -> Self {
-        Self(type: "attach_session", requestId: requestId, sessionId: sessionId, fromSeq: fromSeq)
+        Self(
+            type: "attach_session",
+            requestId: requestId,
+            sessionId: sessionId,
+            fromSeq: fromSeq,
+            beforeSeq: nil,
+            limit: nil
+        )
+    }
+
+    static func loadHistoryBefore(requestId: String, sessionId: UUID, beforeSeq: UInt64, limit: Int) -> Self {
+        Self(
+            type: "load_history_before",
+            requestId: requestId,
+            sessionId: sessionId,
+            fromSeq: nil,
+            beforeSeq: beforeSeq,
+            limit: limit
+        )
     }
 
     static func detachSession(requestId: String, sessionId: UUID) -> Self {
-        Self(type: "detach_session", requestId: requestId, sessionId: sessionId, fromSeq: nil)
+        Self(
+            type: "detach_session",
+            requestId: requestId,
+            sessionId: sessionId,
+            fromSeq: nil,
+            beforeSeq: nil,
+            limit: nil
+        )
     }
 }
 
@@ -895,6 +941,11 @@ struct ReplayHistoryMessage: Hashable, Identifiable {
     let id: String
     let role: Role
     let text: String
+}
+
+enum TaskLifecyclePhase: Hashable {
+    case started
+    case complete
 }
 
 enum JSONValue: Decodable, Hashable {
@@ -1062,13 +1113,24 @@ extension SessionStreamItem {
     }
 
     var isTaskLifecycleEvent: Bool {
+        taskLifecyclePhase != nil
+    }
+
+    var taskLifecyclePhase: TaskLifecyclePhase? {
         guard type == "core_event",
               let payloadType = event?.payload?.typeHint
         else {
-            return false
+            return nil
         }
 
-        return payloadType == "task_started" || payloadType == "task_complete"
+        switch payloadType {
+        case "task_started":
+            return .started
+        case "task_complete":
+            return .complete
+        default:
+            return nil
+        }
     }
 
     var isTurnAbortedEvent: Bool {
