@@ -1,0 +1,2356 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-session-rail-scale",
+  "client_id": "bench-session-rail-scale",
+  "selected_session_id": "90000000-0000-0000-0000-000000000068",
+  "sessions": [
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000001",
+        "conversation_id": "90000000-0000-0000-0000-000000000001",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004999800,
+        "last_event_at_unix_ms": 1700005000000,
+        "title": "code thread 1"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000002",
+        "conversation_id": "90000000-0000-0000-0000-000000000002",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004998800,
+        "last_event_at_unix_ms": 1700004999000,
+        "title": "code thread 2"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000003",
+        "conversation_id": "90000000-0000-0000-0000-000000000003",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004997800,
+        "last_event_at_unix_ms": 1700004998000,
+        "title": "code thread 3"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000004",
+        "conversation_id": "90000000-0000-0000-0000-000000000004",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004996800,
+        "last_event_at_unix_ms": 1700004997000,
+        "title": "code thread 4"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000005",
+        "conversation_id": "90000000-0000-0000-0000-000000000005",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004995800,
+        "last_event_at_unix_ms": 1700004996000,
+        "title": "code thread 5"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000006",
+        "conversation_id": "90000000-0000-0000-0000-000000000006",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004994800,
+        "last_event_at_unix_ms": 1700004995000,
+        "title": "code thread 6"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000007",
+        "conversation_id": "90000000-0000-0000-0000-000000000007",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004993800,
+        "last_event_at_unix_ms": 1700004994000,
+        "title": "code thread 7"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000008",
+        "conversation_id": "90000000-0000-0000-0000-000000000008",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004992800,
+        "last_event_at_unix_ms": 1700004993000,
+        "title": "code thread 8"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000009",
+        "conversation_id": "90000000-0000-0000-0000-000000000009",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004991800,
+        "last_event_at_unix_ms": 1700004992000,
+        "title": "code thread 9"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000010",
+        "conversation_id": "90000000-0000-0000-0000-000000000010",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004990800,
+        "last_event_at_unix_ms": 1700004991000,
+        "title": "code thread 10"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000011",
+        "conversation_id": "90000000-0000-0000-0000-000000000011",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004989800,
+        "last_event_at_unix_ms": 1700004990000,
+        "title": "code thread 11"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000012",
+        "conversation_id": "90000000-0000-0000-0000-000000000012",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004988800,
+        "last_event_at_unix_ms": 1700004989000,
+        "title": "code thread 12"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000013",
+        "conversation_id": "90000000-0000-0000-0000-000000000013",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004987800,
+        "last_event_at_unix_ms": 1700004988000,
+        "title": "code thread 13"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000014",
+        "conversation_id": "90000000-0000-0000-0000-000000000014",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004986800,
+        "last_event_at_unix_ms": 1700004987000,
+        "title": "code thread 14"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000015",
+        "conversation_id": "90000000-0000-0000-0000-000000000015",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004985800,
+        "last_event_at_unix_ms": 1700004986000,
+        "title": "code thread 15"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000016",
+        "conversation_id": "90000000-0000-0000-0000-000000000016",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004984800,
+        "last_event_at_unix_ms": 1700004985000,
+        "title": "code thread 16"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000017",
+        "conversation_id": "90000000-0000-0000-0000-000000000017",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004983800,
+        "last_event_at_unix_ms": 1700004984000,
+        "title": "code thread 17"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000018",
+        "conversation_id": "90000000-0000-0000-0000-000000000018",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004982800,
+        "last_event_at_unix_ms": 1700004983000,
+        "title": "code thread 18"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000019",
+        "conversation_id": "90000000-0000-0000-0000-000000000019",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004981800,
+        "last_event_at_unix_ms": 1700004982000,
+        "title": "code thread 19"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000020",
+        "conversation_id": "90000000-0000-0000-0000-000000000020",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004980800,
+        "last_event_at_unix_ms": 1700004981000,
+        "title": "code thread 20"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000021",
+        "conversation_id": "90000000-0000-0000-0000-000000000021",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004979800,
+        "last_event_at_unix_ms": 1700004980000,
+        "title": "code thread 21"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000022",
+        "conversation_id": "90000000-0000-0000-0000-000000000022",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004978800,
+        "last_event_at_unix_ms": 1700004979000,
+        "title": "code thread 22"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000023",
+        "conversation_id": "90000000-0000-0000-0000-000000000023",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004977800,
+        "last_event_at_unix_ms": 1700004978000,
+        "title": "code thread 23"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000024",
+        "conversation_id": "90000000-0000-0000-0000-000000000024",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004976800,
+        "last_event_at_unix_ms": 1700004977000,
+        "title": "code thread 24"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000025",
+        "conversation_id": "90000000-0000-0000-0000-000000000025",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004975800,
+        "last_event_at_unix_ms": 1700004976000,
+        "title": "code thread 25"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000026",
+        "conversation_id": "90000000-0000-0000-0000-000000000026",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004974800,
+        "last_event_at_unix_ms": 1700004975000,
+        "title": "code thread 26"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000027",
+        "conversation_id": "90000000-0000-0000-0000-000000000027",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004973800,
+        "last_event_at_unix_ms": 1700004974000,
+        "title": "code thread 27"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000028",
+        "conversation_id": "90000000-0000-0000-0000-000000000028",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004972800,
+        "last_event_at_unix_ms": 1700004973000,
+        "title": "code thread 28"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000029",
+        "conversation_id": "90000000-0000-0000-0000-000000000029",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004971800,
+        "last_event_at_unix_ms": 1700004972000,
+        "title": "code thread 29"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000030",
+        "conversation_id": "90000000-0000-0000-0000-000000000030",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700004970800,
+        "last_event_at_unix_ms": 1700004971000,
+        "title": "code thread 30"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000031",
+        "conversation_id": "90000000-0000-0000-0000-000000000031",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004899800,
+        "last_event_at_unix_ms": 1700004900000,
+        "title": "code-rs thread 1"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000032",
+        "conversation_id": "90000000-0000-0000-0000-000000000032",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004898800,
+        "last_event_at_unix_ms": 1700004899000,
+        "title": "code-rs thread 2"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000033",
+        "conversation_id": "90000000-0000-0000-0000-000000000033",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004897800,
+        "last_event_at_unix_ms": 1700004898000,
+        "title": "code-rs thread 3"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000034",
+        "conversation_id": "90000000-0000-0000-0000-000000000034",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004896800,
+        "last_event_at_unix_ms": 1700004897000,
+        "title": "code-rs thread 4"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000035",
+        "conversation_id": "90000000-0000-0000-0000-000000000035",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004895800,
+        "last_event_at_unix_ms": 1700004896000,
+        "title": "code-rs thread 5"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000036",
+        "conversation_id": "90000000-0000-0000-0000-000000000036",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004894800,
+        "last_event_at_unix_ms": 1700004895000,
+        "title": "code-rs thread 6"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000037",
+        "conversation_id": "90000000-0000-0000-0000-000000000037",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004893800,
+        "last_event_at_unix_ms": 1700004894000,
+        "title": "code-rs thread 7"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000038",
+        "conversation_id": "90000000-0000-0000-0000-000000000038",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004892800,
+        "last_event_at_unix_ms": 1700004893000,
+        "title": "code-rs thread 8"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000039",
+        "conversation_id": "90000000-0000-0000-0000-000000000039",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004891800,
+        "last_event_at_unix_ms": 1700004892000,
+        "title": "code-rs thread 9"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000040",
+        "conversation_id": "90000000-0000-0000-0000-000000000040",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004890800,
+        "last_event_at_unix_ms": 1700004891000,
+        "title": "code-rs thread 10"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000041",
+        "conversation_id": "90000000-0000-0000-0000-000000000041",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004889800,
+        "last_event_at_unix_ms": 1700004890000,
+        "title": "code-rs thread 11"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000042",
+        "conversation_id": "90000000-0000-0000-0000-000000000042",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004888800,
+        "last_event_at_unix_ms": 1700004889000,
+        "title": "code-rs thread 12"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000043",
+        "conversation_id": "90000000-0000-0000-0000-000000000043",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004887800,
+        "last_event_at_unix_ms": 1700004888000,
+        "title": "code-rs thread 13"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000044",
+        "conversation_id": "90000000-0000-0000-0000-000000000044",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004886800,
+        "last_event_at_unix_ms": 1700004887000,
+        "title": "code-rs thread 14"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000045",
+        "conversation_id": "90000000-0000-0000-0000-000000000045",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004885800,
+        "last_event_at_unix_ms": 1700004886000,
+        "title": "code-rs thread 15"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000046",
+        "conversation_id": "90000000-0000-0000-0000-000000000046",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004884800,
+        "last_event_at_unix_ms": 1700004885000,
+        "title": "code-rs thread 16"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000047",
+        "conversation_id": "90000000-0000-0000-0000-000000000047",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004883800,
+        "last_event_at_unix_ms": 1700004884000,
+        "title": "code-rs thread 17"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000048",
+        "conversation_id": "90000000-0000-0000-0000-000000000048",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004882800,
+        "last_event_at_unix_ms": 1700004883000,
+        "title": "code-rs thread 18"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000049",
+        "conversation_id": "90000000-0000-0000-0000-000000000049",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004881800,
+        "last_event_at_unix_ms": 1700004882000,
+        "title": "code-rs thread 19"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000050",
+        "conversation_id": "90000000-0000-0000-0000-000000000050",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004880800,
+        "last_event_at_unix_ms": 1700004881000,
+        "title": "code-rs thread 20"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000051",
+        "conversation_id": "90000000-0000-0000-0000-000000000051",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004879800,
+        "last_event_at_unix_ms": 1700004880000,
+        "title": "code-rs thread 21"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000052",
+        "conversation_id": "90000000-0000-0000-0000-000000000052",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004878800,
+        "last_event_at_unix_ms": 1700004879000,
+        "title": "code-rs thread 22"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000053",
+        "conversation_id": "90000000-0000-0000-0000-000000000053",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004877800,
+        "last_event_at_unix_ms": 1700004878000,
+        "title": "code-rs thread 23"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000054",
+        "conversation_id": "90000000-0000-0000-0000-000000000054",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004876800,
+        "last_event_at_unix_ms": 1700004877000,
+        "title": "code-rs thread 24"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000055",
+        "conversation_id": "90000000-0000-0000-0000-000000000055",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004875800,
+        "last_event_at_unix_ms": 1700004876000,
+        "title": "code-rs thread 25"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000056",
+        "conversation_id": "90000000-0000-0000-0000-000000000056",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004874800,
+        "last_event_at_unix_ms": 1700004875000,
+        "title": "code-rs thread 26"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000057",
+        "conversation_id": "90000000-0000-0000-0000-000000000057",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004873800,
+        "last_event_at_unix_ms": 1700004874000,
+        "title": "code-rs thread 27"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000058",
+        "conversation_id": "90000000-0000-0000-0000-000000000058",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004872800,
+        "last_event_at_unix_ms": 1700004873000,
+        "title": "code-rs thread 28"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000059",
+        "conversation_id": "90000000-0000-0000-0000-000000000059",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004871800,
+        "last_event_at_unix_ms": 1700004872000,
+        "title": "code-rs thread 29"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000060",
+        "conversation_id": "90000000-0000-0000-0000-000000000060",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/code-rs",
+        "created_at_unix_ms": 1700004870800,
+        "last_event_at_unix_ms": 1700004871000,
+        "title": "code-rs thread 30"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000061",
+        "conversation_id": "90000000-0000-0000-0000-000000000061",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004799800,
+        "last_event_at_unix_ms": 1700004800000,
+        "title": "CodeNative thread 1"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000062",
+        "conversation_id": "90000000-0000-0000-0000-000000000062",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004798800,
+        "last_event_at_unix_ms": 1700004799000,
+        "title": "CodeNative thread 2"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000063",
+        "conversation_id": "90000000-0000-0000-0000-000000000063",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004797800,
+        "last_event_at_unix_ms": 1700004798000,
+        "title": "CodeNative thread 3"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000064",
+        "conversation_id": "90000000-0000-0000-0000-000000000064",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004796800,
+        "last_event_at_unix_ms": 1700004797000,
+        "title": "CodeNative thread 4"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000065",
+        "conversation_id": "90000000-0000-0000-0000-000000000065",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004795800,
+        "last_event_at_unix_ms": 1700004796000,
+        "title": "CodeNative thread 5"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000066",
+        "conversation_id": "90000000-0000-0000-0000-000000000066",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004794800,
+        "last_event_at_unix_ms": 1700004795000,
+        "title": "CodeNative thread 6"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000067",
+        "conversation_id": "90000000-0000-0000-0000-000000000067",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004793800,
+        "last_event_at_unix_ms": 1700004794000,
+        "title": "CodeNative thread 7"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000068",
+        "conversation_id": "90000000-0000-0000-0000-000000000068",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004792800,
+        "last_event_at_unix_ms": 1700004793000,
+        "title": "CodeNative thread 8"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000069",
+        "conversation_id": "90000000-0000-0000-0000-000000000069",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004791800,
+        "last_event_at_unix_ms": 1700004792000,
+        "title": "CodeNative thread 9"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000070",
+        "conversation_id": "90000000-0000-0000-0000-000000000070",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004790800,
+        "last_event_at_unix_ms": 1700004791000,
+        "title": "CodeNative thread 10"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000071",
+        "conversation_id": "90000000-0000-0000-0000-000000000071",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004789800,
+        "last_event_at_unix_ms": 1700004790000,
+        "title": "CodeNative thread 11"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000072",
+        "conversation_id": "90000000-0000-0000-0000-000000000072",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004788800,
+        "last_event_at_unix_ms": 1700004789000,
+        "title": "CodeNative thread 12"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000073",
+        "conversation_id": "90000000-0000-0000-0000-000000000073",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004787800,
+        "last_event_at_unix_ms": 1700004788000,
+        "title": "CodeNative thread 13"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000074",
+        "conversation_id": "90000000-0000-0000-0000-000000000074",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004786800,
+        "last_event_at_unix_ms": 1700004787000,
+        "title": "CodeNative thread 14"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000075",
+        "conversation_id": "90000000-0000-0000-0000-000000000075",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004785800,
+        "last_event_at_unix_ms": 1700004786000,
+        "title": "CodeNative thread 15"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000076",
+        "conversation_id": "90000000-0000-0000-0000-000000000076",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004784800,
+        "last_event_at_unix_ms": 1700004785000,
+        "title": "CodeNative thread 16"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000077",
+        "conversation_id": "90000000-0000-0000-0000-000000000077",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004783800,
+        "last_event_at_unix_ms": 1700004784000,
+        "title": "CodeNative thread 17"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000078",
+        "conversation_id": "90000000-0000-0000-0000-000000000078",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004782800,
+        "last_event_at_unix_ms": 1700004783000,
+        "title": "CodeNative thread 18"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000079",
+        "conversation_id": "90000000-0000-0000-0000-000000000079",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004781800,
+        "last_event_at_unix_ms": 1700004782000,
+        "title": "CodeNative thread 19"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000080",
+        "conversation_id": "90000000-0000-0000-0000-000000000080",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004780800,
+        "last_event_at_unix_ms": 1700004781000,
+        "title": "CodeNative thread 20"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000081",
+        "conversation_id": "90000000-0000-0000-0000-000000000081",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004779800,
+        "last_event_at_unix_ms": 1700004780000,
+        "title": "CodeNative thread 21"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000082",
+        "conversation_id": "90000000-0000-0000-0000-000000000082",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004778800,
+        "last_event_at_unix_ms": 1700004779000,
+        "title": "CodeNative thread 22"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000083",
+        "conversation_id": "90000000-0000-0000-0000-000000000083",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004777800,
+        "last_event_at_unix_ms": 1700004778000,
+        "title": "CodeNative thread 23"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000084",
+        "conversation_id": "90000000-0000-0000-0000-000000000084",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004776800,
+        "last_event_at_unix_ms": 1700004777000,
+        "title": "CodeNative thread 24"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000085",
+        "conversation_id": "90000000-0000-0000-0000-000000000085",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004775800,
+        "last_event_at_unix_ms": 1700004776000,
+        "title": "CodeNative thread 25"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000086",
+        "conversation_id": "90000000-0000-0000-0000-000000000086",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004774800,
+        "last_event_at_unix_ms": 1700004775000,
+        "title": "CodeNative thread 26"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000087",
+        "conversation_id": "90000000-0000-0000-0000-000000000087",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004773800,
+        "last_event_at_unix_ms": 1700004774000,
+        "title": "CodeNative thread 27"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000088",
+        "conversation_id": "90000000-0000-0000-0000-000000000088",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004772800,
+        "last_event_at_unix_ms": 1700004773000,
+        "title": "CodeNative thread 28"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000089",
+        "conversation_id": "90000000-0000-0000-0000-000000000089",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004771800,
+        "last_event_at_unix_ms": 1700004772000,
+        "title": "CodeNative thread 29"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000090",
+        "conversation_id": "90000000-0000-0000-0000-000000000090",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code/native/CodeNative",
+        "created_at_unix_ms": 1700004770800,
+        "last_event_at_unix_ms": 1700004771000,
+        "title": "CodeNative thread 30"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000091",
+        "conversation_id": "90000000-0000-0000-0000-000000000091",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004699800,
+        "last_event_at_unix_ms": 1700004700000,
+        "title": "api-service thread 1"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000092",
+        "conversation_id": "90000000-0000-0000-0000-000000000092",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004698800,
+        "last_event_at_unix_ms": 1700004699000,
+        "title": "api-service thread 2"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000093",
+        "conversation_id": "90000000-0000-0000-0000-000000000093",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004697800,
+        "last_event_at_unix_ms": 1700004698000,
+        "title": "api-service thread 3"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000094",
+        "conversation_id": "90000000-0000-0000-0000-000000000094",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004696800,
+        "last_event_at_unix_ms": 1700004697000,
+        "title": "api-service thread 4"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000095",
+        "conversation_id": "90000000-0000-0000-0000-000000000095",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004695800,
+        "last_event_at_unix_ms": 1700004696000,
+        "title": "api-service thread 5"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000096",
+        "conversation_id": "90000000-0000-0000-0000-000000000096",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004694800,
+        "last_event_at_unix_ms": 1700004695000,
+        "title": "api-service thread 6"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000097",
+        "conversation_id": "90000000-0000-0000-0000-000000000097",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004693800,
+        "last_event_at_unix_ms": 1700004694000,
+        "title": "api-service thread 7"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000098",
+        "conversation_id": "90000000-0000-0000-0000-000000000098",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004692800,
+        "last_event_at_unix_ms": 1700004693000,
+        "title": "api-service thread 8"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000099",
+        "conversation_id": "90000000-0000-0000-0000-000000000099",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004691800,
+        "last_event_at_unix_ms": 1700004692000,
+        "title": "api-service thread 9"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000100",
+        "conversation_id": "90000000-0000-0000-0000-000000000100",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004690800,
+        "last_event_at_unix_ms": 1700004691000,
+        "title": "api-service thread 10"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000101",
+        "conversation_id": "90000000-0000-0000-0000-000000000101",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004689800,
+        "last_event_at_unix_ms": 1700004690000,
+        "title": "api-service thread 11"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000102",
+        "conversation_id": "90000000-0000-0000-0000-000000000102",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004688800,
+        "last_event_at_unix_ms": 1700004689000,
+        "title": "api-service thread 12"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000103",
+        "conversation_id": "90000000-0000-0000-0000-000000000103",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004687800,
+        "last_event_at_unix_ms": 1700004688000,
+        "title": "api-service thread 13"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000104",
+        "conversation_id": "90000000-0000-0000-0000-000000000104",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004686800,
+        "last_event_at_unix_ms": 1700004687000,
+        "title": "api-service thread 14"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000105",
+        "conversation_id": "90000000-0000-0000-0000-000000000105",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004685800,
+        "last_event_at_unix_ms": 1700004686000,
+        "title": "api-service thread 15"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000106",
+        "conversation_id": "90000000-0000-0000-0000-000000000106",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004684800,
+        "last_event_at_unix_ms": 1700004685000,
+        "title": "api-service thread 16"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000107",
+        "conversation_id": "90000000-0000-0000-0000-000000000107",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004683800,
+        "last_event_at_unix_ms": 1700004684000,
+        "title": "api-service thread 17"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000108",
+        "conversation_id": "90000000-0000-0000-0000-000000000108",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004682800,
+        "last_event_at_unix_ms": 1700004683000,
+        "title": "api-service thread 18"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000109",
+        "conversation_id": "90000000-0000-0000-0000-000000000109",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004681800,
+        "last_event_at_unix_ms": 1700004682000,
+        "title": "api-service thread 19"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000110",
+        "conversation_id": "90000000-0000-0000-0000-000000000110",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004680800,
+        "last_event_at_unix_ms": 1700004681000,
+        "title": "api-service thread 20"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000111",
+        "conversation_id": "90000000-0000-0000-0000-000000000111",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004679800,
+        "last_event_at_unix_ms": 1700004680000,
+        "title": "api-service thread 21"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000112",
+        "conversation_id": "90000000-0000-0000-0000-000000000112",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004678800,
+        "last_event_at_unix_ms": 1700004679000,
+        "title": "api-service thread 22"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000113",
+        "conversation_id": "90000000-0000-0000-0000-000000000113",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004677800,
+        "last_event_at_unix_ms": 1700004678000,
+        "title": "api-service thread 23"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000114",
+        "conversation_id": "90000000-0000-0000-0000-000000000114",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004676800,
+        "last_event_at_unix_ms": 1700004677000,
+        "title": "api-service thread 24"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000115",
+        "conversation_id": "90000000-0000-0000-0000-000000000115",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004675800,
+        "last_event_at_unix_ms": 1700004676000,
+        "title": "api-service thread 25"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000116",
+        "conversation_id": "90000000-0000-0000-0000-000000000116",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004674800,
+        "last_event_at_unix_ms": 1700004675000,
+        "title": "api-service thread 26"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000117",
+        "conversation_id": "90000000-0000-0000-0000-000000000117",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004673800,
+        "last_event_at_unix_ms": 1700004674000,
+        "title": "api-service thread 27"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000118",
+        "conversation_id": "90000000-0000-0000-0000-000000000118",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004672800,
+        "last_event_at_unix_ms": 1700004673000,
+        "title": "api-service thread 28"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000119",
+        "conversation_id": "90000000-0000-0000-0000-000000000119",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004671800,
+        "last_event_at_unix_ms": 1700004672000,
+        "title": "api-service thread 29"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000120",
+        "conversation_id": "90000000-0000-0000-0000-000000000120",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/api-service",
+        "created_at_unix_ms": 1700004670800,
+        "last_event_at_unix_ms": 1700004671000,
+        "title": "api-service thread 30"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000121",
+        "conversation_id": "90000000-0000-0000-0000-000000000121",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004599800,
+        "last_event_at_unix_ms": 1700004600000,
+        "title": "mobile-client thread 1"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000122",
+        "conversation_id": "90000000-0000-0000-0000-000000000122",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004598800,
+        "last_event_at_unix_ms": 1700004599000,
+        "title": "mobile-client thread 2"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000123",
+        "conversation_id": "90000000-0000-0000-0000-000000000123",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004597800,
+        "last_event_at_unix_ms": 1700004598000,
+        "title": "mobile-client thread 3"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000124",
+        "conversation_id": "90000000-0000-0000-0000-000000000124",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004596800,
+        "last_event_at_unix_ms": 1700004597000,
+        "title": "mobile-client thread 4"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000125",
+        "conversation_id": "90000000-0000-0000-0000-000000000125",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004595800,
+        "last_event_at_unix_ms": 1700004596000,
+        "title": "mobile-client thread 5"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000126",
+        "conversation_id": "90000000-0000-0000-0000-000000000126",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004594800,
+        "last_event_at_unix_ms": 1700004595000,
+        "title": "mobile-client thread 6"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000127",
+        "conversation_id": "90000000-0000-0000-0000-000000000127",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004593800,
+        "last_event_at_unix_ms": 1700004594000,
+        "title": "mobile-client thread 7"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000128",
+        "conversation_id": "90000000-0000-0000-0000-000000000128",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004592800,
+        "last_event_at_unix_ms": 1700004593000,
+        "title": "mobile-client thread 8"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000129",
+        "conversation_id": "90000000-0000-0000-0000-000000000129",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004591800,
+        "last_event_at_unix_ms": 1700004592000,
+        "title": "mobile-client thread 9"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000130",
+        "conversation_id": "90000000-0000-0000-0000-000000000130",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004590800,
+        "last_event_at_unix_ms": 1700004591000,
+        "title": "mobile-client thread 10"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000131",
+        "conversation_id": "90000000-0000-0000-0000-000000000131",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004589800,
+        "last_event_at_unix_ms": 1700004590000,
+        "title": "mobile-client thread 11"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000132",
+        "conversation_id": "90000000-0000-0000-0000-000000000132",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004588800,
+        "last_event_at_unix_ms": 1700004589000,
+        "title": "mobile-client thread 12"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000133",
+        "conversation_id": "90000000-0000-0000-0000-000000000133",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004587800,
+        "last_event_at_unix_ms": 1700004588000,
+        "title": "mobile-client thread 13"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000134",
+        "conversation_id": "90000000-0000-0000-0000-000000000134",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004586800,
+        "last_event_at_unix_ms": 1700004587000,
+        "title": "mobile-client thread 14"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000135",
+        "conversation_id": "90000000-0000-0000-0000-000000000135",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004585800,
+        "last_event_at_unix_ms": 1700004586000,
+        "title": "mobile-client thread 15"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000136",
+        "conversation_id": "90000000-0000-0000-0000-000000000136",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004584800,
+        "last_event_at_unix_ms": 1700004585000,
+        "title": "mobile-client thread 16"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000137",
+        "conversation_id": "90000000-0000-0000-0000-000000000137",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004583800,
+        "last_event_at_unix_ms": 1700004584000,
+        "title": "mobile-client thread 17"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000138",
+        "conversation_id": "90000000-0000-0000-0000-000000000138",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004582800,
+        "last_event_at_unix_ms": 1700004583000,
+        "title": "mobile-client thread 18"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000139",
+        "conversation_id": "90000000-0000-0000-0000-000000000139",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004581800,
+        "last_event_at_unix_ms": 1700004582000,
+        "title": "mobile-client thread 19"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000140",
+        "conversation_id": "90000000-0000-0000-0000-000000000140",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004580800,
+        "last_event_at_unix_ms": 1700004581000,
+        "title": "mobile-client thread 20"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000141",
+        "conversation_id": "90000000-0000-0000-0000-000000000141",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004579800,
+        "last_event_at_unix_ms": 1700004580000,
+        "title": "mobile-client thread 21"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000142",
+        "conversation_id": "90000000-0000-0000-0000-000000000142",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004578800,
+        "last_event_at_unix_ms": 1700004579000,
+        "title": "mobile-client thread 22"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000143",
+        "conversation_id": "90000000-0000-0000-0000-000000000143",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004577800,
+        "last_event_at_unix_ms": 1700004578000,
+        "title": "mobile-client thread 23"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000144",
+        "conversation_id": "90000000-0000-0000-0000-000000000144",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004576800,
+        "last_event_at_unix_ms": 1700004577000,
+        "title": "mobile-client thread 24"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000145",
+        "conversation_id": "90000000-0000-0000-0000-000000000145",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004575800,
+        "last_event_at_unix_ms": 1700004576000,
+        "title": "mobile-client thread 25"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000146",
+        "conversation_id": "90000000-0000-0000-0000-000000000146",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004574800,
+        "last_event_at_unix_ms": 1700004575000,
+        "title": "mobile-client thread 26"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000147",
+        "conversation_id": "90000000-0000-0000-0000-000000000147",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004573800,
+        "last_event_at_unix_ms": 1700004574000,
+        "title": "mobile-client thread 27"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000148",
+        "conversation_id": "90000000-0000-0000-0000-000000000148",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004572800,
+        "last_event_at_unix_ms": 1700004573000,
+        "title": "mobile-client thread 28"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000149",
+        "conversation_id": "90000000-0000-0000-0000-000000000149",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004571800,
+        "last_event_at_unix_ms": 1700004572000,
+        "title": "mobile-client thread 29"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000150",
+        "conversation_id": "90000000-0000-0000-0000-000000000150",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/mobile-client",
+        "created_at_unix_ms": 1700004570800,
+        "last_event_at_unix_ms": 1700004571000,
+        "title": "mobile-client thread 30"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000151",
+        "conversation_id": "90000000-0000-0000-0000-000000000151",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004499800,
+        "last_event_at_unix_ms": 1700004500000,
+        "title": "infra-tools thread 1"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000152",
+        "conversation_id": "90000000-0000-0000-0000-000000000152",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004498800,
+        "last_event_at_unix_ms": 1700004499000,
+        "title": "infra-tools thread 2"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000153",
+        "conversation_id": "90000000-0000-0000-0000-000000000153",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004497800,
+        "last_event_at_unix_ms": 1700004498000,
+        "title": "infra-tools thread 3"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000154",
+        "conversation_id": "90000000-0000-0000-0000-000000000154",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004496800,
+        "last_event_at_unix_ms": 1700004497000,
+        "title": "infra-tools thread 4"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000155",
+        "conversation_id": "90000000-0000-0000-0000-000000000155",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004495800,
+        "last_event_at_unix_ms": 1700004496000,
+        "title": "infra-tools thread 5"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000156",
+        "conversation_id": "90000000-0000-0000-0000-000000000156",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004494800,
+        "last_event_at_unix_ms": 1700004495000,
+        "title": "infra-tools thread 6"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000157",
+        "conversation_id": "90000000-0000-0000-0000-000000000157",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004493800,
+        "last_event_at_unix_ms": 1700004494000,
+        "title": "infra-tools thread 7"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000158",
+        "conversation_id": "90000000-0000-0000-0000-000000000158",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004492800,
+        "last_event_at_unix_ms": 1700004493000,
+        "title": "infra-tools thread 8"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000159",
+        "conversation_id": "90000000-0000-0000-0000-000000000159",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004491800,
+        "last_event_at_unix_ms": 1700004492000,
+        "title": "infra-tools thread 9"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000160",
+        "conversation_id": "90000000-0000-0000-0000-000000000160",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004490800,
+        "last_event_at_unix_ms": 1700004491000,
+        "title": "infra-tools thread 10"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000161",
+        "conversation_id": "90000000-0000-0000-0000-000000000161",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004489800,
+        "last_event_at_unix_ms": 1700004490000,
+        "title": "infra-tools thread 11"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000162",
+        "conversation_id": "90000000-0000-0000-0000-000000000162",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004488800,
+        "last_event_at_unix_ms": 1700004489000,
+        "title": "infra-tools thread 12"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000163",
+        "conversation_id": "90000000-0000-0000-0000-000000000163",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004487800,
+        "last_event_at_unix_ms": 1700004488000,
+        "title": "infra-tools thread 13"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000164",
+        "conversation_id": "90000000-0000-0000-0000-000000000164",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004486800,
+        "last_event_at_unix_ms": 1700004487000,
+        "title": "infra-tools thread 14"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000165",
+        "conversation_id": "90000000-0000-0000-0000-000000000165",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004485800,
+        "last_event_at_unix_ms": 1700004486000,
+        "title": "infra-tools thread 15"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000166",
+        "conversation_id": "90000000-0000-0000-0000-000000000166",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004484800,
+        "last_event_at_unix_ms": 1700004485000,
+        "title": "infra-tools thread 16"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000167",
+        "conversation_id": "90000000-0000-0000-0000-000000000167",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004483800,
+        "last_event_at_unix_ms": 1700004484000,
+        "title": "infra-tools thread 17"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000168",
+        "conversation_id": "90000000-0000-0000-0000-000000000168",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004482800,
+        "last_event_at_unix_ms": 1700004483000,
+        "title": "infra-tools thread 18"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000169",
+        "conversation_id": "90000000-0000-0000-0000-000000000169",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004481800,
+        "last_event_at_unix_ms": 1700004482000,
+        "title": "infra-tools thread 19"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000170",
+        "conversation_id": "90000000-0000-0000-0000-000000000170",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004480800,
+        "last_event_at_unix_ms": 1700004481000,
+        "title": "infra-tools thread 20"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000171",
+        "conversation_id": "90000000-0000-0000-0000-000000000171",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004479800,
+        "last_event_at_unix_ms": 1700004480000,
+        "title": "infra-tools thread 21"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000172",
+        "conversation_id": "90000000-0000-0000-0000-000000000172",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004478800,
+        "last_event_at_unix_ms": 1700004479000,
+        "title": "infra-tools thread 22"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000173",
+        "conversation_id": "90000000-0000-0000-0000-000000000173",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004477800,
+        "last_event_at_unix_ms": 1700004478000,
+        "title": "infra-tools thread 23"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000174",
+        "conversation_id": "90000000-0000-0000-0000-000000000174",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004476800,
+        "last_event_at_unix_ms": 1700004477000,
+        "title": "infra-tools thread 24"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000175",
+        "conversation_id": "90000000-0000-0000-0000-000000000175",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004475800,
+        "last_event_at_unix_ms": 1700004476000,
+        "title": "infra-tools thread 25"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000176",
+        "conversation_id": "90000000-0000-0000-0000-000000000176",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004474800,
+        "last_event_at_unix_ms": 1700004475000,
+        "title": "infra-tools thread 26"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000177",
+        "conversation_id": "90000000-0000-0000-0000-000000000177",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004473800,
+        "last_event_at_unix_ms": 1700004474000,
+        "title": "infra-tools thread 27"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000178",
+        "conversation_id": "90000000-0000-0000-0000-000000000178",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004472800,
+        "last_event_at_unix_ms": 1700004473000,
+        "title": "infra-tools thread 28"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000179",
+        "conversation_id": "90000000-0000-0000-0000-000000000179",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004471800,
+        "last_event_at_unix_ms": 1700004472000,
+        "title": "infra-tools thread 29"
+      },
+      "has_more_history_before": false,
+      "items": []
+    },
+    {
+      "summary": {
+        "id": "90000000-0000-0000-0000-000000000180",
+        "conversation_id": "90000000-0000-0000-0000-000000000180",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/work/infra-tools",
+        "created_at_unix_ms": 1700004470800,
+        "last_event_at_unix_ms": 1700004471000,
+        "title": "infra-tools thread 30"
+      },
+      "has_more_history_before": false,
+      "items": []
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 14,
+    "success_count": 14,
+    "slow_page_count": 0,
+    "total_latency_ms": 904,
+    "inactive_retention_passes": 3,
+    "inactive_retention_trimmed_items": 0
+  }
+}

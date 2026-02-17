@@ -162,6 +162,11 @@ Goal: close the largest feature/UX gaps and establish “premium native” quali
 - No unresolved high-severity UX rubric violations.
 - Validation gates pass.
 
+Milestone 2 completion proof lives in
+`docs/native-app-parity-matrix.md` with all `M2` rows marked `present`
+(`PAR-011/012/013/014/015/016/019/022`) and deterministic evidence including
+`session-rail-scale` benchmark artifacts.
+
 ### Auto Drive Execution Brief (Milestone 2)
 
 Use this as kickoff prompt:
@@ -281,8 +286,9 @@ scripts/ux/benchmark-native-ui.sh
 12. `git-recovery`
 13. `ide-integration`
 14. `settings-workflow-controls`
-15. `disconnected-state`
-16. `settings-shell`
+15. `session-rail-scale`
+16. `disconnected-state`
+17. `settings-shell`
 
 ### Review Process
 

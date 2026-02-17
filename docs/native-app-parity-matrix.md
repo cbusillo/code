@@ -37,7 +37,7 @@ Legend:
 | PAR-019 | Visual quality rubric enforcement | Mac-inspired | present | P1 | M2 |
 | PAR-020 | Performance guardrails + telemetry | TUI + native | partial | P0 | M1 |
 | PAR-021 | Voice interaction parity hardening | Codex Mac | partial | P2 | M3 |
-| PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | partial | P1 | M2 |
+| PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | partial | P0 | M1 |
 
 ## Detailed Rows
@@ -234,6 +234,13 @@ Legend:
 - Acceptance criteria: thread rail remains fast and legible at large session
   counts with grouping/density controls behaving predictably.
 - Validation gate: large-catalog scenario + manual UX checklist.
+- Progress: thread rail now uses lazy rendering with explicit rail controls for
+  grouping mode, density, and visible-row caps. Repository groups support
+  stable collapse/expand behavior with per-group counts, and truncation
+  affordances (`show more` / `show all`) keep large catalogs responsive without
+  hiding the currently selected thread. Deterministic evidence is captured in
+  `session-rail-scale` benchmark fixture/scenario, with updated benchmark gate
+  docs and targeted layout tests.
 
 ## PAR-023
 

@@ -24,6 +24,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `git-recovery`
 - `ide-integration`
 - `settings-workflow-controls`
+- `session-rail-scale`
 - `disconnected-state`
 - `settings-shell`
 
@@ -85,3 +86,10 @@ following deterministic scenarios as required review checkpoints:
 
 Merge is blocked for unresolved high-severity visual regressions in any of
 these checkpoints.
+
+## PAR-022 Session Rail Scale Gate
+
+For PAR-022 (`session rail/grouping ergonomics at scale`), include
+`session-rail-scale` in each deterministic benchmark run. The screenshot must
+show thread-rail grouping controls and legible grouped rows under a large,
+fixture-backed session catalog.

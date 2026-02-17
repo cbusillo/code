@@ -71,6 +71,8 @@ struct ContentView: View {
 
     @AppStorage("code_native_theme_mode") private var themeModeRaw = AppThemeMode.system.rawValue
     @AppStorage("code_native_thread_density") private var threadDensityRaw = ThreadDensity.comfortable.rawValue
+    @AppStorage("code_native_session_grouping_mode") private var sessionGroupingModeRaw = SessionRailGroupingMode.repository.rawValue
+    @AppStorage("code_native_session_rail_visible_limit") private var sessionRailVisibleLimit = SessionRailDisplayPolicy.defaultVisibleLimit
     @AppStorage("code_native_transcript_density") private var transcriptDensityRaw = TranscriptDensity.comfortable.rawValue
     @AppStorage("code_native_open_destination") private var openDestinationRaw = OpenDestination.finder.rawValue
     @AppStorage("code_native_session_ide_map") private var sessionIDEMapRaw = "{}"
@@ -93,6 +95,7 @@ struct ContentView: View {
     @State private var settingsCategory: SettingsCategory = .general
     @State private var showThreadPicker = false
     @State private var threadSearchQuery = ""
+    @State private var collapsedSessionRailGroupIDs: Set<String> = []
     @State private var showConnectionPopover = false
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
@@ -351,6 +354,14 @@ struct ContentView: View {
         ThreadDensity(rawValue: threadDensityRaw) ?? .comfortable
     }
 
+    private var selectedSessionGroupingMode: SessionRailGroupingMode {
+        SessionRailGroupingMode(rawValue: sessionGroupingModeRaw) ?? .repository
+    }
+
+    private var normalizedSessionRailVisibleLimit: Int {
+        SessionRailDisplayPolicy.normalizedVisibleLimit(sessionRailVisibleLimit)
+    }
+
     private var selectedTranscriptDensity: TranscriptDensity {
         TranscriptDensity(rawValue: transcriptDensityRaw) ?? .comfortable
     }
@@ -405,30 +416,6 @@ struct ContentView: View {
         case .idle:
             return "Idle"
         }
-    }
-
-    private var repoGroups: [RepoSessionGroup] {
-        let grouped = Dictionary(grouping: filteredSessions) { session in
-            let path = URL(fileURLWithPath: session.cwd)
-            let repo = path.lastPathComponent
-            return repo.isEmpty ? "workspace" : repo
-        }
-
-        return grouped
-            .map { repoName, sessions in
-                let sortedSessions = sessions.sorted(by: { sessionActivityUnixMs($0) > sessionActivityUnixMs($1) })
-                return RepoSessionGroup(
-                    repoName: repoName,
-                    sessions: sortedSessions,
-                    latestActivityUnixMs: sortedSessions.first.map(sessionActivityUnixMs) ?? 0
-                )
-            }
-            .sorted(by: {
-                if $0.latestActivityUnixMs == $1.latestActivityUnixMs {
-                    return $0.repoName.localizedCaseInsensitiveCompare($1.repoName) == .orderedAscending
-                }
-                return $0.latestActivityUnixMs > $1.latestActivityUnixMs
-            })
     }
 
     private var visibleSessions: [SessionSummary] {
@@ -491,8 +478,21 @@ struct ContentView: View {
         }
     }
 
+    private var sessionRailLayout: SessionRailLayout {
+        buildSessionRailLayout(
+            sessions: filteredSessions,
+            groupingMode: selectedSessionGroupingMode,
+            selectedSessionID: store.selectedSessionID,
+            visibleLimit: normalizedSessionRailVisibleLimit
+        )
+    }
+
+    private var sessionRailGroups: [SessionRailGroup] {
+        sessionRailLayout.groups
+    }
+
     private var shouldShowRepoHeaders: Bool {
-        repoGroups.count > 1
+        selectedSessionGroupingMode == .repository && sessionRailGroups.count > 1
     }
 
     private var welcomeQuickSwitchSessions: [SessionSummary] {
@@ -731,6 +731,8 @@ struct ContentView: View {
             autoSubmitVoice: $autoSubmitVoice,
             themeModeRaw: $themeModeRaw,
             threadDensityRaw: $threadDensityRaw,
+            sessionGroupingModeRaw: $sessionGroupingModeRaw,
+            sessionRailVisibleLimit: $sessionRailVisibleLimit,
             transcriptDensityRaw: $transcriptDensityRaw,
             openDestinationRaw: $openDestinationRaw,
             followupModeRaw: $followupModeRaw,
@@ -795,7 +797,7 @@ struct ContentView: View {
             }
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     if !visibleSessions.isEmpty {
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass")
@@ -811,7 +813,7 @@ struct ContentView: View {
                         .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
 
-                    if repoGroups.isEmpty {
+                    if sessionRailGroups.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             Text(threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No threads" : "No matching threads")
                                 .font(.subheadline.weight(.semibold))
@@ -854,6 +856,13 @@ struct ContentView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.9))
 
+                            Text("\(sessionRailLayout.totalCount)")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.7))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
+
                             if showsDeveloperDiagnostics && totalHiddenSessionCount > 0 {
                                 Text("\(totalHiddenSessionCount) hidden")
                                     .font(.caption2)
@@ -873,24 +882,126 @@ struct ContentView: View {
                             }
 
                             Spacer()
-                        }
 
-                        ForEach(repoGroups) { group in
-                            VStack(alignment: .leading, spacing: 8) {
-                                if shouldShowRepoHeaders {
-                                    HStack {
-                                        Text(group.repoName)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-
-                                        Spacer()
-                                        Text("\(group.sessions.count)")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
+                            Menu {
+                                Section("Grouping") {
+                                    Picker("Grouping", selection: $sessionGroupingModeRaw) {
+                                        ForEach(SessionRailGroupingMode.allCases) { option in
+                                            Text(option.label).tag(option.rawValue)
+                                        }
                                     }
                                 }
 
-                                if group.sessions.isEmpty {
+                                Section("Density") {
+                                    Picker("Thread density", selection: $threadDensityRaw) {
+                                        ForEach(ThreadDensity.allCases) { option in
+                                            Text(option.label).tag(option.rawValue)
+                                        }
+                                    }
+                                }
+
+                                Section("Visible threads") {
+                                    Button("Show \(SessionRailDisplayPolicy.visibleLimitStep) more") {
+                                        sessionRailVisibleLimit = SessionRailDisplayPolicy.normalizedVisibleLimit(
+                                            normalizedSessionRailVisibleLimit + SessionRailDisplayPolicy.visibleLimitStep
+                                        )
+                                    }
+                                    .disabled(!sessionRailLayout.isTruncated)
+
+                                    Button("Show all") {
+                                        sessionRailVisibleLimit = SessionRailDisplayPolicy.maxVisibleLimit
+                                    }
+                                    .disabled(!sessionRailLayout.isTruncated)
+
+                                    Button("Reset thread cap") {
+                                        sessionRailVisibleLimit = SessionRailDisplayPolicy.defaultVisibleLimit
+                                    }
+                                    .disabled(normalizedSessionRailVisibleLimit == SessionRailDisplayPolicy.defaultVisibleLimit)
+                                }
+                            } label: {
+                                Image(systemName: "slider.horizontal.3")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.84))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                    .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
+                            }
+                            .accessibilityIdentifier("sidebar.rail-controls")
+                        }
+
+                        if sessionRailLayout.isTruncated {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Showing \(sessionRailLayout.visibleCount) of \(sessionRailLayout.totalCount) threads")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                HStack(spacing: 8) {
+                                    Button("Show \(min(SessionRailDisplayPolicy.visibleLimitStep, sessionRailLayout.hiddenCount)) more") {
+                                        sessionRailVisibleLimit = SessionRailDisplayPolicy.normalizedVisibleLimit(
+                                            normalizedSessionRailVisibleLimit + SessionRailDisplayPolicy.visibleLimitStep
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.82))
+                                    .accessibilityIdentifier("sidebar.show-more")
+
+                                    Button("Show all") {
+                                        sessionRailVisibleLimit = SessionRailDisplayPolicy.maxVisibleLimit
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.82))
+                                    .accessibilityIdentifier("sidebar.show-all")
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+
+                        ForEach(sessionRailGroups) { group in
+                            VStack(alignment: .leading, spacing: 8) {
+                                if shouldShowRepoHeaders {
+                                    let isCollapsed = collapsedSessionRailGroupIDs.contains(group.id)
+                                    Button {
+                                        if isCollapsed {
+                                            collapsedSessionRailGroupIDs.remove(group.id)
+                                        } else {
+                                            collapsedSessionRailGroupIDs.insert(group.id)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                            Text(group.title)
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+
+                                            Spacer()
+
+                                            Text("\(group.sessions.count)/\(group.totalCount)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+
+                                            if group.hiddenCount > 0 {
+                                                Text("+\(group.hiddenCount)")
+                                                    .font(.caption2.weight(.semibold))
+                                                    .foregroundStyle(.white.opacity(0.65))
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.white.opacity(0.05), in: Capsule(style: .continuous))
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("sidebar.group.\(group.id)")
+                                }
+
+                                if shouldShowRepoHeaders && collapsedSessionRailGroupIDs.contains(group.id) {
+                                    EmptyView()
+                                } else if group.sessions.isEmpty {
                                     Text("No threads")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -923,6 +1034,14 @@ struct ContentView: View {
                 await store.refreshSessions()
             }
             #endif
+            .onChange(of: selectedSessionGroupingMode) { _, mode in
+                if mode == .flat {
+                    collapsedSessionRailGroupIDs.removeAll()
+                }
+            }
+            .onChange(of: sessionRailGroups.map(\.id)) { _, groupIDs in
+                collapsedSessionRailGroupIDs = collapsedSessionRailGroupIDs.intersection(Set(groupIDs))
+            }
 
             Spacer(minLength: 8)
 
@@ -3202,9 +3321,7 @@ struct ContentView: View {
     }
 
     private func sessionRepoName(for session: SessionSummary) -> String {
-        let repoName = URL(fileURLWithPath: session.cwd).lastPathComponent
-        let folder = repoName.isEmpty ? "workspace" : repoName
-        return folder
+        sessionRailRepoName(for: session)
     }
 
     private func sessionThreadTitle(for session: SessionSummary) -> String? {
@@ -3572,7 +3689,7 @@ struct ContentView: View {
     }
 
     private func sessionActivityUnixMs(_ session: SessionSummary) -> UInt64 {
-        max(session.lastEventAtUnixMs, session.createdAtUnixMs)
+        sessionRailActivityUnixMs(session)
     }
 
     private var ideOpenFailureIsPresented: Binding<Bool> {
@@ -3923,13 +4040,6 @@ struct ContentView: View {
         lastSpokenItemID = lastItem.id
         voiceOutput.speak(text)
     }
-}
-
-private struct RepoSessionGroup: Identifiable {
-    var id: String { repoName }
-    let repoName: String
-    let sessions: [SessionSummary]
-    let latestActivityUnixMs: UInt64
 }
 
 private enum AppThemeMode: String, CaseIterable, Identifiable {
@@ -8156,6 +8266,8 @@ private struct NativeSettingsView: View {
     @Binding var autoSubmitVoice: Bool
     @Binding var themeModeRaw: String
     @Binding var threadDensityRaw: String
+    @Binding var sessionGroupingModeRaw: String
+    @Binding var sessionRailVisibleLimit: Int
     @Binding var transcriptDensityRaw: String
     @Binding var openDestinationRaw: String
     @Binding var followupModeRaw: String
@@ -8340,6 +8452,38 @@ private struct NativeSettingsView: View {
                 .frame(width: isCompactSettingsLayout ? nil : 240)
             }
 
+            SettingsRow(title: "Thread grouping", description: "Choose how sessions are grouped in the thread rail.") {
+                Picker("", selection: $sessionGroupingModeRaw) {
+                    ForEach(SessionRailGroupingMode.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 260)
+            }
+
+            SettingsRow(title: "Visible thread cap", description: "Limit rendered rows for smoother scrolling in large catalogs.") {
+                HStack(spacing: 10) {
+                    Slider(
+                        value: Binding(
+                            get: { Double(SessionRailDisplayPolicy.normalizedVisibleLimit(sessionRailVisibleLimit)) },
+                            set: { rawValue in
+                                let rounded = Int(rawValue.rounded(.toNearestOrAwayFromZero))
+                                sessionRailVisibleLimit = SessionRailDisplayPolicy.normalizedVisibleLimit(rounded)
+                            }
+                        ),
+                        in: Double(SessionRailDisplayPolicy.minVisibleLimit)...Double(SessionRailDisplayPolicy.maxVisibleLimit),
+                        step: Double(SessionRailDisplayPolicy.visibleLimitStep)
+                    )
+                    .frame(width: isCompactSettingsLayout ? nil : 220)
+
+                    Text("\(SessionRailDisplayPolicy.normalizedVisibleLimit(sessionRailVisibleLimit))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+            }
+
             SettingsRow(title: "Transcript density", description: "Adjust message spacing and card width in transcript view.") {
                 Picker("", selection: $transcriptDensityRaw) {
                     ForEach(TranscriptDensity.allCases) { option in
@@ -8497,6 +8641,9 @@ private struct NativeSettingsView: View {
                 options: approvalPolicyOptions,
                 fallback: "On request"
             )
+            sessionGroupingModeRaw = SessionRailGroupingMode(rawValue: sessionGroupingModeRaw)?.rawValue
+                ?? SessionRailGroupingMode.repository.rawValue
+            sessionRailVisibleLimit = SessionRailDisplayPolicy.normalizedVisibleLimit(sessionRailVisibleLimit)
             defaultSessionIDERaw = SessionIDEPreferences.normalizedDefaultIDE(
                 rawDefaultIDE: defaultSessionIDERaw,
                 available: availableIDEs

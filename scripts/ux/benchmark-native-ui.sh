@@ -23,6 +23,7 @@ SCENARIOS=(
 	"git-recovery"
 	"ide-integration"
 	"settings-workflow-controls"
+	"session-rail-scale"
 	"disconnected-state"
 	"settings-shell"
 )
