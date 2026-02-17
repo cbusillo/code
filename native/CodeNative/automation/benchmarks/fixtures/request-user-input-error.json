@@ -1,0 +1,51 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-request-input-error",
+  "client_id": "bench-request-input-error",
+  "selected_session_id": "00000000-0000-0000-0000-00000000ae02",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000ae02",
+        "conversation_id": "00000000-0000-0000-0000-00000000ae02",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700001110000,
+        "last_event_at_unix_ms": 1700001111000,
+        "title": "Milestone 2 request-user-input error"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000ae02",
+          "seq": 1,
+          "event": {
+            "id": "rui-error-request-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "request_user_input",
+              "call_id": "call-rui-error-1",
+              "turn_id": "turn-rui-error-1",
+              "questions": [
+                {
+                  "id": "project_type",
+                  "question": "Which project type should we optimize for first?",
+                  "is_other": false,
+                  "is_secret": false,
+                  "options": [
+                    {
+                      "label": "CLI app",
+                      "description": "Terminal-first workflow"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

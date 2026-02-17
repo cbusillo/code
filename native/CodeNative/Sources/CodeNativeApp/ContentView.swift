@@ -6228,6 +6228,11 @@ private func normalizedStructuredActivityLines(from value: String) -> [String] {
 }
 
 private struct TranscriptCard: View {
+    private enum RequestInputSubmissionState {
+        case idle
+        case submitted
+    }
+
     let item: SessionStreamItem
     let isActive: Bool
     let density: TranscriptDensity
@@ -6243,7 +6248,7 @@ private struct TranscriptCard: View {
     @State private var selectedDecision: ApprovalDecisionChoice = .approved
     @State private var requestInputSelections: [String: String] = [:]
     @State private var requestInputNotes: [String: String] = [:]
-    @State private var requestInputDidSubmit = false
+    @State private var requestInputSubmissionState: RequestInputSubmissionState = .idle
     @State private var isExpanded = false
     @State private var diffExpansionSteps = 0
     @State private var copiedDiffRecoveryCommandLabel: String?
@@ -6849,8 +6854,8 @@ private struct TranscriptCard: View {
                         }
                     }
                 }
-            } else if let requestInput = item.requestUserInputPrompt {
-                requestUserInputContent(requestInput)
+            } else if let requestInputState = item.requestUserInputPromptState {
+                requestUserInputContent(requestInputState)
             } else {
                 Text(displayedBody)
                     .font(
@@ -7002,6 +7007,11 @@ private struct TranscriptCard: View {
         .onTapGesture {
             onActivate()
         }
+        .onChange(of: item.id) { _, _ in
+            requestInputSelections = [:]
+            requestInputNotes = [:]
+            requestInputSubmissionState = .idle
+        }
         .onChange(of: isActive) { _, active in
             if !active {
                 diffExpansionSteps = 0
@@ -7143,7 +7153,86 @@ private struct TranscriptCard: View {
     }
 
     @ViewBuilder
-    private func requestUserInputContent(_ request: RequestUserInputPrompt) -> some View {
+    private func requestUserInputContent(_ state: RequestUserInputPromptState) -> some View {
+        switch state {
+        case .ready(let request):
+            requestUserInputReadyContent(request)
+        case .loading(let callId, _):
+            requestUserInputPlaceholderContent(
+                icon: "hourglass",
+                title: "Preparing questions",
+                message: "Waiting for question payload before you can respond.",
+                callId: callId,
+                isError: false
+            )
+        case .empty(let callId, _):
+            requestUserInputPlaceholderContent(
+                icon: "questionmark.bubble",
+                title: "No questions provided",
+                message: "This prompt did not include any questions. Ask to retry with a complete request payload.",
+                callId: callId,
+                isError: true
+            )
+        case .invalid(let callId, _, let reason):
+            requestUserInputPlaceholderContent(
+                icon: "exclamationmark.triangle.fill",
+                title: "Question payload is invalid",
+                message: reason,
+                callId: callId,
+                isError: true
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func requestUserInputPlaceholderContent(
+        icon: String,
+        title: String,
+        message: String,
+        callId: String,
+        isError: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(isError ? Color.orange.opacity(0.95) : Color.white.opacity(0.84))
+
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isError ? Color.orange.opacity(0.95) : .secondary)
+
+                Spacer(minLength: 8)
+
+                Text("request_user_input")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Call id: \(callId)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.white.opacity(0.78))
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isError ? Color.orange.opacity(0.34) : Color.white.opacity(0.1), lineWidth: 1)
+        )
+        .accessibilityIdentifier(isError ? "input.state.error" : "input.state.loading")
+    }
+
+    @ViewBuilder
+    private func requestUserInputReadyContent(_ request: RequestUserInputPrompt) -> some View {
+        let canSendResponse = canSubmitRequestUserInput(request)
+        let isSubmitted = requestInputSubmissionState == .submitted
+
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "person.fill.questionmark")
@@ -7159,7 +7248,7 @@ private struct TranscriptCard: View {
                     .foregroundStyle(.secondary)
             }
 
-            ForEach(request.questions) { question in
+            ForEach(Array(request.questions.enumerated()), id: \.element.id) { questionIndex, question in
                 VStack(alignment: .leading, spacing: 7) {
                     Text(question.header)
                         .font(.caption.weight(.semibold))
@@ -7168,24 +7257,39 @@ private struct TranscriptCard: View {
                     Text(question.question)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     if !question.options.isEmpty {
-                        ForEach(question.options, id: \.label) { option in
+                        ForEach(Array(question.options.enumerated()), id: \.element.label) { optionIndex, option in
                             let isSelected = requestInputSelections[question.id] == option.label
+                            let canAssignShortcut = questionIndex == 0 && optionIndex < 9
+
                             Button {
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     requestInputSelections[question.id] = option.label
                                 }
-                                requestInputDidSubmit = false
+                                requestInputSubmissionState = .idle
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: isSelected ? "circle.inset.filled" : "circle")
                                         .font(.caption)
                                         .foregroundStyle(isSelected ? Color.orange.opacity(0.9) : .secondary)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(option.label)
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.primary)
+                                        HStack(spacing: 6) {
+                                            Text(option.label)
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.primary)
+
+                                            if canAssignShortcut {
+                                                Text("\(optionIndex + 1)")
+                                                    .font(.caption2.monospaced())
+                                                    .foregroundStyle(.secondary)
+                                                    .padding(.horizontal, 5)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                                            }
+                                        }
+
                                         if !option.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                             Text(option.description)
                                                 .font(.caption2)
@@ -7205,7 +7309,15 @@ private struct TranscriptCard: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("input.option.\(question.id).\(option.label)")
+                            .accessibilityLabel("\(option.label). \(option.description)")
+                            .accessibilityHint(canAssignShortcut ? "Press \(optionIndex + 1) to select this option" : "")
                             .accessibilityAddTraits(isSelected ? .isSelected : [])
+                            #if os(macOS)
+                            .keyboardShortcut(
+                                KeyEquivalent(Character("\(optionIndex + 1)")),
+                                modifiers: canAssignShortcut ? [] : [.command, .option, .shift, .control]
+                            )
+                            #endif
                         }
                     }
 
@@ -7213,7 +7325,7 @@ private struct TranscriptCard: View {
                         get: { requestInputNotes[question.id] ?? "" },
                         set: {
                             requestInputNotes[question.id] = $0
-                            requestInputDidSubmit = false
+                            requestInputSubmissionState = .idle
                         }
                     )
 
@@ -7222,10 +7334,12 @@ private struct TranscriptCard: View {
                         SecureField(notePlaceholder, text: noteBinding)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityIdentifier("input.note.\(question.id)")
+                            .accessibilityLabel("\(question.header) secret answer")
                     } else {
                         TextField(notePlaceholder, text: noteBinding)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityIdentifier("input.note.\(question.id)")
+                            .accessibilityLabel("\(question.header) response")
                     }
                 }
                 .padding(10)
@@ -7239,6 +7353,7 @@ private struct TranscriptCard: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(isSubmitted)
                 .accessibilityIdentifier("input.skip")
                 .accessibilityHint("Dismiss without answering")
                 #if os(macOS)
@@ -7253,14 +7368,22 @@ private struct TranscriptCard: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(.orange)
+                .disabled(!canSendResponse || isSubmitted)
                 .accessibilityIdentifier("input.send")
-                .accessibilityHint("Submit your answers")
+                .accessibilityHint(canSendResponse ? "Submit your answers" : "Select an option or type a response first")
                 #if os(macOS)
                 .keyboardShortcut(.defaultAction)
                 #endif
             }
 
-            if requestInputDidSubmit {
+            if !canSendResponse && !isSubmitted {
+                Text("Select an option or enter text to enable Send response.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("input.validation")
+            }
+
+            if isSubmitted {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption2)
@@ -7273,8 +7396,24 @@ private struct TranscriptCard: View {
         }
     }
 
+    private func canSubmitRequestUserInput(_ request: RequestUserInputPrompt) -> Bool {
+        for question in request.questions {
+            if let selected = requestInputSelections[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !selected.isEmpty {
+                return true
+            }
+
+            if let note = requestInputNotes[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !note.isEmpty {
+                return true
+            }
+        }
+
+        return false
+    }
+
     private func submitRequestUserInput(_ request: RequestUserInputPrompt, skip: Bool) {
-        requestInputDidSubmit = true
+        requestInputSubmissionState = .submitted
         if skip {
             onRequestUserInputResponse([:])
             return

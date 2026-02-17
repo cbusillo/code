@@ -1000,6 +1000,38 @@ struct RequestUserInputPrompt: Hashable {
     let questions: [RequestUserInputQuestion]
 }
 
+enum RequestUserInputPromptState: Hashable {
+    case ready(RequestUserInputPrompt)
+    case loading(callId: String, turnId: String)
+    case empty(callId: String, turnId: String)
+    case invalid(callId: String, turnId: String, reason: String)
+
+    var callId: String {
+        switch self {
+        case .ready(let prompt):
+            return prompt.callId
+        case .loading(let callId, _), .empty(let callId, _), .invalid(let callId, _, _):
+            return callId
+        }
+    }
+
+    var turnId: String {
+        switch self {
+        case .ready(let prompt):
+            return prompt.turnId
+        case .loading(_, let turnId), .empty(_, let turnId), .invalid(_, let turnId, _):
+            return turnId
+        }
+    }
+
+    var isResponseActionable: Bool {
+        if case .ready = self {
+            return true
+        }
+        return false
+    }
+}
+
 struct ExecCommandInfo {
     let command: String
     let output: String
@@ -1532,32 +1564,79 @@ extension SessionStreamItem {
     }
 
     var requestUserInputPrompt: RequestUserInputPrompt? {
+        guard case .ready(let prompt) = requestUserInputPromptState else {
+            return nil
+        }
+        return prompt
+    }
+
+    var requestUserInputPromptState: RequestUserInputPromptState? {
         guard type == "core_event",
               let payload = event?.payload,
               payload.typeHint == "request_user_input",
               let object = payload.objectValue,
-              let callId = object["call_id"]?.stringValue,
-              let questionsArray = object["questions"]?.arrayValue,
-              !questionsArray.isEmpty
+              let callId = object["call_id"]?.stringValue
         else {
             return nil
         }
 
         let turnId = object["turn_id"]?.stringValue ?? callId
 
-        let questions = questionsArray.compactMap { value -> RequestUserInputQuestion? in
-            guard let question = value.objectValue,
-                  let id = question["id"]?.stringValue,
-                  let header = question["header"]?.stringValue,
-                  let prompt = question["question"]?.stringValue
+        guard let questionsArray = object["questions"]?.arrayValue else {
+            return .loading(callId: callId, turnId: turnId)
+        }
+
+        if questionsArray.isEmpty {
+            return .empty(callId: callId, turnId: turnId)
+        }
+
+        var questions: [RequestUserInputQuestion] = []
+        questions.reserveCapacity(questionsArray.count)
+
+        for (index, value) in questionsArray.enumerated() {
+            guard let question = value.objectValue else {
+                return .invalid(
+                    callId: callId,
+                    turnId: turnId,
+                    reason: "Question payload #\(index + 1) is not an object."
+                )
+            }
+
+            guard let id = question["id"]?.stringValue,
+                  !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else {
-                return nil
+                return .invalid(
+                    callId: callId,
+                    turnId: turnId,
+                    reason: "Question #\(index + 1) is missing an id."
+                )
+            }
+
+            guard let header = question["header"]?.stringValue,
+                  !header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return .invalid(
+                    callId: callId,
+                    turnId: turnId,
+                    reason: "Question #\(index + 1) is missing a header."
+                )
+            }
+
+            guard let prompt = question["question"]?.stringValue,
+                  !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return .invalid(
+                    callId: callId,
+                    turnId: turnId,
+                    reason: "Question #\(index + 1) is missing prompt text."
+                )
             }
 
             let options = question["options"]?.arrayValue?
                 .compactMap { optionValue -> RequestUserInputOption? in
                     guard let option = optionValue.objectValue,
-                          let label = option["label"]?.stringValue
+                          let label = option["label"]?.stringValue,
+                          !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     else {
                         return nil
                     }
@@ -1566,21 +1645,23 @@ extension SessionStreamItem {
                     return RequestUserInputOption(label: label, description: description)
                 } ?? []
 
-            return RequestUserInputQuestion(
-                id: id,
-                header: header,
-                question: prompt,
-                isOther: question["is_other"]?.boolValue ?? false,
-                isSecret: question["is_secret"]?.boolValue ?? false,
-                options: options
+            questions.append(
+                RequestUserInputQuestion(
+                    id: id,
+                    header: header,
+                    question: prompt,
+                    isOther: question["is_other"]?.boolValue ?? false,
+                    isSecret: question["is_secret"]?.boolValue ?? false,
+                    options: options
+                )
             )
         }
 
         guard !questions.isEmpty else {
-            return nil
+            return .empty(callId: callId, turnId: turnId)
         }
 
-        return RequestUserInputPrompt(callId: callId, turnId: turnId, questions: questions)
+        return .ready(RequestUserInputPrompt(callId: callId, turnId: turnId, questions: questions))
     }
 
     var turnDiffText: String? {

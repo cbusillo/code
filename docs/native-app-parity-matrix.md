@@ -29,7 +29,7 @@ Legend:
 | PAR-011 | Slash command launcher parity (core set) | Every Code TUI | present | P1 | M2 |
 | PAR-012 | Mention-style context insertion | Every Code TUI | present | P1 | M2 |
 | PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | present | P1 | M2 |
-| PAR-014 | Request-user-input parity UI | Every Code TUI | partial | P1 | M2 |
+| PAR-014 | Request-user-input parity UI | Every Code TUI | present | P1 | M2 |
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | present | P1 | M2 |
 | PAR-016 | IDE integration robustness | Mac + native | present | P1 | M2 |
 | PAR-017 | Multi-agent progress visualization | Every Code TUI | missing | P2 | M3 |
@@ -153,8 +153,14 @@ Legend:
 - Acceptance criteria: request-user-input cards support option selection, notes,
   submit, and skip semantics.
 - Validation gate: request-user-input scenario + `swift test`.
-- Progress: request-user-input transcript card + response submission wiring
-  shipped in Milestone 2 batch 1.
+- Progress: request-user-input cards now include full question fidelity
+  (multi-question, option metadata, secret/note fields), guarded action
+  handling (send disabled until answers exist, submitted-state lock), explicit
+  loading/empty/error fallback states for malformed payloads, and improved
+  keyboard/accessibility behavior (Return submit, Escape skip, numeric option
+  shortcuts for primary question). Deterministic evidence captured via
+  `request-user-input`, `request-user-input-depth`, and
+  `request-user-input-error` scenarios.
 
 ## PAR-015
 

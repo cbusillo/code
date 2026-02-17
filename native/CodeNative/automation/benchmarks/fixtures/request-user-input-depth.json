@@ -1,0 +1,68 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-request-input-depth",
+  "client_id": "bench-request-input-depth",
+  "selected_session_id": "00000000-0000-0000-0000-00000000ae01",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000ae01",
+        "conversation_id": "00000000-0000-0000-0000-00000000ae01",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700001100000,
+        "last_event_at_unix_ms": 1700001102000,
+        "title": "Milestone 2 request-user-input depth"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000ae01",
+          "seq": 1,
+          "event": {
+            "id": "rui-depth-request-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "request_user_input",
+              "call_id": "call-rui-depth-1",
+              "turn_id": "turn-rui-depth-1",
+              "questions": [
+                {
+                  "id": "project_type",
+                  "header": "Project type",
+                  "question": "Which project type should we optimize for first?",
+                  "is_other": false,
+                  "is_secret": false,
+                  "options": [
+                    {
+                      "label": "CLI app",
+                      "description": "Terminal-first workflow"
+                    },
+                    {
+                      "label": "Desktop app",
+                      "description": "Native GUI workflow"
+                    },
+                    {
+                      "label": "API service",
+                      "description": "Server-side automation"
+                    }
+                  ]
+                },
+                {
+                  "id": "api_key",
+                  "header": "API key",
+                  "question": "Provide an API key for validation runs.",
+                  "is_other": false,
+                  "is_secret": true,
+                  "options": []
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

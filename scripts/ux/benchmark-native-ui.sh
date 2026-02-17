@@ -14,6 +14,8 @@ SCENARIOS=(
 	"activity-heavy"
 	"approval-pending"
 	"request-user-input"
+	"request-user-input-depth"
+	"request-user-input-error"
 	"command-launcher"
 	"command-launcher-depth"
 	"context-mention"

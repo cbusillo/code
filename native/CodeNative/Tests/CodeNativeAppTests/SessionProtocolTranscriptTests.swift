@@ -321,6 +321,75 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.cardStyle, .approval)
         XCTAssertEqual(item.requestUserInputPrompt?.turnId, "turn-input-1")
         XCTAssertEqual(item.requestUserInputPrompt?.questions.first?.id, "project_type")
+        if case .ready(let prompt)? = item.requestUserInputPromptState {
+            XCTAssertEqual(prompt.callId, "call-input-1")
+        } else {
+            XCTFail("Expected ready request-user-input state")
+        }
+    }
+
+    func testRequestUserInputStateLoadingWhenQuestionsMissing() {
+        let item = makeCoreEventItem(
+            seq: 22,
+            payload: .object([
+                "type": .string("request_user_input"),
+                "call_id": .string("call-input-loading")
+            ])
+        )
+
+        XCTAssertNil(item.requestUserInputPrompt)
+        if case .loading(let callId, let turnId)? = item.requestUserInputPromptState {
+            XCTAssertEqual(callId, "call-input-loading")
+            XCTAssertEqual(turnId, "call-input-loading")
+        } else {
+            XCTFail("Expected loading request-user-input state")
+        }
+    }
+
+    func testRequestUserInputStateEmptyWhenQuestionsArrayIsEmpty() {
+        let item = makeCoreEventItem(
+            seq: 23,
+            payload: .object([
+                "type": .string("request_user_input"),
+                "call_id": .string("call-input-empty"),
+                "turn_id": .string("turn-input-empty"),
+                "questions": .array([])
+            ])
+        )
+
+        XCTAssertNil(item.requestUserInputPrompt)
+        if case .empty(let callId, let turnId)? = item.requestUserInputPromptState {
+            XCTAssertEqual(callId, "call-input-empty")
+            XCTAssertEqual(turnId, "turn-input-empty")
+        } else {
+            XCTFail("Expected empty request-user-input state")
+        }
+    }
+
+    func testRequestUserInputStateInvalidWhenQuestionMissingHeader() {
+        let item = makeCoreEventItem(
+            seq: 24,
+            payload: .object([
+                "type": .string("request_user_input"),
+                "call_id": .string("call-input-invalid"),
+                "turn_id": .string("turn-input-invalid"),
+                "questions": .array([
+                    .object([
+                        "id": .string("project_type"),
+                        "question": .string("Which project type are you building?")
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertNil(item.requestUserInputPrompt)
+        if case .invalid(let callId, let turnId, let reason)? = item.requestUserInputPromptState {
+            XCTAssertEqual(callId, "call-input-invalid")
+            XCTAssertEqual(turnId, "turn-input-invalid")
+            XCTAssertTrue(reason.contains("missing a header"))
+        } else {
+            XCTFail("Expected invalid request-user-input state")
+        }
     }
 
     func testUserInputAnswerEventBodySummarizesResponseCount() {
