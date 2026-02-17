@@ -8,6 +8,23 @@ final class SessionMirrorStore: ObservableObject {
     // sparse so list decoding doesn't interrupt typing responsiveness.
     private static let catalogRefreshIntervalNanoseconds: UInt64 = 15_000_000_000
     private static let sessionListRequestTimeoutSeconds: TimeInterval = 20
+    private static let historyPageRequestThrottleSeconds: TimeInterval = 0.35
+    private static let slowHistoryPageThresholdMs: Double = 350
+
+    struct HistoryPageTelemetry {
+        var requestCount: UInt64 = 0
+        var successCount: UInt64 = 0
+        // Counts pages likely to hitch rendering; this is a proxy, not actual dropped-frame telemetry.
+        var slowPageCount: UInt64 = 0
+        var totalLatencyMs: Double = 0
+
+        var averageLatencyMs: Double {
+            guard successCount > 0 else {
+                return 0
+            }
+            return totalLatencyMs / Double(successCount)
+        }
+    }
 
     enum ConnectionState: String {
         case disconnected
@@ -22,6 +39,7 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var itemsBySession: [UUID: [SessionStreamItem]] = [:]
     @Published private(set) var unavailableSessionErrors: [UUID: String] = [:]
     @Published private(set) var historyPageLoadInFlightSessionIDs: Set<UUID> = []
+    @Published private(set) var historyPageTelemetry = HistoryPageTelemetry()
     @Published var composerText: String = ""
     @Published var selectedSessionID: UUID? {
         didSet {
@@ -57,6 +75,8 @@ final class SessionMirrorStore: ObservableObject {
     private var attachmentGeneration: UInt64 = 0
     private var pendingAttachRequestSessionIDs: [String: UUID] = [:]
     private var pendingHistoryPageRequestSessionIDs: [String: UUID] = [:]
+    private var historyPageRequestStartedAtByRequestID: [String: Date] = [:]
+    private var lastHistoryPageRequestAtBySessionID: [UUID: Date] = [:]
     private var hasMoreHistoryBeforeBySessionID: [UUID: Bool] = [:]
     private var unavailableSessionActivitySnapshot: [UUID: UInt64] = [:]
     private var sessionListRequestID: String?
@@ -255,6 +275,8 @@ final class SessionMirrorStore: ObservableObject {
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
         pendingAttachRequestSessionIDs.removeAll()
         pendingHistoryPageRequestSessionIDs.removeAll()
+        historyPageRequestStartedAtByRequestID.removeAll()
+        lastHistoryPageRequestAtBySessionID.removeAll()
         hasMoreHistoryBeforeBySessionID.removeAll()
         historyPageLoadInFlightSessionIDs.removeAll()
         sessionListRequestID = nil
@@ -455,6 +477,14 @@ final class SessionMirrorStore: ObservableObject {
         case .sessionHistoryPage(let message):
             if let requestId = message.requestId {
                 pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId)
+                if let startedAt = historyPageRequestStartedAtByRequestID.removeValue(forKey: requestId) {
+                    let latencyMs = Date().timeIntervalSince(startedAt) * 1_000
+                    historyPageTelemetry.successCount += 1
+                    historyPageTelemetry.totalLatencyMs += latencyMs
+                    if latencyMs > Self.slowHistoryPageThresholdMs {
+                        historyPageTelemetry.slowPageCount += 1
+                    }
+                }
             }
             historyPageLoadInFlightSessionIDs.remove(message.sessionId)
 
@@ -498,6 +528,7 @@ final class SessionMirrorStore: ObservableObject {
             lastError = message.message
             if let requestId = message.requestId,
                let historySessionID = pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId) {
+                historyPageRequestStartedAtByRequestID.removeValue(forKey: requestId)
                 historyPageLoadInFlightSessionIDs.remove(historySessionID)
                 statusLine = "History load failed"
             } else if let requestId = message.requestId,
@@ -613,12 +644,20 @@ final class SessionMirrorStore: ObservableObject {
             return
         }
 
+        if let lastRequestAt = lastHistoryPageRequestAtBySessionID[sessionID],
+           Date().timeIntervalSince(lastRequestAt) < Self.historyPageRequestThrottleSeconds {
+            return
+        }
+
         if hasMoreHistoryBeforeBySessionID[sessionID] == false {
             return
         }
 
         let requestId = nextRequestID()
         historyPageLoadInFlightSessionIDs.insert(sessionID)
+        lastHistoryPageRequestAtBySessionID[sessionID] = Date()
+        historyPageRequestStartedAtByRequestID[requestId] = Date()
+        historyPageTelemetry.requestCount += 1
         pendingHistoryPageRequestSessionIDs[requestId] = sessionID
 
         Task {
@@ -769,11 +808,20 @@ final class SessionMirrorStore: ObservableObject {
         hasMoreHistoryBeforeBySessionID = hasMoreHistoryBeforeBySessionID.filter {
             knownSessionIDs.contains($0.key)
         }
+        lastHistoryPageRequestAtBySessionID = lastHistoryPageRequestAtBySessionID.filter {
+            knownSessionIDs.contains($0.key)
+        }
         historyPageLoadInFlightSessionIDs = Set(historyPageLoadInFlightSessionIDs.filter {
             knownSessionIDs.contains($0)
         })
         pendingHistoryPageRequestSessionIDs = pendingHistoryPageRequestSessionIDs.filter {
             knownSessionIDs.contains($0.value)
+        }
+        historyPageRequestStartedAtByRequestID = historyPageRequestStartedAtByRequestID.filter {
+            if let sessionID = pendingHistoryPageRequestSessionIDs[$0.key] {
+                return knownSessionIDs.contains(sessionID)
+            }
+            return false
         }
     }
 

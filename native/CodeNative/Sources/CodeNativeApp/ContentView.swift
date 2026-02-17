@@ -85,6 +85,7 @@ struct ContentView: View {
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
+    @State private var pendingPrependAnchorItemID: String?
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @FocusState private var composerIsFocused: Bool
@@ -1152,6 +1153,7 @@ struct ContentView: View {
                                 .frame(height: 1)
                                 .id(firstItemID.map { "transcript.top.\($0)" } ?? "transcript.top")
                                 .onAppear {
+                                    pendingPrependAnchorItemID = transcriptItems.first?.id
                                     store.requestOlderHistoryIfNeeded(for: session.id)
                                 }
 
@@ -1173,8 +1175,14 @@ struct ContentView: View {
                                     .padding(.vertical, 2)
                             }
 
-                            ForEach(transcriptItems) { item in
+                            ForEach(Array(transcriptItems.enumerated()), id: \.element.id) { index, item in
                                 transcriptRow(item: item)
+                                    .onAppear {
+                                        if index < 8 {
+                                            pendingPrependAnchorItemID = transcriptItems.first?.id
+                                            store.requestOlderHistoryIfNeeded(for: session.id)
+                                        }
+                                    }
                             }
                         }
 
@@ -1192,10 +1200,23 @@ struct ContentView: View {
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                 }
                 .onChange(of: store.selectedSessionID) { _, _ in
+                    pendingPrependAnchorItemID = nil
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                 }
                 .onChange(of: store.selectedSessionItems.last?.id) { _, _ in
                     scrollTranscriptToBottom(proxy: proxy, animated: true)
+                }
+                .onChange(of: transcriptItems.first?.id) { _, newFirstID in
+                    guard let anchorID = pendingPrependAnchorItemID,
+                          newFirstID != nil,
+                          anchorID != newFirstID,
+                          transcriptItems.contains(where: { $0.id == anchorID })
+                    else {
+                        return
+                    }
+
+                    pendingPrependAnchorItemID = nil
+                    proxy.scrollTo(anchorID, anchor: .top)
                 }
             }
         }
@@ -3866,6 +3887,15 @@ private struct ConnectionPopover: View {
                 Text(store.statusLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            let telemetry = store.historyPageTelemetry
+            if telemetry.requestCount > 0 {
+                Text(
+                    "History pages · req \(telemetry.requestCount) · ok \(telemetry.successCount) · avg \(Int(telemetry.averageLatencyMs))ms · slow \(telemetry.slowPageCount)"
+                )
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
             }
         }
     }
