@@ -168,6 +168,11 @@ final class SessionMirrorStoreTests: XCTestCase {
         XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [10, 11, 12])
         XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
 
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_777",
+            sessionID: sessionId
+        )
+
         try applyServerEnvelope(
             """
             {
@@ -188,6 +193,11 @@ final class SessionMirrorStoreTests: XCTestCase {
 
         XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [7, 8, 9, 10, 11, 12])
         XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
+
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_778",
+            sessionID: sessionId
+        )
 
         try applyServerEnvelope(
             """
@@ -212,6 +222,70 @@ final class SessionMirrorStoreTests: XCTestCase {
 
         XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
         XCTAssertFalse(store.hasMoreHistoryBefore(sessionId))
+    }
+
+    @MainActor
+    func testStoreIgnoresUnexpectedHistoryPageResponses() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(sessionId.uuidString)",
+                  "conversation_id": "\(sessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Session"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(sessionId.uuidString)",
+              "from_seq": 0,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":10,"level":"info","message":"ten"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":11,"level":"info","message":"eleven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":12,"level":"info","message":"twelve"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_unexpected",
+              "session_id": "\(sessionId.uuidString)",
+              "before_seq": 10,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":7,"level":"info","message":"seven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":8,"level":"info","message":"eight"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":9,"level":"info","message":"nine"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), [10, 11, 12])
+        XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
     }
 
     @MainActor
@@ -602,6 +676,73 @@ final class SessionMirrorStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(store.selectedSessionID, newestSessionId)
+    }
+
+    @MainActor
+    func testStoreTrimsInactiveSessionHistoryToBoundMemoryGrowth() throws {
+        let store = SessionMirrorStore()
+        let olderSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000811")!
+        let selectedSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000899")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(olderSessionId.uuidString)",
+                  "conversation_id": "\(olderSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Older"
+                },
+                {
+                  "id": "\(selectedSessionId.uuidString)",
+                  "conversation_id": "\(selectedSessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 2,
+                  "last_event_at_unix_ms": 2,
+                  "title": "Selected"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.selectedSessionID, selectedSessionId)
+
+        let items = (1...2_000)
+            .map { seq in
+                """
+                {"type":"system","session_id":"\(olderSessionId.uuidString)","seq":\(seq),"level":"info","message":"item-\(seq)"}
+                """
+            }
+            .joined(separator: ",")
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(olderSessionId.uuidString)",
+              "from_seq": 0,
+              "has_more_before": false,
+              "items": [
+                \(items)
+              ]
+            }
+            """,
+            to: store
+        )
+
+        let retained = try XCTUnwrap(store.itemsBySession[olderSessionId])
+        XCTAssertEqual(retained.count, 1_500)
+        XCTAssertEqual(retained.first?.seq, 501)
+        XCTAssertEqual(retained.last?.seq, 2_000)
+        XCTAssertTrue(store.hasMoreHistoryBefore(olderSessionId))
     }
 
     @MainActor

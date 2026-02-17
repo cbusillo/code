@@ -10,6 +10,7 @@ final class SessionMirrorStore: ObservableObject {
     private static let sessionListRequestTimeoutSeconds: TimeInterval = 20
     private static let historyPageRequestThrottleSeconds: TimeInterval = 0.35
     private static let slowHistoryPageThresholdMs: Double = 350
+    private static let inactiveSessionItemRetentionLimit = 1_500
 
     struct HistoryPageTelemetry {
         var requestCount: UInt64 = 0
@@ -46,6 +47,7 @@ final class SessionMirrorStore: ObservableObject {
             guard oldValue != selectedSessionID else {
                 return
             }
+            enforceHistoryRetentionPolicy()
             attachmentGeneration = attachmentGeneration.saturatingIncrement()
             let generation = attachmentGeneration
             expectedAttachedSessionID = selectedSessionID
@@ -460,6 +462,7 @@ final class SessionMirrorStore: ObservableObject {
             } else if message.hasMoreBefore == true {
                 hasMoreHistoryBeforeBySessionID[message.sessionId] = true
             }
+            enforceHistoryRetentionPolicy()
             clearSessionUnavailable(message.sessionId)
 
             if !SessionStreamReducer.shouldAcceptSessionAttached(
@@ -476,7 +479,15 @@ final class SessionMirrorStore: ObservableObject {
 
         case .sessionHistoryPage(let message):
             if let requestId = message.requestId {
-                pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId)
+                guard let pendingSessionID = pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId),
+                      pendingSessionID == message.sessionId
+                else {
+                    Self.logger.debug(
+                        "Ignoring stale history page response request_id=\(message.requestId ?? "none", privacy: .public) for session \(message.sessionId.uuidString, privacy: .public)"
+                    )
+                    return
+                }
+
                 if let startedAt = historyPageRequestStartedAtByRequestID.removeValue(forKey: requestId) {
                     let latencyMs = Date().timeIntervalSince(startedAt) * 1_000
                     historyPageTelemetry.successCount += 1
@@ -496,6 +507,7 @@ final class SessionMirrorStore: ObservableObject {
             )
             itemsBySession[message.sessionId] = merged
             hasMoreHistoryBeforeBySessionID[message.sessionId] = message.hasMoreBefore
+            enforceHistoryRetentionPolicy()
 
         case .sessionDetached(let message):
             if attachedSessionID == message.sessionId {
@@ -509,6 +521,7 @@ final class SessionMirrorStore: ObservableObject {
                 items: itemsBySession[sessionId] ?? [],
                 newItem: message.item
             )
+            enforceHistoryRetentionPolicy()
 
             bumpSessionActivity(sessionId: sessionId)
 
@@ -626,31 +639,31 @@ final class SessionMirrorStore: ObservableObject {
         )
     }
 
-    func requestOlderHistoryIfNeeded(for sessionID: UUID) {
+    func requestOlderHistoryIfNeeded(for sessionID: UUID) -> Bool {
         guard connectionState == .connected else {
-            return
+            return false
         }
 
         guard let oldestSeq = itemsBySession[sessionID]?.first?.seq else {
-            return
+            return false
         }
 
         if oldestSeq <= 1 {
             hasMoreHistoryBeforeBySessionID[sessionID] = false
-            return
+            return false
         }
 
         if historyPageLoadInFlightSessionIDs.contains(sessionID) {
-            return
+            return false
         }
 
         if let lastRequestAt = lastHistoryPageRequestAtBySessionID[sessionID],
            Date().timeIntervalSince(lastRequestAt) < Self.historyPageRequestThrottleSeconds {
-            return
+            return false
         }
 
         if hasMoreHistoryBeforeBySessionID[sessionID] == false {
-            return
+            return false
         }
 
         let requestId = nextRequestID()
@@ -670,6 +683,8 @@ final class SessionMirrorStore: ObservableObject {
                 )
             )
         }
+
+        return true
     }
 
     private func send(_ message: OutboundMessage) async {
@@ -825,6 +840,38 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
+    private func enforceHistoryRetentionPolicy() {
+        guard !itemsBySession.isEmpty else {
+            return
+        }
+
+        var retained = itemsBySession
+        var changed = false
+
+        for (sessionID, items) in itemsBySession {
+            guard sessionID != selectedSessionID,
+                  items.count > Self.inactiveSessionItemRetentionLimit
+            else {
+                continue
+            }
+
+            let trimmed = Array(items.suffix(Self.inactiveSessionItemRetentionLimit))
+            if trimmed.count != items.count {
+                retained[sessionID] = trimmed
+                changed = true
+
+                if let firstSeq = trimmed.first?.seq,
+                   firstSeq > 1 {
+                    hasMoreHistoryBeforeBySessionID[sessionID] = true
+                }
+            }
+        }
+
+        if changed {
+            itemsBySession = retained
+        }
+    }
+
     private func markSessionUnavailable(_ sessionID: UUID, message: String) {
         unavailableSessionErrors[sessionID] = message
         if let session = sessions.first(where: { $0.id == sessionID }) {
@@ -906,6 +953,12 @@ extension SessionMirrorStore {
 
     func recordPendingAttachRequestForTesting(requestId: String, sessionID: UUID) {
         pendingAttachRequestSessionIDs[requestId] = sessionID
+    }
+
+    func recordPendingHistoryPageRequestForTesting(requestId: String, sessionID: UUID) {
+        pendingHistoryPageRequestSessionIDs[requestId] = sessionID
+        historyPageLoadInFlightSessionIDs.insert(sessionID)
+        historyPageRequestStartedAtByRequestID[requestId] = Date()
     }
 
     func ingestRawPayloadForTesting(_ payload: String) {

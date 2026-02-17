@@ -5,25 +5,57 @@ enum SessionStreamReducer {
     // beginning of the attached session.
     private static let maxItems: Int? = nil
 
-    private static func normalizedBySequence(
+    private static func trimToMaxItems(_ items: [SessionStreamItem], maxItems: Int?) -> [SessionStreamItem] {
+        guard let maxItems,
+              items.count > maxItems
+        else {
+            return items
+        }
+
+        return Array(items.suffix(maxItems))
+    }
+
+    private static func normalizeUnordered(
         _ items: [SessionStreamItem],
         maxItems: Int?
     ) -> [SessionStreamItem] {
-        var seen: Set<UInt64> = []
-        var ordered: [SessionStreamItem] = []
-        ordered.reserveCapacity(items.count)
+        guard !items.isEmpty else {
+            return []
+        }
 
-        for item in items.sorted(by: { $0.seq < $1.seq }) {
-            if seen.insert(item.seq).inserted {
-                ordered.append(item)
+        let sorted = items.sorted(by: { $0.seq < $1.seq })
+        var deduped: [SessionStreamItem] = []
+        deduped.reserveCapacity(sorted.count)
+
+        var lastSeq: UInt64?
+        for item in sorted {
+            if item.seq == lastSeq {
+                continue
             }
+            deduped.append(item)
+            lastSeq = item.seq
         }
 
-        guard let maxItems else {
-            return ordered
+        return trimToMaxItems(deduped, maxItems: maxItems)
+    }
+
+    private static func ensureNormalized(
+        _ items: [SessionStreamItem],
+        maxItems: Int?
+    ) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return []
         }
 
-        return Array(ordered.suffix(maxItems))
+        var previousSeq = items[0].seq
+        for item in items.dropFirst() {
+            if item.seq <= previousSeq {
+                return normalizeUnordered(items, maxItems: maxItems)
+            }
+            previousSeq = item.seq
+        }
+
+        return trimToMaxItems(items, maxItems: maxItems)
     }
 
     static func shouldAcceptSessionAttached(
@@ -49,31 +81,27 @@ enum SessionStreamReducer {
         fromSeq: UInt64,
         maxItems: Int? = SessionStreamReducer.maxItems
     ) -> [SessionStreamItem] {
-        let normalizedExisting = normalizedBySequence(existing, maxItems: maxItems)
-
         if fromSeq == 0 {
-            return normalizedBySequence(incoming, maxItems: maxItems)
+            return normalizeUnordered(incoming, maxItems: maxItems)
         }
 
+        let normalizedExisting = ensureNormalized(existing, maxItems: maxItems)
+
         guard let highestSeenSeq = normalizedExisting.last?.seq else {
-            return normalizedBySequence(incoming, maxItems: maxItems)
+            return normalizeUnordered(incoming, maxItems: maxItems)
         }
 
         var merged = normalizedExisting
-        var existingSeq = Set(normalizedExisting.map(\.seq))
+        var lastAppendedSeq = highestSeenSeq
 
         for item in incoming.sorted(by: { $0.seq < $1.seq })
-        where item.seq > highestSeenSeq && !existingSeq.contains(item.seq)
+        where item.seq > highestSeenSeq && item.seq != lastAppendedSeq
         {
             merged.append(item)
-            existingSeq.insert(item.seq)
+            lastAppendedSeq = item.seq
         }
 
-        guard let maxItems else {
-            return merged
-        }
-
-        return Array(merged.suffix(maxItems))
+        return trimToMaxItems(merged, maxItems: maxItems)
     }
 
     static func appendLiveItem(
@@ -81,7 +109,7 @@ enum SessionStreamReducer {
         newItem: SessionStreamItem,
         maxItems: Int? = SessionStreamReducer.maxItems
     ) -> [SessionStreamItem] {
-        let normalized = normalizedBySequence(items, maxItems: maxItems)
+        let normalized = ensureNormalized(items, maxItems: maxItems)
 
         if let lastSeq = normalized.last?.seq,
            newItem.seq <= lastSeq {
@@ -91,11 +119,7 @@ enum SessionStreamReducer {
         var next = normalized
         next.append(newItem)
 
-        if let maxItems,
-           next.count > maxItems {
-            next.removeFirst(next.count - maxItems)
-        }
-        return next
+        return trimToMaxItems(next, maxItems: maxItems)
     }
 
     static func mergeOlderHistoryPage(
@@ -104,13 +128,22 @@ enum SessionStreamReducer {
         beforeSeq: UInt64,
         maxItems: Int? = SessionStreamReducer.maxItems
     ) -> [SessionStreamItem] {
-        let normalizedExisting = normalizedBySequence(existing, maxItems: maxItems)
+        let normalizedExisting = ensureNormalized(existing, maxItems: maxItems)
 
-        let olderItems = incoming.filter { $0.seq < beforeSeq }
+        var olderItems = incoming
+            .filter { $0.seq < beforeSeq }
+            .sorted(by: { $0.seq < $1.seq })
+
+        olderItems = ensureNormalized(olderItems, maxItems: nil)
+
+        if let existingFirstSeq = normalizedExisting.first?.seq {
+            olderItems.removeAll { $0.seq >= existingFirstSeq }
+        }
+
         if olderItems.isEmpty {
             return normalizedExisting
         }
 
-        return normalizedBySequence(olderItems + normalizedExisting, maxItems: maxItems)
+        return trimToMaxItems(olderItems + normalizedExisting, maxItems: maxItems)
     }
 }

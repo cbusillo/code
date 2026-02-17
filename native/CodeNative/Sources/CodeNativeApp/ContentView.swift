@@ -1153,8 +1153,9 @@ struct ContentView: View {
                                 .frame(height: 1)
                                 .id(firstItemID.map { "transcript.top.\($0)" } ?? "transcript.top")
                                 .onAppear {
-                                    pendingPrependAnchorItemID = transcriptItems.first?.id
-                                    store.requestOlderHistoryIfNeeded(for: session.id)
+                                    if store.requestOlderHistoryIfNeeded(for: session.id) {
+                                        pendingPrependAnchorItemID = transcriptItems.first?.id
+                                    }
                                 }
 
                             if store.isLoadingOlderHistory(for: session.id) {
@@ -1179,8 +1180,9 @@ struct ContentView: View {
                                 transcriptRow(item: item)
                                     .onAppear {
                                         if index < 8 {
-                                            pendingPrependAnchorItemID = transcriptItems.first?.id
-                                            store.requestOlderHistoryIfNeeded(for: session.id)
+                                            if store.requestOlderHistoryIfNeeded(for: session.id) {
+                                                pendingPrependAnchorItemID = transcriptItems.first?.id
+                                            }
                                         }
                                     }
                             }
@@ -1216,7 +1218,11 @@ struct ContentView: View {
                     }
 
                     pendingPrependAnchorItemID = nil
-                    proxy.scrollTo(anchorID, anchor: .top)
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        proxy.scrollTo(anchorID, anchor: .top)
+                    }
                 }
             }
         }

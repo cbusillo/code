@@ -40,12 +40,13 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const ATTACH_REPLAY_LIMIT: usize = 10_000;
-const ATTACH_REPLAY_BYTE_LIMIT: usize = 4_000_000;
+const NATIVE_WEBSOCKET_FRAME_BUDGET: usize = 1_000_000;
+const ATTACH_REPLAY_BYTE_LIMIT: usize = NATIVE_WEBSOCKET_FRAME_BUDGET - 100_000;
 const ATTACH_REPLAY_ITEM_BYTE_LIMIT: usize = 500_000;
 const COMPACT_REPLAY_ITEM_MAX_CHARS: usize = 1_200;
 const HISTORY_PAGE_LIMIT: usize = 600;
 const HISTORY_PAGE_LIMIT_MAX: usize = 2_000;
-const HISTORY_PAGE_BYTE_LIMIT: usize = 1_200_000;
+const HISTORY_PAGE_BYTE_LIMIT: usize = NATIVE_WEBSOCKET_FRAME_BUDGET - 100_000;
 const ROLLOUT_TAIL_POLL_INTERVAL_MS: u64 = 350;
 const NO_STORE: &str = "no-store, max-age=0";
 
@@ -2061,7 +2062,7 @@ mod tests {
             .sum::<usize>();
 
         assert!(
-            total_bytes <= 1_000_000,
+            total_bytes <= NATIVE_WEBSOCKET_FRAME_BUDGET,
             "initial attach replay should stay below native websocket frame budget, got {total_bytes} bytes"
         );
     }
@@ -2102,6 +2103,32 @@ mod tests {
         assert_eq!(page.items.first().map(SessionStreamItem::seq), Some(1));
         assert_eq!(page.items.last().map(SessionStreamItem::seq), Some(120));
         assert!(!page.has_more_before);
+    }
+
+    #[test]
+    fn truncate_history_before_page_respects_native_websocket_budget() {
+        let history = (1_u64..=3)
+            .map(|seq| SessionStreamItem::System {
+                session_id: Uuid::nil(),
+                seq,
+                level: "info".to_string(),
+                message: "x".repeat(380_000),
+            })
+            .collect::<Vec<_>>();
+
+        let page = truncate_history_before_page(history, 4, 3);
+        assert!(!page.items.is_empty());
+
+        let total_bytes = page
+            .items
+            .iter()
+            .map(estimate_stream_item_json_size)
+            .sum::<usize>();
+
+        assert!(
+            total_bytes <= NATIVE_WEBSOCKET_FRAME_BUDGET,
+            "history page should stay below native websocket frame budget, got {total_bytes} bytes"
+        );
     }
 
     #[tokio::test]
