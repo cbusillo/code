@@ -1,0 +1,29 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-settings-workflow",
+  "client_id": "bench-settings-workflow",
+  "selected_session_id": "00000000-0000-0000-0000-00000000ab01",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000ab01",
+        "conversation_id": "00000000-0000-0000-0000-00000000ab01",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700001000000,
+        "last_event_at_unix_ms": 1700001002000,
+        "title": "Milestone 2 settings workflow controls"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000ab01",
+          "seq": 1,
+          "level": "info",
+          "message": "Ready"
+        }
+      ]
+    }
+  ]
+}

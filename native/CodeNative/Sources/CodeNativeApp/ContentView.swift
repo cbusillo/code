@@ -70,10 +70,12 @@ struct ContentView: View {
     @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = true
     @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
     @AppStorage("code_native_show_activity_events") private var showActivityEvents = true
+    @AppStorage("code_native_ide_context_enabled") private var ideContextEnabled = true
     @AppStorage("code_native_selected_model") private var selectedModel = "GPT-5.3-Codex"
     @AppStorage("code_native_reasoning_level") private var selectedReasoningLevel = "High"
     @AppStorage("code_native_sandbox_mode") private var selectedSandboxMode = "Local"
     @AppStorage("code_native_approval_policy") private var selectedApprovalPolicy = "On request"
+    @AppStorage("code_native_default_session_ide") private var defaultSessionIDERaw = SessionIDESelection.systemDefault.rawValue
 
     @State private var lastSpokenItemID: String?
     @State private var showSettings = false
@@ -81,7 +83,6 @@ struct ContentView: View {
     @State private var showThreadPicker = false
     @State private var threadSearchQuery = ""
     @State private var showConnectionPopover = false
-    @State private var ideContextEnabled = true
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
@@ -99,10 +100,10 @@ struct ContentView: View {
     @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
-    private let modelOptions = ["GPT-5.3-Codex", "GPT-5.2", "Claude Sonnet 4.5"]
-    private let reasoningOptions = ["Low", "Medium", "High"]
-    private let sandboxOptions = ["Local", "Workspace write", "Read-only"]
-    private let approvalPolicyOptions = ["On request", "On failure", "Never"]
+    private let modelOptions = WorkflowSettings.modelOptions
+    private let reasoningOptions = WorkflowSettings.reasoningOptions
+    private let sandboxOptions = WorkflowSettings.sandboxOptions
+    private let approvalPolicyOptions = WorkflowSettings.approvalPolicyOptions
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
@@ -691,6 +692,7 @@ struct ContentView: View {
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
+            normalizeWorkflowSettings()
             pruneSessionIDEPreferences()
             focusComposerEditor(forceActivateApp: true)
         }
@@ -699,6 +701,7 @@ struct ContentView: View {
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
+            normalizeWorkflowSettings()
             pruneSessionIDEPreferences()
         }
         #endif
@@ -717,6 +720,12 @@ struct ContentView: View {
             followupModeRaw: $followupModeRaw,
             multilineBehaviorRaw: $multilineBehaviorRaw,
             showActivityEvents: $showActivityEvents,
+            ideContextEnabled: $ideContextEnabled,
+            selectedModel: $selectedModel,
+            selectedReasoningLevel: $selectedReasoningLevel,
+            selectedSandboxMode: $selectedSandboxMode,
+            selectedApprovalPolicy: $selectedApprovalPolicy,
+            defaultSessionIDERaw: $defaultSessionIDERaw,
             preventSleep: $preventSleep,
             glassWindow: $glassWindow,
             initialCategory: settingsCategory
@@ -3528,6 +3537,29 @@ struct ContentView: View {
         ideOpenFailureMessage = message
     }
 
+    private func normalizeWorkflowSettings() {
+        selectedModel = WorkflowSettings.normalizedSelection(
+            current: selectedModel,
+            options: modelOptions,
+            fallback: "GPT-5.3-Codex"
+        )
+        selectedReasoningLevel = WorkflowSettings.normalizedSelection(
+            current: selectedReasoningLevel,
+            options: reasoningOptions,
+            fallback: "High"
+        )
+        selectedSandboxMode = WorkflowSettings.normalizedSelection(
+            current: selectedSandboxMode,
+            options: sandboxOptions,
+            fallback: "Local"
+        )
+        selectedApprovalPolicy = WorkflowSettings.normalizedSelection(
+            current: selectedApprovalPolicy,
+            options: approvalPolicyOptions,
+            fallback: "On request"
+        )
+    }
+
     private func scrollTranscriptToBottom(proxy: ScrollViewProxy, animated: Bool) {
         let action = {
             proxy.scrollTo(transcriptBottomAnchor, anchor: .bottom)
@@ -3653,6 +3685,7 @@ struct ContentView: View {
         SessionIDEPreferences.selectedIDE(
             for: sessionID,
             rawMap: sessionIDEMapRaw,
+            rawDefaultIDE: defaultSessionIDERaw,
             available: availableSessionIDEs()
         )
     }
@@ -3679,6 +3712,10 @@ struct ContentView: View {
         sessionIDEMapRaw = SessionIDEPreferences.pruned(
             rawMap: sessionIDEMapRaw,
             validSessionIDs: validSessionIDs,
+            available: available
+        )
+        defaultSessionIDERaw = SessionIDEPreferences.normalizedDefaultIDE(
+            rawDefaultIDE: defaultSessionIDERaw,
             available: available
         )
     }
@@ -7588,6 +7625,12 @@ private struct NativeSettingsView: View {
     @Binding var followupModeRaw: String
     @Binding var multilineBehaviorRaw: String
     @Binding var showActivityEvents: Bool
+    @Binding var ideContextEnabled: Bool
+    @Binding var selectedModel: String
+    @Binding var selectedReasoningLevel: String
+    @Binding var selectedSandboxMode: String
+    @Binding var selectedApprovalPolicy: String
+    @Binding var defaultSessionIDERaw: String
     @Binding var preventSleep: Bool
     @Binding var glassWindow: Bool
     let initialCategory: SettingsCategory
@@ -7596,6 +7639,19 @@ private struct NativeSettingsView: View {
     #endif
 
     @State private var selectedCategory: SettingsCategory = .general
+
+    private let modelOptions = WorkflowSettings.modelOptions
+    private let reasoningOptions = WorkflowSettings.reasoningOptions
+    private let sandboxOptions = WorkflowSettings.sandboxOptions
+    private let approvalPolicyOptions = WorkflowSettings.approvalPolicyOptions
+
+    private var availableIDEs: [SessionIDESelection] {
+        #if os(macOS)
+        IDEAvailability.availableSelections()
+        #else
+        [.systemDefault]
+        #endif
+    }
 
     private var isCompactSettingsLayout: Bool {
         #if os(iOS)
@@ -7672,6 +7728,8 @@ private struct NativeSettingsView: View {
 
         switch selectedCategory {
         case .general:
+            SettingsInfoCard(text: "Core workflow defaults apply to new turns in this workspace, so you can stay in one place instead of reconfiguring the composer each time.")
+
             SettingsRow(title: "Open destination", description: "Choose where file actions open by default.") {
                 Picker("", selection: $openDestinationRaw) {
                     ForEach(OpenDestination.allCases) { option in
@@ -7680,6 +7738,60 @@ private struct NativeSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: isCompactSettingsLayout ? nil : 220)
+                .accessibilityIdentifier("settings.open-destination")
+            }
+
+            SettingsRow(title: "Default IDE", description: "IDE used when a thread has no explicit IDE selection.") {
+                Picker("", selection: $defaultSessionIDERaw) {
+                    ForEach(availableIDEs) { ide in
+                        Text(ide.label).tag(ide.rawValue)
+                    }
+                }
+                .frame(width: isCompactSettingsLayout ? nil : 260)
+                .accessibilityIdentifier("settings.default-ide")
+            }
+
+            SettingsRow(title: "Default model", description: "Model preselected for new turns.") {
+                Picker("", selection: $selectedModel) {
+                    ForEach(modelOptions, id: \.self) { option in
+                        Text(option).tag(option)
+                    }
+                }
+                .frame(width: isCompactSettingsLayout ? nil : 280)
+                .accessibilityIdentifier("settings.default-model")
+            }
+
+            SettingsRow(title: "Default reasoning", description: "Reasoning effort for new turns.") {
+                Picker("", selection: $selectedReasoningLevel) {
+                    ForEach(reasoningOptions, id: \.self) { option in
+                        Text(option).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 220)
+                .accessibilityIdentifier("settings.default-reasoning")
+            }
+
+            SettingsRow(title: "Default sandbox", description: "Execution sandbox mode for command actions.") {
+                Picker("", selection: $selectedSandboxMode) {
+                    ForEach(sandboxOptions, id: \.self) { option in
+                        Text(option).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: isCompactSettingsLayout ? nil : 220)
+                .accessibilityIdentifier("settings.default-sandbox")
+            }
+
+            SettingsRow(title: "Default approvals", description: "How command approvals are requested by default.") {
+                Picker("", selection: $selectedApprovalPolicy) {
+                    ForEach(approvalPolicyOptions, id: \.self) { option in
+                        Text(option).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: isCompactSettingsLayout ? nil : 280)
+                .accessibilityIdentifier("settings.default-approval")
             }
 
             SettingsRow(title: "Thread density", description: "Control compactness in the thread list.") {
@@ -7705,6 +7817,13 @@ private struct NativeSettingsView: View {
             SettingsRow(title: "Show activity events", description: "Include reasoning, exec, browser, and coordinator activity in the transcript.") {
                 Toggle("", isOn: $showActivityEvents)
                     .labelsHidden()
+                    .accessibilityIdentifier("settings.show-activity-events")
+            }
+
+            SettingsRow(title: "IDE context", description: "Allow IDE context hints in the composer when building prompts.") {
+                Toggle("", isOn: $ideContextEnabled)
+                    .labelsHidden()
+                    .accessibilityIdentifier("settings.ide-context")
             }
 
             SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
@@ -7822,6 +7941,30 @@ private struct NativeSettingsView: View {
         #endif
         .onAppear {
             selectedCategory = initialCategory
+            selectedModel = WorkflowSettings.normalizedSelection(
+                current: selectedModel,
+                options: modelOptions,
+                fallback: "GPT-5.3-Codex"
+            )
+            selectedReasoningLevel = WorkflowSettings.normalizedSelection(
+                current: selectedReasoningLevel,
+                options: reasoningOptions,
+                fallback: "High"
+            )
+            selectedSandboxMode = WorkflowSettings.normalizedSelection(
+                current: selectedSandboxMode,
+                options: sandboxOptions,
+                fallback: "Local"
+            )
+            selectedApprovalPolicy = WorkflowSettings.normalizedSelection(
+                current: selectedApprovalPolicy,
+                options: approvalPolicyOptions,
+                fallback: "On request"
+            )
+            defaultSessionIDERaw = SessionIDEPreferences.normalizedDefaultIDE(
+                rawDefaultIDE: defaultSessionIDERaw,
+                available: availableIDEs
+            )
         }
     }
 }

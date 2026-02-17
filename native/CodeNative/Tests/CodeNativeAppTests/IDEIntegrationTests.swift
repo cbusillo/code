@@ -63,11 +63,21 @@ final class IDEIntegrationTests: XCTestCase {
         let available: [SessionIDESelection] = [.systemDefault, .vsCode]
 
         XCTAssertEqual(
-            SessionIDEPreferences.selectedIDE(for: sessionA, rawMap: raw, available: available),
+            SessionIDEPreferences.selectedIDE(
+                for: sessionA,
+                rawMap: raw,
+                rawDefaultIDE: SessionIDESelection.systemDefault.rawValue,
+                available: available
+            ),
             .vsCode
         )
         XCTAssertEqual(
-            SessionIDEPreferences.selectedIDE(for: sessionB, rawMap: raw, available: available),
+            SessionIDEPreferences.selectedIDE(
+                for: sessionB,
+                rawMap: raw,
+                rawDefaultIDE: SessionIDESelection.systemDefault.rawValue,
+                available: available
+            ),
             .systemDefault
         )
 
@@ -80,6 +90,29 @@ final class IDEIntegrationTests: XCTestCase {
 
         XCTAssertEqual(decoded[sessionA.uuidString], SessionIDESelection.vsCode.rawValue)
         XCTAssertNil(decoded[sessionB.uuidString])
+    }
+
+    func testSelectedIDEFallsBackToConfiguredDefaultWhenSessionHasNoEntry() {
+        let session = UUID(uuidString: "00000000-0000-0000-0000-00000000c333")!
+        let available: [SessionIDESelection] = [.systemDefault, .xcode]
+
+        let selected = SessionIDEPreferences.selectedIDE(
+            for: session,
+            rawMap: "{}",
+            rawDefaultIDE: SessionIDESelection.xcode.rawValue,
+            available: available
+        )
+
+        XCTAssertEqual(selected, .xcode)
+    }
+
+    func testNormalizedDefaultIDEFallsBackToSystemWhenUnavailable() {
+        let normalized = SessionIDEPreferences.normalizedDefaultIDE(
+            rawDefaultIDE: SessionIDESelection.intelliJ.rawValue,
+            available: [.systemDefault, .vsCode]
+        )
+
+        XCTAssertEqual(normalized, SessionIDESelection.systemDefault.rawValue)
     }
 }
 #endif

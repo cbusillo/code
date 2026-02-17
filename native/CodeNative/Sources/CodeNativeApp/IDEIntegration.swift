@@ -60,6 +60,7 @@ enum SessionIDEPreferences {
     static func selectedIDE(
         for sessionID: UUID,
         rawMap: String,
+        rawDefaultIDE: String,
         available: [SessionIDESelection]
     ) -> SessionIDESelection {
         let map = decode(rawMap)
@@ -68,10 +69,31 @@ enum SessionIDEPreferences {
               let ide = SessionIDESelection(rawValue: raw),
               availableSet.contains(ide)
         else {
+            return selectedDefaultIDE(rawDefaultIDE: rawDefaultIDE, available: available)
+        }
+
+        return ide
+    }
+
+    static func selectedDefaultIDE(
+        rawDefaultIDE: String,
+        available: [SessionIDESelection]
+    ) -> SessionIDESelection {
+        let availableSet = Set(available)
+        guard let ide = SessionIDESelection(rawValue: rawDefaultIDE),
+              availableSet.contains(ide)
+        else {
             return .systemDefault
         }
 
         return ide
+    }
+
+    static func normalizedDefaultIDE(
+        rawDefaultIDE: String,
+        available: [SessionIDESelection]
+    ) -> String {
+        selectedDefaultIDE(rawDefaultIDE: rawDefaultIDE, available: available).rawValue
     }
 
     static func storing(

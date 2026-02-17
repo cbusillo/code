@@ -276,8 +276,9 @@ scripts/ux/benchmark-native-ui.sh
 7. `context-mention`
 8. `git-recovery`
 9. `ide-integration`
-10. `disconnected-state`
-11. `settings-shell`
+10. `settings-workflow-controls`
+11. `disconnected-state`
+12. `settings-shell`
 
 ### Review Process
 
