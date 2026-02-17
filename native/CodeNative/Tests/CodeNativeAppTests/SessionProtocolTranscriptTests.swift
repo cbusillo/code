@@ -268,6 +268,57 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertFalse(item.shouldHideFromTranscript)
     }
 
+    func testRequestUserInputEventParsesQuestionsForCardUI() {
+        let item = makeCoreEventItem(
+            seq: 21,
+            payload: .object([
+                "type": .string("request_user_input"),
+                "call_id": .string("call-input-1"),
+                "turn_id": .string("turn-input-1"),
+                "questions": .array([
+                    .object([
+                        "id": .string("project_type"),
+                        "header": .string("Project Type"),
+                        "question": .string("Which project type are you building?"),
+                        "is_other": .bool(false),
+                        "is_secret": .bool(false),
+                        "options": .array([
+                            .object([
+                                "label": .string("CLI app"),
+                                "description": .string("Command line tool")
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.body, "Awaiting user input · 1 question")
+        XCTAssertEqual(item.cardStyle, .approval)
+        XCTAssertEqual(item.requestUserInputPrompt?.turnId, "turn-input-1")
+        XCTAssertEqual(item.requestUserInputPrompt?.questions.first?.id, "project_type")
+    }
+
+    func testUserInputAnswerEventBodySummarizesResponseCount() {
+        let item = makeCoreEventItem(
+            seq: 22,
+            payload: .object([
+                "type": .string("user_input_answer"),
+                "answers": .object([
+                    "project_type": .object([
+                        "answers": .array([.string("CLI app")])
+                    ]),
+                    "target": .object([
+                        "answers": .array([.string("macOS")])
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.body, "User input submitted · 2 responses")
+        XCTAssertFalse(item.shouldHideFromTranscript)
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

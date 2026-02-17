@@ -1,0 +1,56 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-request-input",
+  "client_id": "bench-request-input",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a601",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a601",
+        "conversation_id": "00000000-0000-0000-0000-00000000a601",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000500000,
+        "last_event_at_unix_ms": 1700000502000,
+        "title": "Milestone 2 request-user-input"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a601",
+          "seq": 1,
+          "event": {
+            "id": "rui-request-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "request_user_input",
+              "call_id": "call-rui-1",
+              "turn_id": "turn-rui-1",
+              "questions": [
+                {
+                  "id": "project_type",
+                  "header": "Project type",
+                  "question": "Which project type should we optimize for?",
+                  "is_other": false,
+                  "is_secret": false,
+                  "options": [
+                    {
+                      "label": "CLI app",
+                      "description": "Terminal-first workflow"
+                    },
+                    {
+                      "label": "Desktop app",
+                      "description": "Native GUI workflow"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

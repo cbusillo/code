@@ -1,0 +1,30 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-command-launcher",
+  "client_id": "bench-command-launcher",
+  "composer_text": "",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a701",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a701",
+        "conversation_id": "00000000-0000-0000-0000-00000000a701",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000600000,
+        "last_event_at_unix_ms": 1700000602000,
+        "title": "Milestone 2 slash command launcher"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000a701",
+          "seq": 1,
+          "level": "info",
+          "message": "Ready"
+        }
+      ]
+    }
+  ]
+}

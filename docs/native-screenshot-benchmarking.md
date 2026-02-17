@@ -14,6 +14,9 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `transcript-long`
 - `activity-heavy`
 - `approval-pending`
+- `request-user-input`
+- `command-launcher`
+- `context-mention`
 - `disconnected-state`
 - `settings-shell`
 

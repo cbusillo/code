@@ -237,6 +237,14 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return summarizePatchApplyEnd(object)
         }
 
+        if payloadType == "request_user_input" {
+            return summarizeRequestUserInput(object)
+        }
+
+        if payloadType == "user_input_answer" {
+            return summarizeUserInputAnswer(object)
+        }
+
         if payloadType == "task_started" {
             return summarizeTaskLifecycle(object: object, phase: "started")
         }
@@ -426,6 +434,37 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         return "Attached to thread (\(details.joined(separator: ", ")))"
+    }
+
+    private func summarizeRequestUserInput(_ object: [String: JSONValue]) -> String {
+        let questionsCount = object["questions"]?.arrayValue?.count ?? 0
+
+        if questionsCount <= 0 {
+            return "Awaiting user input"
+        }
+
+        if questionsCount == 1 {
+            return "Awaiting user input · 1 question"
+        }
+
+        return "Awaiting user input · \(questionsCount) questions"
+    }
+
+    private func summarizeUserInputAnswer(_ object: [String: JSONValue]) -> String {
+        guard let answersObject = object["answers"]?.objectValue else {
+            return "User input submitted"
+        }
+
+        let questionCount = answersObject.count
+        if questionCount <= 0 {
+            return "User input submitted · skipped"
+        }
+
+        if questionCount == 1 {
+            return "User input submitted · 1 response"
+        }
+
+        return "User input submitted · \(questionCount) responses"
     }
 
     private func formatModelName(_ value: String) -> String {
@@ -889,6 +928,18 @@ struct PatchApprovalMessage: Encodable {
     let decision: String
 }
 
+struct UserInputAnswerMessage: Encodable {
+    let type: String = "user_input_answer"
+    let requestId: String
+    let sessionId: UUID
+    let turnId: String
+    let answers: [String: UserInputAnswerPayload]
+}
+
+struct UserInputAnswerPayload: Encodable {
+    let answers: [String]
+}
+
 enum ApprovalType {
     case exec
     case patch
@@ -927,6 +978,26 @@ enum ApprovalDecisionChoice: String, CaseIterable, Identifiable {
 struct ApprovalRequest {
     let type: ApprovalType
     let callId: String
+}
+
+struct RequestUserInputOption: Hashable {
+    let label: String
+    let description: String
+}
+
+struct RequestUserInputQuestion: Hashable, Identifiable {
+    let id: String
+    let header: String
+    let question: String
+    let isOther: Bool
+    let isSecret: Bool
+    let options: [RequestUserInputOption]
+}
+
+struct RequestUserInputPrompt: Hashable {
+    let callId: String
+    let turnId: String
+    let questions: [RequestUserInputQuestion]
 }
 
 struct ExecCommandInfo {
@@ -1460,6 +1531,58 @@ extension SessionStreamItem {
         }
     }
 
+    var requestUserInputPrompt: RequestUserInputPrompt? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "request_user_input",
+              let object = payload.objectValue,
+              let callId = object["call_id"]?.stringValue,
+              let questionsArray = object["questions"]?.arrayValue,
+              !questionsArray.isEmpty
+        else {
+            return nil
+        }
+
+        let turnId = object["turn_id"]?.stringValue ?? callId
+
+        let questions = questionsArray.compactMap { value -> RequestUserInputQuestion? in
+            guard let question = value.objectValue,
+                  let id = question["id"]?.stringValue,
+                  let header = question["header"]?.stringValue,
+                  let prompt = question["question"]?.stringValue
+            else {
+                return nil
+            }
+
+            let options = question["options"]?.arrayValue?
+                .compactMap { optionValue -> RequestUserInputOption? in
+                    guard let option = optionValue.objectValue,
+                          let label = option["label"]?.stringValue
+                    else {
+                        return nil
+                    }
+
+                    let description = option["description"]?.stringValue ?? ""
+                    return RequestUserInputOption(label: label, description: description)
+                } ?? []
+
+            return RequestUserInputQuestion(
+                id: id,
+                header: header,
+                question: prompt,
+                isOther: question["is_other"]?.boolValue ?? false,
+                isSecret: question["is_secret"]?.boolValue ?? false,
+                options: options
+            )
+        }
+
+        guard !questions.isEmpty else {
+            return nil
+        }
+
+        return RequestUserInputPrompt(callId: callId, turnId: turnId, questions: questions)
+    }
+
     var turnDiffText: String? {
         guard type == "core_event",
               let payload = event?.payload,
@@ -1698,6 +1821,10 @@ extension SessionStreamItem {
             return .composer
         case "core_event":
             if approvalRequest != nil {
+                return .approval
+            }
+
+            if requestUserInputPrompt != nil {
                 return .approval
             }
 

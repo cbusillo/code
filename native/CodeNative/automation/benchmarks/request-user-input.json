@@ -1,0 +1,7 @@
+[
+  { "kind": "wait", "seconds": 0.8 },
+  {
+    "kind": "screenshot",
+    "path": ".code/ux-bench/native-ui/current/request-user-input.png"
+  }
+]

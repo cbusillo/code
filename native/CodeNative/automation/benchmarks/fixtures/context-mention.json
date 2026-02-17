@@ -1,0 +1,37 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-context-mention",
+  "client_id": "bench-context-mention",
+  "composer_text": "Investigate @native/CodeNative/Sources",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a801",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a801",
+        "conversation_id": "00000000-0000-0000-0000-00000000a801",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000700000,
+        "last_event_at_unix_ms": 1700000705000,
+        "title": "Milestone 2 context mention"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a801",
+          "seq": 1,
+          "event": {
+            "id": "mention-assistant-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "Use @ references to attach exact files in your next prompt."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

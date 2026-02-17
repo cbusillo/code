@@ -88,6 +88,13 @@ struct ContentView: View {
     @State private var pendingPrependAnchorItemID: String?
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
+    @State private var showSlashCommandLauncher = false
+    @State private var slashCommandQuery = ""
+    @State private var showContextPicker = false
+    @State private var contextPickerQuery = ""
+    @State private var indexedContextRootPath: String?
+    @State private var indexedContextFilePaths: [String] = []
+    @State private var contextIndexLoading = false
     @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
@@ -568,6 +575,37 @@ struct ContentView: View {
             .presentationDragIndicator(.visible)
             #endif
         }
+        .sheet(isPresented: $showSlashCommandLauncher) {
+            SlashCommandLauncherView(
+                query: $slashCommandQuery,
+                commands: filteredSlashCommands,
+                onSelect: { command in
+                    handleSlashCommandSelection(command)
+                }
+            )
+            #if os(macOS)
+            .frame(minWidth: 560, minHeight: 420)
+            #endif
+        }
+        .sheet(isPresented: $showContextPicker) {
+            ContextReferencePickerView(
+                query: $contextPickerQuery,
+                candidates: filteredContextPickerPaths,
+                isLoading: contextIndexLoading,
+                onRefresh: {
+                    ensureContextIndexLoaded(forceReload: true)
+                },
+                onSelect: { path in
+                    insertContextReference(path: path)
+                }
+            )
+            .onAppear {
+                ensureContextIndexLoaded()
+            }
+            #if os(macOS)
+            .frame(minWidth: 620, minHeight: 460)
+            #endif
+        }
         #if os(iOS)
         .sheet(isPresented: $showThreadPicker) {
             NavigationStack {
@@ -601,6 +639,7 @@ struct ContentView: View {
             activeTranscriptItemID = nil
             composerDraft = store.composerText
             refreshTranscriptCache()
+            ensureContextIndexLoaded(forceReload: true)
             #if os(iOS)
             showThreadPicker = false
             #else
@@ -614,6 +653,11 @@ struct ContentView: View {
 
             if !composerIsFocused || newValue.isEmpty {
                 composerDraft = newValue
+            }
+        }
+        .onChange(of: composerDraft) { _, newValue in
+            if ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
+                ensureContextIndexLoaded()
             }
         }
         .onChange(of: store.sessions) { _, _ in
@@ -637,12 +681,14 @@ struct ContentView: View {
         .onAppear {
             composerDraft = store.composerText
             refreshTranscriptCache()
+            ensureContextIndexLoaded(forceReload: true)
             focusComposerEditor(forceActivateApp: true)
         }
         #else
         .onAppear {
             composerDraft = store.composerText
             refreshTranscriptCache()
+            ensureContextIndexLoaded(forceReload: true)
         }
         #endif
     }
@@ -1266,6 +1312,9 @@ struct ContentView: View {
             },
             onApproval: { decision in
                 handleApproval(item: item, decision: decision)
+            },
+            onRequestUserInputResponse: { answersByQuestionID in
+                handleRequestUserInputResponse(item: item, answersByQuestionID: answersByQuestionID)
             }
         )
         .frame(minWidth: widthMin)
@@ -1960,6 +2009,47 @@ struct ContentView: View {
                 }
                 #endif
 
+                if showsInlineContextSuggestions {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Context matches")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 6)
+                            Button("Open picker") {
+                                showContextPicker = true
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.82))
+                        }
+
+                        ForEach(filteredInlineContextPaths.prefix(6), id: \.self) { path in
+                            Button {
+                                insertContextReference(path: path)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "at")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    Text(path)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.white.opacity(0.9))
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 2)
+                }
+
                 composerControlRows
             }
             .background(isCompactPhoneLayout ? Color.white.opacity(0.065) : Color.white.opacity(0.05))
@@ -2082,6 +2172,31 @@ struct ContentView: View {
                 }
 
                 if isCompactPhoneLayout {
+                    Button {
+                        showSlashCommandLauncher = true
+                    } label: {
+                        Image(systemName: "command")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.66))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .accessibilityIdentifier("composer.slash")
+
+                    Button {
+                        ensureContextIndexLoaded()
+                        showContextPicker = true
+                    } label: {
+                        Image(systemName: "at")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.66))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .accessibilityIdentifier("composer.context")
+
                     Spacer(minLength: 6)
 
                     Button {
@@ -2140,6 +2255,33 @@ struct ContentView: View {
                     .disabled(!canSubmit)
                     .accessibilityIdentifier("composer.send")
                 } else {
+                    Button {
+                        showSlashCommandLauncher = true
+                    } label: {
+                        Label("Slash", systemImage: "command")
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                    .accessibilityIdentifier("composer.slash")
+
+                    Button {
+                        ensureContextIndexLoaded()
+                        showContextPicker = true
+                    } label: {
+                        Label("Context", systemImage: "at")
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                    .accessibilityIdentifier("composer.context")
+
                     Spacer(minLength: 10)
                 }
             }
@@ -2282,6 +2424,23 @@ struct ContentView: View {
                     Label(selectedReasoningLevel, systemImage: "chevron.down")
                 }
                 .menuStyle(.borderlessButton)
+
+                Button {
+                    showSlashCommandLauncher = true
+                } label: {
+                    Label("Slash", systemImage: "command")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("composer.slash")
+
+                Button {
+                    ensureContextIndexLoaded()
+                    showContextPicker = true
+                } label: {
+                    Label("Context", systemImage: "at")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("composer.context")
 
                 #if os(macOS)
                 Toggle(isOn: $ideContextEnabled) {
@@ -2566,6 +2725,37 @@ struct ContentView: View {
         canSendTurns && !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var filteredSlashCommands: [ComposerSlashCommand] {
+        ComposerSlashCommandCatalog.filteredCoreSet(query: slashCommandQuery)
+    }
+
+    private var selectedSessionRootPath: String? {
+        store.selectedSession?.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trailingMentionMatch: ComposerContextMentionMatch? {
+        ComposerContextReferenceFormatter.trailingMentionMatch(in: composerDraft)
+    }
+
+    private var inlineContextQuery: String {
+        trailingMentionMatch?.query ?? ""
+    }
+
+    private var filteredInlineContextPaths: [String] {
+        filteredContextPaths(query: inlineContextQuery)
+    }
+
+    private var filteredContextPickerPaths: [String] {
+        filteredContextPaths(query: contextPickerQuery)
+    }
+
+    private var showsInlineContextSuggestions: Bool {
+        composerIsFocused
+            && trailingMentionMatch != nil
+            && !showContextPicker
+            && !filteredInlineContextPaths.isEmpty
+    }
+
     private struct ComposerActivityBadge {
         let label: String
         let icon: String
@@ -2613,6 +2803,143 @@ struct ContentView: View {
         }
 
         return nil
+    }
+
+    private func ensureContextIndexLoaded(forceReload: Bool = false) {
+        guard let rootPath = selectedSessionRootPath,
+              !rootPath.isEmpty
+        else {
+            indexedContextRootPath = nil
+            indexedContextFilePaths = []
+            contextIndexLoading = false
+            return
+        }
+
+        if !forceReload,
+           indexedContextRootPath == rootPath,
+           !indexedContextFilePaths.isEmpty {
+            return
+        }
+
+        if contextIndexLoading {
+            return
+        }
+
+        contextIndexLoading = true
+        Task.detached(priority: .utility) {
+            let indexed = buildContextFileIndex(rootPath: rootPath)
+            await MainActor.run {
+                contextIndexLoading = false
+                guard selectedSessionRootPath == rootPath else {
+                    return
+                }
+                indexedContextRootPath = rootPath
+                indexedContextFilePaths = indexed
+            }
+        }
+    }
+
+    private func filteredContextPaths(query: String) -> [String] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !indexedContextFilePaths.isEmpty else {
+            return []
+        }
+
+        guard !normalized.isEmpty else {
+            return Array(indexedContextFilePaths.prefix(30))
+        }
+
+        let lowercased = normalized.lowercased()
+        var prefixMatches: [String] = []
+        var containsMatches: [String] = []
+        prefixMatches.reserveCapacity(30)
+        containsMatches.reserveCapacity(30)
+
+        for path in indexedContextFilePaths {
+            let lowercasePath = path.lowercased()
+            if lowercasePath.hasPrefix(lowercased) {
+                prefixMatches.append(path)
+            } else if lowercasePath.contains(lowercased) {
+                containsMatches.append(path)
+            }
+
+            if prefixMatches.count + containsMatches.count >= 30 {
+                break
+            }
+        }
+
+        return prefixMatches + containsMatches
+    }
+
+    private func insertContextReference(path: String) {
+        composerDraft = ComposerContextReferenceFormatter.insertReference(
+            into: composerDraft,
+            path: path,
+            mentionMatch: trailingMentionMatch
+        )
+        contextPickerQuery = ""
+        showContextPicker = false
+        focusComposerEditor(forceActivateApp: true)
+    }
+
+    private func handleSlashCommandSelection(_ command: ComposerSlashCommand) {
+        showSlashCommandLauncher = false
+        slashCommandQuery = ""
+
+        switch command.actionID {
+        case .insertPlanTemplate:
+            appendComposerTemplate("Create a concise implementation plan with numbered steps, key risks, and explicit validation gates.")
+        case .insertStatusPrompt:
+            appendComposerTemplate("Summarize current progress, blockers, and the single highest-leverage next step.")
+        case .insertTestPrompt:
+            appendComposerTemplate("Run relevant tests for the current changes and summarize failures, fixes, and final status.")
+        case .insertReviewPrompt:
+            appendComposerTemplate("Review the current changes for bugs, regressions, and missing tests. Provide findings first.")
+        case .newThread:
+            Task {
+                await store.createSession(cwd: nil)
+            }
+        case .refreshThreads:
+            Task {
+                await store.refreshSessions()
+            }
+        case .openSettings:
+            presentSettings(.general)
+        }
+    }
+
+    private func appendComposerTemplate(_ template: String) {
+        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+
+        if composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            composerDraft = trimmed
+        } else if composerDraft.hasSuffix("\n") {
+            composerDraft += trimmed
+        } else {
+            composerDraft += "\n\n\(trimmed)"
+        }
+
+        focusComposerEditor(forceActivateApp: true)
+    }
+
+    private func handleRequestUserInputResponse(
+        item: SessionStreamItem,
+        answersByQuestionID: [String: [String]]
+    ) {
+        guard let request = item.requestUserInputPrompt else {
+            return
+        }
+
+        Task {
+            await store.submitRequestUserInput(
+                sessionId: item.sessionId,
+                turnId: request.turnId,
+                answersByQuestionID: answersByQuestionID
+            )
+        }
     }
 
     private func presentSettings(_ category: SettingsCategory) {
@@ -5670,12 +5997,16 @@ private struct TranscriptCard: View {
     let taskActivityLines: [String]
     let onActivate: () -> Void
     let onApproval: (ApprovalDecisionChoice) -> Void
+    let onRequestUserInputResponse: ([String: [String]]) -> Void
 
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
 
     @State private var selectedDecision: ApprovalDecisionChoice = .approved
+    @State private var requestInputSelections: [String: String] = [:]
+    @State private var requestInputNotes: [String: String] = [:]
+    @State private var requestInputDidSubmit = false
     @State private var isExpanded = false
     @State private var diffExpansionSteps = 0
     @State private var isHoveringCopyActions = false
@@ -6276,6 +6607,8 @@ private struct TranscriptCard: View {
                         }
                     }
                 }
+            } else if let requestInput = item.requestUserInputPrompt {
+                requestUserInputContent(requestInput)
             } else {
                 Text(displayedBody)
                     .font(
@@ -6445,6 +6778,140 @@ private struct TranscriptCard: View {
         #endif
     }
 
+    @ViewBuilder
+    private func requestUserInputContent(_ request: RequestUserInputPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "person.fill.questionmark")
+                    .font(.caption)
+                    .foregroundStyle(Color.orange.opacity(0.95))
+                Text("User input required")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text("\(request.questions.count) question\(request.questions.count == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(request.questions) { question in
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(question.header)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.92))
+
+                    Text(question.question)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.76))
+
+                    if !question.options.isEmpty {
+                        ForEach(question.options, id: \.label) { option in
+                            let isSelected = requestInputSelections[question.id] == option.label
+                            Button {
+                                requestInputSelections[question.id] = option.label
+                                requestInputDidSubmit = false
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                                        .font(.caption2)
+                                        .foregroundStyle(isSelected ? Color.orange.opacity(0.9) : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(option.label)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.white.opacity(0.9))
+                                        if !option.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                            Text(option.description)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 7)
+                                .background(
+                                    isSelected
+                                    ? Color.orange.opacity(0.16)
+                                    : Color.white.opacity(0.04),
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    let noteBinding = Binding<String>(
+                        get: { requestInputNotes[question.id] ?? "" },
+                        set: {
+                            requestInputNotes[question.id] = $0
+                            requestInputDidSubmit = false
+                        }
+                    )
+
+                    if question.isSecret {
+                        SecureField("Optional note", text: noteBinding)
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        TextField("Optional note", text: noteBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            HStack(spacing: 10) {
+                Button("Skip") {
+                    submitRequestUserInput(request, skip: true)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+
+                Spacer(minLength: 8)
+
+                Button("Send response") {
+                    submitRequestUserInput(request, skip: false)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if requestInputDidSubmit {
+                Text("Response submitted")
+                    .font(.caption2)
+                    .foregroundStyle(Color.green.opacity(0.85))
+            }
+        }
+    }
+
+    private func submitRequestUserInput(_ request: RequestUserInputPrompt, skip: Bool) {
+        requestInputDidSubmit = true
+        if skip {
+            onRequestUserInputResponse([:])
+            return
+        }
+
+        var answersByQuestionID: [String: [String]] = [:]
+        for question in request.questions {
+            var answers: [String] = []
+
+            if let selected = requestInputSelections[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !selected.isEmpty {
+                answers.append(selected)
+            }
+
+            if let note = requestInputNotes[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !note.isEmpty {
+                answers.append(note)
+            }
+
+            if !answers.isEmpty {
+                answersByQuestionID[question.id] = answers
+            }
+        }
+
+        onRequestUserInputResponse(answersByQuestionID)
+    }
+
     private func tokenUsageHeadline(_ usage: TokenUsageBreakdown) -> String {
         let model = item.tokenCountRequestedModel.map(displayTokenModelName) ?? "Token usage"
         guard let total = usage.total,
@@ -6610,6 +7077,138 @@ private struct TranscriptCard: View {
             return "You"
         case .unknown:
             return "Message"
+        }
+    }
+}
+
+private struct SlashCommandLauncherView: View {
+    @Binding var query: String
+    let commands: [ComposerSlashCommand]
+    let onSelect: (ComposerSlashCommand) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                TextField("Search slash commands", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("slash.search")
+
+                if commands.isEmpty {
+                    Text("No matching commands")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    List(commands) { command in
+                        Button {
+                            onSelect(command)
+                            dismiss()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(command.command)
+                                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text(command.summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .padding(14)
+            .navigationTitle("Slash commands")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ContextReferencePickerView: View {
+    @Binding var query: String
+    let candidates: [String]
+    let isLoading: Bool
+    let onRefresh: () -> Void
+    let onSelect: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                TextField("Search files for @context", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("context.search")
+
+                if isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Indexing workspace files…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if candidates.isEmpty {
+                    Text(isLoading ? "Loading files" : "No matching files")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    List(candidates, id: \.self) { path in
+                        Button {
+                            onSelect(path)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "at")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(path)
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .padding(14)
+            .navigationTitle("Insert context")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Refresh") {
+                        onRefresh()
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }

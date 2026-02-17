@@ -26,10 +26,10 @@ Legend:
 | PAR-008 | Explicit connection/history runtime states | Every Code TUI | partial | P0 | M1 |
 | PAR-009 | Auto-review summary durability | Every Code TUI | partial | P0 | M1 |
 | PAR-010 | Screenshot benchmark harness + baseline | Mac + native | partial | P0 | M1 |
-| PAR-011 | Slash command launcher parity (core set) | Every Code TUI | missing | P1 | M2 |
-| PAR-012 | Mention-style context insertion | Every Code TUI | missing | P1 | M2 |
+| PAR-011 | Slash command launcher parity (core set) | Every Code TUI | partial | P1 | M2 |
+| PAR-012 | Mention-style context insertion | Every Code TUI | partial | P1 | M2 |
 | PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | missing | P1 | M2 |
-| PAR-014 | Request-user-input parity UI | Every Code TUI | missing | P1 | M2 |
+| PAR-014 | Request-user-input parity UI | Every Code TUI | partial | P1 | M2 |
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | partial | P1 | M2 |
 | PAR-016 | IDE integration robustness | Mac + native | partial | P1 | M2 |
 | PAR-017 | Multi-agent progress visualization | Every Code TUI | missing | P2 | M3 |
@@ -117,6 +117,8 @@ Legend:
 - Acceptance criteria: native command launcher supports highest-frequency
   planning/execution/review commands.
 - Validation gate: command launcher tests + UX benchmark.
+- Progress: core launcher sheet, command filtering, and primary actions shipped
+  in Milestone 2 batch 1; remaining work is command breadth and keyboard depth.
 
 ## PAR-012
 
@@ -124,6 +126,8 @@ Legend:
 - Acceptance criteria: file/context references are insertable via picker with
   deterministic formatting.
 - Validation gate: composer interaction scenario + screenshot review.
+- Progress: mention-triggered suggestions, context picker, and deterministic
+  token formatting shipped in Milestone 2 batch 1.
 
 ## PAR-013
 
@@ -138,6 +142,8 @@ Legend:
 - Acceptance criteria: request-user-input cards support option selection, notes,
   submit, and skip semantics.
 - Validation gate: request-user-input scenario + `swift test`.
+- Progress: request-user-input transcript card + response submission wiring
+  shipped in Milestone 2 batch 1.
 
 ## PAR-015
 

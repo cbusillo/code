@@ -30,6 +30,8 @@ use code_core::config::Config;
 use code_core::protocol::{self, Event, InputItem, Op, ReviewDecision};
 use code_protocol::models::{ContentItem, ResponseItem};
 use code_protocol::protocol::{RolloutItem, RolloutLine, SessionSource};
+use code_protocol::request_user_input::RequestUserInputAnswer;
+use code_protocol::request_user_input::RequestUserInputResponse;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -400,6 +402,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 }
             }
+            ClientMessage::UserInputAnswer {
+                request_id,
+                session_id,
+                turn_id,
+                answers,
+            } => {
+                match state
+                    .hub
+                    .user_input_answer(session_id, turn_id, answers)
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
+                    }
+                    Err(message) => {
+                        let _ = out_tx.send(ServerMessage::Error {
+                            request_id,
+                            message,
+                        }).await;
+                    }
+                }
+            }
         }
     }
 
@@ -500,6 +524,17 @@ enum ClientMessage {
         call_id: String,
         decision: WebReviewDecision,
     },
+    UserInputAnswer {
+        request_id: Option<String>,
+        session_id: Uuid,
+        turn_id: String,
+        answers: HashMap<String, WebUserInputAnswer>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct WebUserInputAnswer {
+    answers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -718,6 +753,26 @@ impl SessionHub {
             })
             .await
             .map_err(|err| format!("Failed to submit patch approval: {err}"))?;
+        Ok(())
+    }
+
+    async fn user_input_answer(
+        &self,
+        session_id: Uuid,
+        turn_id: String,
+        answers: HashMap<String, WebUserInputAnswer>,
+    ) -> Result<(), String> {
+        let session = self.session_for_id(session_id).await?;
+        let response = map_web_user_input_answers(answers);
+
+        session
+            .conversation
+            .submit(Op::UserInputAnswer {
+                id: turn_id,
+                response,
+            })
+            .await
+            .map_err(|err| format!("Failed to submit request_user_input answer: {err}"))?;
         Ok(())
     }
 
@@ -1152,6 +1207,24 @@ impl From<&protocol::OrderMeta> for WebOrderMeta {
             output_index: value.output_index,
             sequence_number: value.sequence_number,
         }
+    }
+}
+
+fn map_web_user_input_answers(
+    answers: HashMap<String, WebUserInputAnswer>,
+) -> RequestUserInputResponse {
+    RequestUserInputResponse {
+        answers: answers
+            .into_iter()
+            .map(|(question_id, answer)| {
+                (
+                    question_id,
+                    RequestUserInputAnswer {
+                        answers: answer.answers,
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -1920,6 +1993,55 @@ mod tests {
                 phase: None,
             }),
         }
+    }
+
+    #[test]
+    fn client_message_user_input_answer_deserializes() {
+        let session_id = Uuid::new_v4();
+        let raw = serde_json::json!({
+            "type": "user_input_answer",
+            "request_id": "native_701",
+            "session_id": session_id,
+            "turn_id": "turn-abc",
+            "answers": {
+                "project_type": {
+                    "answers": ["CLI app", "Rust"]
+                }
+            }
+        });
+
+        let message: ClientMessage = serde_json::from_value(raw).expect("deserialize client message");
+        match message {
+            ClientMessage::UserInputAnswer {
+                request_id,
+                session_id: decoded_session_id,
+                turn_id,
+                answers,
+            } => {
+                assert_eq!(request_id.as_deref(), Some("native_701"));
+                assert_eq!(decoded_session_id, session_id);
+                assert_eq!(turn_id, "turn-abc");
+                assert_eq!(answers.len(), 1);
+                let answer = answers.get("project_type").expect("project_type answer");
+                assert_eq!(answer.answers, vec!["CLI app", "Rust"]);
+            }
+            other => panic!("unexpected client message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_web_user_input_answers_preserves_question_answers() {
+        let mut answers = HashMap::new();
+        answers.insert(
+            "language".to_string(),
+            WebUserInputAnswer {
+                answers: vec!["Swift".to_string(), "macOS".to_string()],
+            },
+        );
+
+        let mapped = map_web_user_input_answers(answers);
+        let entry = mapped.answers.get("language").expect("mapped answer");
+        assert_eq!(entry.answers, vec!["Swift", "macOS"]);
     }
 
     #[test]

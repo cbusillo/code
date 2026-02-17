@@ -1,0 +1,8 @@
+[
+  { "kind": "click", "id": "composer.slash" },
+  { "kind": "wait", "seconds": 0.6 },
+  {
+    "kind": "screenshot",
+    "path": ".code/ux-bench/native-ui/current/command-launcher.png"
+  }
+]

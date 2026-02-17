@@ -1,0 +1,8 @@
+[
+  { "kind": "type", "id": "composer.input", "text": "Investigate @native/CodeNative/Sources" },
+  { "kind": "wait", "seconds": 0.8 },
+  {
+    "kind": "screenshot",
+    "path": ".code/ux-bench/native-ui/current/context-mention.png"
+  }
+]

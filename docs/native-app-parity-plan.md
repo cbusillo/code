@@ -271,8 +271,11 @@ scripts/ux/benchmark-native-ui.sh
 2. `transcript-long`
 3. `activity-heavy`
 4. `approval-pending`
-5. `disconnected-state`
-6. `settings-shell`
+5. `request-user-input`
+6. `command-launcher`
+7. `context-mention`
+8. `disconnected-state`
+9. `settings-shell`
 
 ### Review Process
 

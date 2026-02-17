@@ -13,6 +13,9 @@ SCENARIOS=(
 	"transcript-long"
 	"activity-heavy"
 	"approval-pending"
+	"request-user-input"
+	"command-launcher"
+	"context-mention"
 	"disconnected-state"
 	"settings-shell"
 )

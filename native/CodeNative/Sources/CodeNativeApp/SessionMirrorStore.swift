@@ -344,6 +344,33 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
+    func submitRequestUserInput(
+        sessionId: UUID,
+        turnId: String,
+        answersByQuestionID: [String: [String]]
+    ) async {
+        let normalizedTurnID = turnId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTurnID.isEmpty else {
+            return
+        }
+
+        let payload = answersByQuestionID.reduce(into: [String: UserInputAnswerPayload]()) { partial, entry in
+            let values = entry.value
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            partial[entry.key] = UserInputAnswerPayload(answers: values)
+        }
+
+        await send(
+            UserInputAnswerMessage(
+                requestId: nextRequestID(),
+                sessionId: sessionId,
+                turnId: normalizedTurnID,
+                answers: payload
+            )
+        )
+    }
+
     private func cleanupConnection(status: String, error: String?) {
         receiveTask?.cancel()
         receiveTask = nil
@@ -779,6 +806,10 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     private func send(_ message: PatchApprovalMessage) async {
+        await sendEncodable(message)
+    }
+
+    private func send(_ message: UserInputAnswerMessage) async {
         await sendEncodable(message)
     }
 
