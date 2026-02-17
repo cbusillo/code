@@ -1,0 +1,30 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-command-launcher-depth",
+  "client_id": "bench-command-launcher-depth",
+  "composer_text": "",
+  "selected_session_id": "00000000-0000-0000-0000-00000000ac01",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000ac01",
+        "conversation_id": "00000000-0000-0000-0000-00000000ac01",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000900000,
+        "last_event_at_unix_ms": 1700000902000,
+        "title": "Milestone 2 slash command launcher depth"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000ac01",
+          "seq": 1,
+          "level": "info",
+          "message": "Ready"
+        }
+      ]
+    }
+  ]
+}

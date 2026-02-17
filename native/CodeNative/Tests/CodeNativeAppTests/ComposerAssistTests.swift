@@ -8,6 +8,23 @@ final class ComposerAssistTests: XCTestCase {
         XCTAssertTrue(commands.contains(where: { $0.command == "/plan" }))
     }
 
+    func testSlashCommandCatalogCoversHighFrequencyWorkflows() {
+        let commands = ComposerSlashCommandCatalog.coreSet.map(\.command)
+        XCTAssertTrue(commands.contains("/plan"))
+        XCTAssertTrue(commands.contains("/code"))
+        XCTAssertTrue(commands.contains("/solve"))
+        XCTAssertTrue(commands.contains("/review"))
+        XCTAssertTrue(commands.contains("/status"))
+        XCTAssertTrue(commands.contains("/diff"))
+        XCTAssertTrue(commands.contains("/undo"))
+        XCTAssertTrue(commands.contains("/mention"))
+    }
+
+    func testSlashCommandCatalogFiltersLeadingSlashQueries() {
+        let commands = ComposerSlashCommandCatalog.filteredCoreSet(query: "/sol")
+        XCTAssertEqual(commands.first?.command, "/solve")
+    }
+
     func testTrailingMentionMatchAndReplacement() {
         let draft = "Please inspect @native/Code"
         let mention = ComposerContextReferenceFormatter.trailingMentionMatch(in: draft)

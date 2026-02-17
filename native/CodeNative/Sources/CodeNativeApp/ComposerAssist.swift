@@ -1,13 +1,11 @@
 import Foundation
 
-enum ComposerSlashCommandActionID: String, Hashable {
-    case insertPlanTemplate
-    case insertStatusPrompt
-    case insertTestPrompt
-    case insertReviewPrompt
+enum ComposerSlashCommandActionID: Hashable {
+    case insertCommand(String)
     case newThread
     case refreshThreads
     case openSettings
+    case openContextPicker
 }
 
 struct ComposerSlashCommand: Identifiable, Hashable {
@@ -26,26 +24,56 @@ enum ComposerSlashCommandCatalog {
         ComposerSlashCommand(
             command: "/plan",
             title: "Plan",
-            summary: "Draft a concise implementation plan with risks and validation.",
-            actionID: .insertPlanTemplate
+            summary: "Draft a comprehensive implementation plan using agents.",
+            actionID: .insertCommand("/plan ")
         ),
         ComposerSlashCommand(
-            command: "/status",
-            title: "Status",
-            summary: "Summarize progress, blockers, and next step.",
-            actionID: .insertStatusPrompt
+            command: "/code",
+            title: "Code",
+            summary: "Run a coding task with the multi-agent coding workflow.",
+            actionID: .insertCommand("/code ")
         ),
         ComposerSlashCommand(
-            command: "/test",
-            title: "Test",
-            summary: "Run relevant tests and summarize outcomes.",
-            actionID: .insertTestPrompt
+            command: "/solve",
+            title: "Solve",
+            summary: "Deep-dive a hard problem with multi-agent analysis.",
+            actionID: .insertCommand("/solve ")
         ),
         ComposerSlashCommand(
             command: "/review",
             title: "Review",
-            summary: "Review changes for bugs, regressions, and missing tests.",
-            actionID: .insertReviewPrompt
+            summary: "Run review mode to find concrete bugs and regressions.",
+            actionID: .insertCommand("/review ")
+        ),
+        ComposerSlashCommand(
+            command: "/status",
+            title: "Status",
+            summary: "Show session configuration, usage, and runtime context.",
+            actionID: .insertCommand("/status")
+        ),
+        ComposerSlashCommand(
+            command: "/test",
+            title: "Test",
+            summary: "Run relevant tests and report pass/fail evidence.",
+            actionID: .insertCommand("/test")
+        ),
+        ComposerSlashCommand(
+            command: "/diff",
+            title: "Diff",
+            summary: "Inspect current workspace diff including untracked files.",
+            actionID: .insertCommand("/diff")
+        ),
+        ComposerSlashCommand(
+            command: "/undo",
+            title: "Undo",
+            summary: "Open snapshot recovery flow to restore workspace state.",
+            actionID: .insertCommand("/undo")
+        ),
+        ComposerSlashCommand(
+            command: "/mention",
+            title: "Mention",
+            summary: "Insert @context references from workspace files.",
+            actionID: .openContextPicker
         ),
         ComposerSlashCommand(
             command: "/new",
@@ -74,8 +102,10 @@ enum ComposerSlashCommandCatalog {
         }
 
         let normalized = trimmed.lowercased()
+        let normalizedWithoutPrefix = normalized.hasPrefix("/") ? String(normalized.dropFirst()) : normalized
         return coreSet.filter { command in
             command.command.lowercased().contains(normalized)
+                || command.command.dropFirst().lowercased().contains(normalizedWithoutPrefix)
                 || command.title.lowercased().contains(normalized)
                 || command.summary.lowercased().contains(normalized)
         }

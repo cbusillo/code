@@ -15,6 +15,7 @@ SCENARIOS=(
 	"approval-pending"
 	"request-user-input"
 	"command-launcher"
+	"command-launcher-depth"
 	"context-mention"
 	"git-recovery"
 	"ide-integration"

@@ -2929,14 +2929,8 @@ struct ContentView: View {
         slashCommandQuery = ""
 
         switch command.actionID {
-        case .insertPlanTemplate:
-            appendComposerTemplate("Create a concise implementation plan with numbered steps, key risks, and explicit validation gates.")
-        case .insertStatusPrompt:
-            appendComposerTemplate("Summarize current progress, blockers, and the single highest-leverage next step.")
-        case .insertTestPrompt:
-            appendComposerTemplate("Run relevant tests for the current changes and summarize failures, fixes, and final status.")
-        case .insertReviewPrompt:
-            appendComposerTemplate("Review the current changes for bugs, regressions, and missing tests. Provide findings first.")
+        case .insertCommand(let commandText):
+            appendComposerCommand(commandText)
         case .newThread:
             Task {
                 await store.createSession(cwd: nil)
@@ -2947,11 +2941,14 @@ struct ContentView: View {
             }
         case .openSettings:
             presentSettings(.general)
+        case .openContextPicker:
+            ensureContextIndexLoaded()
+            showContextPicker = true
         }
     }
 
-    private func appendComposerTemplate(_ template: String) {
-        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func appendComposerCommand(_ commandText: String) {
+        let trimmed = commandText.trimmingCharacters(in: .newlines)
         guard !trimmed.isEmpty else {
             return
         }
@@ -2961,7 +2958,7 @@ struct ContentView: View {
         } else if composerDraft.hasSuffix("\n") {
             composerDraft += trimmed
         } else {
-            composerDraft += "\n\n\(trimmed)"
+            composerDraft += "\n\(trimmed)"
         }
 
         focusComposerEditor(forceActivateApp: true)
@@ -7408,14 +7405,35 @@ private struct SlashCommandLauncherView: View {
     let onSelect: (ComposerSlashCommand) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedCommandID: ComposerSlashCommand.ID?
+    @FocusState private var searchFieldFocused: Bool
+
+    private var selectedCommand: ComposerSlashCommand? {
+        if let selectedCommandID,
+           let matched = commands.first(where: { $0.id == selectedCommandID }) {
+            return matched
+        }
+        return commands.first
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedCommand else {
+            return nil
+        }
+        return commands.firstIndex(where: { $0.id == selectedCommand.id })
+    }
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
                 TextField("Search slash commands", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .focused($searchFieldFocused)
                     .accessibilityIdentifier("slash.search")
                     .accessibilityLabel("Filter slash commands")
+                    .onSubmit {
+                        applySelection()
+                    }
 
                 if commands.isEmpty {
                     Text("No matching commands")
@@ -7424,8 +7442,9 @@ private struct SlashCommandLauncherView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .accessibilityIdentifier("slash.empty")
                 } else {
-                    List(Array(commands.enumerated()), id: \.element.id) { index, command in
+                    List(Array(commands.enumerated()), id: \.element.id, selection: $selectedCommandID) { index, command in
                         Button {
+                            selectedCommandID = command.id
                             onSelect(command)
                             dismiss()
                         } label: {
@@ -7451,13 +7470,37 @@ private struct SlashCommandLauncherView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 6)
+                            .padding(.horizontal, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(selectedCommandID == command.id ? Color.accentColor.opacity(0.14) : Color.clear)
+                            )
                         }
                         .buttonStyle(.plain)
+                        .tag(command.id)
                         .accessibilityIdentifier("slash.item.\(command.command)")
                         .accessibilityLabel("\(command.title): \(command.summary)")
-                        .accessibilityHint(index < 9 ? "Press \(index + 1) to select" : "")
+                        .accessibilityHint(index < 9 ? "Press \(index + 1) to select, or Return to select highlighted command" : "Press Return to select highlighted command")
                     }
                     .listStyle(.plain)
+
+                    HStack(spacing: 8) {
+                        Label("↑/↓", systemImage: "arrow.up.arrow.down")
+                        Text("navigate")
+                        Text("•")
+                        Text("Return")
+                        Text("select")
+                        Text("•")
+                        Text("Esc")
+                        Text("close")
+                        Text("•")
+                        Text("1-9")
+                        Text("quick pick")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("slash.keyboard-hints")
                 }
             }
             .padding(14)
@@ -7472,7 +7515,98 @@ private struct SlashCommandLauncherView: View {
                     }
                 }
             }
+            .overlay(alignment: .topLeading) {
+                keyboardShortcutProxy
+            }
+            .onAppear {
+                syncSelection()
+                searchFieldFocused = true
+            }
+            .onChange(of: commands.map(\.id)) { _, _ in
+                syncSelection()
+            }
         }
+    }
+
+    @ViewBuilder
+    private var keyboardShortcutProxy: some View {
+        VStack(spacing: 0) {
+            Button("Select slash command") {
+                applySelection()
+            }
+            .keyboardShortcut(.defaultAction)
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .disabled(commands.isEmpty)
+
+            Button("Close slash commands") {
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+
+            Button("Previous slash command") {
+                moveSelection(delta: -1)
+            }
+            .keyboardShortcut(.upArrow, modifiers: [])
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .disabled(commands.count < 2)
+
+            Button("Next slash command") {
+                moveSelection(delta: 1)
+            }
+            .keyboardShortcut(.downArrow, modifiers: [])
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .disabled(commands.count < 2)
+
+            ForEach(Array(commands.prefix(9).enumerated()), id: \.element.id) { index, command in
+                Button("Select \(command.command)") {
+                    selectedCommandID = command.id
+                    applySelection()
+                }
+                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
+                .opacity(0.001)
+                .frame(width: 1, height: 1)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func syncSelection() {
+        guard let first = commands.first else {
+            selectedCommandID = nil
+            return
+        }
+
+        guard let selectedCommandID,
+              commands.contains(where: { $0.id == selectedCommandID })
+        else {
+            self.selectedCommandID = first.id
+            return
+        }
+    }
+
+    private func moveSelection(delta: Int) {
+        guard !commands.isEmpty else {
+            return
+        }
+
+        let fallbackIndex = delta >= 0 ? 0 : max(0, commands.count - 1)
+        let currentIndex = selectedIndex ?? fallbackIndex
+        let nextIndex = max(0, min(commands.count - 1, currentIndex + delta))
+        selectedCommandID = commands[nextIndex].id
+    }
+
+    private func applySelection() {
+        guard let selectedCommand else {
+            return
+        }
+
+        onSelect(selectedCommand)
+        dismiss()
     }
 }
 

@@ -26,7 +26,7 @@ Legend:
 | PAR-008 | Explicit connection/history runtime states | Every Code TUI | partial | P0 | M1 |
 | PAR-009 | Auto-review summary durability | Every Code TUI | partial | P0 | M1 |
 | PAR-010 | Screenshot benchmark harness + baseline | Mac + native | partial | P0 | M1 |
-| PAR-011 | Slash command launcher parity (core set) | Every Code TUI | partial | P1 | M2 |
+| PAR-011 | Slash command launcher parity (core set) | Every Code TUI | present | P1 | M2 |
 | PAR-012 | Mention-style context insertion | Every Code TUI | partial | P1 | M2 |
 | PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | present | P1 | M2 |
 | PAR-014 | Request-user-input parity UI | Every Code TUI | partial | P1 | M2 |
@@ -117,8 +117,12 @@ Legend:
 - Acceptance criteria: native command launcher supports highest-frequency
   planning/execution/review commands.
 - Validation gate: command launcher tests + UX benchmark.
-- Progress: core launcher sheet, command filtering, and primary actions shipped
-  in Milestone 2 batch 1; remaining work is command breadth and keyboard depth.
+- Progress: launcher now covers high-frequency slash workflows (`/plan`,
+  `/code`, `/solve`, `/review`, `/status`, `/test`, `/diff`, `/undo`,
+  `/mention`) with native quick actions for thread/settings/context. Keyboard
+  depth now supports Return-select, arrow-key selection movement, Escape-close,
+  and deterministic 1-9 quick-pick shortcuts, with benchmark evidence from
+  `command-launcher` + `command-launcher-depth` scenarios.
 
 ## PAR-012
 

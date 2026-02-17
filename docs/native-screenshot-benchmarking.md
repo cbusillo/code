@@ -16,6 +16,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `approval-pending`
 - `request-user-input`
 - `command-launcher`
+- `command-launcher-depth`
 - `context-mention`
 - `git-recovery`
 - `ide-integration`

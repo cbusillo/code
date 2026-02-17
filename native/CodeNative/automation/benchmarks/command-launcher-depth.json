@@ -1,0 +1,10 @@
+[
+  { "kind": "click", "id": "composer.slash" },
+  { "kind": "wait", "seconds": 0.4 },
+  { "kind": "type", "id": "slash.search", "text": "re" },
+  { "kind": "wait", "seconds": 0.4 },
+  {
+    "kind": "screenshot",
+    "path": ".code/ux-bench/native-ui/current/command-launcher-depth.png"
+  }
+]
