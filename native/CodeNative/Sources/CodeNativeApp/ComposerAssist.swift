@@ -118,7 +118,7 @@ struct ComposerContextMentionMatch: Hashable {
 }
 
 enum ComposerContextReferenceFormatter {
-    private static let mentionPattern = "(?:^|\\s)@([A-Za-z0-9_./-]*)$"
+    private static let mentionPattern = "(?:^|[\\s\\(\\[\\{,:;])(@(?:\\\"([^\\\"]*)\\\"|([A-Za-z0-9_./-]*)))$"
 
     static func trailingMentionMatch(in draft: String) -> ComposerContextMentionMatch? {
         guard let regex = try? NSRegularExpression(pattern: mentionPattern) else {
@@ -127,22 +127,26 @@ enum ComposerContextReferenceFormatter {
 
         let nsRange = NSRange(draft.startIndex..<draft.endIndex, in: draft)
         guard let match = regex.firstMatch(in: draft, options: [], range: nsRange),
-              let fullRange = Range(match.range, in: draft),
-              let queryRange = Range(match.range(at: 1), in: draft)
+              let mentionRange = Range(match.range(at: 1), in: draft)
         else {
             return nil
         }
 
-        guard queryRange.lowerBound > fullRange.lowerBound else {
-            return nil
+        if let quotedRange = Range(match.range(at: 2), in: draft) {
+            return ComposerContextMentionMatch(
+                query: String(draft[quotedRange]),
+                range: mentionRange
+            )
         }
 
-        let replacementStart = draft.index(before: queryRange.lowerBound)
+        if let plainRange = Range(match.range(at: 3), in: draft) {
+            return ComposerContextMentionMatch(
+                query: String(draft[plainRange]),
+                range: mentionRange
+            )
+        }
 
-        return ComposerContextMentionMatch(
-            query: String(draft[queryRange]),
-            range: replacementStart..<fullRange.upperBound
-        )
+        return nil
     }
 
     static func formattedReferenceToken(path: String) -> String {
@@ -172,6 +176,58 @@ enum ComposerContextReferenceFormatter {
         var updated = draft
         updated.replaceSubrange(mentionMatch.range, with: token)
         return updated
+    }
+}
+
+enum ComposerContextPathCatalog {
+    static func filteredPaths(
+        from indexedPaths: [String],
+        query: String,
+        limit: Int = 30
+    ) -> [String] {
+        guard !indexedPaths.isEmpty else {
+            return []
+        }
+
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return Array(indexedPaths.prefix(limit))
+        }
+
+        let lowercasedQuery = normalized.lowercased()
+        return indexedPaths
+            .compactMap { path -> (score: Int, length: Int, path: String)? in
+                let lowercasedPath = path.lowercased()
+                let fileName = (path as NSString).lastPathComponent.lowercased()
+
+                let score: Int
+                if lowercasedPath.hasPrefix(lowercasedQuery) {
+                    score = 0
+                } else if fileName.hasPrefix(lowercasedQuery) {
+                    score = 1
+                } else if fileName.contains(lowercasedQuery) {
+                    score = 2
+                } else if lowercasedPath.contains(lowercasedQuery) {
+                    score = 3
+                } else {
+                    return nil
+                }
+
+                return (score, path.count, path)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score < rhs.score
+                }
+
+                if lhs.length != rhs.length {
+                    return lhs.length < rhs.length
+                }
+
+                return lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+            }
+            .prefix(limit)
+            .map(\.path)
     }
 }
 

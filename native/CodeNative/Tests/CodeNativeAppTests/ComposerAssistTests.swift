@@ -43,9 +43,50 @@ final class ComposerAssistTests: XCTestCase {
         )
     }
 
+    func testTrailingMentionMatchSupportsQuotedAndPunctuationTriggers() {
+        let quotedDraft = "Please inspect (@\"docs/native app\""
+        let quotedMatch = ComposerContextReferenceFormatter.trailingMentionMatch(in: quotedDraft)
+        XCTAssertEqual(quotedMatch?.query, "docs/native app")
+
+        let punctuatedDraft = "Need file: @native/CodeNative"
+        let punctuatedMatch = ComposerContextReferenceFormatter.trailingMentionMatch(in: punctuatedDraft)
+        XCTAssertEqual(punctuatedMatch?.query, "native/CodeNative")
+    }
+
+    func testInsertReferenceReplacesQuotedMentionRange() {
+        let draft = "Inspect (@\"docs/native app\""
+        let mention = ComposerContextReferenceFormatter.trailingMentionMatch(in: draft)
+
+        let updated = ComposerContextReferenceFormatter.insertReference(
+            into: draft,
+            path: "docs/native app parity.md",
+            mentionMatch: mention
+        )
+
+        XCTAssertEqual(updated, "Inspect (@\"docs/native app parity.md\" ")
+    }
+
     func testFormattedReferenceTokenQuotesWhitespacePaths() {
         let token = ComposerContextReferenceFormatter.formattedReferenceToken(path: "docs/native app parity.md")
         XCTAssertEqual(token, "@\"docs/native app parity.md\"")
+    }
+
+    func testContextPathFilteringPrefersBasenameAndLimitsCount() {
+        let indexed = [
+            "docs/native-app-parity-plan.md",
+            "native/CodeNative/Sources/CodeNativeApp/ContentView.swift",
+            "native/CodeNative/Sources/CodeNativeApp/ComposerAssist.swift",
+            "scripts/ux/benchmark-native-ui.sh"
+        ]
+
+        let filtered = ComposerContextPathCatalog.filteredPaths(
+            from: indexed,
+            query: "contentview",
+            limit: 2
+        )
+
+        XCTAssertEqual(filtered.count, 1)
+        XCTAssertEqual(filtered.first, "native/CodeNative/Sources/CodeNativeApp/ContentView.swift")
     }
 
     func testBuildContextFileIndexSkipsHiddenAndLargeDirectories() throws {

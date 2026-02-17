@@ -1,0 +1,10 @@
+[
+  { "kind": "click", "id": "composer.context" },
+  { "kind": "wait", "seconds": 1.0 },
+  { "kind": "type", "id": "context.search", "text": "ContentView.swift" },
+  { "kind": "wait", "seconds": 0.8 },
+  {
+    "kind": "screenshot",
+    "path": ".code/ux-bench/native-ui/current/context-mention-depth.png"
+  }
+]

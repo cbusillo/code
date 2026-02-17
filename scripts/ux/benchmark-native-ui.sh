@@ -17,6 +17,7 @@ SCENARIOS=(
 	"command-launcher"
 	"command-launcher-depth"
 	"context-mention"
+	"context-mention-depth"
 	"git-recovery"
 	"ide-integration"
 	"settings-workflow-controls"

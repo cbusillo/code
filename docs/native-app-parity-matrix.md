@@ -27,7 +27,7 @@ Legend:
 | PAR-009 | Auto-review summary durability | Every Code TUI | partial | P0 | M1 |
 | PAR-010 | Screenshot benchmark harness + baseline | Mac + native | partial | P0 | M1 |
 | PAR-011 | Slash command launcher parity (core set) | Every Code TUI | present | P1 | M2 |
-| PAR-012 | Mention-style context insertion | Every Code TUI | partial | P1 | M2 |
+| PAR-012 | Mention-style context insertion | Every Code TUI | present | P1 | M2 |
 | PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | present | P1 | M2 |
 | PAR-014 | Request-user-input parity UI | Every Code TUI | partial | P1 | M2 |
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | present | P1 | M2 |
@@ -130,8 +130,12 @@ Legend:
 - Acceptance criteria: file/context references are insertable via picker with
   deterministic formatting.
 - Validation gate: composer interaction scenario + screenshot review.
-- Progress: mention-triggered suggestions, context picker, and deterministic
-  token formatting shipped in Milestone 2 batch 1.
+- Progress: mention flow now supports punctuation/quoted triggers, ranked
+  filtering that prioritizes filename matches, stable quoted-path insertion,
+  keyboard-first inline selection (`Tab`, arrow navigation) and context-picker
+  keyboard controls (`Return`, arrow navigation, `Esc`, quick 1-9). Benchmarks
+  now include `context-mention` + `context-mention-depth` deterministic
+  scenarios.
 
 ## PAR-013
 

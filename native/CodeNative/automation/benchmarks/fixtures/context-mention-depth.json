@@ -1,0 +1,37 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-context-mention-depth",
+  "client_id": "bench-context-mention-depth",
+  "composer_text": "Review @\"native/CodeNative\"",
+  "selected_session_id": "00000000-0000-0000-0000-00000000ad01",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000ad01",
+        "conversation_id": "00000000-0000-0000-0000-00000000ad01",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700001000000,
+        "last_event_at_unix_ms": 1700001003000,
+        "title": "Milestone 2 context mention depth"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000ad01",
+          "seq": 1,
+          "event": {
+            "id": "mention-depth-assistant-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "Use @context picker with keyboard navigation to attach exact files."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

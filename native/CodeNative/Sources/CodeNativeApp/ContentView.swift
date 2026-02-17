@@ -93,6 +93,7 @@ struct ContentView: View {
     @State private var slashCommandQuery = ""
     @State private var showContextPicker = false
     @State private var contextPickerQuery = ""
+    @State private var selectedInlineContextPath: String?
     @State private var ideOpenFailureMessage: String?
     @State private var indexedContextRootPath: String?
     @State private var indexedContextFilePaths: [String] = []
@@ -668,6 +669,10 @@ struct ContentView: View {
             if ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
                 ensureContextIndexLoaded()
             }
+            syncInlineContextSelection()
+        }
+        .onChange(of: displayedInlineContextPaths) { _, _ in
+            syncInlineContextSelection()
         }
         .onChange(of: store.sessions) { _, _ in
             pruneSessionIDEPreferences()
@@ -1995,7 +2000,8 @@ struct ContentView: View {
                         isFocused: composerIsFocused,
                         measuredHeight: $composerMeasuredHeight,
                         onFocusChange: { composerIsFocused = $0 },
-                        onSubmit: { submitComposerAction(text: $0) }
+                        onSubmit: { submitComposerAction(text: $0) },
+                        onEditorKeyCommand: handleComposerKeyCommand
                     )
                     .frame(height: composerEditorHeight)
                     .padding(.horizontal, 12)
@@ -2035,6 +2041,9 @@ struct ContentView: View {
                             Text("Context matches")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                            Text("Tab inserts")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             Spacer(minLength: 6)
                             Button("Open picker") {
                                 showContextPicker = true
@@ -2044,8 +2053,9 @@ struct ContentView: View {
                             .foregroundStyle(.white.opacity(0.82))
                         }
 
-                        ForEach(filteredInlineContextPaths.prefix(6), id: \.self) { path in
+                        ForEach(displayedInlineContextPaths, id: \.self) { path in
                             Button {
+                                selectedInlineContextPath = path
                                 insertContextReference(path: path)
                             } label: {
                                 HStack(spacing: 8) {
@@ -2061,7 +2071,10 @@ struct ContentView: View {
                                 }
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 7)
-                                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(selectedInlineContextPath == path ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.05))
+                                )
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Insert \(path)")
@@ -2787,6 +2800,10 @@ struct ContentView: View {
         filteredContextPaths(query: inlineContextQuery)
     }
 
+    private var displayedInlineContextPaths: [String] {
+        Array(filteredInlineContextPaths.prefix(6))
+    }
+
     private var filteredContextPickerPaths: [String] {
         filteredContextPaths(query: contextPickerQuery)
     }
@@ -2795,7 +2812,7 @@ struct ContentView: View {
         composerIsFocused
             && trailingMentionMatch != nil
             && !showContextPicker
-            && !filteredInlineContextPaths.isEmpty
+            && !displayedInlineContextPaths.isEmpty
     }
 
     private struct ComposerActivityBadge {
@@ -2882,35 +2899,11 @@ struct ContentView: View {
     }
 
     private func filteredContextPaths(query: String) -> [String] {
-        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !indexedContextFilePaths.isEmpty else {
-            return []
-        }
-
-        guard !normalized.isEmpty else {
-            return Array(indexedContextFilePaths.prefix(30))
-        }
-
-        let lowercased = normalized.lowercased()
-        var prefixMatches: [String] = []
-        var containsMatches: [String] = []
-        prefixMatches.reserveCapacity(30)
-        containsMatches.reserveCapacity(30)
-
-        for path in indexedContextFilePaths {
-            let lowercasePath = path.lowercased()
-            if lowercasePath.hasPrefix(lowercased) {
-                prefixMatches.append(path)
-            } else if lowercasePath.contains(lowercased) {
-                containsMatches.append(path)
-            }
-
-            if prefixMatches.count + containsMatches.count >= 30 {
-                break
-            }
-        }
-
-        return prefixMatches + containsMatches
+        ComposerContextPathCatalog.filteredPaths(
+            from: indexedContextFilePaths,
+            query: query,
+            limit: 30
+        )
     }
 
     private func insertContextReference(path: String) {
@@ -2919,9 +2912,61 @@ struct ContentView: View {
             path: path,
             mentionMatch: trailingMentionMatch
         )
+        selectedInlineContextPath = nil
         contextPickerQuery = ""
         showContextPicker = false
         focusComposerEditor(forceActivateApp: true)
+    }
+
+    private func syncInlineContextSelection() {
+        guard showsInlineContextSuggestions else {
+            selectedInlineContextPath = nil
+            return
+        }
+
+        guard let selectedInlineContextPath,
+              displayedInlineContextPaths.contains(selectedInlineContextPath)
+        else {
+            self.selectedInlineContextPath = displayedInlineContextPaths.first
+            return
+        }
+    }
+
+    private func moveInlineContextSelection(delta: Int) {
+        guard !displayedInlineContextPaths.isEmpty else {
+            return
+        }
+
+        let fallbackIndex = delta >= 0 ? 0 : max(0, displayedInlineContextPaths.count - 1)
+        let currentIndex = selectedInlineContextPath.flatMap { displayedInlineContextPaths.firstIndex(of: $0) } ?? fallbackIndex
+        let nextIndex = max(0, min(displayedInlineContextPaths.count - 1, currentIndex + delta))
+        selectedInlineContextPath = displayedInlineContextPaths[nextIndex]
+    }
+
+    private func acceptInlineContextSelection() {
+        guard let path = selectedInlineContextPath ?? displayedInlineContextPaths.first else {
+            return
+        }
+
+        insertContextReference(path: path)
+    }
+
+    private func handleComposerKeyCommand(_ command: ComposerEditorKeyCommand) -> Bool {
+        guard showsInlineContextSuggestions else {
+            return false
+        }
+
+        switch command {
+        case .acceptInlineContextSelection:
+            acceptInlineContextSelection()
+            return true
+        case .moveInlineContextSelectionUp:
+            moveInlineContextSelection(delta: -1)
+            return true
+        case .moveInlineContextSelectionDown:
+            moveInlineContextSelection(delta: 1)
+            return true
+        }
     }
 
     private func handleSlashCommandSelection(_ command: ComposerSlashCommand) {
@@ -4496,6 +4541,12 @@ private struct QuickPromptCard: View {
     }
 }
 
+private enum ComposerEditorKeyCommand {
+    case acceptInlineContextSelection
+    case moveInlineContextSelectionUp
+    case moveInlineContextSelectionDown
+}
+
 #if os(macOS)
 private struct MacComposerTextView: NSViewRepresentable {
     @Binding var text: String
@@ -4503,6 +4554,7 @@ private struct MacComposerTextView: NSViewRepresentable {
     @Binding var measuredHeight: CGFloat
     let onFocusChange: (Bool) -> Void
     let onSubmit: (String) -> Void
+    let onEditorKeyCommand: (ComposerEditorKeyCommand) -> Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -4532,6 +4584,7 @@ private struct MacComposerTextView: NSViewRepresentable {
             coordinator?.cancelPendingSync()
             onSubmit(textView?.string ?? "")
         }
+        textView.onEditorKeyCommand = onEditorKeyCommand
         textView.string = text
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -4565,6 +4618,7 @@ private struct MacComposerTextView: NSViewRepresentable {
             coordinator?.cancelPendingSync()
             onSubmit(textView?.string ?? "")
         }
+        textView.onEditorKeyCommand = onEditorKeyCommand
 
         if isFocused,
            let window = nsView.window,
@@ -4639,16 +4693,34 @@ private struct MacComposerTextView: NSViewRepresentable {
 
     final class SubmitAwareTextView: NSTextView {
         var onSubmit: (() -> Void)?
+        var onEditorKeyCommand: ((ComposerEditorKeyCommand) -> Bool)?
 
         override func keyDown(with event: NSEvent) {
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let hasShift = modifiers.contains(.shift)
+            let hasCommand = modifiers.contains(.command)
+            let hasOption = modifiers.contains(.option)
+            let hasControl = modifiers.contains(.control)
+
+            if !hasShift && !hasCommand && !hasOption && !hasControl {
+                if event.keyCode == 48,
+                   onEditorKeyCommand?(.acceptInlineContextSelection) == true {
+                    return
+                }
+
+                if event.keyCode == 126,
+                   onEditorKeyCommand?(.moveInlineContextSelectionUp) == true {
+                    return
+                }
+
+                if event.keyCode == 125,
+                   onEditorKeyCommand?(.moveInlineContextSelectionDown) == true {
+                    return
+                }
+            }
+
             let isReturnKey = event.keyCode == 36 || event.keyCode == 76
             if isReturnKey {
-                let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                let hasShift = modifiers.contains(.shift)
-                let hasCommand = modifiers.contains(.command)
-                let hasOption = modifiers.contains(.option)
-                let hasControl = modifiers.contains(.control)
-
                 if hasShift && !hasCommand && !hasOption && !hasControl {
                     insertNewline(nil)
                     return
@@ -7618,14 +7690,35 @@ private struct ContextReferencePickerView: View {
     let onSelect: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedPath: String?
+    @FocusState private var searchFocused: Bool
+
+    private var selectedCandidate: String? {
+        if let selectedPath,
+           candidates.contains(selectedPath) {
+            return selectedPath
+        }
+        return candidates.first
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedCandidate else {
+            return nil
+        }
+        return candidates.firstIndex(of: selectedCandidate)
+    }
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
                 TextField("Search files for @context", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .focused($searchFocused)
                     .accessibilityIdentifier("context.search")
                     .accessibilityLabel("Filter workspace files")
+                    .onSubmit {
+                        applySelectedCandidate()
+                    }
 
                 if isLoading {
                     HStack(spacing: 8) {
@@ -7644,8 +7737,9 @@ private struct ContextReferencePickerView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .accessibilityIdentifier("context.empty")
                 } else {
-                    List(candidates, id: \.self) { path in
+                    List(candidates, id: \.self, selection: $selectedPath) { path in
                         Button {
+                            selectedPath = path
                             onSelect(path)
                             dismiss()
                         } label: {
@@ -7662,12 +7756,36 @@ private struct ContextReferencePickerView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 4)
+                            .padding(.horizontal, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(selectedPath == path ? Color.accentColor.opacity(0.14) : Color.clear)
+                            )
                         }
                         .buttonStyle(.plain)
+                        .tag(path)
                         .accessibilityIdentifier("context.item.\(path)")
                         .accessibilityLabel("Insert reference to \(path)")
                     }
                     .listStyle(.plain)
+
+                    HStack(spacing: 8) {
+                        Label("↑/↓", systemImage: "arrow.up.arrow.down")
+                        Text("navigate")
+                        Text("•")
+                        Text("Return")
+                        Text("insert")
+                        Text("•")
+                        Text("Esc")
+                        Text("close")
+                        Text("•")
+                        Text("1-9")
+                        Text("quick pick")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("context.keyboard-hints")
                 }
             }
             .padding(14)
@@ -7688,7 +7806,98 @@ private struct ContextReferencePickerView: View {
                     }
                 }
             }
+            .overlay(alignment: .topLeading) {
+                keyboardProxy
+            }
+            .onAppear {
+                syncSelection()
+                searchFocused = true
+            }
+            .onChange(of: candidates) { _, _ in
+                syncSelection()
+            }
         }
+    }
+
+    @ViewBuilder
+    private var keyboardProxy: some View {
+        VStack(spacing: 0) {
+            Button("Insert selected reference") {
+                applySelectedCandidate()
+            }
+            .keyboardShortcut(.defaultAction)
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .disabled(candidates.isEmpty)
+
+            Button("Close context picker") {
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+
+            Button("Previous context candidate") {
+                moveSelection(delta: -1)
+            }
+            .keyboardShortcut(.upArrow, modifiers: [])
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .disabled(candidates.count < 2)
+
+            Button("Next context candidate") {
+                moveSelection(delta: 1)
+            }
+            .keyboardShortcut(.downArrow, modifiers: [])
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .disabled(candidates.count < 2)
+
+            ForEach(Array(candidates.prefix(9).enumerated()), id: \.element) { index, path in
+                Button("Insert \(path)") {
+                    selectedPath = path
+                    applySelectedCandidate()
+                }
+                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
+                .opacity(0.001)
+                .frame(width: 1, height: 1)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func syncSelection() {
+        guard let first = candidates.first else {
+            selectedPath = nil
+            return
+        }
+
+        guard let selectedPath,
+              candidates.contains(selectedPath)
+        else {
+            self.selectedPath = first
+            return
+        }
+    }
+
+    private func moveSelection(delta: Int) {
+        guard !candidates.isEmpty else {
+            return
+        }
+
+        let fallbackIndex = delta >= 0 ? 0 : max(0, candidates.count - 1)
+        let currentIndex = selectedIndex ?? fallbackIndex
+        let nextIndex = max(0, min(candidates.count - 1, currentIndex + delta))
+        selectedPath = candidates[nextIndex]
+    }
+
+    private func applySelectedCandidate() {
+        guard let selectedCandidate else {
+            return
+        }
+
+        onSelect(selectedCandidate)
+        dismiss()
     }
 
     private func contextFileIcon(for path: String) -> String {
