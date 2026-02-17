@@ -29,7 +29,7 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
-    enum ConnectionState: String {
+    enum ConnectionState: String, Decodable {
         case disconnected
         case connecting
         case connected
@@ -72,6 +72,9 @@ final class SessionMirrorStore: ObservableObject {
             guard oldValue != selectedSessionID else {
                 return
             }
+            if suppressSelectionSideEffects {
+                return
+            }
             enforceHistoryRetentionPolicy()
             attachmentGeneration = attachmentGeneration.saturatingIncrement()
             let generation = attachmentGeneration
@@ -108,6 +111,8 @@ final class SessionMirrorStore: ObservableObject {
     private var unavailableSessionActivitySnapshot: [UUID: UInt64] = [:]
     private var sessionListRequestID: String?
     private var sessionListRequestStartedAt: Date?
+    private var suppressSelectionSideEffects: Bool = false
+    private var loadedBenchmarkFixturePath: String?
 
     private lazy var decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -229,6 +234,28 @@ final class SessionMirrorStore: ObservableObject {
 
         receiveTask = Task {
             await self.receiveLoop()
+        }
+    }
+
+    func loadBenchmarkFixture(from path: String) {
+        guard loadedBenchmarkFixturePath != path else {
+            return
+        }
+
+        let fixtureURL = URL(fileURLWithPath: path)
+        do {
+            let data = try Data(contentsOf: fixtureURL)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let fixture = try decoder.decode(BenchmarkFixture.self, from: data)
+            applyBenchmarkFixture(fixture)
+            loadedBenchmarkFixturePath = path
+            Self.logger.info("Loaded benchmark fixture from \(path, privacy: .public)")
+        } catch {
+            loadedBenchmarkFixturePath = nil
+            lastError = "Failed to load benchmark fixture: \(error.localizedDescription)"
+            statusLine = "Fixture load failed"
+            Self.logger.error("Failed to load benchmark fixture from \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -535,26 +562,9 @@ final class SessionMirrorStore: ObservableObject {
             statusLine = "Attached to \(message.sessionId.uuidString.prefix(8))"
 
         case .sessionHistoryPage(let message):
-            if let requestId = message.requestId {
-                guard let pendingSessionID = pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId),
-                      pendingSessionID == message.sessionId
-                else {
-                    Self.logger.debug(
-                        "Ignoring stale history page response request_id=\(message.requestId ?? "none", privacy: .public) for session \(message.sessionId.uuidString, privacy: .public)"
-                    )
-                    return
-                }
-
-                if let startedAt = historyPageRequestStartedAtByRequestID.removeValue(forKey: requestId) {
-                    let latencyMs = Date().timeIntervalSince(startedAt) * 1_000
-                    historyPageTelemetry.successCount += 1
-                    historyPageTelemetry.totalLatencyMs += latencyMs
-                    if latencyMs > Self.slowHistoryPageThresholdMs {
-                        historyPageTelemetry.slowPageCount += 1
-                    }
-                }
+            guard consumeHistoryPageResponseTracking(for: message) else {
+                return
             }
-            historyPageLoadInFlightSessionIDs.remove(message.sessionId)
 
             let existing = itemsBySession[message.sessionId] ?? []
             let merged = SessionStreamReducer.mergeOlderHistoryPage(
@@ -932,6 +942,149 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
+    private func consumeHistoryPageResponseTracking(
+        for message: SessionHistoryPageMessage
+    ) -> Bool {
+        guard let requestId = message.requestId else {
+            historyPageLoadInFlightSessionIDs.remove(message.sessionId)
+            return true
+        }
+
+        guard let pendingSessionID = pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId) else {
+            historyPageRequestStartedAtByRequestID.removeValue(forKey: requestId)
+            clearOrphanedHistoryPageInFlightState(for: message.sessionId)
+            Self.logger.debug(
+                "Ignoring stale history page response request_id=\(requestId, privacy: .public) for session \(message.sessionId.uuidString, privacy: .public)"
+            )
+            return false
+        }
+
+        let startedAt = historyPageRequestStartedAtByRequestID.removeValue(forKey: requestId)
+        historyPageLoadInFlightSessionIDs.remove(pendingSessionID)
+
+        guard pendingSessionID == message.sessionId else {
+            clearOrphanedHistoryPageInFlightState(for: message.sessionId)
+            Self.logger.warning(
+                "Ignoring mismatched history page response request_id=\(requestId, privacy: .public) expected_session=\(pendingSessionID.uuidString, privacy: .public) actual_session=\(message.sessionId.uuidString, privacy: .public)"
+            )
+            return false
+        }
+
+        if let startedAt {
+            let latencyMs = Date().timeIntervalSince(startedAt) * 1_000
+            historyPageTelemetry.successCount += 1
+            historyPageTelemetry.totalLatencyMs += latencyMs
+            if latencyMs > Self.slowHistoryPageThresholdMs {
+                historyPageTelemetry.slowPageCount += 1
+            }
+        }
+
+        return true
+    }
+
+    private func clearOrphanedHistoryPageInFlightState(for sessionID: UUID) {
+        if pendingHistoryPageRequestSessionIDs.values.contains(sessionID) {
+            return
+        }
+        historyPageLoadInFlightSessionIDs.remove(sessionID)
+    }
+
+    private func applyBenchmarkFixture(_ fixture: BenchmarkFixture) {
+        receiveTask?.cancel()
+        receiveTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        catalogRefreshTask?.cancel()
+        catalogRefreshTask = nil
+        webSocket?.cancel(with: .goingAway, reason: nil)
+        webSocket = nil
+
+        if let endpoint = fixture.endpoint,
+           !endpoint.isEmpty {
+            self.endpoint = endpoint
+        }
+
+        userInitiatedDisconnect = true
+        expectedAttachedSessionID = nil
+        pendingAttachRequestSessionIDs.removeAll()
+        pendingHistoryPageRequestSessionIDs.removeAll()
+        historyPageRequestStartedAtByRequestID.removeAll()
+        lastHistoryPageRequestAtBySessionID.removeAll()
+        hasMoreHistoryBeforeBySessionID.removeAll()
+        unavailableSessionActivitySnapshot.removeAll()
+        sessionListRequestID = nil
+        sessionListRequestStartedAt = nil
+
+        var builtSessions: [SessionSummary] = []
+        var builtItemsBySession: [UUID: [SessionStreamItem]] = [:]
+        var builtHasMoreBySessionID: [UUID: Bool] = [:]
+        var builtUnavailableSessionErrors: [UUID: String] = [:]
+        var builtInFlightHistorySessionIDs: Set<UUID> = []
+
+        for sessionFixture in fixture.sessions {
+            let sessionID = sessionFixture.summary.id
+            builtSessions.append(sessionFixture.summary)
+            builtItemsBySession[sessionID] = SessionStreamReducer.mergeReplayItems(
+                existing: [],
+                incoming: sessionFixture.items,
+                fromSeq: 0
+            )
+
+            if let hasMoreHistoryBefore = sessionFixture.hasMoreHistoryBefore {
+                builtHasMoreBySessionID[sessionID] = hasMoreHistoryBefore
+            }
+
+            if sessionFixture.historyPageInFlight == true {
+                builtInFlightHistorySessionIDs.insert(sessionID)
+            }
+
+            if let unavailableError = sessionFixture.unavailableError?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !unavailableError.isEmpty {
+                builtUnavailableSessionErrors[sessionID] = unavailableError
+            }
+        }
+
+        sessions = builtSessions.sorted(by: { sessionActivityUnixMs($0) < sessionActivityUnixMs($1) })
+        itemsBySession = builtItemsBySession
+        hasMoreHistoryBeforeBySessionID = builtHasMoreBySessionID
+        unavailableSessionErrors = builtUnavailableSessionErrors
+
+        if let historyPageInFlightSessionIDs = fixture.historyPageInFlightSessionIDs {
+            builtInFlightHistorySessionIDs.formUnion(historyPageInFlightSessionIDs)
+        }
+        historyPageLoadInFlightSessionIDs = builtInFlightHistorySessionIDs
+
+        if let telemetry = fixture.historyPageTelemetry {
+            historyPageTelemetry = HistoryPageTelemetry(
+                requestCount: telemetry.requestCount,
+                successCount: telemetry.successCount,
+                slowPageCount: telemetry.slowPageCount,
+                totalLatencyMs: telemetry.totalLatencyMs,
+                inactiveRetentionPasses: telemetry.inactiveRetentionPasses,
+                inactiveRetentionTrimmedItems: telemetry.inactiveRetentionTrimmedItems
+            )
+        } else {
+            historyPageTelemetry = HistoryPageTelemetry()
+        }
+
+        suppressSelectionSideEffects = true
+        selectedSessionID = fixture.selectedSessionID ?? sessions.last?.id
+        suppressSelectionSideEffects = false
+
+        attachedSessionID = selectedSessionID
+        expectedAttachedSessionID = nil
+
+        composerText = fixture.composerText ?? ""
+        connectionState = fixture.connectionState
+        statusLine = fixture.statusLine ?? fixture.connectionState.defaultStatusLine
+        lastError = fixture.lastError
+        clientId = fixture.clientId
+        transportFailureCount = 0
+        lastTransportFailureAt = nil
+
+        enforceHistoryRetentionPolicy()
+    }
+
     private func markSessionUnavailable(_ sessionID: UUID, message: String) {
         unavailableSessionErrors[sessionID] = message
         if let session = sessions.first(where: { $0.id == sessionID }) {
@@ -1003,6 +1156,68 @@ final class SessionMirrorStore: ObservableObject {
         return normalized.contains("/.code/working/") && normalized.contains("/branches/auto-review")
     }
 
+}
+
+private struct BenchmarkFixture: Decodable {
+    let endpoint: String?
+    let connectionState: SessionMirrorStore.ConnectionState
+    let statusLine: String?
+    let lastError: String?
+    let clientId: String?
+    let composerText: String?
+    let selectedSessionID: UUID?
+    let sessions: [BenchmarkFixtureSession]
+    let historyPageInFlightSessionIDs: [UUID]?
+    let historyPageTelemetry: BenchmarkHistoryPageTelemetry?
+}
+
+private struct BenchmarkFixtureSession: Decodable {
+    let summary: SessionSummary
+    let items: [SessionStreamItem]
+    let hasMoreHistoryBefore: Bool?
+    let historyPageInFlight: Bool?
+    let unavailableError: String?
+}
+
+private struct BenchmarkHistoryPageTelemetry: Decodable {
+    let requestCount: UInt64
+    let successCount: UInt64
+    let slowPageCount: UInt64
+    let totalLatencyMs: Double
+    let inactiveRetentionPasses: UInt64
+    let inactiveRetentionTrimmedItems: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case requestCount
+        case successCount
+        case slowPageCount
+        case totalLatencyMs
+        case inactiveRetentionPasses
+        case inactiveRetentionTrimmedItems
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requestCount = try container.decodeIfPresent(UInt64.self, forKey: .requestCount) ?? 0
+        successCount = try container.decodeIfPresent(UInt64.self, forKey: .successCount) ?? 0
+        slowPageCount = try container.decodeIfPresent(UInt64.self, forKey: .slowPageCount) ?? 0
+        totalLatencyMs = try container.decodeIfPresent(Double.self, forKey: .totalLatencyMs) ?? 0
+        inactiveRetentionPasses = try container.decodeIfPresent(UInt64.self, forKey: .inactiveRetentionPasses) ?? 0
+        inactiveRetentionTrimmedItems = try container.decodeIfPresent(UInt64.self, forKey: .inactiveRetentionTrimmedItems) ?? 0
+    }
+}
+
+private extension SessionMirrorStore.ConnectionState {
+    var defaultStatusLine: String {
+        switch self {
+        case .disconnected:
+            return "Disconnected"
+        case .connecting:
+            return "Connecting..."
+        case .connected:
+            return "Connected"
+        }
+    }
 }
 
 #if DEBUG

@@ -1,4 +1,5 @@
 [
+  { "kind": "click", "id": "rail.footer-settings" },
   { "kind": "wait", "seconds": 0.8 },
   {
     "kind": "screenshot",

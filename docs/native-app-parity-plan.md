@@ -246,7 +246,16 @@ swift run --package-path native/CodeNative CodeNativeAutomation --scenario <scen
 ```
 
 - Scenario directory:
-  `native/CodeNative/automation/scenarios/`
+  `native/CodeNative/automation/benchmarks/`
+
+- Deterministic fixture directory:
+  `native/CodeNative/automation/benchmarks/fixtures/`
+
+- One-shot benchmark runner:
+
+```bash
+scripts/ux/benchmark-native-ui.sh
+```
 
 - Cross-app parity captures:
   - Every Code TUI: launch representative scenario and capture terminal window.

@@ -1,0 +1,6 @@
+{
+  "connection_state": "disconnected",
+  "status_line": "Disconnected",
+  "last_error": "Backend offline; retrying...",
+  "sessions": []
+}

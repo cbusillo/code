@@ -1,0 +1,141 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-activity",
+  "client_id": "bench-activity",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a301",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a301",
+        "conversation_id": "00000000-0000-0000-0000-00000000a301",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000200000,
+        "last_event_at_unix_ms": 1700000280000,
+        "title": "Milestone 1 activity card"
+      },
+      "has_more_history_before": true,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 60,
+          "event": {
+            "id": "activity-task-start",
+            "event_seq": 60,
+            "kind": "event_msg",
+            "payload": {
+              "type": "task_started",
+              "task": "Exploring",
+              "summary": "Audit pagination and reconnect ordering"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 61,
+          "event": {
+            "id": "activity-bg-1",
+            "event_seq": 61,
+            "kind": "event_msg",
+            "payload": {
+              "type": "background_event",
+              "message": "Search ATTACH_REPLAY_ITEM_BYTE_LIMIT|compact_replay in web_server.rs"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 62,
+          "event": {
+            "id": "activity-bg-2",
+            "event_seq": 62,
+            "kind": "event_msg",
+            "payload": {
+              "type": "background_event",
+              "message": "Read ContentView.swift (lines 860 to 1035)"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 63,
+          "event": {
+            "id": "activity-exec-begin",
+            "event_seq": 63,
+            "kind": "event_msg",
+            "payload": {
+              "type": "exec_command_begin",
+              "command": [
+                "cargo",
+                "test",
+                "-p",
+                "code-app-server",
+                "truncate_attach_history_respects_native_websocket_budget"
+              ]
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 64,
+          "event": {
+            "id": "activity-exec-end",
+            "event_seq": 64,
+            "kind": "event_msg",
+            "payload": {
+              "type": "exec_command_end",
+              "command": [
+                "cargo",
+                "test",
+                "-p",
+                "code-app-server"
+              ],
+              "exit_code": 0,
+              "duration": "10.2s",
+              "formatted_output": "test result: ok. 34 passed; 0 failed"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 65,
+          "event": {
+            "id": "activity-auto-review",
+            "event_seq": 65,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "[auto-review] history-page bookkeeping now clears stale in-flight state"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a301",
+          "seq": 66,
+          "event": {
+            "id": "activity-task-complete",
+            "event_seq": 66,
+            "kind": "event_msg",
+            "payload": {
+              "type": "task_complete",
+              "summary": "Phase 0 and Milestone 1 activity UX checks complete"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 8,
+    "success_count": 8,
+    "slow_page_count": 1,
+    "total_latency_ms": 1242
+  }
+}

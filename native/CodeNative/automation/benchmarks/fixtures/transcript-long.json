@@ -1,0 +1,198 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-long",
+  "client_id": "bench-long",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a201",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a201",
+        "conversation_id": "00000000-0000-0000-0000-00000000a201",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000100000,
+        "last_event_at_unix_ms": 1700000199000,
+        "title": "Milestone 1 transcript long"
+      },
+      "has_more_history_before": true,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 41,
+          "level": "info",
+          "message": "Loaded baseline context"
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 42,
+          "event": {
+            "id": "long-user-1",
+            "event_seq": 42,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "List the remaining parity risks."
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 43,
+          "event": {
+            "id": "long-assistant-1",
+            "event_seq": 43,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "### Remaining P0 gaps\n\n- Ensure stale history-page responses always clear in-flight state\n- Make screenshot scenarios deterministic\n- Capture one cross-app parity triplet per milestone"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 44,
+          "event": {
+            "id": "long-task-start",
+            "event_seq": 44,
+            "kind": "event_msg",
+            "payload": {
+              "type": "task_started",
+              "task": "Parity benchmarking",
+              "summary": "Collect deterministic screenshots"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 45,
+          "event": {
+            "id": "long-bg-1",
+            "event_seq": 45,
+            "kind": "event_msg",
+            "payload": {
+              "type": "background_event",
+              "message": "Exploring benchmark fixtures"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 46,
+          "event": {
+            "id": "long-bg-2",
+            "event_seq": 46,
+            "kind": "event_msg",
+            "payload": {
+              "type": "background_event",
+              "message": "Read ContentView.swift (lines 5600 to 6660)"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 47,
+          "event": {
+            "id": "long-exec-begin",
+            "event_seq": 47,
+            "kind": "event_msg",
+            "payload": {
+              "type": "exec_command_begin",
+              "command": [
+                "swift",
+                "test",
+                "--package-path",
+                "native/CodeNative"
+              ]
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 48,
+          "event": {
+            "id": "long-exec-end",
+            "event_seq": 48,
+            "kind": "event_msg",
+            "payload": {
+              "type": "exec_command_end",
+              "command": [
+                "swift",
+                "test",
+                "--package-path",
+                "native/CodeNative"
+              ],
+              "exit_code": 0,
+              "duration": "4.8s",
+              "formatted_output": "Executed 45 tests, with 0 failures"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 49,
+          "event": {
+            "id": "long-auto-review",
+            "event_seq": 49,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "[auto-review] no issues found"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 50,
+          "event": {
+            "id": "long-task-complete",
+            "event_seq": 50,
+            "kind": "event_msg",
+            "payload": {
+              "type": "task_complete",
+              "summary": "Benchmarks captured and validated"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 51,
+          "event": {
+            "id": "long-assistant-2",
+            "event_seq": 51,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "## Validation\n\n- `swift test --package-path native/CodeNative`\n- `./build-fast.sh`\n- `scripts/ux/benchmark-native-ui.sh`\n\nAll green in benchmark fixture mode."
+            }
+          }
+        },
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000a201",
+          "seq": 52,
+          "level": "info",
+          "message": "History page loaded: older events available"
+        }
+      ]
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 5,
+    "success_count": 5,
+    "slow_page_count": 1,
+    "total_latency_ms": 812,
+    "inactive_retention_passes": 1,
+    "inactive_retention_trimmed_items": 322
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-approval",
+  "client_id": "bench-approval",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a401",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a401",
+        "conversation_id": "00000000-0000-0000-0000-00000000a401",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000300000,
+        "last_event_at_unix_ms": 1700000309000,
+        "title": "Milestone 1 approval flow"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a401",
+          "seq": 71,
+          "event": {
+            "id": "approval-user",
+            "event_seq": 71,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "Run build-fast and report results."
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a401",
+          "seq": 72,
+          "event": {
+            "id": "approval-request",
+            "event_seq": 72,
+            "kind": "event_msg",
+            "payload": {
+              "type": "exec_approval_request",
+              "call_id": "call-approval-1",
+              "command": [
+                "./build-fast.sh"
+              ],
+              "reason": "Needs command execution approval"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

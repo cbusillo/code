@@ -289,6 +289,86 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testStoreClearsInFlightHistoryBookkeepingForMismatchedResponseSession() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
+        let staleSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000130")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "hello",
+              "client_id": "client-1"
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(sessionId.uuidString)",
+                  "conversation_id": "\(sessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Session"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(sessionId.uuidString)",
+              "from_seq": 0,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":10,"level":"info","message":"ten"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":11,"level":"info","message":"eleven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":12,"level":"info","message":"twelve"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_inflight",
+            sessionID: sessionId
+        )
+        XCTAssertTrue(store.isLoadingOlderHistory(for: sessionId))
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_inflight",
+              "session_id": "\(staleSessionId.uuidString)",
+              "before_seq": 10,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(staleSessionId.uuidString)","seq":7,"level":"info","message":"seven"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertFalse(store.isLoadingOlderHistory(for: sessionId))
+        XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
+        XCTAssertTrue(store.requestOlderHistoryIfNeeded(for: sessionId))
+    }
+
+    @MainActor
     func testStoreRejectsStaleSessionAttachedForAttachmentState() throws {
         let store = SessionMirrorStore()
         let selectedSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000211")!
@@ -838,6 +918,68 @@ final class SessionMirrorStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(store.runtimeState(for: sessionId), .unavailable)
+    }
+
+    @MainActor
+    func testLoadBenchmarkFixtureSeedsDeterministicState() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000921")!
+        let fixturePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-benchmark-fixture-\(UUID().uuidString).json")
+
+        let fixtureJSON = """
+        {
+          "connection_state": "connected",
+          "status_line": "Connected as fixture",
+          "client_id": "fixture-client",
+          "selected_session_id": "\(sessionId.uuidString)",
+          "sessions": [
+            {
+              "summary": {
+                "id": "\(sessionId.uuidString)",
+                "conversation_id": "\(sessionId.uuidString)",
+                "model": "gpt-5",
+                "cwd": "/tmp/repo",
+                "created_at_unix_ms": 1,
+                "last_event_at_unix_ms": 2,
+                "title": "Fixture session"
+              },
+              "has_more_history_before": true,
+              "history_page_in_flight": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":1,"level":"info","message":"one"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":2,"level":"info","message":"two"}
+              ]
+            }
+          ],
+          "history_page_telemetry": {
+            "request_count": 3,
+            "success_count": 3,
+            "slow_page_count": 1,
+            "total_latency_ms": 420
+          }
+        }
+        """
+
+        try fixtureJSON.write(to: fixturePath, atomically: true, encoding: .utf8)
+        defer {
+            try? FileManager.default.removeItem(at: fixturePath)
+        }
+
+        store.loadBenchmarkFixture(from: fixturePath.path)
+
+        XCTAssertEqual(store.connectionState, .connected)
+        XCTAssertEqual(store.statusLine, "Connected as fixture")
+        XCTAssertEqual(store.selectedSessionID, sessionId)
+        XCTAssertEqual(store.selectedSession?.title, "Fixture session")
+        XCTAssertEqual(store.selectedSessionItems.map(\.seq), [1, 2])
+        XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
+        XCTAssertTrue(store.isLoadingOlderHistory(for: sessionId))
+        XCTAssertEqual(store.selectedSessionRuntimeState, .historyLoading)
+        XCTAssertEqual(store.historyPageTelemetry.requestCount, 3)
+        XCTAssertEqual(store.historyPageTelemetry.successCount, 3)
+        XCTAssertEqual(store.historyPageTelemetry.slowPageCount, 1)
+        XCTAssertEqual(Int(store.historyPageTelemetry.totalLatencyMs), 420)
     }
 
     @MainActor

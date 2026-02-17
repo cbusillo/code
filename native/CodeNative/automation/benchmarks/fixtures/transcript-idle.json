@@ -1,0 +1,63 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-idle",
+  "client_id": "bench-idle",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a101",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a101",
+        "conversation_id": "00000000-0000-0000-0000-00000000a101",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000000000,
+        "last_event_at_unix_ms": 1700000009000,
+        "title": "Milestone 1 transcript idle"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a101",
+          "seq": 1,
+          "event": {
+            "id": "bench-idle-user",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "Can you summarize where Milestone 1 stands?"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a101",
+          "seq": 2,
+          "event": {
+            "id": "bench-idle-assistant",
+            "event_seq": 2,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "## Milestone 1 status\n\n- Task/activity card quality is in place\n  - Anchored updates stream into the task card\n- Runtime states are explicit\n- Approval and exec cards are clearer"
+            }
+          }
+        },
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000a101",
+          "seq": 3,
+          "level": "info",
+          "message": "Ready for next action"
+        }
+      ]
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 2,
+    "success_count": 2,
+    "slow_page_count": 0,
+    "total_latency_ms": 238
+  }
+}

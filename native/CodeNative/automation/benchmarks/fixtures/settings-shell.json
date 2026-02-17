@@ -1,0 +1,29 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-settings",
+  "client_id": "bench-settings",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a501",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a501",
+        "conversation_id": "00000000-0000-0000-0000-00000000a501",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000400000,
+        "last_event_at_unix_ms": 1700000402000,
+        "title": "Milestone 1 settings shell"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000a501",
+          "seq": 1,
+          "level": "info",
+          "message": "Ready"
+        }
+      ]
+    }
+  ]
+}
