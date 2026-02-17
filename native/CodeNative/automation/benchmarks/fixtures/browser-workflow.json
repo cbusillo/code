@@ -1,0 +1,131 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-browser",
+  "client_id": "bench-browser",
+  "selected_session_id": "00000000-0000-0000-0000-00000000b018",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000b018",
+        "conversation_id": "00000000-0000-0000-0000-00000000b018",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000800000,
+        "last_event_at_unix_ms": 1700000890000,
+        "title": "Browser workflow parity"
+      },
+      "has_more_history_before": true,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000b018",
+          "seq": 120,
+          "event": {
+            "id": "browser-user-1",
+            "event_seq": 120,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "Can you inspect Apple docs for SwiftUI accessibility best practices?"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000b018",
+          "seq": 121,
+          "event": {
+            "id": "browser-search-begin",
+            "event_seq": 121,
+            "kind": "event_msg",
+            "payload": {
+              "type": "web_search_begin",
+              "call_id": "web-search-1",
+              "query": "swiftui accessibility labels buttons"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000b018",
+          "seq": 122,
+          "event": {
+            "id": "browser-mcp-end",
+            "event_seq": 122,
+            "kind": "event_msg",
+            "payload": {
+              "type": "mcp_tool_call_end",
+              "call_id": "browser-call-1",
+              "invocation": {
+                "server": "browser",
+                "tool": "browser",
+                "arguments": {
+                  "action": "fetch",
+                  "url": "https://developer.apple.com/documentation/swiftui"
+                }
+              },
+              "duration": "1.8s",
+              "result": {
+                "Ok": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Fetched developer.apple.com page and extracted accessibility heading sections."
+                    }
+                  ],
+                  "isError": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000b018",
+          "seq": 123,
+          "event": {
+            "id": "browser-mcp-failed",
+            "event_seq": 123,
+            "kind": "event_msg",
+            "payload": {
+              "type": "mcp_tool_call_end",
+              "call_id": "browser-call-2",
+              "invocation": {
+                "server": "browser",
+                "tool": "browser",
+                "arguments": {
+                  "action": "open",
+                  "url": "https://invalid.example/not-found"
+                }
+              },
+              "duration": "0.7s",
+              "result": {
+                "Err": "navigation failed with status 502"
+              }
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000b018",
+          "seq": 124,
+          "event": {
+            "id": "browser-agent-summary",
+            "event_seq": 124,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "I found SwiftUI accessibility guidance and captured the relevant sections."
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 6,
+    "success_count": 6,
+    "slow_page_count": 0,
+    "total_latency_ms": 712
+  }
+}

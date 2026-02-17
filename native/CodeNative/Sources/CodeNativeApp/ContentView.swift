@@ -1519,7 +1519,7 @@ struct ContentView: View {
     private func transcriptRow(item: SessionStreamItem) -> some View {
         let widthCap = transcriptWidthCap(for: item)
         let widthMin = transcriptMinWidth(for: item)
-        let shouldFitContentWidth = item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent
+        let shouldFitContentWidth = item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent
         let card = TranscriptCard(
             item: item,
             isActive: activeTranscriptItemID == item.id,
@@ -3061,6 +3061,24 @@ struct ContentView: View {
                 return ComposerActivityBadge(label: "Executing…", icon: "terminal", tint: Color.green.opacity(0.9))
             }
 
+            if payloadType == "web_search_begin" {
+                return ComposerActivityBadge(label: "Browsing…", icon: "globe", tint: Color.blue.opacity(0.9))
+            }
+
+            if payloadType == "mcp_tool_call_begin",
+               item.isBrowserWorkflowEvent {
+                return ComposerActivityBadge(label: "Browsing…", icon: "globe", tint: Color.blue.opacity(0.9))
+            }
+
+            if payloadType == "web_search_end" {
+                return nil
+            }
+
+            if payloadType == "mcp_tool_call_end",
+               item.isBrowserWorkflowEvent {
+                return nil
+            }
+
             if payloadType == "turn_diff" || payloadType == "patch_apply_end" {
                 return ComposerActivityBadge(label: "Diffing…", icon: "doc.text.magnifyingglass", tint: Color.cyan.opacity(0.9))
             }
@@ -3663,7 +3681,7 @@ struct ContentView: View {
         let compactCap: CGFloat = (isCompactPhoneLayout ? 318 : 350) + widthDelta
         let toolCap: CGFloat = (isCompactPhoneLayout ? 330 : 360) + widthDelta
 
-        if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent {
+        if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent {
             return toolCap
         }
 
@@ -3688,6 +3706,10 @@ struct ContentView: View {
         }
 
         if item.isBackgroundEvent {
+            return 760 + widthDelta
+        }
+
+        if item.isBrowserWorkflowEvent {
             return 760 + widthDelta
         }
 
@@ -3718,6 +3740,10 @@ struct ContentView: View {
         }
 
         if item.isBackgroundEvent {
+            return 520
+        }
+
+        if item.isBrowserWorkflowEvent {
             return 520
         }
 
@@ -6532,6 +6558,10 @@ private struct TranscriptCard: View {
     @State private var copiedDiffRecoveryCommandLabel: String?
     @State private var isHoveringCopyActions = false
 
+    private var browserWorkflow: BrowserWorkflowEvent? {
+        item.browserWorkflowEvent
+    }
+
     private var effectiveLineSpacing: CGFloat {
         usesCompactPhoneLayout ? min(2, density.lineSpacing) : density.lineSpacing
     }
@@ -6577,6 +6607,10 @@ private struct TranscriptCard: View {
             return Color.white.opacity(0.04)
         }
 
+        if browserWorkflow != nil {
+            return Color.blue.opacity(0.08)
+        }
+
         switch item.cardStyle {
         case .user:
             return Color.white.opacity(0.11)
@@ -6618,6 +6652,10 @@ private struct TranscriptCard: View {
             return Color.white.opacity(0.10)
         }
 
+        if browserWorkflow != nil {
+            return Color.blue.opacity(0.26)
+        }
+
         switch item.cardStyle {
         case .user:
             return Color.white.opacity(0.18)
@@ -6655,6 +6693,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if browserWorkflow != nil {
+            return false
+        }
+
         switch item.cardStyle {
         case .tool, .system:
             return true
@@ -6664,7 +6706,7 @@ private struct TranscriptCard: View {
     }
 
     private var usesCompactBodyText: Bool {
-        item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isTaskLifecycleEvent
+        item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isTaskLifecycleEvent || browserWorkflow != nil
     }
 
     private var monospacedBodyFont: Font {
@@ -6705,6 +6747,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if browserWorkflow != nil {
+            return false
+        }
+
         switch item.cardStyle {
         case .assistant, .user, .defaultStyle:
             return false
@@ -6728,6 +6774,10 @@ private struct TranscriptCard: View {
         }
 
         if item.isBackgroundEvent {
+            return true
+        }
+
+        if browserWorkflow != nil {
             return true
         }
 
@@ -6786,6 +6836,10 @@ private struct TranscriptCard: View {
 
         if item.isBackgroundEvent {
             return 340
+        }
+
+        if browserWorkflow != nil {
+            return 420
         }
 
         if item.turnDiffText != nil {
@@ -7064,6 +7118,8 @@ private struct TranscriptCard: View {
                         Spacer(minLength: 0)
                     }
                 }
+            } else if let browserWorkflow {
+                browserWorkflowContent(browserWorkflow)
             } else if item.isTaskLifecycleEvent || item.isBackgroundEvent {
                 taskActivityContent
             } else if let exec = item.execCommandInfo {
@@ -7865,6 +7921,112 @@ private struct TranscriptCard: View {
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private func browserWorkflowStatusLabel(_ status: BrowserWorkflowStatus) -> String {
+        switch status {
+        case .inProgress:
+            return "In progress"
+        case .succeeded:
+            return "Complete"
+        case .failed:
+            return "Error"
+        }
+    }
+
+    private func browserWorkflowStatusIcon(_ status: BrowserWorkflowStatus) -> String {
+        switch status {
+        case .inProgress:
+            return "globe"
+        case .succeeded:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func browserWorkflowStatusColor(_ status: BrowserWorkflowStatus) -> Color {
+        switch status {
+        case .inProgress:
+            return Color.blue.opacity(0.9)
+        case .succeeded:
+            return Color.green.opacity(0.9)
+        case .failed:
+            return Color.orange.opacity(0.95)
+        }
+    }
+
+    @ViewBuilder
+    private func browserWorkflowContent(_ workflow: BrowserWorkflowEvent) -> some View {
+        let statusColor = browserWorkflowStatusColor(workflow.status)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: browserWorkflowStatusIcon(workflow.status))
+                    .font(.caption)
+                    .foregroundStyle(statusColor)
+                    .accessibilityHidden(true)
+
+                Text(workflow.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .lineLimit(2)
+
+                Spacer(minLength: 6)
+
+                Text(browserWorkflowStatusLabel(workflow.status))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(statusColor.opacity(0.16), in: Capsule(style: .continuous))
+                    .accessibilityIdentifier("browser.workflow.status")
+            }
+
+            if !workflow.detailLines.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(workflow.detailLines.prefix(5).enumerated()), id: \.offset) { _, line in
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text("•")
+                                .font(.caption2)
+                                .foregroundStyle(Color.white.opacity(0.54))
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.white.opacity(0.84))
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("browser.workflow.details")
+            }
+
+            if let artifactPreview = workflow.artifactPreview,
+               !artifactPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Artifact")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text(artifactPreview)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.white.opacity(0.83))
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(9)
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                )
+                .accessibilityIdentifier("browser.workflow.artifact")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Browser workflow")
+        .accessibilityHint(browserWorkflowStatusLabel(workflow.status))
     }
 
     @ViewBuilder

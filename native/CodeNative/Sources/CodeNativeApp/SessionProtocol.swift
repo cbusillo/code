@@ -178,6 +178,10 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         let payloadType = object["type"]?.stringValue ?? payload.typeHint ?? ""
 
+        if let browserWorkflow = browserWorkflowEvent {
+            return summarizeBrowserWorkflow(browserWorkflow)
+        }
+
         if payloadType == "agent_message",
            let message = object["message"]?.stringValue {
             if isAutoReviewSummaryMessage(message) || isAutoReviewStreamSummaryMessage(message) {
@@ -415,6 +419,311 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         return headline
+    }
+
+    private func summarizeBrowserWorkflow(_ event: BrowserWorkflowEvent) -> String {
+        var lines: [String] = [event.headline]
+        if !event.detailLines.isEmpty {
+            lines.append(contentsOf: event.detailLines.prefix(4))
+        }
+
+        if let artifactPreview = event.artifactPreview,
+           !artifactPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append(artifactPreview)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func parseBrowserWorkflowEvent(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> BrowserWorkflowEvent? {
+        switch payloadType {
+        case "web_search_begin":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let query = normalizedBrowserValue(object["query"]?.stringValue)
+            var details: [String] = []
+            if let query {
+                details.append("Query: \"\(query)\"")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+
+            let headline = query.map { "Searching web for \"\($0)\"" } ?? "Searching web"
+            return BrowserWorkflowEvent(
+                status: .inProgress,
+                headline: headline,
+                detailLines: details,
+                artifactPreview: nil,
+                callId: callId
+            )
+
+        case "web_search_end":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let query = normalizedBrowserValue(object["query"]?.stringValue)
+            var details: [String] = []
+            if let query {
+                details.append("Query: \"\(query)\"")
+            }
+            if let action = summarizeWebSearchAction(object["action"]?.objectValue) {
+                details.append("Action: \(action)")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+
+            let headline = query.map { "Search results ready for \"\($0)\"" } ?? "Web search complete"
+            return BrowserWorkflowEvent(
+                status: .succeeded,
+                headline: headline,
+                detailLines: details,
+                artifactPreview: nil,
+                callId: callId
+            )
+
+        case "mcp_tool_call_begin", "mcp_tool_call_end":
+            guard let invocation = object["invocation"]?.objectValue,
+                  let descriptor = describeBrowserInvocation(invocation)
+            else {
+                return nil
+            }
+
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            var details = descriptor.detailLines
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+
+            if payloadType == "mcp_tool_call_begin" {
+                return BrowserWorkflowEvent(
+                    status: .inProgress,
+                    headline: descriptor.inProgressHeadline,
+                    detailLines: details,
+                    artifactPreview: nil,
+                    callId: callId
+                )
+            }
+
+            let mcpResult = summarizeBrowserMcpResult(object["result"])
+            return BrowserWorkflowEvent(
+                status: mcpResult.status,
+                headline: mcpResult.status == .failed
+                    ? "\(descriptor.actionLabel) failed"
+                    : "\(descriptor.actionLabel) complete",
+                detailLines: details,
+                artifactPreview: mcpResult.preview,
+                callId: callId
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    private func describeBrowserInvocation(_ invocation: [String: JSONValue]) -> BrowserInvocationDescriptor? {
+        let server = normalizedBrowserValue(invocation["server"]?.stringValue)?.lowercased() ?? ""
+        let tool = normalizedBrowserValue(invocation["tool"]?.stringValue)?.lowercased() ?? ""
+
+        let looksBrowserRelated = server.contains("browser")
+            || tool.contains("browser")
+            || tool.contains("web_search")
+            || tool.contains("web-search")
+
+        guard looksBrowserRelated else {
+            return nil
+        }
+
+        let arguments = invocation["arguments"]?.objectValue
+        let actionRaw = normalizedBrowserValue(arguments?["action"]?.stringValue)
+            ?? normalizedBrowserValue(invocation["tool"]?.stringValue)
+            ?? "browser action"
+        let actionLabel = formatBrowserActionLabel(actionRaw)
+
+        var details: [String] = []
+        if let url = normalizedBrowserValue(arguments?["url"]?.stringValue) {
+            details.append("URL: \(url)")
+        }
+
+        if let query = normalizedBrowserValue(arguments?["query"]?.stringValue) {
+            details.append("Query: \"\(query)\"")
+        }
+
+        if let queries = arguments?["queries"]?.arrayValue {
+            let entries = queries
+                .compactMap(\.stringValue)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !entries.isEmpty {
+                details.append("Queries: \(entries.prefix(3).joined(separator: " · "))")
+            }
+        }
+
+        if let pattern = normalizedBrowserValue(arguments?["pattern"]?.stringValue) {
+            details.append("Pattern: \"\(pattern)\"")
+        }
+
+        if let serverName = normalizedBrowserValue(invocation["server"]?.stringValue),
+           let toolName = normalizedBrowserValue(invocation["tool"]?.stringValue) {
+            details.append("Tool: \(serverName)/\(toolName)")
+        }
+
+        let inProgressHeadline = "\(actionLabel) in progress"
+        return BrowserInvocationDescriptor(
+            actionLabel: actionLabel,
+            inProgressHeadline: inProgressHeadline,
+            detailLines: details
+        )
+    }
+
+    private func summarizeWebSearchAction(_ action: [String: JSONValue]?) -> String? {
+        guard let action else {
+            return nil
+        }
+
+        let type = normalizedBrowserValue(action["type"]?.stringValue)?.lowercased() ?? ""
+        switch type {
+        case "search":
+            if let query = normalizedBrowserValue(action["query"]?.stringValue) {
+                return "Search \"\(query)\""
+            }
+
+            let queries = action["queries"]?.arrayValue?
+                .compactMap(\.stringValue)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            if let queries,
+               !queries.isEmpty {
+                return "Search \(queries.prefix(3).joined(separator: " · "))"
+            }
+
+            return "Search"
+
+        case "open_page":
+            if let url = normalizedBrowserValue(action["url"]?.stringValue) {
+                return "Open page \(url)"
+            }
+            return "Open page"
+
+        case "find_in_page":
+            var parts: [String] = ["Find in page"]
+            if let pattern = normalizedBrowserValue(action["pattern"]?.stringValue) {
+                parts.append("\"\(pattern)\"")
+            }
+            if let url = normalizedBrowserValue(action["url"]?.stringValue) {
+                parts.append("at \(url)")
+            }
+            return parts.joined(separator: " ")
+
+        default:
+            if !type.isEmpty {
+                return formatBrowserActionLabel(type)
+            }
+            return nil
+        }
+    }
+
+    private func summarizeBrowserMcpResult(_ value: JSONValue?) -> BrowserMcpResultSummary {
+        guard let resultObject = value?.objectValue else {
+            return BrowserMcpResultSummary(status: .succeeded, preview: nil)
+        }
+
+        if let errorMessage = normalizedBrowserValue(resultObject["Err"]?.stringValue) {
+            return BrowserMcpResultSummary(status: .failed, preview: "Error: \(errorMessage)")
+        }
+
+        guard let okObject = resultObject["Ok"]?.objectValue else {
+            return BrowserMcpResultSummary(status: .succeeded, preview: nil)
+        }
+
+        let isError = okObject["isError"]?.boolValue ?? false
+        let preview = summarizeCallToolResultPreview(okObject)
+        return BrowserMcpResultSummary(status: isError ? .failed : .succeeded, preview: preview)
+    }
+
+    private func summarizeCallToolResultPreview(_ result: [String: JSONValue]) -> String? {
+        if let contentItems = result["content"]?.arrayValue {
+            let lines = contentItems
+                .compactMap { item -> String? in
+                    if let text = normalizedBrowserValue(item.stringValue) {
+                        return text
+                    }
+
+                    guard let object = item.objectValue else {
+                        return nil
+                    }
+
+                    if let text = normalizedBrowserValue(object["text"]?.stringValue) {
+                        return text
+                    }
+
+                    if let url = normalizedBrowserValue(object["url"]?.stringValue) {
+                        return url
+                    }
+
+                    return nil
+                }
+                .filter { !$0.isEmpty }
+
+            if !lines.isEmpty {
+                return truncate(lines.prefix(3).joined(separator: "\n"), maxCharacters: 380)
+            }
+        }
+
+        if let structuredContent = result["structuredContent"] {
+            let pretty = structuredContent.pretty.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !pretty.isEmpty,
+               pretty != "null" {
+                return truncate(pretty, maxCharacters: 380)
+            }
+        }
+
+        return nil
+    }
+
+    private func normalizedBrowserValue(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let normalized = normalizeStructuredText(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func formatBrowserActionLabel(_ rawValue: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "Browser action"
+        }
+
+        var normalized = trimmed
+        if normalized.lowercased().hasPrefix("browser.") {
+            normalized.removeFirst("browser.".count)
+        }
+
+        normalized = normalized
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: ".", with: " ")
+
+        let words = normalized
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        if words.isEmpty {
+            return "Browser action"
+        }
+
+        let capitalized = words.enumerated().map { index, word in
+            if index == 0 {
+                return word.prefix(1).uppercased() + word.dropFirst()
+            }
+            return word
+        }
+
+        return capitalized.joined(separator: " ")
     }
 
     private func summarizeSessionAttached(_ object: [String: JSONValue]) -> String {
@@ -1039,6 +1348,31 @@ struct ExecCommandInfo {
     let duration: String?
 }
 
+enum BrowserWorkflowStatus: Hashable {
+    case inProgress
+    case succeeded
+    case failed
+}
+
+struct BrowserWorkflowEvent: Hashable {
+    let status: BrowserWorkflowStatus
+    let headline: String
+    let detailLines: [String]
+    let artifactPreview: String?
+    let callId: String?
+}
+
+private struct BrowserInvocationDescriptor {
+    let actionLabel: String
+    let inProgressHeadline: String
+    let detailLines: [String]
+}
+
+private struct BrowserMcpResultSummary {
+    let status: BrowserWorkflowStatus
+    let preview: String?
+}
+
 struct TokenUsageBreakdown {
     let total: Int?
     let input: Int?
@@ -1570,6 +1904,22 @@ extension SessionStreamItem {
         return prompt
     }
 
+    var browserWorkflowEvent: BrowserWorkflowEvent? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              let object = payload.objectValue
+        else {
+            return nil
+        }
+
+        let payloadType = object["type"]?.stringValue ?? payload.typeHint ?? ""
+        return parseBrowserWorkflowEvent(payloadType: payloadType, object: object)
+    }
+
+    var isBrowserWorkflowEvent: Bool {
+        browserWorkflowEvent != nil
+    }
+
     var requestUserInputPromptState: RequestUserInputPromptState? {
         guard type == "core_event",
               let payload = event?.payload,
@@ -1754,6 +2104,10 @@ extension SessionStreamItem {
             return true
         }
 
+        if browserWorkflowEvent != nil {
+            return true
+        }
+
         if payloadType == "agent_message",
            let payload = event?.payload,
            let object = payload.objectValue,
@@ -1799,6 +2153,10 @@ extension SessionStreamItem {
             || payloadType == "exec_command_begin"
             || payloadType == "background_event"
         {
+            return true
+        }
+
+        if browserWorkflowEvent != nil {
             return true
         }
 
@@ -1928,6 +2286,9 @@ extension SessionStreamItem {
                 return .reasoning
             }
             if payloadType == "turn_diff" {
+                return .tool
+            }
+            if payloadType == "web_search_begin" || payloadType == "web_search_end" {
                 return .tool
             }
             if payloadType.contains("exec") || payloadType.contains("tool") {

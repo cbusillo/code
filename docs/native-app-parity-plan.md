@@ -188,6 +188,14 @@ Goal: close remaining advanced parity and differentiation work.
   appropriate).
 - Advanced diagnostics and timeline drill-down.
 
+Current progress snapshot:
+
+- PAR-021 (`voice interaction parity hardening`) is complete with deterministic
+  `voice-guardrails` benchmark coverage.
+- PAR-018 (`browser workflow parity`) is complete with deterministic
+  `browser-workflow` benchmark coverage and transcript card state validation.
+- Remaining M3 gap: PAR-017 (`multi-agent progress visualization`).
+
 ## Dependencies and Sequencing
 
 1. **Protocol and reducer integrity first**

@@ -14,6 +14,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `transcript-long`
 - `activity-heavy`
 - `approval-pending`
+- `browser-workflow`
 - `voice-guardrails`
 - `request-user-input`
 - `request-user-input-depth`
@@ -94,6 +95,13 @@ For PAR-022 (`session rail/grouping ergonomics at scale`), include
 `session-rail-scale` in each deterministic benchmark run. The screenshot must
 show thread-rail grouping controls and legible grouped rows under a large,
 fixture-backed session catalog.
+
+## PAR-018 Browser Workflow Gate
+
+For PAR-018 (`browser workflow parity`), include `browser-workflow` in each
+deterministic benchmark run. The screenshot must show readable browser cards
+covering in-progress, completed, and failure states with visible artifact
+detail for at least one completed browser action.
 
 ## PAR-021 Voice Hardening Gate
 

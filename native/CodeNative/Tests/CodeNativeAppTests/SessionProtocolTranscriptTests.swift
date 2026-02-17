@@ -412,6 +412,97 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertFalse(item.shouldHideFromTranscript)
     }
 
+    func testWebSearchBeginBuildsBrowserWorkflowInProgressCard() {
+        let item = makeCoreEventItem(
+            seq: 25,
+            payload: .object([
+                "type": .string("web_search_begin"),
+                "call_id": .string("ws-call-1")
+            ])
+        )
+
+        XCTAssertEqual(item.browserWorkflowEvent?.status, .inProgress)
+        XCTAssertTrue(item.browserWorkflowEvent?.headline.contains("Searching web") ?? false)
+        XCTAssertTrue(item.browserWorkflowEvent?.detailLines.contains("Call id: ws-call-1") ?? false)
+        XCTAssertEqual(item.cardStyle, .tool)
+        XCTAssertTrue(item.shouldHideFromTranscript)
+        XCTAssertTrue(item.isOptionalActivityEvent)
+    }
+
+    func testWebSearchEndSummarizesActionDetails() {
+        let item = makeCoreEventItem(
+            seq: 26,
+            payload: .object([
+                "type": .string("web_search_end"),
+                "call_id": .string("ws-call-2"),
+                "query": .string("swiftui accessibility"),
+                "action": .object([
+                    "type": .string("open_page"),
+                    "url": .string("https://developer.apple.com/documentation/swiftui")
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.browserWorkflowEvent?.status, .succeeded)
+        XCTAssertTrue(item.browserWorkflowEvent?.headline.contains("Search results ready") ?? false)
+        XCTAssertTrue(
+            item.browserWorkflowEvent?.detailLines.contains(
+                "Action: Open page https://developer.apple.com/documentation/swiftui"
+            ) ?? false
+        )
+        XCTAssertTrue(item.body.contains("Search results ready"))
+    }
+
+    func testMcpBrowserToolFailureExposesReadableArtifactError() {
+        let item = makeCoreEventItem(
+            seq: 27,
+            payload: .object([
+                "type": .string("mcp_tool_call_end"),
+                "call_id": .string("browser-call-2"),
+                "invocation": .object([
+                    "server": .string("browser"),
+                    "tool": .string("browser"),
+                    "arguments": .object([
+                        "action": .string("fetch"),
+                        "url": .string("https://invalid.example")
+                    ])
+                ]),
+                "duration": .string("1.2s"),
+                "result": .object([
+                    "Err": .string("request failed with status 502")
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.browserWorkflowEvent?.status, .failed)
+        XCTAssertTrue(item.browserWorkflowEvent?.headline.contains("failed") ?? false)
+        XCTAssertEqual(item.browserWorkflowEvent?.artifactPreview, "Error: request failed with status 502")
+        XCTAssertTrue(item.body.contains("Error: request failed with status 502"))
+        XCTAssertTrue(item.shouldHideFromTranscript)
+        XCTAssertTrue(item.isOptionalActivityEvent)
+    }
+
+    func testMcpNonBrowserToolCallIsNotClassifiedAsBrowserWorkflow() {
+        let item = makeCoreEventItem(
+            seq: 28,
+            payload: .object([
+                "type": .string("mcp_tool_call_begin"),
+                "call_id": .string("fs-call-1"),
+                "invocation": .object([
+                    "server": .string("filesystem"),
+                    "tool": .string("read_file"),
+                    "arguments": .object([
+                        "path": .string("README.md")
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertNil(item.browserWorkflowEvent)
+        XCTAssertFalse(item.isBrowserWorkflowEvent)
+        XCTAssertFalse(item.shouldHideFromTranscript)
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

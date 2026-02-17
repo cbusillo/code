@@ -33,7 +33,7 @@ Legend:
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | present | P1 | M2 |
 | PAR-016 | IDE integration robustness | Mac + native | present | P1 | M2 |
 | PAR-017 | Multi-agent progress visualization | Every Code TUI | missing | P2 | M3 |
-| PAR-018 | Browser workflow parity | Every Code TUI | partial | P2 | M3 |
+| PAR-018 | Browser workflow parity | Every Code TUI | present | P2 | M3 |
 | PAR-019 | Visual quality rubric enforcement | Mac-inspired | present | P1 | M2 |
 | PAR-020 | Performance guardrails + telemetry | TUI + native | partial | P0 | M1 |
 | PAR-021 | Voice interaction parity hardening | Codex Mac | present | P2 | M3 |
@@ -197,6 +197,13 @@ Legend:
 - Acceptance criteria: browser-related events/artifacts are visible and
   understandable in transcript/activity context.
 - Validation gate: browser scenario + regression checks.
+- Progress: native transcript now renders dedicated browser workflow cards for
+  `web_search_begin`/`web_search_end` and browser MCP tool calls, with explicit
+  in-progress/completed/error status chips, readable metadata lines, and
+  artifact previews for completed/failed tool results. Browser workflow events
+  are now treated as optional activity rows (controlled by the activity toggle)
+  and benchmark proof is captured via the deterministic `browser-workflow`
+  fixture/scenario.
 
 ## PAR-019
 
