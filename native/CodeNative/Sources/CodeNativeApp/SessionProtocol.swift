@@ -161,7 +161,7 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         case "composer":
             return text ?? ""
         case "system":
-            return message ?? ""
+            return summarizeSystemMessage(message)
         default:
             return message ?? ""
         }
@@ -180,7 +180,7 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         if payloadType == "agent_message",
            let message = object["message"]?.stringValue {
-            if isAutoReviewSummaryMessage(message) {
+            if isAutoReviewSummaryMessage(message) || isAutoReviewStreamSummaryMessage(message) {
                 return summarizeAutoReviewMessage(message)
             }
             return normalizeStructuredText(message)
@@ -538,6 +538,18 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
 
         let heading = "Restored history · \(replayItems.count) messages"
         return "\(heading)\n\(samples.joined(separator: "\n"))"
+    }
+
+    private func summarizeSystemMessage(_ value: String?) -> String {
+        guard let value else {
+            return ""
+        }
+
+        if isAutoReviewSummaryMessage(value) || isAutoReviewStreamSummaryMessage(value) {
+            return summarizeAutoReviewMessage(value)
+        }
+
+        return value
     }
 
     private func replayRoleLabel(from object: [String: JSONValue]) -> String {
@@ -1116,6 +1128,26 @@ extension SessionStreamItem {
         taskLifecyclePhase != nil
     }
 
+    var isExecCommandBeginEvent: Bool {
+        guard type == "core_event" else {
+            return false
+        }
+        return event?.payload?.typeHint == "exec_command_begin"
+    }
+
+    var isAutoReviewSummaryEvent: Bool {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "agent_message",
+              let object = payload.objectValue,
+              let message = object["message"]?.stringValue
+        else {
+            return false
+        }
+
+        return isAutoReviewSummaryMessage(message) || isAutoReviewStreamSummaryMessage(message)
+    }
+
     var taskLifecyclePhase: TaskLifecyclePhase? {
         guard type == "core_event",
               let payloadType = event?.payload?.typeHint
@@ -1613,8 +1645,29 @@ extension SessionStreamItem {
             || normalized.hasPrefix("background auto-review completed")
     }
 
+    private func isAutoReviewStreamSummaryMessage(_ message: String) -> Bool {
+        let normalized = message
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if normalized.hasPrefix("[auto-review]") {
+            return true
+        }
+
+        return normalized.hasPrefix("auto review:") || normalized.contains("auto-review")
+    }
+
     private func summarizeAutoReviewMessage(_ message: String) -> String {
         let trimmed = normalizeStructuredText(message).trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("[auto-review]") {
+            let cleaned = trimmed.replacingOccurrences(of: "[auto-review]", with: "", options: [.caseInsensitive])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.isEmpty {
+                return "Auto-review completed"
+            }
+            return "Auto-review summary: \(cleaned)"
+        }
+
         let prefixes = [
             "[developer] background auto-review completed:",
             "background auto-review completed:",

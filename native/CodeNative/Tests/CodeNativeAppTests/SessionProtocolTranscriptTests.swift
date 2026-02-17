@@ -234,6 +234,40 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertTrue(item.shouldHideFromTranscript)
     }
 
+    func testAutoReviewAgentSummaryIsNormalizedForTranscript() {
+        let item = makeCoreEventItem(
+            seq: 19,
+            payload: .object([
+                "type": .string("agent_message"),
+                "message": .string("[auto-review] main: 2 issue(s) found. Merge worktree to apply fixes.")
+            ])
+        )
+
+        XCTAssertEqual(
+            item.body,
+            "Auto-review summary: main: 2 issue(s) found. Merge worktree to apply fixes."
+        )
+        XCTAssertFalse(item.shouldHideFromTranscript)
+    }
+
+    func testAutoReviewSystemSummaryIsNormalizedForTranscript() {
+        let item = SessionStreamItem(
+            type: "system",
+            sessionId: UUID(uuidString: "00000000-0000-0000-0000-00000000abcd")!,
+            seq: 20,
+            event: nil,
+            rev: nil,
+            text: nil,
+            cursor: nil,
+            sourceClientId: nil,
+            level: "info",
+            message: "[auto-review] no issues found"
+        )
+
+        XCTAssertEqual(item.body, "Auto-review summary: no issues found")
+        XCTAssertFalse(item.shouldHideFromTranscript)
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

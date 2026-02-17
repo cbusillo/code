@@ -743,6 +743,101 @@ final class SessionMirrorStoreTests: XCTestCase {
         XCTAssertEqual(retained.first?.seq, 501)
         XCTAssertEqual(retained.last?.seq, 2_000)
         XCTAssertTrue(store.hasMoreHistoryBefore(olderSessionId))
+        XCTAssertGreaterThan(store.historyPageTelemetry.inactiveRetentionPasses, 0)
+        XCTAssertGreaterThan(store.historyPageTelemetry.inactiveRetentionTrimmedItems, 0)
+    }
+
+    @MainActor
+    func testRuntimeStateTracksHistoryLifecycleAndUnavailableState() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000911")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "hello",
+              "client_id": "client-1"
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(sessionId.uuidString)",
+                  "conversation_id": "\(sessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "State Test"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(sessionId.uuidString)",
+              "from_seq": 0,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":10,"level":"info","message":"ten"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":11,"level":"info","message":"eleven"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.runtimeState(for: sessionId), .connected)
+
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_900",
+            sessionID: sessionId
+        )
+        XCTAssertEqual(store.runtimeState(for: sessionId), .historyLoading)
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_900",
+              "session_id": "\(sessionId.uuidString)",
+              "before_seq": 10,
+              "has_more_before": false,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":1,"level":"info","message":"one"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":2,"level":"info","message":"two"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.runtimeState(for: sessionId), .historyComplete)
+
+        store.recordPendingAttachRequestForTesting(requestId: "native_901", sessionID: sessionId)
+        try applyServerEnvelope(
+            """
+            {
+              "type": "error",
+              "request_id": "native_901",
+              "message": "Failed to resume session \(sessionId.uuidString): internal error"
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.runtimeState(for: sessionId), .unavailable)
     }
 
     @MainActor

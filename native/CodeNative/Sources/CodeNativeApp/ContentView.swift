@@ -345,6 +345,21 @@ struct ContentView: View {
         }
     }
 
+    private var runtimeStateColor: Color {
+        switch store.selectedSessionRuntimeState {
+        case .connected:
+            return Color.green.opacity(0.84)
+        case .reconnecting:
+            return Color.orange.opacity(0.9)
+        case .historyLoading:
+            return Color.blue.opacity(0.88)
+        case .historyComplete:
+            return Color.teal.opacity(0.84)
+        case .unavailable:
+            return Color.red.opacity(0.9)
+        }
+    }
+
     private var voiceStateLabel: String {
         if voiceInput.isRecording {
             switch voiceInput.transcriptState {
@@ -1118,9 +1133,18 @@ struct ContentView: View {
             Circle()
                 .fill(connectionChipColor)
                 .frame(width: 8, height: 8)
+            Text(store.selectedSessionRuntimeState.label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(runtimeStateColor)
+
+            Text("•")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             Text(store.statusLine)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -1553,6 +1577,26 @@ struct ContentView: View {
                     seenLines: &activeTaskSeenLines
                 )
                 continue
+            }
+
+            if item.isExecCommandBeginEvent,
+               let activeTaskStartItemID {
+                appendTaskActivityLines(
+                    from: item.body,
+                    into: &activityByStartItemID[activeTaskStartItemID, default: []],
+                    seenLines: &activeTaskSeenLines
+                )
+                mergedItems.append(item)
+                continue
+            }
+
+            if item.isAutoReviewSummaryEvent,
+               let activeTaskStartItemID {
+                appendTaskActivityLines(
+                    from: item.body,
+                    into: &activityByStartItemID[activeTaskStartItemID, default: []],
+                    seenLines: &activeTaskSeenLines
+                )
             }
 
             mergedItems.append(item)
@@ -3890,18 +3934,34 @@ private struct ConnectionPopover: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             } else {
-                Text(store.statusLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(store.selectedSessionRuntimeState.label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(store.statusLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             let telemetry = store.historyPageTelemetry
             if telemetry.requestCount > 0 {
-                Text(
-                    "History pages · req \(telemetry.requestCount) · ok \(telemetry.successCount) · avg \(Int(telemetry.averageLatencyMs))ms · slow \(telemetry.slowPageCount)"
-                )
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(
+                        "History pages · req \(telemetry.requestCount) · ok \(telemetry.successCount) · avg \(Int(telemetry.averageLatencyMs))ms · slow \(telemetry.slowPageCount)"
+                    )
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+
+                    if telemetry.inactiveRetentionPasses > 0 {
+                        Text(
+                            "Retention trims · passes \(telemetry.inactiveRetentionPasses) · items \(telemetry.inactiveRetentionTrimmedItems)"
+                        )
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
     }
@@ -5675,7 +5735,7 @@ private struct TranscriptCard: View {
         case .tool:
             return Color.cyan.opacity(0.045)
         case .approval:
-            return Color.yellow.opacity(0.10)
+            return Color.orange.opacity(0.18)
         case .composer:
             return Color.gray.opacity(0.07)
         case .system:
@@ -5716,7 +5776,7 @@ private struct TranscriptCard: View {
         case .tool:
             return Color.cyan.opacity(0.14)
         case .approval:
-            return Color.yellow.opacity(0.22)
+            return Color.orange.opacity(0.52)
         case .composer:
             return Color.gray.opacity(0.18)
         case .system:
@@ -6123,11 +6183,21 @@ private struct TranscriptCard: View {
             } else if let exec = item.execCommandInfo {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
-                        Text("Ran command")
+                        Text("Exec")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
 
                         Spacer()
+
+                        if let duration = exec.duration,
+                           !duration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(duration)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.white.opacity(0.72))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                        }
 
                         Text(execStatusText(for: exec))
                             .font(.caption2.weight(.semibold))
@@ -6144,14 +6214,28 @@ private struct TranscriptCard: View {
                     }
 
                     let outputPreview = previewExecOutput(exec.output)
-                    if !outputPreview.isEmpty {
-                        Text(outputPreview)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.white.opacity(0.86))
-                            .lineSpacing(2)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(outputPreview.isEmpty ? "Output · none" : "Output preview")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        if outputPreview.isEmpty {
+                            Text("No stdout/stderr captured")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.white.opacity(0.62))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color.black.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        } else {
+                            Text(outputPreview)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.white.opacity(0.86))
+                                .lineSpacing(2)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
                     }
                 }
             } else if item.isReplayHistoryEvent {
@@ -6219,6 +6303,10 @@ private struct TranscriptCard: View {
 
             if item.approvalRequest != nil {
                 VStack(alignment: .leading, spacing: 6) {
+                    Text("Approval required")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.orange.opacity(0.95))
+
                     ForEach(Array(ApprovalDecisionChoice.allCases.enumerated()), id: \.offset) { index, choice in
                         Button {
                             selectedDecision = choice
@@ -6242,29 +6330,45 @@ private struct TranscriptCard: View {
                             .padding(.vertical, 8)
                             .background(
                                 selectedDecision == choice
-                                ? Color.white.opacity(0.10)
-                                : Color.white.opacity(0.04),
+                                ? Color.orange.opacity(0.18)
+                                : Color.white.opacity(0.05),
                                 in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                             )
                         }
                         .buttonStyle(.plain)
+                        #if os(macOS)
+                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
+                        #endif
                     }
 
                     HStack(spacing: 10) {
-                        Button("Skip") {
+                        Button("Set deny") {
+                            selectedDecision = .denied
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
+                        #if os(macOS)
+                        .keyboardShortcut("d", modifiers: [.command])
+                        #endif
 
                         Spacer()
 
-                        Button("Submit") {
+                        Button("Send decision") {
                             onApproval(selectedDecision)
                         }
                         .buttonStyle(.borderedProminent)
+                        #if os(macOS)
+                        .keyboardShortcut(.defaultAction)
+                        #endif
                     }
                     .padding(.top, 4)
                 }
+                .padding(10)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.orange.opacity(0.40), lineWidth: 1)
+                )
             }
         }
         .padding(.horizontal, effectiveCardHorizontalPadding)
@@ -6439,6 +6543,13 @@ private struct TranscriptCard: View {
         return detailLines.joined(separator: "\n")
     }
 
+    private var taskActivityDetailLines: [String] {
+        taskActivityDetails
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     @ViewBuilder
     private var taskActivityContent: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -6452,13 +6563,21 @@ private struct TranscriptCard: View {
             }
 
             if !taskActivityDetails.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(taskActivityDetails)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.white.opacity(0.82))
-                        .lineSpacing(2)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(taskActivityDetailLines.enumerated()), id: \.offset) { _, line in
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text("•")
+                                .font(.caption2)
+                                .foregroundStyle(Color.white.opacity(0.54))
+
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.white.opacity(0.82))
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                 }
             }
         }

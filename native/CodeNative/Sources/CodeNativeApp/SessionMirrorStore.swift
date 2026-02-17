@@ -18,6 +18,8 @@ final class SessionMirrorStore: ObservableObject {
         // Counts pages likely to hitch rendering; this is a proxy, not actual dropped-frame telemetry.
         var slowPageCount: UInt64 = 0
         var totalLatencyMs: Double = 0
+        var inactiveRetentionPasses: UInt64 = 0
+        var inactiveRetentionTrimmedItems: UInt64 = 0
 
         var averageLatencyMs: Double {
             guard successCount > 0 else {
@@ -31,6 +33,29 @@ final class SessionMirrorStore: ObservableObject {
         case disconnected
         case connecting
         case connected
+    }
+
+    enum SessionRuntimeState: String {
+        case connected
+        case reconnecting
+        case historyLoading
+        case historyComplete
+        case unavailable
+
+        var label: String {
+            switch self {
+            case .connected:
+                return "Connected"
+            case .reconnecting:
+                return "Reconnecting"
+            case .historyLoading:
+                return "History loading"
+            case .historyComplete:
+                return "History complete"
+            case .unavailable:
+                return "Unavailable"
+            }
+        }
     }
 
     @Published var endpoint: String = "ws://127.0.0.1:4317/ws"
@@ -103,6 +128,10 @@ final class SessionMirrorStore: ObservableObject {
         return sessions.first(where: { $0.id == selectedSessionID })
     }
 
+    var selectedSessionRuntimeState: SessionRuntimeState {
+        runtimeState(for: selectedSessionID)
+    }
+
     var selectedSessionItems: [SessionStreamItem] {
         guard let selectedSessionID else {
             return []
@@ -112,6 +141,34 @@ final class SessionMirrorStore: ObservableObject {
 
     var unavailableSessionIDs: Set<UUID> {
         Set(unavailableSessionErrors.keys)
+    }
+
+    func runtimeState(for sessionID: UUID?) -> SessionRuntimeState {
+        if let sessionID,
+           isSessionUnavailable(sessionID) {
+            return .unavailable
+        }
+
+        if connectionState != .connected {
+            return .reconnecting
+        }
+
+        guard let sessionID,
+              let items = itemsBySession[sessionID],
+              !items.isEmpty
+        else {
+            return .connected
+        }
+
+        if historyPageLoadInFlightSessionIDs.contains(sessionID) {
+            return .historyLoading
+        }
+
+        if hasMoreHistoryBefore(sessionID) == false {
+            return .historyComplete
+        }
+
+        return .connected
     }
 
     func isSessionUnavailable(_ sessionID: UUID) -> Bool {
@@ -859,6 +916,9 @@ final class SessionMirrorStore: ObservableObject {
             if trimmed.count != items.count {
                 retained[sessionID] = trimmed
                 changed = true
+                historyPageTelemetry.inactiveRetentionPasses = historyPageTelemetry.inactiveRetentionPasses.saturatingIncrement()
+                let trimmedCount = UInt64(items.count - trimmed.count)
+                historyPageTelemetry.inactiveRetentionTrimmedItems = historyPageTelemetry.inactiveRetentionTrimmedItems.saturatingAdding(trimmedCount)
 
                 if let firstSeq = trimmed.first?.seq,
                    firstSeq > 1 {
@@ -976,5 +1036,10 @@ private extension UInt64 {
             return self
         }
         return self + 1
+    }
+
+    func saturatingAdding(_ value: UInt64) -> UInt64 {
+        let (sum, overflow) = addingReportingOverflow(value)
+        return overflow ? UInt64.max : sum
     }
 }
