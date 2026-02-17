@@ -503,6 +503,76 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertFalse(item.shouldHideFromTranscript)
     }
 
+    func testCollabSpawnBeginProducesCoordinatorProgressCard() {
+        let item = makeCoreEventItem(
+            seq: 29,
+            payload: .object([
+                "type": .string("collab_agent_spawn_begin"),
+                "call_id": .string("collab-call-1"),
+                "sender_thread_id": .string("thread-primary-1234abcd"),
+                "prompt": .string("Plan pagination tests and report status")
+            ])
+        )
+
+        XCTAssertEqual(item.collaborationProgressEvent?.status, .inProgress)
+        XCTAssertTrue(item.body.contains("Spawning helper agent"))
+        XCTAssertTrue(item.body.contains("Call id: collab-call-1"))
+        XCTAssertTrue(item.isCollaborationProgressEvent)
+        XCTAssertTrue(item.shouldHideFromTranscript)
+        XCTAssertTrue(item.isOptionalActivityEvent)
+        XCTAssertEqual(item.cardStyle, .tool)
+    }
+
+    func testCollabInteractionEndIncludesResultSummary() {
+        let item = makeCoreEventItem(
+            seq: 30,
+            payload: .object([
+                "type": .string("collab_agent_interaction_end"),
+                "call_id": .string("collab-call-2"),
+                "sender_thread_id": .string("thread-primary-1234abcd"),
+                "receiver_thread_id": .string("thread-agent-4567efgh"),
+                "prompt": .string("Add reconnect pagination checks"),
+                "status": .object([
+                    "completed": .string("Added reconnect pagination checks and regression tests")
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.collaborationProgressEvent?.status, .succeeded)
+        XCTAssertTrue(item.body.contains("Helper agent response received"))
+        XCTAssertTrue(item.body.contains("Status: completed"))
+        XCTAssertTrue(
+            item.collaborationProgressEvent?.artifactPreview?.contains(
+                "Added reconnect pagination checks"
+            ) ?? false
+        )
+    }
+
+    func testCollabWaitingEndSummarizesMixedAgentStatuses() {
+        let item = makeCoreEventItem(
+            seq: 31,
+            payload: .object([
+                "type": .string("collab_waiting_end"),
+                "call_id": .string("collab-call-3"),
+                "sender_thread_id": .string("thread-primary-1234abcd"),
+                "statuses": .object([
+                    "thread-agent-a": .string("running"),
+                    "thread-agent-b": .object([
+                        "completed": .string("done")
+                    ]),
+                    "thread-agent-c": .object([
+                        "errored": .string("tool timeout")
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.collaborationProgressEvent?.status, .failed)
+        XCTAssertTrue(item.body.contains("Agent wait ended with errors"))
+        XCTAssertTrue(item.body.contains("Completed: 1 · Running: 1 · Errors: 1"))
+        XCTAssertTrue(item.body.contains("tool timeout"))
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

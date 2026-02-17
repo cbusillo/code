@@ -1519,7 +1519,7 @@ struct ContentView: View {
     private func transcriptRow(item: SessionStreamItem) -> some View {
         let widthCap = transcriptWidthCap(for: item)
         let widthMin = transcriptMinWidth(for: item)
-        let shouldFitContentWidth = item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent
+        let shouldFitContentWidth = item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent || item.isCollaborationProgressEvent
         let card = TranscriptCard(
             item: item,
             isActive: activeTranscriptItemID == item.id,
@@ -3079,6 +3079,16 @@ struct ContentView: View {
                 return nil
             }
 
+            if payloadType.hasPrefix("collab_") {
+                if payloadType.hasSuffix("_begin") {
+                    return ComposerActivityBadge(label: "Coordinating…", icon: "person.2.wave.2", tint: Color.indigo.opacity(0.9))
+                }
+
+                if payloadType.hasSuffix("_end") {
+                    return nil
+                }
+            }
+
             if payloadType == "turn_diff" || payloadType == "patch_apply_end" {
                 return ComposerActivityBadge(label: "Diffing…", icon: "doc.text.magnifyingglass", tint: Color.cyan.opacity(0.9))
             }
@@ -3681,7 +3691,7 @@ struct ContentView: View {
         let compactCap: CGFloat = (isCompactPhoneLayout ? 318 : 350) + widthDelta
         let toolCap: CGFloat = (isCompactPhoneLayout ? 330 : 360) + widthDelta
 
-        if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent {
+        if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent || item.isCollaborationProgressEvent {
             return toolCap
         }
 
@@ -3710,6 +3720,10 @@ struct ContentView: View {
         }
 
         if item.isBrowserWorkflowEvent {
+            return 760 + widthDelta
+        }
+
+        if item.isCollaborationProgressEvent {
             return 760 + widthDelta
         }
 
@@ -3744,6 +3758,10 @@ struct ContentView: View {
         }
 
         if item.isBrowserWorkflowEvent {
+            return 520
+        }
+
+        if item.isCollaborationProgressEvent {
             return 520
         }
 
@@ -6558,6 +6576,10 @@ private struct TranscriptCard: View {
     @State private var copiedDiffRecoveryCommandLabel: String?
     @State private var isHoveringCopyActions = false
 
+    private var collaborationProgress: CollaborationProgressEvent? {
+        item.collaborationProgressEvent
+    }
+
     private var browserWorkflow: BrowserWorkflowEvent? {
         item.browserWorkflowEvent
     }
@@ -6607,6 +6629,10 @@ private struct TranscriptCard: View {
             return Color.white.opacity(0.04)
         }
 
+        if collaborationProgress != nil {
+            return Color.indigo.opacity(0.10)
+        }
+
         if browserWorkflow != nil {
             return Color.blue.opacity(0.08)
         }
@@ -6652,6 +6678,10 @@ private struct TranscriptCard: View {
             return Color.white.opacity(0.10)
         }
 
+        if collaborationProgress != nil {
+            return Color.indigo.opacity(0.30)
+        }
+
         if browserWorkflow != nil {
             return Color.blue.opacity(0.26)
         }
@@ -6693,6 +6723,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if collaborationProgress != nil {
+            return false
+        }
+
         if browserWorkflow != nil {
             return false
         }
@@ -6706,7 +6740,7 @@ private struct TranscriptCard: View {
     }
 
     private var usesCompactBodyText: Bool {
-        item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isTaskLifecycleEvent || browserWorkflow != nil
+        item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isTaskLifecycleEvent || collaborationProgress != nil || browserWorkflow != nil
     }
 
     private var monospacedBodyFont: Font {
@@ -6747,6 +6781,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if collaborationProgress != nil {
+            return false
+        }
+
         if browserWorkflow != nil {
             return false
         }
@@ -6774,6 +6812,10 @@ private struct TranscriptCard: View {
         }
 
         if item.isBackgroundEvent {
+            return true
+        }
+
+        if collaborationProgress != nil {
             return true
         }
 
@@ -6836,6 +6878,10 @@ private struct TranscriptCard: View {
 
         if item.isBackgroundEvent {
             return 340
+        }
+
+        if collaborationProgress != nil {
+            return 420
         }
 
         if browserWorkflow != nil {
@@ -7118,6 +7164,8 @@ private struct TranscriptCard: View {
                         Spacer(minLength: 0)
                     }
                 }
+            } else if let collaborationProgress {
+                collaborationProgressContent(collaborationProgress)
             } else if let browserWorkflow {
                 browserWorkflowContent(browserWorkflow)
             } else if item.isTaskLifecycleEvent || item.isBackgroundEvent {
@@ -7921,6 +7969,112 @@ private struct TranscriptCard: View {
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private func collaborationStatusLabel(_ status: CollaborationProgressStatus) -> String {
+        switch status {
+        case .inProgress:
+            return "In progress"
+        case .succeeded:
+            return "Complete"
+        case .failed:
+            return "Error"
+        }
+    }
+
+    private func collaborationStatusIcon(_ status: CollaborationProgressStatus) -> String {
+        switch status {
+        case .inProgress:
+            return "person.2.wave.2"
+        case .succeeded:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func collaborationStatusColor(_ status: CollaborationProgressStatus) -> Color {
+        switch status {
+        case .inProgress:
+            return Color.indigo.opacity(0.92)
+        case .succeeded:
+            return Color.green.opacity(0.9)
+        case .failed:
+            return Color.orange.opacity(0.95)
+        }
+    }
+
+    @ViewBuilder
+    private func collaborationProgressContent(_ progress: CollaborationProgressEvent) -> some View {
+        let statusColor = collaborationStatusColor(progress.status)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: collaborationStatusIcon(progress.status))
+                    .font(.caption)
+                    .foregroundStyle(statusColor)
+                    .accessibilityHidden(true)
+
+                Text(progress.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .lineLimit(2)
+
+                Spacer(minLength: 6)
+
+                Text(collaborationStatusLabel(progress.status))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(statusColor.opacity(0.16), in: Capsule(style: .continuous))
+                    .accessibilityIdentifier("collab.progress.status")
+            }
+
+            if !progress.detailLines.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(progress.detailLines.prefix(6).enumerated()), id: \.offset) { _, line in
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text("•")
+                                .font(.caption2)
+                                .foregroundStyle(Color.white.opacity(0.54))
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.white.opacity(0.84))
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("collab.progress.details")
+            }
+
+            if let artifactPreview = progress.artifactPreview,
+               !artifactPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Result")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text(artifactPreview)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.white.opacity(0.83))
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(9)
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                )
+                .accessibilityIdentifier("collab.progress.result")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Coordinator progress")
+        .accessibilityHint(collaborationStatusLabel(progress.status))
     }
 
     private func browserWorkflowStatusLabel(_ status: BrowserWorkflowStatus) -> String {

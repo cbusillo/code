@@ -194,7 +194,11 @@ Current progress snapshot:
   `voice-guardrails` benchmark coverage.
 - PAR-018 (`browser workflow parity`) is complete with deterministic
   `browser-workflow` benchmark coverage and transcript card state validation.
-- Remaining M3 gap: PAR-017 (`multi-agent progress visualization`).
+- PAR-017 (`multi-agent progress visualization`) is complete with deterministic
+  `multi-agent-progress` benchmark coverage and coordinator state-card
+  validation.
+
+Milestone 3 status: all planned rows (PAR-017/018/021) are now present.
 
 ## Dependencies and Sequencing
 

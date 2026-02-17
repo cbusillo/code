@@ -1,0 +1,145 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-collab",
+  "client_id": "bench-collab",
+  "selected_session_id": "00000000-0000-0000-0000-00000000c017",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000c017",
+        "conversation_id": "00000000-0000-0000-0000-00000000c017",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000900000,
+        "last_event_at_unix_ms": 1700000990000,
+        "title": "Multi-agent progress"
+      },
+      "has_more_history_before": true,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 140,
+          "event": {
+            "id": "collab-user-1",
+            "event_seq": 140,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "Use multiple agents to parallelize M3 implementation and summarize outcomes."
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 141,
+          "event": {
+            "id": "collab-task-start",
+            "event_seq": 141,
+            "kind": "event_msg",
+            "payload": {
+              "type": "task_started",
+              "task": "Orchestrating agents",
+              "summary": "Split work across history/perf, UI parity, and docs updates"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 142,
+          "event": {
+            "id": "collab-spawn-begin",
+            "event_seq": 142,
+            "kind": "event_msg",
+            "payload": {
+              "type": "collab_agent_spawn_begin",
+              "call_id": "spawn-001",
+              "sender_thread_id": "thread-main-1a2b3c4d",
+              "prompt": "Audit transcript prepend anchor behavior and report risks"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 143,
+          "event": {
+            "id": "collab-interaction-end",
+            "event_seq": 143,
+            "kind": "event_msg",
+            "payload": {
+              "type": "collab_agent_interaction_end",
+              "call_id": "interaction-101",
+              "sender_thread_id": "thread-main-1a2b3c4d",
+              "receiver_thread_id": "thread-agent-a7b8c9d0",
+              "prompt": "Return actionable findings for pagination ordering",
+              "status": {
+                "completed": "Found stale-page race in reconnect path; suggested request-id guard."
+              }
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 144,
+          "event": {
+            "id": "collab-waiting-end",
+            "event_seq": 144,
+            "kind": "event_msg",
+            "payload": {
+              "type": "collab_waiting_end",
+              "call_id": "wait-900",
+              "sender_thread_id": "thread-main-1a2b3c4d",
+              "statuses": {
+                "thread-agent-a7b8c9d0": {
+                  "completed": "history checks done"
+                },
+                "thread-agent-e3f4g5h6": "completed",
+                "thread-agent-z9y8x7w6": {
+                  "errored": "benchmark fixture mismatch"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 145,
+          "event": {
+            "id": "collab-task-complete",
+            "event_seq": 145,
+            "kind": "event_msg",
+            "payload": {
+              "type": "task_complete",
+              "summary": "Coordinator merged two agent outcomes and queued one retry"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000c017",
+          "seq": 146,
+          "event": {
+            "id": "collab-agent-summary",
+            "event_seq": 146,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "I coordinated three helper agents and summarized progress with one retriable failure."
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 7,
+    "success_count": 7,
+    "slow_page_count": 0,
+    "total_latency_ms": 801
+  }
+}

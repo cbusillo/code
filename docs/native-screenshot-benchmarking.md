@@ -15,6 +15,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `activity-heavy`
 - `approval-pending`
 - `browser-workflow`
+- `multi-agent-progress`
 - `voice-guardrails`
 - `request-user-input`
 - `request-user-input-depth`
@@ -102,6 +103,13 @@ For PAR-018 (`browser workflow parity`), include `browser-workflow` in each
 deterministic benchmark run. The screenshot must show readable browser cards
 covering in-progress, completed, and failure states with visible artifact
 detail for at least one completed browser action.
+
+## PAR-017 Multi-Agent Progress Gate
+
+For PAR-017 (`multi-agent progress visualization`), include
+`multi-agent-progress` in each deterministic benchmark run. The screenshot must
+show coordinator progress cards with at least one in-progress, one completed,
+and one error state visible in transcript flow.
 
 ## PAR-021 Voice Hardening Gate
 

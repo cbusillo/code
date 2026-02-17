@@ -14,6 +14,7 @@ SCENARIOS=(
 	"activity-heavy"
 	"approval-pending"
 	"browser-workflow"
+	"multi-agent-progress"
 	"voice-guardrails"
 	"request-user-input"
 	"request-user-input-depth"

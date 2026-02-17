@@ -32,7 +32,7 @@ Legend:
 | PAR-014 | Request-user-input parity UI | Every Code TUI | present | P1 | M2 |
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | present | P1 | M2 |
 | PAR-016 | IDE integration robustness | Mac + native | present | P1 | M2 |
-| PAR-017 | Multi-agent progress visualization | Every Code TUI | missing | P2 | M3 |
+| PAR-017 | Multi-agent progress visualization | Every Code TUI | present | P2 | M3 |
 | PAR-018 | Browser workflow parity | Every Code TUI | present | P2 | M3 |
 | PAR-019 | Visual quality rubric enforcement | Mac-inspired | present | P1 | M2 |
 | PAR-020 | Performance guardrails + telemetry | TUI + native | partial | P0 | M1 |
@@ -190,6 +190,13 @@ Legend:
 - Acceptance criteria: native surfaces plan/progress/task states for multi-agent
   runs with clear hierarchy.
 - Validation gate: workflow scenario + screenshot benchmark.
+- Progress: collaboration lifecycle events (`collab_*`) now render as dedicated
+  coordinator progress cards with explicit in-progress/completed/error states,
+  readable coordinator/agent metadata, and durable result/error summaries.
+  Events are classified as optional activity rows so transcript noise remains
+  controllable while preserving deep visibility when activity is enabled.
+  Deterministic proof is captured via the `multi-agent-progress`
+  fixture/scenario.
 
 ## PAR-018
 

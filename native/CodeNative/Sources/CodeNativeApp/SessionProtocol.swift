@@ -140,6 +140,8 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
                 return "assistant"
             case "user_message":
                 return "user"
+            case "collab_agent_spawn_begin", "collab_agent_spawn_end", "collab_agent_interaction_begin", "collab_agent_interaction_end", "collab_waiting_begin", "collab_waiting_end", "collab_close_begin", "collab_close_end", "collab_resume_begin", "collab_resume_end":
+                return "coordinator"
             case let value?:
                 return value.replacingOccurrences(of: "_", with: " ")
             case nil:
@@ -177,6 +179,10 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         let payloadType = object["type"]?.stringValue ?? payload.typeHint ?? ""
+
+        if let collaborationProgress = collaborationProgressEvent {
+            return summarizeCollaborationProgress(collaborationProgress)
+        }
 
         if let browserWorkflow = browserWorkflowEvent {
             return summarizeBrowserWorkflow(browserWorkflow)
@@ -419,6 +425,332 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         return headline
+    }
+
+    private func summarizeCollaborationProgress(_ event: CollaborationProgressEvent) -> String {
+        var lines: [String] = [event.headline]
+        if !event.detailLines.isEmpty {
+            lines.append(contentsOf: event.detailLines.prefix(5))
+        }
+
+        if let artifactPreview = event.artifactPreview,
+           !artifactPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append(artifactPreview)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func parseCollaborationProgressEvent(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> CollaborationProgressEvent? {
+        switch payloadType {
+        case "collab_agent_spawn_begin":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let prompt = normalizedBrowserValue(object["prompt"]?.stringValue)
+            var details: [String] = []
+            if let senderThread {
+                details.append("Coordinator: \(shortThreadID(senderThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+            if let prompt,
+               !prompt.isEmpty {
+                details.append("Prompt: \(truncate(prompt, maxCharacters: 180))")
+            }
+
+            return CollaborationProgressEvent(
+                status: .inProgress,
+                headline: "Spawning helper agent",
+                detailLines: details,
+                artifactPreview: nil,
+                callId: callId
+            )
+
+        case "collab_agent_spawn_end":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let agentThread = normalizedBrowserValue(object["new_thread_id"]?.stringValue)
+            let statusSummary = parseCollaborationAgentStatus(object["status"])
+            var details: [String] = []
+            if let senderThread {
+                details.append("Coordinator: \(shortThreadID(senderThread))")
+            }
+            if let agentThread {
+                details.append("Agent: \(shortThreadID(agentThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+            details.append("Status: \(statusSummary.label)")
+
+            return CollaborationProgressEvent(
+                status: statusSummary.status,
+                headline: statusSummary.status == .failed ? "Helper agent spawn failed" : "Helper agent ready",
+                detailLines: details,
+                artifactPreview: statusSummary.detail,
+                callId: callId
+            )
+
+        case "collab_agent_interaction_begin":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let receiverThread = normalizedBrowserValue(object["receiver_thread_id"]?.stringValue)
+            let prompt = normalizedBrowserValue(object["prompt"]?.stringValue)
+
+            var details: [String] = []
+            if let senderThread,
+               let receiverThread {
+                details.append("\(shortThreadID(senderThread)) → \(shortThreadID(receiverThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+            if let prompt,
+               !prompt.isEmpty {
+                details.append("Prompt: \(truncate(prompt, maxCharacters: 180))")
+            }
+
+            return CollaborationProgressEvent(
+                status: .inProgress,
+                headline: "Delegating work to helper agent",
+                detailLines: details,
+                artifactPreview: nil,
+                callId: callId
+            )
+
+        case "collab_agent_interaction_end":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let receiverThread = normalizedBrowserValue(object["receiver_thread_id"]?.stringValue)
+            let statusSummary = parseCollaborationAgentStatus(object["status"])
+
+            var details: [String] = []
+            if let senderThread,
+               let receiverThread {
+                details.append("\(shortThreadID(senderThread)) ← \(shortThreadID(receiverThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+            details.append("Status: \(statusSummary.label)")
+
+            return CollaborationProgressEvent(
+                status: statusSummary.status,
+                headline: statusSummary.status == .failed ? "Helper agent response failed" : "Helper agent response received",
+                detailLines: details,
+                artifactPreview: statusSummary.detail,
+                callId: callId
+            )
+
+        case "collab_waiting_begin":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let receiverThreadIDs = object["receiver_thread_ids"]?.arrayValue?
+                .compactMap(\.stringValue)
+                .map(shortThreadID) ?? []
+
+            var details: [String] = []
+            if let senderThread {
+                details.append("Coordinator: \(shortThreadID(senderThread))")
+            }
+            if !receiverThreadIDs.isEmpty {
+                details.append("Agents: \(receiverThreadIDs.joined(separator: " · "))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+
+            let headline = receiverThreadIDs.isEmpty
+                ? "Waiting for helper agents"
+                : "Waiting for \(receiverThreadIDs.count) helper agent\(receiverThreadIDs.count == 1 ? "" : "s")"
+
+            return CollaborationProgressEvent(
+                status: .inProgress,
+                headline: headline,
+                detailLines: details,
+                artifactPreview: nil,
+                callId: callId
+            )
+
+        case "collab_waiting_end":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let statusByThread = object["statuses"]?.objectValue ?? [:]
+
+            var completed = 0
+            var running = 0
+            var failed = 0
+            var threadLines: [String] = []
+            var artifactLines: [String] = []
+
+            for (threadID, statusValue) in statusByThread {
+                let status = parseCollaborationAgentStatus(statusValue)
+                switch status.status {
+                case .succeeded:
+                    completed += 1
+                case .inProgress:
+                    running += 1
+                case .failed:
+                    failed += 1
+                }
+                threadLines.append("\(shortThreadID(threadID)): \(status.label)")
+                if let detail = status.detail,
+                   !detail.isEmpty,
+                   artifactLines.count < 2 {
+                    artifactLines.append("\(shortThreadID(threadID)): \(detail)")
+                }
+            }
+
+            threadLines.sort()
+
+            let eventStatus: CollaborationProgressStatus
+            let headline: String
+            if failed > 0 {
+                eventStatus = .failed
+                headline = "Agent wait ended with errors"
+            } else if running > 0 {
+                eventStatus = .inProgress
+                headline = "Agent wait still in progress"
+            } else {
+                eventStatus = .succeeded
+                headline = "All helper agents reported"
+            }
+
+            var details: [String] = []
+            if let senderThread {
+                details.append("Coordinator: \(shortThreadID(senderThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+            if !statusByThread.isEmpty {
+                details.append("Completed: \(completed) · Running: \(running) · Errors: \(failed)")
+                details.append(contentsOf: threadLines.prefix(3))
+            }
+
+            let artifactPreview = artifactLines.isEmpty ? nil : artifactLines.joined(separator: "\n")
+            return CollaborationProgressEvent(
+                status: eventStatus,
+                headline: headline,
+                detailLines: details,
+                artifactPreview: artifactPreview,
+                callId: callId
+            )
+
+        case "collab_close_begin", "collab_resume_begin":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let receiverThread = normalizedBrowserValue(object["receiver_thread_id"]?.stringValue)
+            var details: [String] = []
+            if let senderThread,
+               let receiverThread {
+                details.append("\(shortThreadID(senderThread)) ↔ \(shortThreadID(receiverThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+
+            return CollaborationProgressEvent(
+                status: .inProgress,
+                headline: payloadType == "collab_close_begin"
+                    ? "Closing helper agent session"
+                    : "Resuming helper agent session",
+                detailLines: details,
+                artifactPreview: nil,
+                callId: callId
+            )
+
+        case "collab_close_end", "collab_resume_end":
+            let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
+            let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
+            let receiverThread = normalizedBrowserValue(object["receiver_thread_id"]?.stringValue)
+            let statusSummary = parseCollaborationAgentStatus(object["status"])
+            var details: [String] = []
+            if let senderThread,
+               let receiverThread {
+                details.append("\(shortThreadID(senderThread)) ↔ \(shortThreadID(receiverThread))")
+            }
+            if let callId {
+                details.append("Call id: \(callId)")
+            }
+            details.append("Status: \(statusSummary.label)")
+
+            return CollaborationProgressEvent(
+                status: statusSummary.status,
+                headline: payloadType == "collab_close_end"
+                    ? (statusSummary.status == .failed ? "Helper close failed" : "Helper session closed")
+                    : (statusSummary.status == .failed ? "Helper resume failed" : "Helper session resumed"),
+                detailLines: details,
+                artifactPreview: statusSummary.detail,
+                callId: callId
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    private func parseCollaborationAgentStatus(_ value: JSONValue?) -> CollaborationAgentStatusSummary {
+        guard let value else {
+            return CollaborationAgentStatusSummary(status: .inProgress, label: "running", detail: nil)
+        }
+
+        if let status = value.stringValue {
+            return collaborationStatusSummary(from: status, detail: nil)
+        }
+
+        if let object = value.objectValue {
+            if let completed = object["completed"] {
+                let detail = normalizedBrowserValue(completed.stringValue) ?? normalizedBrowserValue(completed.pretty)
+                return collaborationStatusSummary(from: "completed", detail: detail)
+            }
+
+            if let errored = object["errored"] {
+                let detail = normalizedBrowserValue(errored.stringValue) ?? normalizedBrowserValue(errored.pretty)
+                return collaborationStatusSummary(from: "errored", detail: detail)
+            }
+
+            let knownStatuses = ["pending_init", "running", "shutdown", "not_found"]
+            for known in knownStatuses where object[known] != nil {
+                return collaborationStatusSummary(from: known, detail: nil)
+            }
+
+            let preview = truncate(value.pretty, maxCharacters: 220)
+            return CollaborationAgentStatusSummary(status: .inProgress, label: "running", detail: preview)
+        }
+
+        return CollaborationAgentStatusSummary(status: .inProgress, label: "running", detail: nil)
+    }
+
+    private func collaborationStatusSummary(from rawValue: String, detail: String?) -> CollaborationAgentStatusSummary {
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "completed", "shutdown":
+            return CollaborationAgentStatusSummary(status: .succeeded, label: normalized.replacingOccurrences(of: "_", with: " "), detail: detail)
+        case "errored", "not_found":
+            return CollaborationAgentStatusSummary(status: .failed, label: normalized.replacingOccurrences(of: "_", with: " "), detail: detail)
+        case "pending_init", "running":
+            return CollaborationAgentStatusSummary(status: .inProgress, label: normalized.replacingOccurrences(of: "_", with: " "), detail: detail)
+        default:
+            return CollaborationAgentStatusSummary(status: .inProgress, label: normalized.replacingOccurrences(of: "_", with: " "), detail: detail)
+        }
+    }
+
+    private func shortThreadID(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return value
+        }
+
+        if trimmed.count <= 8 {
+            return trimmed
+        }
+
+        return String(trimmed.prefix(8))
     }
 
     private func summarizeBrowserWorkflow(_ event: BrowserWorkflowEvent) -> String {
@@ -1354,8 +1686,22 @@ enum BrowserWorkflowStatus: Hashable {
     case failed
 }
 
+enum CollaborationProgressStatus: Hashable {
+    case inProgress
+    case succeeded
+    case failed
+}
+
 struct BrowserWorkflowEvent: Hashable {
     let status: BrowserWorkflowStatus
+    let headline: String
+    let detailLines: [String]
+    let artifactPreview: String?
+    let callId: String?
+}
+
+struct CollaborationProgressEvent: Hashable {
+    let status: CollaborationProgressStatus
     let headline: String
     let detailLines: [String]
     let artifactPreview: String?
@@ -1371,6 +1717,12 @@ private struct BrowserInvocationDescriptor {
 private struct BrowserMcpResultSummary {
     let status: BrowserWorkflowStatus
     let preview: String?
+}
+
+private struct CollaborationAgentStatusSummary {
+    let status: CollaborationProgressStatus
+    let label: String
+    let detail: String?
 }
 
 struct TokenUsageBreakdown {
@@ -1904,6 +2256,22 @@ extension SessionStreamItem {
         return prompt
     }
 
+    var collaborationProgressEvent: CollaborationProgressEvent? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              let object = payload.objectValue
+        else {
+            return nil
+        }
+
+        let payloadType = object["type"]?.stringValue ?? payload.typeHint ?? ""
+        return parseCollaborationProgressEvent(payloadType: payloadType, object: object)
+    }
+
+    var isCollaborationProgressEvent: Bool {
+        collaborationProgressEvent != nil
+    }
+
     var browserWorkflowEvent: BrowserWorkflowEvent? {
         guard type == "core_event",
               let payload = event?.payload,
@@ -2104,6 +2472,10 @@ extension SessionStreamItem {
             return true
         }
 
+        if collaborationProgressEvent != nil {
+            return true
+        }
+
         if browserWorkflowEvent != nil {
             return true
         }
@@ -2153,6 +2525,10 @@ extension SessionStreamItem {
             || payloadType == "exec_command_begin"
             || payloadType == "background_event"
         {
+            return true
+        }
+
+        if collaborationProgressEvent != nil {
             return true
         }
 
@@ -2285,6 +2661,9 @@ extension SessionStreamItem {
             if payloadType.contains("reasoning") {
                 return .reasoning
             }
+            if collaborationProgressEvent != nil {
+                return .tool
+            }
             if payloadType == "turn_diff" {
                 return .tool
             }
@@ -2310,7 +2689,7 @@ extension SessionStreamItem {
     }
 
     var prefersCenteredBubble: Bool {
-        isPatchApplyEndEvent || isTokenCountEvent || isBackgroundEvent
+        isPatchApplyEndEvent || isTokenCountEvent || isBackgroundEvent || isCollaborationProgressEvent
     }
 }
 
