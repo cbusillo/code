@@ -1,0 +1,36 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-ide-integration",
+  "client_id": "bench-ide-integration",
+  "selected_session_id": "00000000-0000-0000-0000-00000000aa01",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000aa01",
+        "conversation_id": "00000000-0000-0000-0000-00000000aa01",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000900000,
+        "last_event_at_unix_ms": 1700000905000,
+        "title": "Milestone 2 IDE integration"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000aa01",
+          "seq": 1,
+          "event": {
+            "id": "ide-integration-msg-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "IDE integration benchmark fixture. Verify per-session IDE picker and Open behavior affordances."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

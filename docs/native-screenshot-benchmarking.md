@@ -18,6 +18,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `command-launcher`
 - `context-mention`
 - `git-recovery`
+- `ide-integration`
 - `disconnected-state`
 - `settings-shell`
 

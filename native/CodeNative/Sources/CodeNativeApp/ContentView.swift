@@ -92,6 +92,7 @@ struct ContentView: View {
     @State private var slashCommandQuery = ""
     @State private var showContextPicker = false
     @State private var contextPickerQuery = ""
+    @State private var ideOpenFailureMessage: String?
     @State private var indexedContextRootPath: String?
     @State private var indexedContextFilePaths: [String] = []
     @State private var contextIndexLoading = false
@@ -553,6 +554,13 @@ struct ContentView: View {
         .environment(\.openURL, OpenURLAction { url in
             handleOpenURL(url)
         })
+        .alert("Unable to Open in IDE", isPresented: ideOpenFailureIsPresented) {
+            Button("OK", role: .cancel) {
+                ideOpenFailureMessage = nil
+            }
+        } message: {
+            Text(ideOpenFailureMessage ?? "Unknown error")
+        }
         .sheet(isPresented: $showSettings) {
             NavigationStack {
                 settingsSheetContent
@@ -661,6 +669,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: store.sessions) { _, _ in
+            pruneSessionIDEPreferences()
             ensureVisibleSelection()
         }
         .onChange(of: showActivityEvents) { _, _ in
@@ -682,6 +691,7 @@ struct ContentView: View {
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
+            pruneSessionIDEPreferences()
             focusComposerEditor(forceActivateApp: true)
         }
         #else
@@ -689,6 +699,7 @@ struct ContentView: View {
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
+            pruneSessionIDEPreferences()
         }
         #endif
     }
@@ -3502,6 +3513,21 @@ struct ContentView: View {
         max(session.lastEventAtUnixMs, session.createdAtUnixMs)
     }
 
+    private var ideOpenFailureIsPresented: Binding<Bool> {
+        Binding(
+            get: { ideOpenFailureMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    ideOpenFailureMessage = nil
+                }
+            }
+        )
+    }
+
+    private func reportIDEOpenFailure(_ message: String) {
+        ideOpenFailureMessage = message
+    }
+
     private func scrollTranscriptToBottom(proxy: ScrollViewProxy, animated: Bool) {
         let action = {
             proxy.scrollTo(transcriptBottomAnchor, anchor: .bottom)
@@ -3624,46 +3650,37 @@ struct ContentView: View {
     }
 
     private func selectedIDE(for sessionID: UUID) -> SessionIDESelection {
-        let map = decodedSessionIDEMap()
-        if let raw = map[sessionID.uuidString],
-           let ide = SessionIDESelection(rawValue: raw),
-           ide.isAvailable {
-            return ide
-        }
-        return .systemDefault
+        SessionIDEPreferences.selectedIDE(
+            for: sessionID,
+            rawMap: sessionIDEMapRaw,
+            available: availableSessionIDEs()
+        )
     }
 
     private func setSessionIDE(_ ide: SessionIDESelection, for sessionID: UUID) {
-        var map = decodedSessionIDEMap()
-        if ide == .systemDefault {
-            map.removeValue(forKey: sessionID.uuidString)
-        } else {
-            map[sessionID.uuidString] = ide.rawValue
-        }
-        encodedSessionIDEMap(map)
+        sessionIDEMapRaw = SessionIDEPreferences.storing(
+            ide: ide,
+            for: sessionID,
+            rawMap: sessionIDEMapRaw
+        )
     }
 
     private func availableSessionIDEs() -> [SessionIDESelection] {
-        SessionIDESelection.allCases.filter(\.isAvailable)
+        #if os(macOS)
+        IDEAvailability.availableSelections()
+        #else
+        [.systemDefault]
+        #endif
     }
 
-    private func decodedSessionIDEMap() -> [String: String] {
-        guard let data = sessionIDEMapRaw.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode([String: String].self, from: data)
-        else {
-            return [:]
-        }
-        return decoded
-    }
-
-    private func encodedSessionIDEMap(_ map: [String: String]) {
-        guard let data = try? JSONEncoder().encode(map),
-              let encoded = String(data: data, encoding: .utf8)
-        else {
-            return
-        }
-
-        sessionIDEMapRaw = encoded
+    private func pruneSessionIDEPreferences() {
+        let validSessionIDs = Set(store.sessions.map(\.id))
+        let available = availableSessionIDEs()
+        sessionIDEMapRaw = SessionIDEPreferences.pruned(
+            rawMap: sessionIDEMapRaw,
+            validSessionIDs: validSessionIDs,
+            available: available
+        )
     }
 
     #if os(macOS)
@@ -3676,23 +3693,79 @@ struct ContentView: View {
     ) -> Bool {
         let ide = sessionID.map(selectedIDE(for:)) ?? .systemDefault
 
+        let locationSuffix: String
+        if let line {
+            if let column {
+                locationSuffix = ":\(line):\(column)"
+            } else {
+                locationSuffix = ":\(line)"
+            }
+        } else {
+            locationSuffix = ""
+        }
+        let targetDescription = "\(fileURL.path)\(locationSuffix)"
+
+        if ide != .systemDefault,
+           !ide.isInstalled() {
+            let message = "\(ide.label) is not installed. Choose another IDE for this session."
+            if fallbackToDefaultApp,
+               NSWorkspace.shared.open(fileURL) {
+                reportIDEOpenFailure("\(message) Opened \(targetDescription) in the default app instead.")
+                return true
+            }
+
+            reportIDEOpenFailure("\(message) Unable to open \(targetDescription).")
+            return false
+        }
+
         if let deepLink = ide.deepLinkURL(for: fileURL, line: line, column: column),
            NSWorkspace.shared.open(deepLink) {
             return true
         }
 
-        if let appURL = ide.applicationURL {
+        if let appURL = ide.resolvedApplicationURL() {
             NSWorkspace.shared.open(
                 [fileURL],
                 withApplicationAt: appURL,
-                configuration: NSWorkspace.OpenConfiguration(),
-                completionHandler: nil
-            )
+                configuration: NSWorkspace.OpenConfiguration()
+            ) { _, error in
+                guard let error else {
+                    return
+                }
+
+                if fallbackToDefaultApp,
+                   NSWorkspace.shared.open(fileURL) {
+                    Task { @MainActor in
+                        reportIDEOpenFailure("Could not open \(targetDescription) in \(ide.label): \(error.localizedDescription). Opened in the default app instead.")
+                    }
+                    return
+                }
+
+                Task { @MainActor in
+                    reportIDEOpenFailure("Could not open \(targetDescription) in \(ide.label): \(error.localizedDescription)")
+                }
+            }
             return true
         }
 
+        if ide != .systemDefault {
+            let message = "No launchable app was found for \(ide.label)."
+            if fallbackToDefaultApp,
+               NSWorkspace.shared.open(fileURL) {
+                reportIDEOpenFailure("\(message) Opened \(targetDescription) in the default app instead.")
+                return true
+            }
+
+            reportIDEOpenFailure("\(message) Unable to open \(targetDescription).")
+            return false
+        }
+
         if fallbackToDefaultApp {
-            return NSWorkspace.shared.open(fileURL)
+            let opened = NSWorkspace.shared.open(fileURL)
+            if !opened {
+                reportIDEOpenFailure("Unable to open \(targetDescription) in the default app.")
+            }
+            return opened
         }
 
         return false
@@ -3952,7 +4025,7 @@ private enum FollowupMode: String, CaseIterable, Identifiable {
     }
 }
 
-private enum SessionIDESelection: String, CaseIterable, Identifiable {
+enum SessionIDESelection: String, CaseIterable, Identifiable {
     case systemDefault
     case cursor
     case vsCode
@@ -3988,26 +4061,66 @@ private enum SessionIDESelection: String, CaseIterable, Identifiable {
         case .systemDefault:
             return []
         case .cursor:
-            return ["com.todesktop.230313mzl4w4u92"]
+            return ["com.todesktop.230313mzl4w4u92", "com.cursor.app"]
         case .vsCode:
-            return ["com.microsoft.VSCode"]
+            return ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"]
         case .zed:
             return ["dev.zed.Zed"]
         case .intelliJ:
-            return ["com.jetbrains.intellij", "com.jetbrains.intellij.ce"]
+            return ["com.jetbrains.intellij", "com.jetbrains.intellij.ce", "com.jetbrains.intellij-EAP"]
         case .pyCharm:
-            return ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce"]
+            return ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce", "com.jetbrains.pycharm-EAP"]
         case .xcode:
             return ["com.apple.dt.Xcode"]
         }
     }
 
-    var applicationURL: URL? {
+    var applicationNames: [String] {
+        switch self {
+        case .systemDefault:
+            return []
+        case .cursor:
+            return ["Cursor"]
+        case .vsCode:
+            return ["Visual Studio Code", "Visual Studio Code - Insiders"]
+        case .zed:
+            return ["Zed"]
+        case .intelliJ:
+            return ["IntelliJ IDEA", "IntelliJ IDEA CE", "IntelliJ IDEA Ultimate", "IntelliJ IDEA EAP"]
+        case .pyCharm:
+            return ["PyCharm", "PyCharm CE", "PyCharm Professional", "PyCharm EAP"]
+        case .xcode:
+            return ["Xcode"]
+        }
+    }
+
+    func installedBundleIdentifier(
+        using resolver: IDEApplicationResolving = LiveIDEApplicationResolver.shared
+    ) -> String? {
         for bundleIdentifier in bundleIdentifiers {
-            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            if resolver.urlForApplication(bundleIdentifier: bundleIdentifier) != nil {
+                return bundleIdentifier
+            }
+        }
+
+        return nil
+    }
+
+    func resolvedApplicationURL(
+        using resolver: IDEApplicationResolving = LiveIDEApplicationResolver.shared
+    ) -> URL? {
+        for bundleIdentifier in bundleIdentifiers {
+            if let url = resolver.urlForApplication(bundleIdentifier: bundleIdentifier) {
                 return url
             }
         }
+
+        for appName in applicationNames {
+            if let url = resolver.urlForApplication(named: appName) {
+                return url
+            }
+        }
+
         return nil
     }
 
@@ -4029,21 +4142,17 @@ private enum SessionIDESelection: String, CaseIterable, Identifiable {
     }
 
     var isAvailable: Bool {
+        isInstalled()
+    }
+
+    func isInstalled(
+        using resolver: IDEApplicationResolving = LiveIDEApplicationResolver.shared
+    ) -> Bool {
         if self == .systemDefault {
             return true
         }
 
-        if applicationURL != nil {
-            return true
-        }
-
-        guard let fileURLScheme,
-              let schemeProbe = URL(string: "\(fileURLScheme)://open")
-        else {
-            return false
-        }
-
-        return NSWorkspace.shared.urlForApplication(toOpen: schemeProbe) != nil
+        return resolvedApplicationURL(using: resolver) != nil
     }
 
     func deepLinkURL(for fileURL: URL, line: Int?, column: Int?) -> URL? {

@@ -31,7 +31,7 @@ Legend:
 | PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | present | P1 | M2 |
 | PAR-014 | Request-user-input parity UI | Every Code TUI | partial | P1 | M2 |
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | partial | P1 | M2 |
-| PAR-016 | IDE integration robustness | Mac + native | partial | P1 | M2 |
+| PAR-016 | IDE integration robustness | Mac + native | present | P1 | M2 |
 | PAR-017 | Multi-agent progress visualization | Every Code TUI | missing | P2 | M3 |
 | PAR-018 | Browser workflow parity | Every Code TUI | partial | P2 | M3 |
 | PAR-019 | Visual quality rubric enforcement | Mac-inspired | partial | P1 | M2 |
@@ -161,6 +161,10 @@ Legend:
 - Acceptance criteria: IDE picker shows installed apps only, session-scoped
   selection persists, and file opens are reliable with fallback.
 - Validation gate: IDE open scenario + manual verification.
+- Progress: installed-only IDE availability now uses bundle/name app resolution,
+  session IDE preferences are persisted and pruned per thread, and open-in-IDE
+  paths report explicit failure/fallback messaging. Deterministic evidence added
+  via `ide-integration` benchmark scenario and fixture.
 
 ## PAR-017
 
