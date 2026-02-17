@@ -13,6 +13,7 @@ SCENARIOS=(
 	"transcript-long"
 	"activity-heavy"
 	"approval-pending"
+	"history-telemetry"
 	"browser-workflow"
 	"multi-agent-progress"
 	"voice-guardrails"

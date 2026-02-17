@@ -128,6 +128,12 @@ Goal: ship complete primary workflow loop in native.
   regressions.
 - Validation gates pass.
 
+Milestone 1 completion proof lives in
+`docs/native-app-parity-matrix.md` with all `M1` rows marked `present`
+(`PAR-005/006/007/008/009/010/020/023`), deterministic
+`history-telemetry` benchmark evidence, and milestone triplet artifacts under
+`docs/reference/native-ui/parity/`.
+
 ### Auto Drive Execution Brief (Milestone 1)
 
 Use this as kickoff prompt:
@@ -288,20 +294,21 @@ scripts/ux/benchmark-native-ui.sh
 2. `transcript-long`
 3. `activity-heavy`
 4. `approval-pending`
-5. `voice-guardrails`
-6. `request-user-input`
-7. `request-user-input-depth`
-8. `request-user-input-error`
-9. `command-launcher`
-10. `command-launcher-depth`
-11. `context-mention`
-12. `context-mention-depth`
-13. `git-recovery`
-14. `ide-integration`
-15. `settings-workflow-controls`
-16. `session-rail-scale`
-17. `disconnected-state`
-18. `settings-shell`
+5. `history-telemetry`
+6. `voice-guardrails`
+7. `request-user-input`
+8. `request-user-input-depth`
+9. `request-user-input-error`
+10. `command-launcher`
+11. `command-launcher-depth`
+12. `context-mention`
+13. `context-mention-depth`
+14. `git-recovery`
+15. `ide-integration`
+16. `settings-workflow-controls`
+17. `session-rail-scale`
+18. `disconnected-state`
+19. `settings-shell`
 
 ### Review Process
 

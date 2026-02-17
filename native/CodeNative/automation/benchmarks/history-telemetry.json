@@ -1,0 +1,8 @@
+[
+  { "kind": "click", "id": "top.connection" },
+  { "kind": "wait", "seconds": 0.7 },
+  {
+    "kind": "screenshot",
+    "path": ".code/ux-bench/native-ui/current/history-telemetry.png"
+  }
+]

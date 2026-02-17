@@ -956,7 +956,9 @@ final class SessionMirrorStoreTests: XCTestCase {
             "request_count": 3,
             "success_count": 3,
             "slow_page_count": 1,
-            "total_latency_ms": 420
+            "total_latency_ms": 420,
+            "inactive_retention_passes": 2,
+            "inactive_retention_trimmed_items": 128
           }
         }
         """
@@ -980,6 +982,8 @@ final class SessionMirrorStoreTests: XCTestCase {
         XCTAssertEqual(store.historyPageTelemetry.successCount, 3)
         XCTAssertEqual(store.historyPageTelemetry.slowPageCount, 1)
         XCTAssertEqual(Int(store.historyPageTelemetry.totalLatencyMs), 420)
+        XCTAssertEqual(store.historyPageTelemetry.inactiveRetentionPasses, 2)
+        XCTAssertEqual(store.historyPageTelemetry.inactiveRetentionTrimmedItems, 128)
     }
 
     @MainActor

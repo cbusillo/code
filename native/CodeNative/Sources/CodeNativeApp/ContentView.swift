@@ -1393,29 +1393,32 @@ struct ContentView: View {
     }
 
     private var statusChip: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(connectionChipColor)
-                .frame(width: 8, height: 8)
-            Text(store.selectedSessionRuntimeState.label)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(runtimeStateColor)
-
-            Text("•")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            Text(store.statusLine)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.white.opacity(0.06), in: Capsule())
-        .onTapGesture {
+        Button {
             showConnectionPopover.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(connectionChipColor)
+                    .frame(width: 8, height: 8)
+                Text(store.selectedSessionRuntimeState.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(runtimeStateColor)
+
+                Text("•")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Text(store.statusLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.06), in: Capsule())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Session connection status")
         .accessibilityIdentifier("top.connection")
         .popover(isPresented: $showConnectionPopover, arrowEdge: .bottom) {
             ConnectionPopover(store: store)

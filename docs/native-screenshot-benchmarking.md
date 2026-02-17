@@ -14,6 +14,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `transcript-long`
 - `activity-heavy`
 - `approval-pending`
+- `history-telemetry`
 - `browser-workflow`
 - `multi-agent-progress`
 - `voice-guardrails`
@@ -76,6 +77,18 @@ Milestone 1 includes a representative triplet:
 - `docs/reference/native-ui/parity/workflow-active-codex-mac.png`
 - `docs/reference/native-ui/parity/workflow-active-native.png`
 
+Milestone-tagged parity triplets:
+
+- `docs/reference/native-ui/parity/workflow-active-{tui,codex-mac,native}.png`
+- `docs/reference/native-ui/parity/m2-activity-heavy-{tui,codex-mac,native}.png`
+- `docs/reference/native-ui/parity/m3-multi-agent-progress-{tui,codex-mac,native}.png`
+
+Verify triplet completeness and reproducible checksums:
+
+```bash
+scripts/ux/verify-parity-triplets.sh
+```
+
 ## PAR-019 Visual Rubric Gate
 
 When enforcing PAR-019 (`visual quality rubric enforcement`), treat the
@@ -84,6 +97,7 @@ following deterministic scenarios as required review checkpoints:
 - `transcript-long` (dense conversation hierarchy and readability)
 - `activity-heavy` (task/activity card clarity under load)
 - `approval-pending` (high-priority action prominence)
+- `history-telemetry` (paging metrics and retention visibility)
 - `request-user-input-depth` (interactive card depth and spacing consistency)
 - `settings-workflow-controls` (settings information hierarchy and alignment)
 
@@ -117,3 +131,16 @@ For PAR-021 (`voice interaction parity hardening`), include
 `voice-guardrails` in each deterministic benchmark run. The screenshot must
 show voice input remaining blocked while an approval decision is pending,
 without losing the current draft text.
+
+## PAR-020 Telemetry Guardrail Gate
+
+For PAR-020 (`performance guardrails + telemetry`), include
+`history-telemetry` in each deterministic benchmark run. The screenshot must
+show connection/runtime state plus non-zero history telemetry counters
+(`req/ok/avg/slow`) and retention-trim counters when present.
+
+## PAR-023 Cross-App Evidence Gate
+
+For PAR-023 (`cross-app screenshot parity evidence`), keep milestone-tagged
+triplets current in `docs/reference/native-ui/parity/` and verify with
+`scripts/ux/verify-parity-triplets.sh` after refreshing captures.

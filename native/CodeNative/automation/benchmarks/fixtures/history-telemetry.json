@@ -1,0 +1,59 @@
+{
+  "connection_state": "disconnected",
+  "status_line": "Disconnected (fixture telemetry snapshot)",
+  "client_id": "bench-history",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a711",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a711",
+        "conversation_id": "00000000-0000-0000-0000-00000000a711",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000800000,
+        "last_event_at_unix_ms": 1700000899000,
+        "title": "History telemetry benchmark"
+      },
+      "has_more_history_before": true,
+      "history_page_in_flight": true,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a711",
+          "seq": 100,
+          "event": {
+            "id": "history-telemetry-user",
+            "event_seq": 100,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "Show paging telemetry summary."
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a711",
+          "seq": 101,
+          "event": {
+            "id": "history-telemetry-assistant",
+            "event_seq": 101,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "History paging is in progress with bounded retention enabled."
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "history_page_telemetry": {
+    "request_count": 12,
+    "success_count": 11,
+    "slow_page_count": 2,
+    "total_latency_ms": 1764,
+    "inactive_retention_passes": 3,
+    "inactive_retention_trimmed_items": 540
+  }
+}

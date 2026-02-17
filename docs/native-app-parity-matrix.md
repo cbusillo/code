@@ -35,10 +35,10 @@ Legend:
 | PAR-017 | Multi-agent progress visualization | Every Code TUI | present | P2 | M3 |
 | PAR-018 | Browser workflow parity | Every Code TUI | present | P2 | M3 |
 | PAR-019 | Visual quality rubric enforcement | Mac-inspired | present | P1 | M2 |
-| PAR-020 | Performance guardrails + telemetry | TUI + native | partial | P0 | M1 |
+| PAR-020 | Performance guardrails + telemetry | TUI + native | present | P0 | M1 |
 | PAR-021 | Voice interaction parity hardening | Codex Mac | present | P2 | M3 |
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
-| PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | partial | P0 | M1 |
+| PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | present | P0 | M1 |
 
 ## Detailed Rows
 
@@ -234,6 +234,12 @@ Legend:
 - Acceptance criteria: paging/scroll telemetry is available and typing remains
   responsive during pagination.
 - Validation gate: telemetry spot-check + manual typing stress.
+- Progress: history paging telemetry is now fixture-backed and benchmarked via
+  the deterministic `history-telemetry` scenario, which opens the connection
+  popover and captures runtime state plus paging metrics (`req/ok/avg/slow` and
+  retention trims). Store coverage verifies telemetry hydration from benchmark
+  fixtures, including inactive-retention counters, while existing paging tests
+  continue guarding reconnect/order behavior.
 
 ## PAR-021
 
@@ -270,6 +276,12 @@ Legend:
 - Acceptance criteria: each milestone includes at least one matched screenshot
   triplet (`tui`, `codex-mac`, `native`) for a representative workflow state.
 - Validation gate: parity screenshot artifact review.
+- Progress: cross-app parity triplets now include milestone-tagged evidence for
+  M1, M2, and M3 under `docs/reference/native-ui/parity/`:
+  `workflow-active-*`, `m2-activity-heavy-*`, and
+  `m3-multi-agent-progress-*`. Reproducible verification is documented in
+  `docs/native-screenshot-benchmarking.md` and enforced by
+  `scripts/ux/verify-parity-triplets.sh`.
 
 ## Milestone Rollup
 
