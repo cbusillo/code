@@ -113,7 +113,7 @@ final class VoiceInputController: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func stopRecording() -> String {
+    func stopRecording(clearTranscript: Bool = false) -> String {
         if isRecording {
             audioEngine.stop()
             audioEngine.inputNode.removeTap(onBus: 0)
@@ -124,11 +124,19 @@ final class VoiceInputController: NSObject, ObservableObject {
         recognitionTask = nil
         recognitionRequest = nil
         isRecording = false
-        if liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if clearTranscript {
+            liveTranscript = ""
+            transcriptState = .idle
+        } else if liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             transcriptState = .idle
         }
 
         return liveTranscript
+    }
+
+    func clearTranscript() {
+        liveTranscript = ""
+        transcriptState = .idle
     }
 
     private func requestSpeechPermission() async -> Bool {

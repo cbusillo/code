@@ -276,19 +276,20 @@ scripts/ux/benchmark-native-ui.sh
 2. `transcript-long`
 3. `activity-heavy`
 4. `approval-pending`
-5. `request-user-input`
-6. `request-user-input-depth`
-7. `request-user-input-error`
-8. `command-launcher`
-9. `command-launcher-depth`
-10. `context-mention`
-11. `context-mention-depth`
-12. `git-recovery`
-13. `ide-integration`
-14. `settings-workflow-controls`
-15. `session-rail-scale`
-16. `disconnected-state`
-17. `settings-shell`
+5. `voice-guardrails`
+6. `request-user-input`
+7. `request-user-input-depth`
+8. `request-user-input-error`
+9. `command-launcher`
+10. `command-launcher-depth`
+11. `context-mention`
+12. `context-mention-depth`
+13. `git-recovery`
+14. `ide-integration`
+15. `settings-workflow-controls`
+16. `session-rail-scale`
+17. `disconnected-state`
+18. `settings-shell`
 
 ### Review Process
 

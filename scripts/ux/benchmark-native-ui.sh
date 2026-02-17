@@ -13,6 +13,7 @@ SCENARIOS=(
 	"transcript-long"
 	"activity-heavy"
 	"approval-pending"
+	"voice-guardrails"
 	"request-user-input"
 	"request-user-input-depth"
 	"request-user-input-error"

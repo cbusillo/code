@@ -36,7 +36,7 @@ Legend:
 | PAR-018 | Browser workflow parity | Every Code TUI | partial | P2 | M3 |
 | PAR-019 | Visual quality rubric enforcement | Mac-inspired | present | P1 | M2 |
 | PAR-020 | Performance guardrails + telemetry | TUI + native | partial | P0 | M1 |
-| PAR-021 | Voice interaction parity hardening | Codex Mac | partial | P2 | M3 |
+| PAR-021 | Voice interaction parity hardening | Codex Mac | present | P2 | M3 |
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | partial | P0 | M1 |
 
@@ -227,6 +227,14 @@ Legend:
 - Acceptance criteria: voice capture/playback states remain clear and
   non-disruptive during active transcript streaming and approvals.
 - Validation gate: voice interaction scenario + screenshot review.
+- Progress: voice capture now applies explicit guardrails for reconnect,
+  no-session, approval-pending, and active-stream states; active recordings are
+  safely stopped on guard transitions, and auto-submit is blocked whenever a
+  guard applies to prevent accidental sends. Interrupt actions now stop both
+  capture and speech playback, and auto-submitted captures clear transcript
+  state to avoid stale/stuck voice badges. Deterministic evidence is captured
+  through the `voice-guardrails` benchmark fixture/scenario, alongside
+  regression tests for voice policy decisions.
 
 ## PAR-022
 

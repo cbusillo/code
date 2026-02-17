@@ -96,6 +96,7 @@ struct ContentView: View {
     @State private var showThreadPicker = false
     @State private var threadSearchQuery = ""
     @State private var collapsedSessionRailGroupIDs: Set<String> = []
+    @State private var voiceInteractionNotice: String?
     @State private var showConnectionPopover = false
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
@@ -122,6 +123,42 @@ struct ContentView: View {
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
+    }
+
+    private var latestSessionPayloadType: String? {
+        latestCorePayloadType(in: store.selectedSessionItems)
+    }
+
+    private var voiceCaptureGuardReason: VoiceCaptureGuardReason? {
+        VoiceInteractionPolicy.guardReason(
+            connectionState: store.connectionState,
+            hasSelectedSession: store.selectedSessionID != nil,
+            latestPayloadType: latestSessionPayloadType
+        )
+    }
+
+    private var canStartVoiceCapture: Bool {
+        voiceCaptureGuardReason == nil
+    }
+
+    private var canToggleVoiceCapture: Bool {
+        voiceInput.isRecording || canStartVoiceCapture
+    }
+
+    private var voiceMicAccessibilityHint: String {
+        if voiceInput.isRecording {
+            return "Stops voice recording and keeps the captured draft in the composer."
+        }
+
+        if let voiceCaptureGuardReason {
+            return voiceCaptureGuardReason.accessibilityHint
+        }
+
+        if autoSubmitVoice {
+            return "Starts voice input and auto-submits when recording stops."
+        }
+
+        return "Starts voice input and keeps the captured text in the composer."
     }
 
     private var composerHelperText: String? {
@@ -158,6 +195,21 @@ struct ContentView: View {
 
     private var showVoiceBadge: Bool {
         voiceInput.isRecording || voiceInput.transcriptState != .idle
+    }
+
+    private var voiceCaptureNoticeText: String? {
+        if let voiceInteractionNotice,
+           !voiceInteractionNotice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return voiceInteractionNotice
+        }
+
+        guard !voiceInput.isRecording,
+              let voiceCaptureGuardReason
+        else {
+            return nil
+        }
+
+        return voiceCaptureGuardReason.helperLabel
     }
 
     private var lastAssistantResponseText: String? {
@@ -651,12 +703,17 @@ struct ContentView: View {
         .onChange(of: store.selectedSessionItems) { _, _ in
             refreshTranscriptCache()
             handleAssistantSpeech()
+            enforceVoiceCapturePolicy(clearTranscript: true)
             if let activeTranscriptItemID,
                !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
                 self.activeTranscriptItemID = nil
             }
         }
         .onChange(of: store.selectedSessionID) { _, _ in
+            if voiceInput.isRecording {
+                stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
+            }
+            voiceInteractionNotice = nil
             activeTranscriptItemID = nil
             composerDraft = store.composerText
             refreshTranscriptCache()
@@ -692,6 +749,12 @@ struct ContentView: View {
         .onChange(of: showActivityEvents) { _, _ in
             refreshTranscriptCache()
         }
+        .onChange(of: store.connectionState) { _, newState in
+            if newState != .connected {
+                voiceOutput.stop()
+                enforceVoiceCapturePolicy(clearTranscript: true)
+            }
+        }
         #if os(iOS)
         .onChange(of: showsIPadSplitLayout) { _, isSplit in
             if isSplit {
@@ -700,7 +763,7 @@ struct ContentView: View {
         }
         #endif
         .onDisappear {
-            _ = voiceInput.stopRecording()
+            stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
             voiceOutput.stop()
         }
         #if os(macOS)
@@ -2377,9 +2440,10 @@ struct ContentView: View {
                     .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
                     .frame(width: 22, height: 22)
                     .background(Color.white.opacity(0.05), in: Circle())
-                    .disabled(!canSendTurns)
+                    .disabled(!canToggleVoiceCapture)
                     .accessibilityIdentifier("composer.mic-toggle")
                     .accessibilityLabel(voiceInput.isRecording ? "Stop recording" : "Start voice input")
+                    .accessibilityHint(voiceMicAccessibilityHint)
 
                     Button {
                         interruptTurnAction()
@@ -2489,6 +2553,22 @@ struct ContentView: View {
                 .padding(.bottom, isCompactPhoneLayout ? 1 : 2)
             }
 
+            if let voiceCaptureNoticeText {
+                HStack(spacing: 8) {
+                    Image(systemName: "mic.slash")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.66))
+                    Text(voiceCaptureNoticeText)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.66))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, isCompactPhoneLayout ? 1 : 2)
+                .accessibilityIdentifier("composer.voice-notice")
+            }
+
             if !isCompactPhoneLayout {
                 HStack(spacing: 8) {
                     Button {
@@ -2501,9 +2581,10 @@ struct ContentView: View {
                     .foregroundStyle(voiceInput.isRecording ? .red : .white.opacity(0.66))
                     .frame(width: 24, height: 24)
                     .background(Color.white.opacity(0.05), in: Circle())
-                    .disabled(!canSendTurns)
+                    .disabled(!canToggleVoiceCapture)
                     .accessibilityIdentifier("composer.mic-toggle")
                     .accessibilityLabel(voiceInput.isRecording ? "Stop recording" : "Start voice input")
+                    .accessibilityHint(voiceMicAccessibilityHint)
 
                     Button {
                         interruptTurnAction()
@@ -2654,9 +2735,10 @@ struct ContentView: View {
                 .foregroundStyle(voiceInput.isRecording ? .red : .secondary)
                 .frame(width: 24, height: 24)
                 .background(Color.white.opacity(0.05), in: Circle())
-                .disabled(!canSendTurns)
+                .disabled(!canToggleVoiceCapture)
                 .accessibilityIdentifier("composer.mic-toggle")
                 .accessibilityLabel(voiceInput.isRecording ? "Stop recording" : "Start voice input")
+                .accessibilityHint(voiceMicAccessibilityHint)
 
                 Button {
                     interruptTurnAction()
@@ -2725,6 +2807,14 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton)
 
                 VoiceStatusBadge(label: voiceStateLabel, isActive: voiceInput.isRecording)
+
+                if let voiceCaptureNoticeText {
+                    Label(voiceCaptureNoticeText, systemImage: "mic.slash")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("composer.voice-notice")
+                }
 
                 Spacer()
 
@@ -3205,6 +3295,10 @@ struct ContentView: View {
     }
 
     private func submitComposerAction(text overrideText: String? = nil) {
+        if voiceInput.isRecording {
+            stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
+        }
+
         let text = (overrideText ?? composerDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             return
@@ -3217,6 +3311,11 @@ struct ContentView: View {
     }
 
     private func interruptTurnAction() {
+        if voiceInput.isRecording {
+            stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
+        }
+        voiceOutput.stop()
+
         Task {
             await store.interruptTurn()
         }
@@ -3980,7 +4079,13 @@ struct ContentView: View {
     #endif
 
     private func startVoiceCapture() {
+        if let voiceCaptureGuardReason {
+            voiceInteractionNotice = voiceCaptureGuardReason.helperLabel
+            return
+        }
+
         voiceOutput.stop()
+        voiceInteractionNotice = nil
         Task {
             await voiceInput.startRecording { text, _ in
                 Task { @MainActor in
@@ -3990,16 +4095,63 @@ struct ContentView: View {
         }
     }
 
-    private func stopVoiceCapture(shouldSubmit: Bool) {
-        let finalText = voiceInput.stopRecording()
+    private func stopVoiceCapture(shouldSubmit: Bool, clearTranscript: Bool = false) {
+        let wasRecording = voiceInput.isRecording
+        let guardReasonAtStop = voiceCaptureGuardReason
+        let finalText = voiceInput.stopRecording(clearTranscript: clearTranscript)
         let normalized = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        composerDraft = finalText
 
-        if shouldSubmit && autoSubmitVoice && !normalized.isEmpty {
+        if wasRecording {
+            composerDraft = finalText
+        }
+
+        if !wasRecording,
+           !clearTranscript {
+            return
+        }
+
+        let shouldAutoSubmit = VoiceInteractionPolicy.shouldAutoSubmitCapture(
+            autoSubmitEnabled: shouldSubmit && autoSubmitVoice,
+            normalizedDraft: normalized,
+            guardReason: guardReasonAtStop
+        )
+
+        if shouldAutoSubmit {
             composerDraft = ""
+            voiceInput.clearTranscript()
+            voiceInteractionNotice = nil
             Task {
                 await store.submitComposer(text: finalText)
             }
+            return
+        }
+
+        if shouldSubmit,
+           autoSubmitVoice,
+           !normalized.isEmpty,
+           let guardReasonAtStop {
+            voiceInteractionNotice = guardReasonAtStop.helperLabel
+        } else if clearTranscript {
+            voiceInteractionNotice = guardReasonAtStop?.helperLabel
+        }
+    }
+
+    private func enforceVoiceCapturePolicy(clearTranscript: Bool) {
+        let guardReason = voiceCaptureGuardReason
+        if let guardReason,
+           !voiceInput.isRecording {
+            voiceInteractionNotice = guardReason.helperLabel
+        } else if guardReason == nil,
+                  !voiceInput.isRecording {
+            voiceInteractionNotice = nil
+        }
+
+        if VoiceInteractionPolicy.shouldStopActiveCapture(
+            isRecording: voiceInput.isRecording,
+            guardReason: guardReason
+        ) {
+            stopVoiceCapture(shouldSubmit: false, clearTranscript: clearTranscript)
+            voiceInteractionNotice = guardReason?.helperLabel
         }
     }
 
@@ -4017,6 +4169,10 @@ struct ContentView: View {
             return
         }
 
+        if voiceInput.isRecording {
+            stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
+        }
+
         Task {
             await store.submitApproval(
                 sessionId: item.sessionId,
@@ -4030,6 +4186,7 @@ struct ContentView: View {
     private func handleAssistantSpeech() {
         guard autoSpeakAssistant,
               !voiceInput.isRecording,
+              store.connectionState == .connected,
               let lastItem = store.selectedSessionItems.last,
               lastItem.id != lastSpokenItemID,
               let text = lastItem.assistantMessageText

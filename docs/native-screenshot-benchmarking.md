@@ -14,6 +14,7 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `transcript-long`
 - `activity-heavy`
 - `approval-pending`
+- `voice-guardrails`
 - `request-user-input`
 - `request-user-input-depth`
 - `request-user-input-error`
@@ -93,3 +94,10 @@ For PAR-022 (`session rail/grouping ergonomics at scale`), include
 `session-rail-scale` in each deterministic benchmark run. The screenshot must
 show thread-rail grouping controls and legible grouped rows under a large,
 fixture-backed session catalog.
+
+## PAR-021 Voice Hardening Gate
+
+For PAR-021 (`voice interaction parity hardening`), include
+`voice-guardrails` in each deterministic benchmark run. The screenshot must
+show voice input remaining blocked while an approval decision is pending,
+without losing the current draft text.

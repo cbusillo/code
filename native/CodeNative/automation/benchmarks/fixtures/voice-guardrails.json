@@ -1,0 +1,55 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-voice-guardrails",
+  "client_id": "bench-voice-guardrails",
+  "composer_text": "Transcribed draft stays in composer until approval is resolved.",
+  "selected_session_id": "00000000-0000-0000-0000-00000000ab01",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000ab01",
+        "conversation_id": "00000000-0000-0000-0000-00000000ab01",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000900000,
+        "last_event_at_unix_ms": 1700000909000,
+        "title": "Milestone 3 voice guardrails"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000ab01",
+          "seq": 101,
+          "event": {
+            "id": "voice-guardrails-user",
+            "event_seq": 101,
+            "kind": "event_msg",
+            "payload": {
+              "type": "user_message",
+              "message": "Run benchmark captures and summarize any regressions."
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000ab01",
+          "seq": 102,
+          "event": {
+            "id": "voice-guardrails-approval",
+            "event_seq": 102,
+            "kind": "event_msg",
+            "payload": {
+              "type": "exec_approval_request",
+              "call_id": "call-voice-guardrails-1",
+              "command": [
+                "scripts/ux/benchmark-native-ui.sh"
+              ],
+              "reason": "Needs command execution approval"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
