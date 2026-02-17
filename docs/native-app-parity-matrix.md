@@ -34,7 +34,7 @@ Legend:
 | PAR-016 | IDE integration robustness | Mac + native | present | P1 | M2 |
 | PAR-017 | Multi-agent progress visualization | Every Code TUI | missing | P2 | M3 |
 | PAR-018 | Browser workflow parity | Every Code TUI | partial | P2 | M3 |
-| PAR-019 | Visual quality rubric enforcement | Mac-inspired | partial | P1 | M2 |
+| PAR-019 | Visual quality rubric enforcement | Mac-inspired | present | P1 | M2 |
 | PAR-020 | Performance guardrails + telemetry | TUI + native | partial | P0 | M1 |
 | PAR-021 | Voice interaction parity hardening | Codex Mac | partial | P2 | M3 |
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | partial | P1 | M2 |
@@ -204,6 +204,15 @@ Legend:
 - Acceptance criteria: no unresolved high-severity visual issues across
   benchmark suite after milestone changes.
 - Validation gate: screenshot diff review gate.
+- Progress: transcript cards now enforce rubric-consistent hierarchy with
+  gradient depth, adaptive contrast, and focus-preserving active states while
+  keeping assistant content legible. Request-user-input option shortcuts are
+  now safely constrained to single-digit keys (`1`-`9`) to avoid invalid
+  key-binding crashes when option counts exceed 9. Deterministic proof comes
+  from `scripts/ux/benchmark-native-ui.sh` fixture-backed scenarios including
+  `transcript-long`, `activity-heavy`, `approval-pending`,
+  `request-user-input-depth`, and `settings-workflow-controls`, plus cross-app
+  parity triplets under `docs/reference/native-ui/parity/`.
 
 ## PAR-020
 

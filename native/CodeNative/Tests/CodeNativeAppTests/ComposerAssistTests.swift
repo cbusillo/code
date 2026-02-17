@@ -89,6 +89,13 @@ final class ComposerAssistTests: XCTestCase {
         XCTAssertEqual(filtered.first, "native/CodeNative/Sources/CodeNativeApp/ContentView.swift")
     }
 
+    func testRequestInputShortcutDigitOnlyMapsFirstQuestionSingleDigits() {
+        XCTAssertEqual(requestInputShortcutDigit(questionIndex: 0, optionIndex: 0), "1")
+        XCTAssertEqual(requestInputShortcutDigit(questionIndex: 0, optionIndex: 8), "9")
+        XCTAssertNil(requestInputShortcutDigit(questionIndex: 0, optionIndex: 9))
+        XCTAssertNil(requestInputShortcutDigit(questionIndex: 1, optionIndex: 0))
+    }
+
     func testBuildContextFileIndexSkipsHiddenAndLargeDirectories() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("composer-context-index-\(UUID().uuidString)")

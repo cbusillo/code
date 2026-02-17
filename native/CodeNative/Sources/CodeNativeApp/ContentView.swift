@@ -24,6 +24,17 @@ private func formatCompactTokenCount(_ value: Int) -> String {
     return "\(value)"
 }
 
+func requestInputShortcutDigit(questionIndex: Int, optionIndex: Int) -> String? {
+    guard questionIndex == 0,
+          optionIndex >= 0,
+          optionIndex < 9
+    else {
+        return nil
+    }
+
+    return String(optionIndex + 1)
+}
+
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
     @Environment(\.openURL) private var openURL
@@ -6463,6 +6474,36 @@ private struct TranscriptCard: View {
         }
     }
 
+    private var cardFillGradient: LinearGradient {
+        if cardBackground == .clear {
+            return LinearGradient(colors: [.clear, .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
+
+        return LinearGradient(
+            colors: [
+                cardBackground.opacity(0.96),
+                cardBackground.opacity(0.78),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var cardShadowColor: Color {
+        if item.cardStyle == .assistant || cardBackground == .clear {
+            return .clear
+        }
+        return Color.black.opacity(isActive ? 0.30 : 0.18)
+    }
+
+    private var cardShadowRadius: CGFloat {
+        isActive ? 14 : 8
+    }
+
+    private var cardShadowY: CGFloat {
+        isActive ? 8 : 4
+    }
+
     private var collapsedBodyLimit: Int {
         if item.isTaskLifecycleEvent {
             return 420
@@ -6953,7 +6994,10 @@ private struct TranscriptCard: View {
         }
         .padding(.horizontal, effectiveCardHorizontalPadding)
         .padding(.vertical, effectiveCardVerticalPadding)
-        .background(cardBackground)
+        .background(
+            RoundedRectangle(cornerRadius: effectiveCardCornerRadius, style: .continuous)
+                .fill(cardFillGradient)
+        )
         .clipShape(RoundedRectangle(cornerRadius: effectiveCardCornerRadius, style: .continuous))
         .overlay {
             if shouldDrawBorder {
@@ -6992,6 +7036,7 @@ private struct TranscriptCard: View {
                 .allowsHitTesting(showsCopyActions)
             }
         }
+        .shadow(color: cardShadowColor, radius: cardShadowRadius, x: 0, y: cardShadowY)
         .contextMenu {
             if !item.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button("Copy text") {
@@ -7262,9 +7307,12 @@ private struct TranscriptCard: View {
                     if !question.options.isEmpty {
                         ForEach(Array(question.options.enumerated()), id: \.element.label) { optionIndex, option in
                             let isSelected = requestInputSelections[question.id] == option.label
-                            let canAssignShortcut = questionIndex == 0 && optionIndex < 9
+                            let shortcutDigit = requestInputShortcutDigit(
+                                questionIndex: questionIndex,
+                                optionIndex: optionIndex
+                            )
 
-                            Button {
+                            let optionButton = Button {
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     requestInputSelections[question.id] = option.label
                                 }
@@ -7280,8 +7328,8 @@ private struct TranscriptCard: View {
                                                 .font(.caption.weight(.semibold))
                                                 .foregroundStyle(.primary)
 
-                                            if canAssignShortcut {
-                                                Text("\(optionIndex + 1)")
+                                            if let shortcutDigit {
+                                                Text(shortcutDigit)
                                                     .font(.caption2.monospaced())
                                                     .foregroundStyle(.secondary)
                                                     .padding(.horizontal, 5)
@@ -7310,13 +7358,19 @@ private struct TranscriptCard: View {
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("input.option.\(question.id).\(option.label)")
                             .accessibilityLabel("\(option.label). \(option.description)")
-                            .accessibilityHint(canAssignShortcut ? "Press \(optionIndex + 1) to select this option" : "")
+                            .accessibilityHint(shortcutDigit.map { "Press \($0) to select this option" } ?? "")
                             .accessibilityAddTraits(isSelected ? .isSelected : [])
+
                             #if os(macOS)
-                            .keyboardShortcut(
-                                KeyEquivalent(Character("\(optionIndex + 1)")),
-                                modifiers: canAssignShortcut ? [] : [.command, .option, .shift, .control]
-                            )
+                            if let shortcutDigit,
+                               let shortcutKey = shortcutDigit.first {
+                                optionButton
+                                    .keyboardShortcut(KeyEquivalent(shortcutKey), modifiers: [])
+                            } else {
+                                optionButton
+                            }
+                            #else
+                            optionButton
                             #endif
                         }
                     }

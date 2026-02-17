@@ -71,3 +71,17 @@ Milestone 1 includes a representative triplet:
 - `docs/reference/native-ui/parity/workflow-active-tui.png`
 - `docs/reference/native-ui/parity/workflow-active-codex-mac.png`
 - `docs/reference/native-ui/parity/workflow-active-native.png`
+
+## PAR-019 Visual Rubric Gate
+
+When enforcing PAR-019 (`visual quality rubric enforcement`), treat the
+following deterministic scenarios as required review checkpoints:
+
+- `transcript-long` (dense conversation hierarchy and readability)
+- `activity-heavy` (task/activity card clarity under load)
+- `approval-pending` (high-priority action prominence)
+- `request-user-input-depth` (interactive card depth and spacing consistency)
+- `settings-workflow-controls` (settings information hierarchy and alignment)
+
+Merge is blocked for unresolved high-severity visual regressions in any of
+these checkpoints.
