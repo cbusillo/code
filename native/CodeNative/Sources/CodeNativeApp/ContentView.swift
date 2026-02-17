@@ -2036,6 +2036,7 @@ struct ContentView: View {
                                         .font(.caption.monospaced())
                                         .foregroundStyle(.white.opacity(0.9))
                                         .lineLimit(1)
+                                        .truncationMode(.middle)
                                     Spacer(minLength: 0)
                                 }
                                 .padding(.horizontal, 10)
@@ -2043,11 +2044,13 @@ struct ContentView: View {
                                 .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Insert \(path)")
                         }
                     }
                     .padding(.horizontal, 12)
                     .padding(.top, 4)
                     .padding(.bottom, 2)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
 
                 composerControlRows
@@ -2183,6 +2186,7 @@ struct ContentView: View {
                     .frame(width: 22, height: 22)
                     .background(Color.white.opacity(0.05), in: Circle())
                     .accessibilityIdentifier("composer.slash")
+                    .accessibilityLabel("Slash commands")
 
                     Button {
                         ensureContextIndexLoaded()
@@ -2196,6 +2200,7 @@ struct ContentView: View {
                     .frame(width: 22, height: 22)
                     .background(Color.white.opacity(0.05), in: Circle())
                     .accessibilityIdentifier("composer.context")
+                    .accessibilityLabel("Insert context reference")
 
                     Spacer(minLength: 6)
 
@@ -2211,6 +2216,7 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.05), in: Circle())
                     .disabled(!canSendTurns)
                     .accessibilityIdentifier("composer.mic-toggle")
+                    .accessibilityLabel(voiceInput.isRecording ? "Stop recording" : "Start voice input")
 
                     Button {
                         interruptTurnAction()
@@ -2224,6 +2230,7 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.05), in: Circle())
                     .disabled(!canSendTurns)
                     .accessibilityIdentifier("composer.stop")
+                    .accessibilityLabel("Stop response")
 
                     if hasComposerText {
                         Button {
@@ -2237,6 +2244,7 @@ struct ContentView: View {
                         .frame(width: 22, height: 22)
                         .background(Color.white.opacity(0.05), in: Circle())
                         .accessibilityIdentifier("composer.clear")
+                        .accessibilityLabel("Clear draft")
                     }
 
                     Button {
@@ -2254,6 +2262,7 @@ struct ContentView: View {
                     )
                     .disabled(!canSubmit)
                     .accessibilityIdentifier("composer.send")
+                    .accessibilityLabel("Send message")
                 } else {
                     Button {
                         showSlashCommandLauncher = true
@@ -2331,6 +2340,7 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.05), in: Circle())
                     .disabled(!canSendTurns)
                     .accessibilityIdentifier("composer.mic-toggle")
+                    .accessibilityLabel(voiceInput.isRecording ? "Stop recording" : "Start voice input")
 
                     Button {
                         interruptTurnAction()
@@ -2344,6 +2354,7 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.05), in: Circle())
                     .disabled(!canSendTurns)
                     .accessibilityIdentifier("composer.stop")
+                    .accessibilityLabel("Stop response")
                     #if os(macOS)
                     .keyboardShortcut(".", modifiers: [.command])
                     #endif
@@ -2360,6 +2371,7 @@ struct ContentView: View {
                         .frame(width: 24, height: 24)
                         .background(Color.white.opacity(0.05), in: Circle())
                         .accessibilityIdentifier("composer.clear")
+                        .accessibilityLabel("Clear draft")
                     }
 
                     Spacer(minLength: 6)
@@ -2384,6 +2396,7 @@ struct ContentView: View {
                     )
                     .disabled(!canSubmit)
                     .accessibilityIdentifier("composer.send")
+                    .accessibilityLabel("Send message")
                     #if os(macOS)
                     .keyboardShortcut(.return, modifiers: [.command])
                     #endif
@@ -2432,6 +2445,9 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("composer.slash")
+                #if os(macOS)
+                .keyboardShortcut("k", modifiers: [.command])
+                #endif
 
                 Button {
                     ensureContextIndexLoaded()
@@ -2441,6 +2457,9 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("composer.context")
+                #if os(macOS)
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+                #endif
 
                 #if os(macOS)
                 Toggle(isOn: $ideContextEnabled) {
@@ -2474,6 +2493,7 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
                 .accessibilityIdentifier("composer.mic-toggle")
+                .accessibilityLabel(voiceInput.isRecording ? "Stop recording" : "Start voice input")
 
                 Button {
                     interruptTurnAction()
@@ -2487,6 +2507,7 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.05), in: Circle())
                 .disabled(!canSendTurns)
                 .accessibilityIdentifier("composer.stop")
+                .accessibilityLabel("Stop response")
                 #if os(macOS)
                 .keyboardShortcut(".", modifiers: [.command])
                 #endif
@@ -2506,6 +2527,7 @@ struct ContentView: View {
                 )
                 .disabled(!canSubmit)
                 .accessibilityIdentifier("composer.send")
+                .accessibilityLabel("Send message")
                 #if os(macOS)
                 .keyboardShortcut(.return, modifiers: [.command])
                 #endif
@@ -6785,6 +6807,7 @@ private struct TranscriptCard: View {
                 Image(systemName: "person.fill.questionmark")
                     .font(.caption)
                     .foregroundStyle(Color.orange.opacity(0.95))
+                    .accessibilityLabel("User input required")
                 Text("User input required")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -6798,27 +6821,29 @@ private struct TranscriptCard: View {
                 VStack(alignment: .leading, spacing: 7) {
                     Text(question.header)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(.primary)
 
                     Text(question.question)
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.76))
+                        .foregroundStyle(.secondary)
 
                     if !question.options.isEmpty {
                         ForEach(question.options, id: \.label) { option in
                             let isSelected = requestInputSelections[question.id] == option.label
                             Button {
-                                requestInputSelections[question.id] = option.label
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    requestInputSelections[question.id] = option.label
+                                }
                                 requestInputDidSubmit = false
                             } label: {
                                 HStack(spacing: 8) {
-                                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
-                                        .font(.caption2)
+                                    Image(systemName: isSelected ? "circle.inset.filled" : "circle")
+                                        .font(.caption)
                                         .foregroundStyle(isSelected ? Color.orange.opacity(0.9) : .secondary)
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(option.label)
                                             .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.white.opacity(0.9))
+                                            .foregroundStyle(.primary)
                                         if !option.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                             Text(option.description)
                                                 .font(.caption2)
@@ -6827,8 +6852,8 @@ private struct TranscriptCard: View {
                                     }
                                     Spacer(minLength: 0)
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 7)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
                                 .background(
                                     isSelected
                                     ? Color.orange.opacity(0.16)
@@ -6837,6 +6862,8 @@ private struct TranscriptCard: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("input.option.\(question.id).\(option.label)")
+                            .accessibilityAddTraits(isSelected ? .isSelected : [])
                         }
                     }
 
@@ -6848,24 +6875,33 @@ private struct TranscriptCard: View {
                         }
                     )
 
+                    let notePlaceholder = question.options.isEmpty ? "Type your answer" : "Add a note (optional)"
                     if question.isSecret {
-                        SecureField("Optional note", text: noteBinding)
+                        SecureField(notePlaceholder, text: noteBinding)
                             .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("input.note.\(question.id)")
                     } else {
-                        TextField("Optional note", text: noteBinding)
+                        TextField(notePlaceholder, text: noteBinding)
                             .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("input.note.\(question.id)")
                     }
                 }
                 .padding(10)
                 .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityIdentifier("input.question.\(question.id)")
             }
 
             HStack(spacing: 10) {
                 Button("Skip") {
                     submitRequestUserInput(request, skip: true)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityIdentifier("input.skip")
+                .accessibilityHint("Dismiss without answering")
+                #if os(macOS)
+                .keyboardShortcut(.escape, modifiers: [])
+                #endif
 
                 Spacer(minLength: 8)
 
@@ -6873,12 +6909,24 @@ private struct TranscriptCard: View {
                     submitRequestUserInput(request, skip: false)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.orange)
+                .accessibilityIdentifier("input.send")
+                .accessibilityHint("Submit your answers")
+                #if os(macOS)
+                .keyboardShortcut(.defaultAction)
+                #endif
             }
 
             if requestInputDidSubmit {
-                Text("Response submitted")
-                    .font(.caption2)
-                    .foregroundStyle(Color.green.opacity(0.85))
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption2)
+                    Text("Response submitted")
+                        .font(.caption2)
+                }
+                .foregroundStyle(Color.green.opacity(0.85))
+                .accessibilityAddTraits(.updatesFrequently)
             }
         }
     }
@@ -7094,30 +7142,47 @@ private struct SlashCommandLauncherView: View {
                 TextField("Search slash commands", text: $query)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("slash.search")
+                    .accessibilityLabel("Filter slash commands")
 
                 if commands.isEmpty {
                     Text("No matching commands")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .accessibilityIdentifier("slash.empty")
                 } else {
-                    List(commands) { command in
+                    List(Array(commands.enumerated()), id: \.element.id) { index, command in
                         Button {
                             onSelect(command)
                             dismiss()
                         } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(command.command)
-                                    .font(.system(.body, design: .monospaced).weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Text(command.summary)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                            HStack(spacing: 0) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(command.command)
+                                        .font(.system(.body, design: .monospaced).weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                    Text(command.summary)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                Spacer(minLength: 8)
+                                if index < 9 {
+                                    Text("\(index + 1)")
+                                        .font(.caption.monospaced().weight(.medium))
+                                        .foregroundStyle(.tertiary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 4)
+                            .padding(.vertical, 6)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("slash.item.\(command.command)")
+                        .accessibilityLabel("\(command.title): \(command.summary)")
+                        .accessibilityHint(index < 9 ? "Press \(index + 1) to select" : "")
                     }
                     .listStyle(.plain)
                 }
@@ -7153,6 +7218,7 @@ private struct ContextReferencePickerView: View {
                 TextField("Search files for @context", text: $query)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("context.search")
+                    .accessibilityLabel("Filter workspace files")
 
                 if isLoading {
                     HStack(spacing: 8) {
@@ -7169,6 +7235,7 @@ private struct ContextReferencePickerView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .accessibilityIdentifier("context.empty")
                 } else {
                     List(candidates, id: \.self) { path in
                         Button {
@@ -7176,18 +7243,22 @@ private struct ContextReferencePickerView: View {
                             dismiss()
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "at")
+                                Image(systemName: contextFileIcon(for: path))
                                     .font(.caption2.weight(.semibold))
                                     .foregroundStyle(.secondary)
+                                    .frame(width: 16, alignment: .center)
                                 Text(path)
                                     .font(.system(.body, design: .monospaced))
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 2)
+                            .padding(.vertical, 4)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("context.item.\(path)")
+                        .accessibilityLabel("Insert reference to \(path)")
                     }
                     .listStyle(.plain)
                 }
@@ -7202,6 +7273,7 @@ private struct ContextReferencePickerView: View {
                     Button("Refresh") {
                         onRefresh()
                     }
+                    .accessibilityLabel("Re-index workspace files")
                 }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
@@ -7209,6 +7281,28 @@ private struct ContextReferencePickerView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func contextFileIcon(for path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift":
+            return "swift"
+        case "js", "ts", "jsx", "tsx":
+            return "chevron.left.forwardslash.chevron.right"
+        case "py":
+            return "terminal"
+        case "rs":
+            return "gearshape"
+        case "json", "yaml", "yml", "toml", "plist":
+            return "doc.text"
+        case "md", "txt", "rst":
+            return "doc.richtext"
+        case "png", "jpg", "jpeg", "svg", "gif", "webp":
+            return "photo"
+        default:
+            return "doc"
         }
     }
 }
