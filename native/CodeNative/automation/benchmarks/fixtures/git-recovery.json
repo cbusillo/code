@@ -1,0 +1,50 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-git-recovery",
+  "client_id": "bench-git-recovery",
+  "selected_session_id": "00000000-0000-0000-0000-00000000a901",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000a901",
+        "conversation_id": "00000000-0000-0000-0000-00000000a901",
+        "model": "gpt-5.3-codex",
+        "cwd": "/Users/cbusillo/Developer/code",
+        "created_at_unix_ms": 1700000800000,
+        "last_event_at_unix_ms": 1700000808000,
+        "title": "Milestone 2 git recovery"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a901",
+          "seq": 1,
+          "event": {
+            "id": "git-recovery-diff-1",
+            "event_seq": 1,
+            "kind": "event_msg",
+            "payload": {
+              "type": "turn_diff",
+              "unified_diff": "diff --git a/native/CodeNative/Sources/CodeNativeApp/ContentView.swift b/native/CodeNative/Sources/CodeNativeApp/ContentView.swift\n@@ -2000,6 +2000,16 @@ struct ContentView: View {\n-old\n+new\ndiff --git a/docs/native-app-parity-matrix.md b/docs/native-app-parity-matrix.md\n@@ -29,7 +29,7 @@\n-missing\n+present\n"
+            }
+          }
+        },
+        {
+          "type": "core_event",
+          "session_id": "00000000-0000-0000-0000-00000000a901",
+          "seq": 2,
+          "event": {
+            "id": "git-recovery-assistant-2",
+            "event_seq": 2,
+            "kind": "event_msg",
+            "payload": {
+              "type": "agent_message",
+              "message": "Diff ready. Use the recovery controls to snapshot, restore, or re-apply changes safely."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -28,7 +28,7 @@ Legend:
 | PAR-010 | Screenshot benchmark harness + baseline | Mac + native | partial | P0 | M1 |
 | PAR-011 | Slash command launcher parity (core set) | Every Code TUI | partial | P1 | M2 |
 | PAR-012 | Mention-style context insertion | Every Code TUI | partial | P1 | M2 |
-| PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | missing | P1 | M2 |
+| PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | present | P1 | M2 |
 | PAR-014 | Request-user-input parity UI | Every Code TUI | partial | P1 | M2 |
 | PAR-015 | Settings parity for core workflow controls | TUI + Mac | partial | P1 | M2 |
 | PAR-016 | IDE integration robustness | Mac + native | partial | P1 | M2 |
@@ -135,6 +135,9 @@ Legend:
 - Acceptance criteria: native exposes diff context and rollback/recovery
   affordances sufficient for daily review loops.
 - Validation gate: workflow scenario + docs validation.
+- Progress: dedicated diff recovery module and transcript card actions now expose
+  copyable review/snapshot/restore/apply commands with changed-file context;
+  deterministic evidence captured via `git-recovery` benchmark scenario.
 
 ## PAR-014
 

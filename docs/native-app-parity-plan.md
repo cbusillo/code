@@ -274,8 +274,9 @@ scripts/ux/benchmark-native-ui.sh
 5. `request-user-input`
 6. `command-launcher`
 7. `context-mention`
-8. `disconnected-state`
-9. `settings-shell`
+8. `git-recovery`
+9. `disconnected-state`
+10. `settings-shell`
 
 ### Review Process
 

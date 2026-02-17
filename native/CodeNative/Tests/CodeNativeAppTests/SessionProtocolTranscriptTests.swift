@@ -56,6 +56,30 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.cardStyle, .tool)
     }
 
+    func testTurnDiffExposesRecoveryPlan() {
+        let diff = """
+        diff --git a/src/main.swift b/src/main.swift
+        @@ -1 +1 @@
+        -old
+        +new
+        """
+
+        let item = makeCoreEventItem(
+            seq: 81,
+            payload: .object([
+                "type": .string("turn_diff"),
+                "unified_diff": .string(diff)
+            ])
+        )
+
+        XCTAssertEqual(item.diffRecoveryPlan?.changedPaths, ["src/main.swift"])
+        XCTAssertEqual(item.diffRecoveryPlan?.reviewCommand, "git diff -- 'src/main.swift'")
+        XCTAssertEqual(
+            item.diffRecoveryPlan?.restoreCommand,
+            "git restore --source=HEAD -- 'src/main.swift'"
+        )
+    }
+
     func testApprovalRequestMapsToApprovalCardStyle() {
         let item = makeCoreEventItem(
             seq: 9,

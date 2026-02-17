@@ -16,6 +16,7 @@ SCENARIOS=(
 	"request-user-input"
 	"command-launcher"
 	"context-mention"
+	"git-recovery"
 	"disconnected-state"
 	"settings-shell"
 )

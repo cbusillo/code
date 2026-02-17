@@ -6031,6 +6031,7 @@ private struct TranscriptCard: View {
     @State private var requestInputDidSubmit = false
     @State private var isExpanded = false
     @State private var diffExpansionSteps = 0
+    @State private var copiedDiffRecoveryCommandLabel: String?
     @State private var isHoveringCopyActions = false
 
     private var effectiveLineSpacing: CGFloat {
@@ -6507,6 +6508,10 @@ private struct TranscriptCard: View {
                 .padding(.vertical, 6)
                 .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
+                if let recoveryPlan = item.diffRecoveryPlan {
+                    diffRecoveryContent(recoveryPlan)
+                }
+
                 preview
             } else if let tokenUsage = item.tokenUsageBreakdown {
                 VStack(alignment: .leading, spacing: 8) {
@@ -6786,6 +6791,7 @@ private struct TranscriptCard: View {
             if !active {
                 diffExpansionSteps = 0
                 isExpanded = false
+                copiedDiffRecoveryCommandLabel = nil
             }
         }
     }
@@ -6798,6 +6804,127 @@ private struct TranscriptCard: View {
         #elseif os(iOS)
         UIPasteboard.general.string = text
         #endif
+    }
+
+    @ViewBuilder
+    private func diffRecoveryContent(_ plan: DiffRecoveryPlan) -> some View {
+        let previewPaths = Array(plan.changedPaths.prefix(3))
+        let remainingPathCount = max(0, plan.changedPaths.count - previewPaths.count)
+        let pathSummary = previewPaths.joined(separator: ", ")
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: "arrow.uturn.backward.circle")
+                    .font(.caption)
+                    .foregroundStyle(Color.orange.opacity(0.92))
+
+                Text("Diff recovery")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+
+                Spacer(minLength: 8)
+
+                Text("\(plan.changedPaths.count) file\(plan.changedPaths.count == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(
+                remainingPathCount > 0
+                ? "\(pathSummary), +\(remainingPathCount) more"
+                : pathSummary
+            )
+            .font(.caption.monospaced())
+            .foregroundStyle(.white.opacity(0.82))
+            .lineLimit(2)
+            .truncationMode(.middle)
+
+            HStack(spacing: 6) {
+                diffRecoveryCommandButton(
+                    title: "Copy review",
+                    icon: "doc.text.magnifyingglass",
+                    label: "review",
+                    command: plan.reviewCommand,
+                    tint: Color.white.opacity(0.08),
+                    textTint: Color.white.opacity(0.88),
+                    accessibilityID: "diff.recovery.copy-review"
+                )
+
+                diffRecoveryCommandButton(
+                    title: "Copy snapshot",
+                    icon: "square.and.arrow.down.on.square",
+                    label: "snapshot",
+                    command: plan.snapshotCommand,
+                    tint: Color.cyan.opacity(0.16),
+                    textTint: Color.cyan.opacity(0.98),
+                    accessibilityID: "diff.recovery.copy-snapshot"
+                )
+            }
+
+            HStack(spacing: 6) {
+                diffRecoveryCommandButton(
+                    title: "Copy restore",
+                    icon: "arrow.uturn.backward",
+                    label: "restore",
+                    command: plan.restoreCommand,
+                    tint: Color.orange.opacity(0.16),
+                    textTint: Color.orange.opacity(0.96),
+                    accessibilityID: "diff.recovery.copy-restore"
+                )
+
+                diffRecoveryCommandButton(
+                    title: "Copy apply",
+                    icon: "square.and.arrow.up",
+                    label: "apply",
+                    command: plan.applySnapshotCommand,
+                    tint: Color.green.opacity(0.16),
+                    textTint: Color.green.opacity(0.96),
+                    accessibilityID: "diff.recovery.copy-apply"
+                )
+            }
+
+            if let copiedDiffRecoveryCommandLabel {
+                Text("Copied \(copiedDiffRecoveryCommandLabel) command")
+                    .font(.caption2)
+                    .foregroundStyle(Color.green.opacity(0.86))
+                    .accessibilityIdentifier("diff.recovery.copy-status")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func diffRecoveryCommandButton(
+        title: String,
+        icon: String,
+        label: String,
+        command: String,
+        tint: Color,
+        textTint: Color,
+        accessibilityID: String
+    ) -> some View {
+        Button {
+            copyTextToPasteboard(command)
+            copiedDiffRecoveryCommandLabel = label
+        } label: {
+            Label(title, systemImage: icon)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(tint, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .foregroundStyle(textTint)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityID)
+        .accessibilityHint(command)
     }
 
     @ViewBuilder

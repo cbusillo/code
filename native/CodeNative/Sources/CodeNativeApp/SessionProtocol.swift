@@ -1596,6 +1596,14 @@ extension SessionStreamItem {
         return normalizeStructuredText(unifiedDiff)
     }
 
+    var diffRecoveryPlan: DiffRecoveryPlan? {
+        guard let diff = turnDiffText else {
+            return nil
+        }
+
+        return DiffRecoveryPlan(unifiedDiff: diff)
+    }
+
     var isReplayOmittedNotice: Bool {
         guard type == "system",
               let message,
