@@ -107,6 +107,21 @@ jobs:
           p12-file-base64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
 
+      - name: Verify installer certificate availability
+        run: |
+          set -euo pipefail
+          if ! security find-certificate \
+            -a \
+            -c "Mac Installer Distribution" \
+            >/dev/null 2>&1; then
+            echo "Missing Mac Installer Distribution certificate" \
+              "in keychain." >&2
+            echo "Export a .p12 containing that certificate/private key and" >&2
+            echo "store it in IOS_DIST_CERT_P12_BASE64, or include it in" >&2
+            echo "the existing distribution .p12, before rerunning." >&2
+            exit 1
+          fi
+
       - name: Install Mac App Store provisioning profile
         env:
           MACOS_APPSTORE_PROFILE_BASE64:
