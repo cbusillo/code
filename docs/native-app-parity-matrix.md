@@ -2,8 +2,9 @@
 
 # Native App Parity Matrix
 
-This matrix maps Every Code TUI and Codex Mac app capabilities to native app
-parity work with explicit priorities, milestone assignment, dependencies,
+This matrix maps Every Code TUI and Codex Mac app capabilities to Every Code
+Companion (native app) parity work with explicit priorities, milestone
+assignment, dependencies,
 acceptance criteria, and validation gates.
 
 Legend:

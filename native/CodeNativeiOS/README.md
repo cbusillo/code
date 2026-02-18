@@ -1,4 +1,4 @@
-# CodeNative iOS Demo
+# Every Code Companion iOS Demo
 
 This folder contains a lightweight iOS/iPadOS demo app target that reuses the
 shared SwiftUI client from `native/CodeNative/Sources/CodeNativeApp`.
@@ -18,7 +18,7 @@ This creates `CodeNativeiOSDemo.xcodeproj`.
 2. Pick an iPhone or iPad simulator.
 3. Run `CodeNativeiOSDemo`.
 
-By default, the app connects to `ws://127.0.0.1:4317/ws`.
+By default, Every Code Companion connects to `ws://127.0.0.1:4317/ws`.
 
 ## iOS Core Controls
 

@@ -64,8 +64,9 @@ scripts/ux/verify-native-benchmark-baseline.sh
 
 ## Cross-App Parity Captures
 
-We can run and interact with Every Code TUI, Codex Mac app, and native app,
-then capture screenshots for side-by-side parity checks.
+We can run and interact with Every Code TUI, Codex Mac app, and Every Code
+Companion (native app), then capture screenshots for side-by-side parity
+checks.
 
 Parity triplets are stored under:
 

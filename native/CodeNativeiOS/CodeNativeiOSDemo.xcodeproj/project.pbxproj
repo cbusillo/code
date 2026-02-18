@@ -294,7 +294,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "CodeNative iOS Demo";
+				INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -305,7 +305,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.every.code.nativeiosdemo;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cbusillo.everycodecompanion;
 				PRODUCT_NAME = CodeNativeiOSDemo;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -407,7 +407,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "CodeNative iOS Demo";
+				INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -418,7 +418,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.every.code.nativeiosdemo;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cbusillo.everycodecompanion;
 				PRODUCT_NAME = CodeNativeiOSDemo;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;

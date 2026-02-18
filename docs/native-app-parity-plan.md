@@ -1,6 +1,7 @@
 # Native App Parity Roadmap
 
-This roadmap is the execution source of truth for bringing the native app to
+This roadmap is the execution source of truth for bringing Every Code
+Companion (the native app) to
 high-function parity with Every Code TUI and selected Codex Mac app strengths,
 while preserving a polished, intentional UX.
 

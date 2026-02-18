@@ -13,10 +13,10 @@ targets:
     platform: iOS
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.every.code.nativeiosdemo
+        PRODUCT_BUNDLE_IDENTIFIER: com.cbusillo.everycodecompanion
         PRODUCT_NAME: CodeNativeiOSDemo
         GENERATE_INFOPLIST_FILE: true
-        INFOPLIST_KEY_CFBundleDisplayName: CodeNative iOS Demo
+        INFOPLIST_KEY_CFBundleDisplayName: Every Code Companion
         INFOPLIST_KEY_NSMicrophoneUsageDescription: >-
           Voice capture sends your speech to on-device recognition.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: >-

@@ -4,7 +4,7 @@ This folder stores milestone parity triplets across:
 
 - Every Code TUI
 - Codex Mac app
-- CodeNative app
+- Every Code Companion (native app)
 
 Milestone 1 representative workflow triplet:
 
