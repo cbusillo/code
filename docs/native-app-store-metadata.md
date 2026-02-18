@@ -89,4 +89,5 @@ Workflow notes:
 
 - Team ID is tracked in workflow as `MM5YXC7T6E`.
 - The job always emits an IPA artifact (`EveryCodeCompanion-ipa`).
+- Push tags matching `ios-v*` for automatic release-driven uploads.
 - Set `upload_to_testflight = true` when dispatching to publish to TestFlight.

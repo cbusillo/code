@@ -85,3 +85,6 @@ App Store/TestFlight listing copy lives in
 
 Use `.github/workflows/native-ios-testflight.yml` (manual dispatch) to produce
 a signed IPA artifact and optionally upload it to TestFlight.
+
+Pushing a tag that matches `ios-v*` triggers the same workflow automatically
+for release-driven uploads.

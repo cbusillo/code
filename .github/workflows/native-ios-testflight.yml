@@ -2,6 +2,9 @@
 name: Native iOS TestFlight
 
 'on':
+  push:
+    tags:
+      - 'ios-v*'
   workflow_dispatch:
     inputs:
       git_ref:
@@ -35,11 +38,22 @@ jobs:
       EXPORT_OPTIONS_PATH: ${{ runner.temp }}/ExportOptions.plist
       PROFILE_PATH: ${{ runner.temp }}/every-code-companion.mobileprovision
     steps:
+      - name: Resolve checkout ref
+        id: resolve_ref
+        run: |
+          set -euo pipefail
+          ref="$GITHUB_REF"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            && [ -n "${{ github.event.inputs.git_ref }}" ]; then
+            ref="${{ github.event.inputs.git_ref }}"
+          fi
+          echo "value=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.git_ref != '' && inputs.git_ref || github.ref }}
+          ref: ${{ steps.resolve_ref.outputs.value }}
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -172,7 +186,9 @@ jobs:
           if-no-files-found: error
 
       - name: Upload to TestFlight
-        if: ${{ inputs.upload_to_testflight }}
+        if: >-
+          ${{ github.event_name == 'push'
+            || github.event.inputs.upload_to_testflight == 'true' }}
         uses: apple-actions/upload-testflight-build@v3
         with:
           app-path: ${{ env.EXPORT_PATH }}/EveryCodeCompanion.ipa
