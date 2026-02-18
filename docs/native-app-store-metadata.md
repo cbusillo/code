@@ -91,3 +91,7 @@ Workflow notes:
 - The job always emits an IPA artifact (`EveryCodeCompanion-ipa`).
 - Push tags matching `ios-v*` for automatic release-driven uploads.
 - Set `upload_to_testflight = true` when dispatching to publish to TestFlight.
+
+Tag helper:
+
+- `scripts/release-ios-tag.sh 1.4.0` creates and pushes `ios-v1.4.0`.
