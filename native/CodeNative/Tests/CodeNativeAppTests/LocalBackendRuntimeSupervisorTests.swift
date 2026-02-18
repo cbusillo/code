@@ -3,6 +3,29 @@ import XCTest
 @testable import CodeNativeApp
 
 final class LocalBackendRuntimeSupervisorTests: XCTestCase {
+    @MainActor
+    func testCanRotateCompanionSessionTokenFalseWhenEnvironmentTokenConfigured() {
+        let supervisor = LocalBackendRuntimeSupervisor(
+            arguments: ["CodeNativeApp"],
+            environment: [
+                "CODE_NATIVE_DISABLE_MANAGED_BACKEND": "true",
+                "CODE_NATIVE_COMPANION_TOKEN": "managed-token",
+            ]
+        )
+
+        XCTAssertFalse(supervisor.canRotateCompanionSessionToken)
+    }
+
+    @MainActor
+    func testCanRotateCompanionSessionTokenTrueWhenTokenIsGenerated() {
+        let supervisor = LocalBackendRuntimeSupervisor(
+            arguments: ["CodeNativeApp"],
+            environment: ["CODE_NATIVE_DISABLE_MANAGED_BACKEND": "true"]
+        )
+
+        XCTAssertTrue(supervisor.canRotateCompanionSessionToken)
+    }
+
     func testShouldManageBackendDisabledForBenchmarkFixtureEnvironment() {
         XCTAssertFalse(
             LocalBackendRuntimeSupervisor.shouldManageBackend(

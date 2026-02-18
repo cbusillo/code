@@ -37,10 +37,22 @@ func requestInputShortcutDigit(questionIndex: Int, optionIndex: Int) -> String? 
 
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
+    let canRotateCompanionToken: Bool
+    let rotateCompanionToken: (() -> Void)?
     @Environment(\.openURL) private var openURL
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
+
+    init(
+        store: SessionMirrorStore,
+        canRotateCompanionToken: Bool = false,
+        rotateCompanionToken: (() -> Void)? = nil
+    ) {
+        self.store = store
+        self.canRotateCompanionToken = canRotateCompanionToken
+        self.rotateCompanionToken = rotateCompanionToken
+    }
 
     private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -790,6 +802,8 @@ struct ContentView: View {
     private var settingsSheetContent: some View {
         NativeSettingsView(
             store: store,
+            canRotateCompanionToken: canRotateCompanionToken,
+            rotateCompanionToken: rotateCompanionToken,
             autoSpeakAssistant: $autoSpeakAssistant,
             autoSubmitVoice: $autoSubmitVoice,
             themeModeRaw: $themeModeRaw,
@@ -8802,6 +8816,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
 
 private struct NativeSettingsView: View {
     @ObservedObject var store: SessionMirrorStore
+    let canRotateCompanionToken: Bool
+    let rotateCompanionToken: (() -> Void)?
     @Binding var autoSpeakAssistant: Bool
     @Binding var autoSubmitVoice: Bool
     @Binding var themeModeRaw: String
@@ -9132,6 +9148,22 @@ private struct NativeSettingsView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.caption.monospaced())
                 .frame(width: isCompactSettingsLayout ? nil : 320)
+            }
+
+            SettingsRow(title: "Rotate token", description: "Reissue the companion token and restart runtime to revoke prior pairings.") {
+                HStack(spacing: 8) {
+                    Button("Rotate now") {
+                        rotateCompanionToken?()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(canRotateCompanionToken == false || rotateCompanionToken == nil)
+
+                    if canRotateCompanionToken == false {
+                        Text("Managed by CODE_NATIVE_COMPANION_TOKEN")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             SettingsRow(title: "Pairing code", description: "Copy this code to bootstrap a remote iOS/iPadOS companion.") {

@@ -37,6 +37,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     @Published private(set) var endpoint: String?
     @Published private(set) var sessionToken: String?
     @Published private(set) var lanEndpoint: String?
+    @Published private(set) var canRotateCompanionSessionToken: Bool
     @Published private(set) var launchState: LaunchState = .idle
     @Published private(set) var restartCount: UInt64 = 0
 
@@ -47,7 +48,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private let bundleResourceURL: URL?
     private let fileManager: FileManager
     private let now: () -> Date
-    private let managedSessionToken: String?
+    private var managedSessionToken: String
 
     private var launchPlan: LaunchPlan?
     private var process: Process?
@@ -71,7 +72,9 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         self.bundleResourceURL = bundleResourceURL
         self.fileManager = fileManager
         self.now = now
-        self.managedSessionToken = Self.resolveCompanionSessionToken(environment: environment)
+        let configuredToken = Self.environmentCompanionSessionToken(environment: environment)
+        self.canRotateCompanionSessionToken = configuredToken == nil
+        self.managedSessionToken = configuredToken ?? Self.generateCompanionSessionToken()
 
         guard Self.shouldManageBackend(arguments: arguments, environment: environment) else {
             lanEndpoint = nil
@@ -164,6 +167,25 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         launchState = .idle
     }
 
+    func rotateCompanionSessionToken() {
+        guard canRotateCompanionSessionToken,
+              !isDisabled
+        else {
+            return
+        }
+
+        let previousToken = managedSessionToken
+        var refreshedToken = Self.generateCompanionSessionToken()
+        while refreshedToken == previousToken {
+            refreshedToken = Self.generateCompanionSessionToken()
+        }
+
+        managedSessionToken = refreshedToken
+        stop()
+        refreshLaunchPlan()
+        startIfNeeded()
+    }
+
     private var isDisabled: Bool {
         if case .disabled = launchState {
             return true
@@ -187,16 +209,6 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
                 "Managed runtime unavailable: no launchable code binary found. Set CODE_NATIVE_BACKEND_BINARY to override."
             )
             Self.logger.error("Managed runtime unavailable: could not resolve backend binary")
-            return
-        }
-
-        guard let managedSessionToken else {
-            launchPlan = nil
-            endpoint = SessionMirrorStore.defaultEndpoint
-            lanEndpoint = nil
-            sessionToken = nil
-            launchState = .failed("Managed runtime unavailable: companion session token not configured.")
-            Self.logger.error("Managed runtime unavailable: companion session token not configured")
             return
         }
 
@@ -286,12 +298,20 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     }
 
     nonisolated static func resolveCompanionSessionToken(environment: [String: String]) -> String? {
+        environmentCompanionSessionToken(environment: environment) ?? generateCompanionSessionToken()
+    }
+
+    nonisolated static func environmentCompanionSessionToken(environment: [String: String]) -> String? {
         if let configuredToken = environment[Self.companionSessionTokenEnv]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            configuredToken.isEmpty == false {
             return configuredToken
         }
 
+        return nil
+    }
+
+    nonisolated static func generateCompanionSessionToken() -> String {
         return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
@@ -531,7 +551,14 @@ struct CodeNativeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(store: store)
+            ContentView(
+                store: store,
+                canRotateCompanionToken: runtimeSupervisor.canRotateCompanionSessionToken,
+                rotateCompanionToken: {
+                    runtimeSupervisor.rotateCompanionSessionToken()
+                    syncStoreFromRuntimeSupervisor()
+                }
+            )
                 .frame(minWidth: 1080, minHeight: 720)
                 .task {
                     if let benchmarkFixturePath {
@@ -540,17 +567,30 @@ struct CodeNativeApp: App {
                     }
 
                     runtimeSupervisor.startIfNeeded()
-                    if let endpoint = runtimeSupervisor.endpoint,
-                       store.endpoint != endpoint {
-                        store.endpoint = endpoint
-                    }
-                    if store.companionSessionToken != runtimeSupervisor.sessionToken {
-                        store.companionSessionToken = runtimeSupervisor.sessionToken
-                    }
-                    if store.companionLANEndpoint != runtimeSupervisor.lanEndpoint {
-                        store.companionLANEndpoint = runtimeSupervisor.lanEndpoint
-                    }
+                    syncStoreFromRuntimeSupervisor()
                 }
+                .onReceive(runtimeSupervisor.$endpoint) { _ in
+                    syncStoreFromRuntimeSupervisor()
+                }
+                .onReceive(runtimeSupervisor.$sessionToken) { _ in
+                    syncStoreFromRuntimeSupervisor()
+                }
+                .onReceive(runtimeSupervisor.$lanEndpoint) { _ in
+                    syncStoreFromRuntimeSupervisor()
+                }
+        }
+    }
+
+    private func syncStoreFromRuntimeSupervisor() {
+        if let endpoint = runtimeSupervisor.endpoint,
+           store.endpoint != endpoint {
+            store.endpoint = endpoint
+        }
+        if store.companionSessionToken != runtimeSupervisor.sessionToken {
+            store.companionSessionToken = runtimeSupervisor.sessionToken
+        }
+        if store.companionLANEndpoint != runtimeSupervisor.lanEndpoint {
+            store.companionLANEndpoint = runtimeSupervisor.lanEndpoint
         }
     }
 

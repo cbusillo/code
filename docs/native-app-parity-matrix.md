@@ -392,8 +392,9 @@ Legend:
   messaging are enforced with no insecure fallback path.
 - Validation gate: auth regression tests + negative-connect scenarios.
 - Progress: in progress. Session-token enforcement is now active for managed
-  websocket clients and auth failures are explicit (`401`). Token rotation,
-  revocation UX, and expiry enforcement remain pending.
+  websocket clients and auth failures are explicit (`401`). Native settings
+  now support manual token rotation (runtime restart + new pairing code), but
+  explicit device-level revocation and expiry enforcement remain pending.
 
 ## PAR-029
 
