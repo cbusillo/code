@@ -277,7 +277,7 @@ jobs:
             --type macos \
             --apiKey "$APP_STORE_CONNECT_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
-            | tee "$log_path"
+            2>&1 | tee "$log_path"
 
           if grep -Eq \
             "UPLOAD FAILED|Validation failed| ERROR:" \
