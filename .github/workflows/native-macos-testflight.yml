@@ -89,6 +89,8 @@ jobs:
           for name in \
             IOS_DIST_CERT_P12_BASE64 \
             IOS_DIST_CERT_PASSWORD \
+            MACOS_INSTALLER_CERT_P12_BASE64 \
+            MACOS_INSTALLER_CERT_PASSWORD \
             MACOS_APPSTORE_PROFILE_BASE64 \
             MACOS_APPSTORE_PROFILE_NAME \
             APP_STORE_CONNECT_KEY_ID \
@@ -112,7 +114,6 @@ jobs:
           p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
 
       - name: Import Mac Installer certificate
-        if: ${{ secrets.MACOS_INSTALLER_CERT_P12_BASE64 != '' }}
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.MACOS_INSTALLER_CERT_P12_BASE64 }}

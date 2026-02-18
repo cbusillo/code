@@ -86,9 +86,9 @@ Required repository secrets:
 - `APP_STORE_CONNECT_PRIVATE_KEY`: Raw `.p8` API private key contents.
 - `MACOS_APPSTORE_PROFILE_BASE64`: Base64-encoded macOS App Store profile.
 - `MACOS_APPSTORE_PROFILE_NAME`: macOS provisioning profile name.
-- `MACOS_INSTALLER_CERT_P12_BASE64` (optional): Base64 `.p12` with
+- `MACOS_INSTALLER_CERT_P12_BASE64`: Base64 `.p12` with
   `Mac Installer Distribution` cert/private key.
-- `MACOS_INSTALLER_CERT_PASSWORD` (optional): Password for installer `.p12`.
+- `MACOS_INSTALLER_CERT_PASSWORD`: Password for installer `.p12`.
 
 Workflow notes:
 
@@ -112,8 +112,8 @@ Before running macOS TestFlight workflow:
 - Create/download a `macOS App Store` provisioning profile for that bundle id.
 - Base64-encode the profile and set `MACOS_APPSTORE_PROFILE_BASE64` secret.
 - Set `MACOS_APPSTORE_PROFILE_NAME` to the profile Name field exactly.
-- Either include `Mac Installer Distribution` in `IOS_DIST_CERT_P12_BASE64`
-  or set dedicated installer secrets above.
+- Set dedicated installer cert secrets:
+  `MACOS_INSTALLER_CERT_P12_BASE64` and `MACOS_INSTALLER_CERT_PASSWORD`.
 
 Tag helper:
 
