@@ -112,6 +112,8 @@ jobs:
         with:
           p12-file-base64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          keychain: signing_temp
+          keychain-password: ${{ github.run_id }}
 
       - name: Import Mac Installer certificate
         uses: apple-actions/import-codesign-certs@v3
@@ -119,6 +121,7 @@ jobs:
           p12-file-base64: ${{ secrets.MACOS_INSTALLER_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
           keychain: signing_temp
+          keychain-password: ${{ github.run_id }}
           create-keychain: false
 
       - name: Verify installer certificate availability
