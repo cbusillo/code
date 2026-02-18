@@ -40,7 +40,7 @@ Legend:
 | PAR-021 | Voice interaction parity hardening | Codex Mac | present | P2 | M3 |
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | present | P0 | M1 |
-| PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | partial | P0 | M4 |
+| PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | present | P0 | M4 |
 | PAR-025 | TUI binary compatibility contract | Every Code TUI | missing | P0 | M4 |
 | PAR-026 | Companion pairing/auth gateway (iOS↔macOS) | Native companion | missing | P0 | M4 |
 | PAR-027 | iOS/iPadOS companion connection UX | Codex Mac-inspired | missing | P1 | M4 |
@@ -342,10 +342,12 @@ Legend:
 - Progress: runtime supervisor now launches a managed local backend on a
   random loopback port, applies crash-loop restart suppression, and updates the
   native endpoint automatically while keeping benchmark-fixture runs disabled.
-  Unit coverage was added for manage/disable gating, binary-path resolution,
-  and loopback-port reservation (`LocalBackendRuntimeSupervisorTests`).
-  Remaining gap: ship the binary in the macOS app bundle and prove
-  launch-without-repo on clean machines.
+  The macOS app target now bundles the fork backend into
+  `Contents/Resources/backend/code` via the `Bundle Managed Backend` build
+  phase, and TestFlight CI injects a deterministic backend path after
+  `./build-fast.sh`. Runtime helper coverage includes manage/disable gating,
+  binary-path resolution (including bundled lookup), and loopback-port
+  reservation (`LocalBackendRuntimeSupervisorTests`).
 
 ## PAR-025
 

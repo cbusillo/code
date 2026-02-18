@@ -24,13 +24,77 @@ targets:
         INFOPLIST_KEY_CFBundleShortVersionString: $(MARKETING_VERSION)
         INFOPLIST_KEY_CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_LSApplicationCategoryType: >-
+          public.app-category.developer-tools
         INFOPLIST_KEY_NSMicrophoneUsageDescription: >-
           Voice capture sends your speech to on-device recognition.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: >-
           Speech recognition converts your voice into prompt text.
         CODE_SIGN_ENTITLEMENTS: CodeNativeMac/CodeNativeMac.entitlements
+        CODE_NATIVE_BACKEND_BINARY: ""
         SUPPORTS_MACCATALYST: false
+      configs:
+        Debug:
+          CODE_NATIVE_REQUIRE_MANAGED_BACKEND: "NO"
+        Release:
+          CODE_NATIVE_REQUIRE_MANAGED_BACKEND: "YES"
     sources:
       - path: ../CodeNative/Sources/CodeNativeApp
       - path: CodeNativeMac/Assets.xcassets
+    preBuildScripts:
+      - name: Bundle Managed Backend
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+
+          destination_dir="${TARGET_BUILD_DIR}/"
+          destination_dir+="${UNLOCALIZED_RESOURCES_FOLDER_PATH}/backend"
+          destination_path="${destination_dir}/code"
+          source_path="${CODE_NATIVE_BACKEND_BINARY:-}"
+
+          if [ -n "${source_path}" ] \
+            && [ ! -x "${source_path}" ] \
+            && [ "${source_path#/}" = "${source_path}" ]; then
+            repo_root="$(cd "${SRCROOT}/../.." && pwd)"
+            if [ -x "${repo_root}/${source_path}" ]; then
+              source_path="${repo_root}/${source_path}"
+            fi
+          fi
+
+          if [ -z "${source_path}" ]; then
+            repo_root="$(cd "${SRCROOT}/../.." && pwd)"
+            candidate="${repo_root}/code-rs/target/dev-fast/code"
+            if [ -x "${candidate}" ]; then
+              source_path="${candidate}"
+            fi
+          fi
+
+          if [ -z "${source_path}" ]; then
+            repo_root="$(cd "${SRCROOT}/../.." && pwd)"
+            cache_glob="${repo_root}/.code/working/_target-cache/code"
+            cache_glob+="/*/code-rs/dev-fast/code"
+            candidate="$(ls -1t \
+              ${cache_glob} \
+              2>/dev/null | head -n1 || true)"
+            if [ -n "${candidate}" ] \
+              && [ -x "${candidate}" ]; then
+              source_path="${candidate}"
+            fi
+          fi
+
+          if [ -z "${source_path}" ] || [ ! -x "${source_path}" ]; then
+            if [ "${CODE_NATIVE_REQUIRE_MANAGED_BACKEND:-NO}" = "YES" ]; then
+              echo "error: managed backend binary missing." >&2
+              echo "Set CODE_NATIVE_BACKEND_BINARY or run ./build-fast.sh." >&2
+              exit 1
+            fi
+
+            echo "warning: managed backend binary unavailable;" >&2
+            echo "skipping bundle copy." >&2
+            exit 0
+          fi
+
+          mkdir -p "${destination_dir}"
+          cp "${source_path}" "${destination_path}"
+          chmod 755 "${destination_path}"
+          echo "Bundled managed backend from ${source_path}"

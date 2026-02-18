@@ -69,6 +69,39 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
         XCTAssertNil(resolved)
     }
 
+    func testResolveBinaryURLPrefersBundledBackendPath() throws {
+        let temporaryDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let resourceDirectory = temporaryDirectory.appendingPathComponent("Resources", isDirectory: true)
+        let bundledBackendDirectory = resourceDirectory.appendingPathComponent("backend", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundledBackendDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        let bundledBinaryURL = bundledBackendDirectory.appendingPathComponent("code")
+        try "#!/bin/sh\necho bundled\n".write(to: bundledBinaryURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: bundledBinaryURL.path
+        )
+
+        let resolved = LocalBackendRuntimeSupervisor.resolveBinaryURL(
+            environment: ["PATH": ""],
+            currentDirectoryURL: temporaryDirectory,
+            executableDirectoryURL: temporaryDirectory,
+            bundleResourceURL: resourceDirectory,
+            fileManager: .default
+        )
+
+        XCTAssertNotNil(resolved)
+        XCTAssertEqual(resolved?.lastPathComponent, "code")
+        XCTAssertEqual(
+            resolved?.deletingLastPathComponent().lastPathComponent.lowercased(),
+            "backend"
+        )
+    }
+
     func testReserveLoopbackPortReturnsNonZeroPort() {
         let port = LocalBackendRuntimeSupervisor.reserveLoopbackPort()
         XCTAssertNotNil(port)

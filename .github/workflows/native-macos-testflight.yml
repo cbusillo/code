@@ -67,6 +67,32 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Build managed backend
+        run: |
+          set -euo pipefail
+          ./build-fast.sh
+
+      - name: Resolve managed backend binary
+        id: managed_backend
+        run: |
+          set -euo pipefail
+          cache_glob="$GITHUB_WORKSPACE/.code/working/_target-cache/code"
+          cache_glob+="/*/code-rs/dev-fast/code"
+          candidate=$(ls -1t \
+            $cache_glob \
+            2>/dev/null | head -n1 || true)
+
+          if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
+            candidate="$GITHUB_WORKSPACE/code-rs/target/dev-fast/code"
+          fi
+
+          if [ ! -x "$candidate" ]; then
+            echo "Managed backend binary not found after build-fast" >&2
+            exit 1
+          fi
+
+          echo "path=$candidate" >> "$GITHUB_OUTPUT"
+
       - name: Validate required secrets
         env:
           IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
@@ -208,6 +234,8 @@ jobs:
         env:
           MACOS_APPSTORE_PROFILE_NAME:
             ${{ secrets.MACOS_APPSTORE_PROFILE_NAME }}
+          CODE_NATIVE_BACKEND_BINARY:
+            ${{ steps.managed_backend.outputs.path }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -220,6 +248,7 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
+            CODE_NATIVE_BACKEND_BINARY="$CODE_NATIVE_BACKEND_BINARY" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             PROVISIONING_PROFILE_SPECIFIER="$MACOS_APPSTORE_PROFILE_NAME" \
             clean archive

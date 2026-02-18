@@ -430,6 +430,7 @@ Current status:
 - [x] Benchmark baselines captured
 - [x] Auto Drive milestones executed (`M1`, `M2`, `M3`)
 
-Next planned status:
+Current Milestone 4 status:
 
-- [x] Milestone 4 execution started (`M4-A` in progress)
+- [x] Milestone 4 execution started
+- [x] `M4-A` runtime host hardening complete

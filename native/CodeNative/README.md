@@ -15,7 +15,20 @@ Codex session stream.
 
 ## Run
 
-The native app expects a WebSocket mirror endpoint at
+`CodeNativeApp` now tries to launch a managed local backend automatically. It
+prefers a bundled binary (for macOS app builds) and otherwise resolves from:
+
+- `CODE_NATIVE_BACKEND_BINARY`
+- `code-rs/target/dev-fast/code`
+- `.code/working/_target-cache/code/*/code-rs/dev-fast/code`
+
+Build the backend first from repo root:
+
+```bash
+./build-fast.sh
+```
+
+If you want to run backend + app manually, the default endpoint remains
 `ws://127.0.0.1:4317/ws`.
 
 From the repo root, start the mirror server:
@@ -31,7 +44,7 @@ cd native/CodeNative
 swift run CodeNativeApp
 ```
 
-The default endpoint in the app is `ws://127.0.0.1:4317/ws`.
+The fallback endpoint in the app is `ws://127.0.0.1:4317/ws`.
 
 ## One-command Dev Loop
 
