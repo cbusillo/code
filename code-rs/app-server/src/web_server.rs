@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_lines)]
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
@@ -61,7 +62,7 @@ pub struct WebServerOptions {
     pub host: String,
     pub port: u16,
     pub open_browser: bool,
-    pub session_token: Option<String>,
+    pub session_tokens: Vec<String>,
 }
 
 impl Default for WebServerOptions {
@@ -70,7 +71,7 @@ impl Default for WebServerOptions {
             host: "127.0.0.1".to_string(),
             port: 4317,
             open_browser: false,
-            session_token: None,
+            session_tokens: Vec::new(),
         }
     }
 }
@@ -78,7 +79,7 @@ impl Default for WebServerOptions {
 #[derive(Clone)]
 struct AppState {
     hub: Arc<SessionHub>,
-    session_token: Option<String>,
+    session_tokens: Arc<HashSet<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -87,12 +88,19 @@ struct WsAuthQuery {
 }
 
 pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions) -> IoResult<()> {
-    if !host_is_loopback(&options.host) {
+    let session_tokens = options
+        .session_tokens
+        .iter()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect::<HashSet<_>>();
+
+    if !host_is_loopback(&options.host) && session_tokens.is_empty() {
         return Err(std::io::Error::new(
             ErrorKind::PermissionDenied,
             format!(
-                "Refusing to bind web mirror to non-loopback host '{}'; use localhost or a loopback IP",
-                options.host
+                "Refusing to bind web mirror to non-loopback host '{}'; configure at least one session token with --session-token",
+                options.host,
             ),
         ));
     }
@@ -106,7 +114,7 @@ pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions)
     let hub = Arc::new(SessionHub::new(base_config, conversation_manager));
     let state = AppState {
         hub,
-        session_token: options.session_token,
+        session_tokens: Arc::new(session_tokens),
     };
 
     let app = Router::new()
@@ -148,7 +156,7 @@ async fn ws_handler(
     Query(query): Query<WsAuthQuery>,
 ) -> impl IntoResponse {
     if !ws_client_authorized(
-        state.session_token.as_deref(),
+        &state.session_tokens,
         headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()),
         query.token.as_deref(),
     ) {
@@ -1956,24 +1964,24 @@ fn host_is_loopback(host: &str) -> bool {
 }
 
 fn ws_client_authorized(
-    required_token: Option<&str>,
+    required_tokens: &HashSet<String>,
     authorization_header: Option<&str>,
     query_token: Option<&str>,
 ) -> bool {
-    let Some(required_token) = required_token else {
+    if required_tokens.is_empty() {
         return true;
-    };
+    }
 
     if let Some(header_value) = authorization_header {
         if let Some(parsed_header_token) = parse_bearer_header(header_value) {
-            if parsed_header_token == required_token {
+            if required_tokens.contains(parsed_header_token) {
                 return true;
             }
         }
     }
 
     match query_token {
-        Some(token) => token == required_token,
+        Some(token) => required_tokens.contains(token),
         None => false,
     }
 }
@@ -2002,15 +2010,21 @@ mod tests {
 
     use tokio::time::timeout;
 
+    fn token_set(tokens: &[&str]) -> HashSet<String> {
+        tokens.iter().map(|token| token.to_string()).collect()
+    }
+
     #[test]
     fn ws_client_authorized_without_token_requirement() {
-        assert!(ws_client_authorized(None, None, None));
+        let tokens = token_set(&[]);
+        assert!(ws_client_authorized(&tokens, None, None));
     }
 
     #[test]
     fn ws_client_authorized_accepts_bearer_header() {
+        let tokens = token_set(&["token-123"]);
         assert!(ws_client_authorized(
-            Some("token-123"),
+            &tokens,
             Some("Bearer token-123"),
             None,
         ));
@@ -2018,17 +2032,29 @@ mod tests {
 
     #[test]
     fn ws_client_authorized_accepts_query_fallback() {
+        let tokens = token_set(&["token-123"]);
         assert!(ws_client_authorized(
-            Some("token-123"),
+            &tokens,
             Some("Bearer wrong"),
             Some("token-123"),
         ));
     }
 
     #[test]
+    fn ws_client_authorized_accepts_any_registered_token() {
+        let tokens = token_set(&["token-123", "token-456"]);
+        assert!(ws_client_authorized(
+            &tokens,
+            Some("Bearer token-456"),
+            None,
+        ));
+    }
+
+    #[test]
     fn ws_client_authorized_rejects_mismatch() {
+        let tokens = token_set(&["token-123"]);
         assert!(!ws_client_authorized(
-            Some("token-123"),
+            &tokens,
             Some("Bearer wrong"),
             Some("other"),
         ));

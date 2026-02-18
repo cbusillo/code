@@ -205,7 +205,7 @@ struct WebCommand {
 
     /// Require websocket clients to provide this bearer token.
     #[arg(long = "session-token")]
-    session_token: Option<String>,
+    session_tokens: Vec<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -517,14 +517,14 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
             code_app_server::run_main(code_linux_sandbox_exe, root_config_overrides).await?;
         }
         Some(Subcommand::Web(web)) => {
-            let session_token = web
-                .session_token
-                .or_else(|| std::env::var("CODE_NATIVE_COMPANION_TOKEN").ok());
+            let mut session_tokens = web.session_tokens;
+            session_tokens.extend(companion_tokens_from_env());
+            session_tokens = normalize_session_tokens(session_tokens);
             let options = WebServerOptions {
                 host: web.host,
                 port: web.port,
                 open_browser: web.open,
-                session_token,
+                session_tokens,
             };
             code_app_server::run_web_main(code_linux_sandbox_exe, root_config_overrides, options)
                 .await?;
@@ -955,6 +955,28 @@ fn normalise_cli_vec(values: Vec<String>, fallback: Vec<String>) -> Vec<String> 
     vals.sort();
     vals.dedup();
     vals
+}
+
+fn companion_tokens_from_env() -> Vec<String> {
+    let Ok(raw) = std::env::var("CODE_NATIVE_COMPANION_TOKEN") else {
+        return Vec::new();
+    };
+
+    raw.split(',')
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn normalize_session_tokens(tokens: Vec<String>) -> Vec<String> {
+    let mut normalized = tokens
+        .into_iter()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn find_subscription_override_path(start: &Path) -> Option<PathBuf> {
@@ -1642,6 +1664,38 @@ mod tests {
         let script = String::from_utf8(buf).expect("completion output should be valid UTF-8");
         assert!(script.contains("_code()"), "expected bash completion function to be named _code");
         assert!(!script.contains("_codex()"), "bash completion output should not use legacy codex prefix");
+    }
+
+    #[test]
+    fn companion_tokens_from_env_parses_csv_list() {
+        let _guard = CODE_HOME_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var("CODE_NATIVE_COMPANION_TOKEN").ok();
+
+        set_env_var("CODE_NATIVE_COMPANION_TOKEN", " token-a,token-b ,, token-a ");
+        assert_eq!(
+            companion_tokens_from_env(),
+            vec!["token-a", "token-b", "token-a"]
+        );
+
+        match previous {
+            Some(value) => set_env_var("CODE_NATIVE_COMPANION_TOKEN", value),
+            None => remove_env_var("CODE_NATIVE_COMPANION_TOKEN"),
+        }
+    }
+
+    #[test]
+    fn normalize_session_tokens_trims_and_deduplicates() {
+        assert_eq!(
+            normalize_session_tokens(vec![
+                " token-a ".to_string(),
+                "".to_string(),
+                "token-b".to_string(),
+                "token-a".to_string(),
+            ]),
+            vec!["token-a".to_string(), "token-b".to_string()]
+        );
     }
 
     fn finalize_from_args(args: &[&str]) -> TuiCli {
