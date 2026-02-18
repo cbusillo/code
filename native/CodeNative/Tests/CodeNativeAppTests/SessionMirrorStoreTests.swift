@@ -225,6 +225,137 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testStoreHistoryPagingRecoversAfterStaleResponseAndReachesSessionStart() throws {
+        let store = SessionMirrorStore()
+        let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000125")!
+        let staleSessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000126")!
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_list",
+              "sessions": [
+                {
+                  "id": "\(sessionId.uuidString)",
+                  "conversation_id": "\(sessionId.uuidString)",
+                  "model": "gpt-5",
+                  "cwd": "/tmp/repo",
+                  "created_at_unix_ms": 1,
+                  "last_event_at_unix_ms": 1,
+                  "title": "Session"
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_attached",
+              "session_id": "\(sessionId.uuidString)",
+              "from_seq": 0,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":20,"level":"info","message":"twenty"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":21,"level":"info","message":"twenty one"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":22,"level":"info","message":"twenty two"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_stale",
+            sessionID: sessionId
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_stale",
+              "session_id": "\(staleSessionId.uuidString)",
+              "before_seq": 20,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(staleSessionId.uuidString)","seq":19,"level":"info","message":"stale"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertFalse(store.isLoadingOlderHistory(for: sessionId))
+        XCTAssertTrue(store.hasMoreHistoryBefore(sessionId))
+
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_page1",
+            sessionID: sessionId
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_page1",
+              "session_id": "\(sessionId.uuidString)",
+              "before_seq": 20,
+              "has_more_before": true,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":16,"level":"info","message":"sixteen"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":17,"level":"info","message":"seventeen"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":18,"level":"info","message":"eighteen"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":19,"level":"info","message":"nineteen"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        store.recordPendingHistoryPageRequestForTesting(
+            requestId: "native_page2",
+            sessionID: sessionId
+        )
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "session_history_page",
+              "request_id": "native_page2",
+              "session_id": "\(sessionId.uuidString)",
+              "before_seq": 16,
+              "has_more_before": false,
+              "items": [
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":1,"level":"info","message":"one"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":2,"level":"info","message":"two"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":3,"level":"info","message":"three"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":4,"level":"info","message":"four"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":5,"level":"info","message":"five"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":6,"level":"info","message":"six"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":7,"level":"info","message":"seven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":8,"level":"info","message":"eight"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":9,"level":"info","message":"nine"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":10,"level":"info","message":"ten"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":11,"level":"info","message":"eleven"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":12,"level":"info","message":"twelve"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":13,"level":"info","message":"thirteen"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":14,"level":"info","message":"fourteen"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":15,"level":"info","message":"fifteen"},
+                {"type":"system","session_id":"\(sessionId.uuidString)","seq":16,"level":"info","message":"sixteen-duplicate"}
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.itemsBySession[sessionId]?.map(\.seq), Array(1...22))
+        XCTAssertFalse(store.hasMoreHistoryBefore(sessionId))
+    }
+
+    @MainActor
     func testStoreIgnoresUnexpectedHistoryPageResponses() throws {
         let store = SessionMirrorStore()
         let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
@@ -831,6 +962,8 @@ final class SessionMirrorStoreTests: XCTestCase {
     func testRuntimeStateTracksHistoryLifecycleAndUnavailableState() throws {
         let store = SessionMirrorStore()
         let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000911")!
+
+        XCTAssertEqual(store.runtimeState(for: sessionId), .reconnecting)
 
         try applyServerEnvelope(
             """

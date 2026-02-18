@@ -7331,6 +7331,7 @@ private struct TranscriptCard: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("approval.choice.\(choice.rawValue)")
                         #if os(macOS)
                         .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
                         #endif
@@ -7342,6 +7343,7 @@ private struct TranscriptCard: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("approval.set-deny")
                         #if os(macOS)
                         .keyboardShortcut("d", modifiers: [.command])
                         #endif
@@ -7352,12 +7354,14 @@ private struct TranscriptCard: View {
                             onApproval(selectedDecision)
                         }
                         .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("approval.send-decision")
                         #if os(macOS)
                         .keyboardShortcut(.defaultAction)
                         #endif
                     }
                     .padding(.top, 4)
                 }
+                .accessibilityIdentifier("approval.card")
                 .padding(10)
                 .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(

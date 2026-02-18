@@ -95,6 +95,82 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.cardStyle, .approval)
     }
 
+    func testTaskLifecycleEventsMapToOptionalActivitySummary() {
+        let started = makeCoreEventItem(
+            seq: 9_001,
+            payload: .object([
+                "type": .string("task_started"),
+                "task": .string("Exploring"),
+                "summary": .string("Audit pagination and reconnect ordering")
+            ])
+        )
+
+        XCTAssertTrue(started.isTaskLifecycleEvent)
+        XCTAssertEqual(started.taskLifecyclePhase, .started)
+        XCTAssertTrue(started.shouldHideFromTranscript)
+        XCTAssertTrue(started.isOptionalActivityEvent)
+        XCTAssertTrue(started.body.contains("Task started"))
+        XCTAssertTrue(started.body.contains("Exploring"))
+
+        let completed = makeCoreEventItem(
+            seq: 9_002,
+            payload: .object([
+                "type": .string("task_complete"),
+                "summary": .string("Benchmarks captured and validated")
+            ])
+        )
+
+        XCTAssertTrue(completed.isTaskLifecycleEvent)
+        XCTAssertEqual(completed.taskLifecyclePhase, .complete)
+        XCTAssertTrue(completed.shouldHideFromTranscript)
+        XCTAssertTrue(completed.isOptionalActivityEvent)
+        XCTAssertTrue(completed.body.contains("Task complete"))
+        XCTAssertTrue(completed.body.contains("Benchmarks captured and validated"))
+    }
+
+    func testExecLifecycleSummaryIncludesStatusDurationAndPreview() {
+        let begin = makeCoreEventItem(
+            seq: 9_003,
+            payload: .object([
+                "type": .string("exec_command_begin"),
+                "command": .array([
+                    .string("cargo"),
+                    .string("test"),
+                    .string("-p"),
+                    .string("code-app-server")
+                ])
+            ])
+        )
+
+        XCTAssertEqual(begin.body, "Running `cargo test -p code-app-server`")
+        XCTAssertTrue(begin.isExecCommandBeginEvent)
+        XCTAssertTrue(begin.shouldHideFromTranscript)
+        XCTAssertTrue(begin.isOptionalActivityEvent)
+
+        let end = makeCoreEventItem(
+            seq: 9_004,
+            payload: .object([
+                "type": .string("exec_command_end"),
+                "command": .array([
+                    .string("cargo"),
+                    .string("test"),
+                    .string("-p"),
+                    .string("code-app-server")
+                ]),
+                "exit_code": .number(1),
+                "duration": .string("12.4s"),
+                "formatted_output": .string(
+                    "compile step\nwarning: example\nerror: build failed\nretrying\naborting\nline six is truncated"
+                )
+            ])
+        )
+
+        XCTAssertTrue(end.body.contains("Failed (1) · `cargo test -p code-app-server` · 12.4s"))
+        XCTAssertTrue(end.body.contains("error: build failed"))
+        XCTAssertFalse(end.body.contains("line six is truncated"))
+        XCTAssertEqual(end.cardStyle, .tool)
+    }
+
     func testTurnAbortedBodyShowsReason() {
         let item = makeCoreEventItem(
             seq: 10,

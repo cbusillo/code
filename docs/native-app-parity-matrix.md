@@ -16,16 +16,16 @@ Legend:
 
 | ID | Capability | Source | Status | Priority | Milestone |
 | --- | --- | --- | --- | --- | --- |
-| PAR-001 | Stable upward history pagination | Every Code TUI | partial | P0 | Phase0 |
-| PAR-002 | Reconnect-safe history + attach behavior | Every Code TUI | partial | P0 | Phase0 |
-| PAR-003 | History transport payload safety | Every Code TUI | partial | P0 | Phase0 |
-| PAR-004 | Transcript anchor-preserving prepend | Every Code TUI | partial | P0 | Phase0 |
-| PAR-005 | Activity/task anchored streaming card | Every Code TUI | partial | P0 | M1 |
-| PAR-006 | Approval card prominence + keyboard flow | Every Code TUI | partial | P0 | M1 |
-| PAR-007 | Exec card lifecycle clarity | Every Code TUI | partial | P0 | M1 |
-| PAR-008 | Explicit connection/history runtime states | Every Code TUI | partial | P0 | M1 |
-| PAR-009 | Auto-review summary durability | Every Code TUI | partial | P0 | M1 |
-| PAR-010 | Screenshot benchmark harness + baseline | Mac + native | partial | P0 | M1 |
+| PAR-001 | Stable upward history pagination | Every Code TUI | present | P0 | Phase0 |
+| PAR-002 | Reconnect-safe history + attach behavior | Every Code TUI | present | P0 | Phase0 |
+| PAR-003 | History transport payload safety | Every Code TUI | present | P0 | Phase0 |
+| PAR-004 | Transcript anchor-preserving prepend | Every Code TUI | present | P0 | Phase0 |
+| PAR-005 | Activity/task anchored streaming card | Every Code TUI | present | P0 | M1 |
+| PAR-006 | Approval card prominence + keyboard flow | Every Code TUI | present | P0 | M1 |
+| PAR-007 | Exec card lifecycle clarity | Every Code TUI | present | P0 | M1 |
+| PAR-008 | Explicit connection/history runtime states | Every Code TUI | present | P0 | M1 |
+| PAR-009 | Auto-review summary durability | Every Code TUI | present | P0 | M1 |
+| PAR-010 | Screenshot benchmark harness + baseline | Mac + native | present | P0 | M1 |
 | PAR-011 | Slash command launcher parity (core set) | Every Code TUI | present | P1 | M2 |
 | PAR-012 | Mention-style context insertion | Every Code TUI | present | P1 | M2 |
 | PAR-013 | Git diff/snapshot recovery surface | Every Code TUI | present | P1 | M2 |
@@ -48,6 +48,10 @@ Legend:
 - Acceptance criteria: user can scroll to start-of-session sentinel on long
   thread with no skipped or duplicate rows.
 - Validation gate: reducer tests + manual long-scroll scenario.
+- Progress: deterministic paging tests now cover multi-page prepend all the way
+  to `seq=1` with duplicate suppression (`testStorePrependsHistoryPagesAndTracksHasMoreFlag`,
+  `testStoreHistoryPagingRecoversAfterStaleResponseAndReachesSessionStart`,
+  `testMergeOlderHistoryPagePrependsUniqueRows`).
 
 ## PAR-002
 
@@ -55,6 +59,11 @@ Legend:
 - Acceptance criteria: reconnect during page load preserves ordering and does
   not drop visible transcript content.
 - Validation gate: reconnect stress scenario + `swift test`.
+- Progress: stale/mismatched history-page responses are ignored while always
+  clearing in-flight bookkeeping, allowing immediate recovery paging without
+  order loss (`testStoreClearsInFlightHistoryBookkeepingForMismatchedResponseSession`,
+  `testStoreHistoryPagingRecoversAfterStaleResponseAndReachesSessionStart`,
+  `testStoreRejectsStaleSessionAttachedForAttachmentState`).
 
 ## PAR-003
 
@@ -62,12 +71,20 @@ Legend:
 - Acceptance criteria: attach/page responses stay within configured budgets and
   continued paging still works.
 - Validation gate: app-server tests + `./build-fast.sh`.
+- Progress: app-server replay truncation and history paging budget behavior are
+  guarded by targeted server tests (`truncate_attach_history_respects_native_websocket_budget`,
+  `truncate_history_before_page_returns_older_slice_with_more_flag`) and
+  validated in native via deterministic paging fixtures plus `./build-fast.sh`.
 
 ## PAR-004
 
 - Dependencies: PAR-001.
 - Acceptance criteria: no perceptible jump while older pages prepend near top.
 - Validation gate: screenshot benchmark + manual top-scroll check.
+- Progress: prepend anchoring is preserved by explicit top-anchor retention in
+  transcript scroll logic (`pendingPrependAnchorItemID` flow in `ContentView`),
+  with deterministic long-transcript benchmark coverage and manual top-scroll
+  sanity on the fixture-backed benchmark run.
 
 ## PAR-005
 
@@ -75,6 +92,10 @@ Legend:
 - Acceptance criteria: task-started card continuously aggregates relevant
   background lines and final summary.
 - Validation gate: transcript rendering tests + screenshot review.
+- Progress: task lifecycle rows now aggregate background/exec/auto-review lines
+  into anchored task activity cards (`mergeTaskActivityIntoTaskCards`), covered
+  by transcript tests (`testTaskLifecycleEventsMapToOptionalActivitySummary`) and
+  deterministic `activity-heavy` benchmark evidence.
 
 ## PAR-006
 
@@ -82,6 +103,10 @@ Legend:
 - Acceptance criteria: pending approval card is visually prominent and full
   approve/deny flow is keyboard-accessible.
 - Validation gate: approval interaction scenario + `swift test`.
+- Progress: approval cards render with dedicated style and prominent treatment,
+  with keyboard-first decision flow (`1..N` selection, `Cmd+D`, default-action
+  submit) and deterministic `approval-pending` benchmark capture; protocol tests
+  enforce approval-card classification (`testApprovalRequestMapsToApprovalCardStyle`).
 
 ## PAR-007
 
@@ -89,6 +114,10 @@ Legend:
 - Acceptance criteria: running state, duration, exit status, and concise output
   preview are always clear.
 - Validation gate: execution scenario screenshots + protocol tests.
+- Progress: exec lifecycle summaries now encode start/end status, duration,
+  exit code, and bounded output preview (`summarizeExecCommandBegin/End`), with
+  regression coverage in `testExecLifecycleSummaryIncludesStatusDurationAndPreview`
+  and deterministic `activity-heavy` benchmark evidence.
 
 ## PAR-008
 
@@ -96,6 +125,10 @@ Legend:
 - Acceptance criteria: deterministic runtime states are shown for connected,
   reconnecting, history loading, history complete, and unavailable.
 - Validation gate: reconnect scenario + screenshot benchmark.
+- Progress: runtime state machine now deterministically surfaces all required
+  states (`connected/reconnecting/historyLoading/historyComplete/unavailable`),
+  covered by `testRuntimeStateTracksHistoryLifecycleAndUnavailableState` and
+  fixture-backed `disconnected-state` + `history-telemetry` benchmark captures.
 
 ## PAR-009
 
@@ -103,6 +136,11 @@ Legend:
 - Acceptance criteria: auto-review summaries remain visible as user-facing
   outcomes in task context.
 - Validation gate: transcript tests + manual thread inspection.
+- Progress: auto-review summaries are normalized into durable user-facing text
+  and retained in task activity context, with transcript coverage in
+  `testAutoReviewAgentSummaryIsNormalizedForTranscript` and
+  `testAutoReviewSystemSummaryIsNormalizedForTranscript`, plus deterministic
+  `transcript-long`/`activity-heavy` fixture evidence.
 
 ## PAR-010
 
@@ -110,6 +148,11 @@ Legend:
 - Acceptance criteria: minimum benchmark suite is runnable and baseline artifacts
   exist for required states.
 - Validation gate: benchmark artifact review + docs checklist.
+- Progress: deterministic benchmark automation is fully wired via
+  `scripts/ux/benchmark-native-ui.sh`, baseline/state verification scripts
+  (`scripts/ux/verify-native-benchmark-baseline.sh`,
+  `scripts/ux/verify-parity-triplets.sh`), and committed baseline artifacts for
+  required PAR-010 states under `docs/reference/native-ui/baseline/`.
 
 ## PAR-011
 

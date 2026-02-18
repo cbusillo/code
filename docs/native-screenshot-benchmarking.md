@@ -56,6 +56,12 @@ Baseline directory:
 
 - `docs/reference/native-ui/baseline/`
 
+Verify required PAR-010 baseline states are present and checksum-visible:
+
+```bash
+scripts/ux/verify-native-benchmark-baseline.sh
+```
+
 ## Cross-App Parity Captures
 
 We can run and interact with Every Code TUI, Codex Mac app, and native app,

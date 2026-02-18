@@ -93,6 +93,11 @@ Objective: remove transcript/history risk and establish safe baselines.
 - Telemetry is visible and records non-zero values under paging activity.
 - Validation gates pass.
 
+Phase 0 completion proof lives in `docs/native-app-parity-matrix.md` with
+`PAR-001/002/003/004` marked `present`, backed by paging/reconnect regression
+tests and deterministic benchmark captures (`transcript-long`,
+`history-telemetry`, `disconnected-state`).
+
 ## Prioritized Feature Matrix
 
 The detailed matrix lives in `docs/native-app-parity-matrix.md`.
@@ -343,3 +348,10 @@ Start execution without additional decisions when all are true:
 - [ ] Matrix priorities confirmed in docs
 - [ ] Benchmark baselines captured
 - [ ] Auto Drive milestone brief selected (`M1` or `M2`)
+
+Current status:
+
+- [x] Phase 0 acceptance criteria passed
+- [x] Matrix priorities confirmed in docs
+- [x] Benchmark baselines captured
+- [x] Auto Drive milestones executed (`M1`, `M2`, `M3`)
