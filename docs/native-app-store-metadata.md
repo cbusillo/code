@@ -105,7 +105,7 @@ Workflow notes:
 
 Before running macOS TestFlight workflow:
 
-- Create `com.shinycomputers.everycodecompanion.macos` App ID in Apple
+- Use bundle id `com.shinycomputers.everycodecompanion` for macOS in Apple
   Developer.
 - Ensure `Mac Installer Distribution` certificate exists for Team
   `MM5YXC7T6E`.

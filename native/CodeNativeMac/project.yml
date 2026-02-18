@@ -13,7 +13,7 @@ targets:
     platform: macOS
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.everycodecompanion.macos
+        PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.everycodecompanion
         PRODUCT_NAME: EveryCodeCompanion
         MARKETING_VERSION: 1.0.0
         CURRENT_PROJECT_VERSION: 1

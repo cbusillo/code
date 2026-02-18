@@ -30,7 +30,7 @@ jobs:
     runs-on: macos-15
     env:
       APPLE_TEAM_ID: MM5YXC7T6E
-      BUNDLE_ID: com.shinycomputers.everycodecompanion.macos
+      BUNDLE_ID: com.shinycomputers.everycodecompanion
       SCHEME: CodeNativeMac
       XCODE_PROJECT: native/CodeNativeMac/CodeNativeMac.xcodeproj
       ARCHIVE_PATH: /tmp/ecc-macos/EveryCodeCompanion.xcarchive
