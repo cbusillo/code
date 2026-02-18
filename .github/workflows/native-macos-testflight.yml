@@ -190,11 +190,6 @@ jobs:
             <true/>
             <key>teamID</key>
             <string>${APPLE_TEAM_ID}</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${BUNDLE_ID}</key>
-              <string>${MACOS_APPSTORE_PROFILE_NAME}</string>
-            </dict>
           </dict>
           </plist>
           EOF
