@@ -121,10 +121,22 @@ jobs:
       - name: Verify installer certificate availability
         run: |
           set -euo pipefail
-          if ! security find-certificate \
+          has_modern=0
+          has_legacy=0
+          if security find-certificate \
             -a \
             -c "Mac Installer Distribution" \
             >/dev/null 2>&1; then
+            has_modern=1
+          fi
+          if security find-certificate \
+            -a \
+            -c "3rd Party Mac Developer Installer" \
+            >/dev/null 2>&1; then
+            has_legacy=1
+          fi
+
+          if [ "$has_modern" -eq 0 ] && [ "$has_legacy" -eq 0 ]; then
             echo "Missing Mac Installer Distribution certificate" \
               "in keychain." >&2
             echo "Provide MACOS_INSTALLER_CERT_P12_BASE64/" >&2
