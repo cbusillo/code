@@ -8,10 +8,53 @@ struct CompanionPairingEntry: Codable, Equatable, Identifiable {
     var label: String
     var sessionToken: String
     let createdAtUnixMs: UInt64
+    var expiresAtUnixMs: UInt64
     var revokedAtUnixMs: UInt64?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case sessionToken
+        case createdAtUnixMs
+        case expiresAtUnixMs
+        case revokedAtUnixMs
+    }
+
+    init(
+        id: String,
+        label: String,
+        sessionToken: String,
+        createdAtUnixMs: UInt64,
+        expiresAtUnixMs: UInt64,
+        revokedAtUnixMs: UInt64?
+    ) {
+        self.id = id
+        self.label = label
+        self.sessionToken = sessionToken
+        self.createdAtUnixMs = createdAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+        self.revokedAtUnixMs = revokedAtUnixMs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        sessionToken = try container.decode(String.self, forKey: .sessionToken)
+        createdAtUnixMs = try container.decodeIfPresent(UInt64.self, forKey: .createdAtUnixMs) ?? 0
+        let fallbackExpiry = LocalBackendRuntimeSupervisor.defaultCompanionPairingExpiryUnixMs(
+            createdAtUnixMs: createdAtUnixMs
+        )
+        expiresAtUnixMs = try container.decodeIfPresent(UInt64.self, forKey: .expiresAtUnixMs) ?? fallbackExpiry
+        revokedAtUnixMs = try container.decodeIfPresent(UInt64.self, forKey: .revokedAtUnixMs)
+    }
 
     var isRevoked: Bool {
         revokedAtUnixMs != nil
+    }
+
+    func isExpired(referenceUnixMs: UInt64) -> Bool {
+        referenceUnixMs >= expiresAtUnixMs
     }
 
     var displayLabel: String {
@@ -56,6 +99,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     nonisolated private static let companionSessionTokenEnv = "CODE_NATIVE_COMPANION_TOKEN"
     nonisolated private static let managedBackendBindHost = "0.0.0.0"
     nonisolated private static let managedBackendConnectHost = "127.0.0.1"
+    nonisolated private static let companionPairingLifetimeMs: UInt64 = 86_400_000
     private static let restartDelayNanoseconds: UInt64 = 1_000_000_000
     private static let crashLoopWindowSeconds: TimeInterval = 30
     private static let crashLoopFailureLimit = 3
@@ -80,6 +124,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private var launchPlan: LaunchPlan?
     private var process: Process?
     private var restartTask: Task<Void, Never>?
+    private var pairingExpiryTask: Task<Void, Never>?
     private var requestedStop = false
     private var unexpectedTerminationDates: [Date] = []
     private var lastAppliedSessionTokens: Set<String> = []
@@ -112,10 +157,12 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
 
         refreshLaunchPlan()
+        scheduleCompanionPairingExpiryRefresh()
     }
 
     deinit {
         restartTask?.cancel()
+        pairingExpiryTask?.cancel()
         if let process,
            process.isRunning {
             process.terminate()
@@ -189,6 +236,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     func stop() {
         restartTask?.cancel()
         restartTask = nil
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
         requestedStop = true
 
         guard let process else {
@@ -229,16 +278,19 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
 
         companionPairingEntries = normalized
+        scheduleCompanionPairingExpiryRefresh()
         reconfigureCompanionSessionTokensIfNeeded()
     }
 
     func createCompanionPairing(label: String?) {
         let trimmedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let nowUnixMs = Self.nowUnixMs()
         let pairing = CompanionPairingEntry(
             id: UUID().uuidString.lowercased(),
             label: trimmedLabel,
             sessionToken: Self.generateCompanionSessionToken(),
-            createdAtUnixMs: Self.nowUnixMs(),
+            createdAtUnixMs: nowUnixMs,
+            expiresAtUnixMs: Self.defaultCompanionPairingExpiryUnixMs(createdAtUnixMs: nowUnixMs),
             revokedAtUnixMs: nil
         )
 
@@ -301,15 +353,48 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     }
 
     private func activeCompanionSessionTokens() -> [String] {
-        var tokens: [String] = [managedSessionToken]
-        for entry in companionPairingEntries where !entry.isRevoked {
-            let trimmedToken = entry.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedToken.isEmpty {
-                continue
-            }
-            tokens.append(trimmedToken)
+        Self.activeCompanionSessionTokens(
+            localSessionToken: managedSessionToken,
+            pairingEntries: companionPairingEntries,
+            referenceUnixMs: Self.nowUnixMs()
+        )
+    }
+
+    private func scheduleCompanionPairingExpiryRefresh() {
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
+
+        let nowUnixMs = Self.nowUnixMs()
+        let nextExpiryUnixMs = companionPairingEntries
+            .filter { !$0.isRevoked && !$0.isExpired(referenceUnixMs: nowUnixMs) }
+            .map(\.expiresAtUnixMs)
+            .min()
+
+        guard let nextExpiryUnixMs,
+              nextExpiryUnixMs > nowUnixMs
+        else {
+            return
         }
-        return Self.normalizeCompanionSessionTokens(tokens)
+
+        let delayMilliseconds = nextExpiryUnixMs - nowUnixMs
+        let delayNanoseconds = Self.millisecondsToNanoseconds(delayMilliseconds)
+
+        pairingExpiryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                self?.reconfigureCompanionSessionTokensIfNeeded()
+                self?.scheduleCompanionPairingExpiryRefresh()
+            }
+        }
     }
 
     private var isDisabled: Bool {
@@ -442,6 +527,28 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
+    nonisolated static func defaultCompanionPairingExpiryUnixMs(createdAtUnixMs: UInt64) -> UInt64 {
+        let (sum, overflow) = createdAtUnixMs.addingReportingOverflow(companionPairingLifetimeMs)
+        return overflow ? UInt64.max : sum
+    }
+
+    nonisolated static func activeCompanionSessionTokens(
+        localSessionToken: String,
+        pairingEntries: [CompanionPairingEntry],
+        referenceUnixMs: UInt64
+    ) -> [String] {
+        var tokens: [String] = [localSessionToken]
+        for entry in pairingEntries where !entry.isRevoked && !entry.isExpired(referenceUnixMs: referenceUnixMs) {
+            let trimmedToken = entry.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedToken.isEmpty {
+                continue
+            }
+            tokens.append(trimmedToken)
+        }
+
+        return normalizeCompanionSessionTokens(tokens)
+    }
+
     nonisolated static func normalizeCompanionSessionTokens(_ tokens: [String]) -> [String] {
         var normalized: [String] = []
         var seen: Set<String> = []
@@ -476,12 +583,22 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             }
 
             let normalizedLabel = entry.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedCreatedAt = entry.createdAtUnixMs
+            let normalizedExpiresAt: UInt64
+            if entry.expiresAtUnixMs == 0 {
+                normalizedExpiresAt = defaultCompanionPairingExpiryUnixMs(
+                    createdAtUnixMs: normalizedCreatedAt
+                )
+            } else {
+                normalizedExpiresAt = entry.expiresAtUnixMs
+            }
             var normalizedEntry = entry
             normalizedEntry = CompanionPairingEntry(
                 id: normalizedID,
                 label: normalizedLabel,
                 sessionToken: normalizedToken,
-                createdAtUnixMs: entry.createdAtUnixMs,
+                createdAtUnixMs: normalizedCreatedAt,
+                expiresAtUnixMs: normalizedExpiresAt,
                 revokedAtUnixMs: entry.revokedAtUnixMs
             )
 
@@ -499,6 +616,11 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
     nonisolated static func nowUnixMs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1_000)
+    }
+
+    nonisolated static func millisecondsToNanoseconds(_ milliseconds: UInt64) -> UInt64 {
+        let (nanoseconds, overflow) = milliseconds.multipliedReportingOverflow(by: 1_000_000)
+        return overflow ? UInt64.max : nanoseconds
     }
 
     nonisolated static func resolveBinaryURL(

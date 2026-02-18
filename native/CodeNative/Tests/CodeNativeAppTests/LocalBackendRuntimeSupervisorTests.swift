@@ -46,6 +46,7 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
                 label: " Tablet ",
                 sessionToken: " token-b ",
                 createdAtUnixMs: 20,
+                expiresAtUnixMs: 2_000,
                 revokedAtUnixMs: nil
             ),
             CompanionPairingEntry(
@@ -53,6 +54,7 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
                 label: "Invalid",
                 sessionToken: "token-invalid",
                 createdAtUnixMs: 10,
+                expiresAtUnixMs: 1_000,
                 revokedAtUnixMs: nil
             ),
             CompanionPairingEntry(
@@ -60,6 +62,7 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
                 label: "Phone",
                 sessionToken: "token-a",
                 createdAtUnixMs: 10,
+                expiresAtUnixMs: 1_000,
                 revokedAtUnixMs: nil
             ),
             CompanionPairingEntry(
@@ -67,6 +70,7 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
                 label: "Duplicate",
                 sessionToken: "token-dup",
                 createdAtUnixMs: 30,
+                expiresAtUnixMs: 3_000,
                 revokedAtUnixMs: nil
             ),
         ]
@@ -76,6 +80,63 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
         XCTAssertEqual(normalized.map(\.id), ["a-id", "b-id"])
         XCTAssertEqual(normalized.map(\.sessionToken), ["token-a", "token-b"])
         XCTAssertEqual(normalized.map(\.label), ["Phone", "Tablet"])
+        XCTAssertEqual(normalized.map(\.expiresAtUnixMs), [1_000, 2_000])
+    }
+
+    func testActiveCompanionSessionTokensExcludeRevokedAndExpiredEntries() {
+        let entries = [
+            CompanionPairingEntry(
+                id: "active",
+                label: "Active",
+                sessionToken: "active-token",
+                createdAtUnixMs: 10,
+                expiresAtUnixMs: 5_000,
+                revokedAtUnixMs: nil
+            ),
+            CompanionPairingEntry(
+                id: "expired",
+                label: "Expired",
+                sessionToken: "expired-token",
+                createdAtUnixMs: 10,
+                expiresAtUnixMs: 50,
+                revokedAtUnixMs: nil
+            ),
+            CompanionPairingEntry(
+                id: "revoked",
+                label: "Revoked",
+                sessionToken: "revoked-token",
+                createdAtUnixMs: 10,
+                expiresAtUnixMs: 5_000,
+                revokedAtUnixMs: 20
+            ),
+        ]
+
+        let activeTokens = LocalBackendRuntimeSupervisor.activeCompanionSessionTokens(
+            localSessionToken: "local-token",
+            pairingEntries: entries,
+            referenceUnixMs: 100
+        )
+
+        XCTAssertEqual(activeTokens, ["local-token", "active-token"])
+    }
+
+    func testCompanionPairingEntryDecodeBackfillsMissingExpiry() throws {
+        let payload = """
+        {
+          "id": "pairing-a",
+          "label": "Phone",
+          "sessionToken": "token-a",
+          "createdAtUnixMs": 1000,
+          "revokedAtUnixMs": null
+        }
+        """
+
+        let entry = try JSONDecoder().decode(
+            CompanionPairingEntry.self,
+            from: Data(payload.utf8)
+        )
+
+        XCTAssertGreaterThan(entry.expiresAtUnixMs, entry.createdAtUnixMs)
     }
 
     func testShouldManageBackendDisabledForBenchmarkFixtureEnvironment() {

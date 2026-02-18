@@ -8930,6 +8930,40 @@ private struct NativeSettingsView: View {
     @State private var pairingCodeImportText = ""
     @State private var newPairingLabel = ""
 
+    private static let pairingExpiryFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, h:mm a"
+        return formatter
+    }()
+
+    private enum PairingStatus {
+        case active
+        case expired
+        case revoked
+
+        var label: String {
+            switch self {
+            case .active:
+                "Active"
+            case .expired:
+                "Expired"
+            case .revoked:
+                "Revoked"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .active:
+                .green
+            case .expired:
+                .orange
+            case .revoked:
+                .red
+            }
+        }
+    }
+
     private let modelOptions = WorkflowSettings.modelOptions
     private let reasoningOptions = WorkflowSettings.reasoningOptions
     private let sandboxOptions = WorkflowSettings.sandboxOptions
@@ -9011,6 +9045,22 @@ private struct NativeSettingsView: View {
             endpoint: pairingCodeEndpoint,
             token: entry.sessionToken
         )
+    }
+
+    private func pairingStatus(for entry: CompanionPairingEntry) -> PairingStatus {
+        let nowUnixMs = LocalBackendRuntimeSupervisor.nowUnixMs()
+        if entry.isRevoked {
+            return .revoked
+        }
+        if entry.isExpired(referenceUnixMs: nowUnixMs) {
+            return .expired
+        }
+        return .active
+    }
+
+    private func pairingExpiryCaption(for entry: CompanionPairingEntry) -> String {
+        let expiryDate = Date(timeIntervalSince1970: Double(entry.expiresAtUnixMs) / 1_000)
+        return "Expires \(Self.pairingExpiryFormatter.string(from: expiryDate))"
     }
 
     @ViewBuilder
@@ -9302,29 +9352,30 @@ private struct NativeSettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(companionPairingEntries) { pairing in
                             VStack(alignment: .leading, spacing: 6) {
+                                let status = pairingStatus(for: pairing)
                                 HStack(spacing: 8) {
                                     Text(pairing.displayLabel)
                                         .font(.subheadline.weight(.semibold))
 
-                                    if pairing.isRevoked {
-                                        Text("Revoked")
-                                            .font(.caption2.monospaced())
-                                            .foregroundStyle(.red)
-                                    } else {
-                                        Text("Active")
-                                            .font(.caption2.monospaced())
-                                            .foregroundStyle(.green)
-                                    }
+                                    Text(status.label)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(status.color)
                                 }
 
+                                Text(pairingExpiryCaption(for: pairing))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+
+                                let isActive = status == .active
+
                                 HStack(spacing: 8) {
-                                    if pairing.isRevoked {
+                                    if status == .revoked || status == .expired {
                                         Button("Restore") {
                                             restoreCompanionPairing?(pairing.id)
                                         }
                                         .buttonStyle(.bordered)
                                         .disabled(restoreCompanionPairing == nil)
-                                    } else {
+                                    } else if isActive {
                                         Button("Revoke") {
                                             revokeCompanionPairing?(pairing.id)
                                         }
@@ -9339,7 +9390,7 @@ private struct NativeSettingsView: View {
                                     .disabled(deleteCompanionPairing == nil)
                                 }
 
-                                if !pairing.isRevoked,
+                                if isActive,
                                    let pairingCode = pairingCode(for: pairing) {
                                     HStack(alignment: .top, spacing: 10) {
                                         Text(pairingCode)
