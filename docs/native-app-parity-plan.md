@@ -212,6 +212,75 @@ Current progress snapshot:
 
 Milestone 3 status: all planned rows (PAR-017/018/021) are now present.
 
+## Milestone 4: Companion Runtime + Cross-Device Productionization
+
+Goal: make Every Code Companion a complete local runtime product: macOS hosts
+GUI + bundled fork backend + TUI compatibility + secure mobile companion.
+
+### Product Decisions Locked
+
+- The macOS app is the runtime host for local execution.
+- The forked `code` backend is bundled and supervised by the macOS app.
+- TUI remains first-class via `code`-compatible behavior (with optional `ecc`
+  alias), not replaced.
+- iOS/iPadOS operate as remote clients to the user’s Mac companion service.
+- Security model is device pairing + short-lived auth + TLS; iCloud metadata
+  sync is optional convenience only, not primary trust.
+
+### Milestone 4 Scope
+
+- Runtime bundling and lifecycle supervision (launch, health, restart,
+  shutdown).
+- CLI/TUI compatibility contract for upstream-equivalent core flows.
+- Companion gateway for iOS/iPadOS with pairing and per-connection auth.
+- Connection UX for discovery, pairing, reconnect, and explicit failures.
+- Release/install path for macOS + iOS/iPadOS under one App Store Connect app
+  record.
+
+### Milestone 4 Batches (Auto Drive Ready)
+
+1. `M4-A` Runtime host hardening:
+   - bundle fork backend in macOS app
+   - random localhost port allocation per launch
+   - supervisor telemetry and crash-loop guards
+2. `M4-B` TUI coexistence + compatibility:
+   - `code`-compatible command/flag behavior for core paths
+   - `ecc` wrapper/alias for product branding without breaking scripts
+   - shared session store contract across GUI/TUI
+3. `M4-C` Pairing/auth gateway:
+   - QR/bootstrap pairing with device keys
+   - short-lived session tokens and revocation
+   - reject unpaired/expired connections before session attach
+4. `M4-D` Mobile connection UX:
+   - discovery + manual endpoint fallback
+   - readable states (`discovering`, `pair required`, `approval pending`,
+     `connected`, `reconnecting`, `offline`)
+5. `M4-E` Release and install readiness:
+   - deterministic signing/export path docs and CI
+   - TestFlight install path for macOS and iOS/iPadOS
+
+### Milestone 4 DoD
+
+- Users can install macOS app and run GUI + TUI without separate backend setup.
+- Paired iOS/iPadOS clients can securely connect to the local Mac companion.
+- Unpaired clients cannot connect; revoked clients lose access immediately.
+- Core TUI workflows remain script-compatible with upstream expectations.
+- Validation gates pass with companion benchmarks and security tests.
+
+### Auto Drive Execution Brief (Milestone 4)
+
+Use this as kickoff prompt:
+
+```text
+Execute Milestone 4 from docs/native-app-parity-plan.md and
+docs/native-app-parity-matrix.md. Implement M4-A first (bundled runtime +
+supervisor), then M4-B (TUI compatibility contract), then companion pairing
+and mobile connectivity batches. Preserve all M1/M2/M3 parity behavior.
+Validate with swift test --package-path native/CodeNative,
+scripts/ux/benchmark-native-ui.sh, and ./build-fast.sh; run app-server tests
+when touched. Keep benchmark scenarios deterministic.
+```
+
 ## Dependencies and Sequencing
 
 1. **Protocol and reducer integrity first**
@@ -315,6 +384,10 @@ scripts/ux/benchmark-native-ui.sh
 17. `session-rail-scale`
 18. `disconnected-state`
 19. `settings-shell`
+20. `companion-pairing`
+21. `companion-connected`
+22. `companion-auth-error`
+23. `tui-coexistence`
 
 ### Review Process
 
@@ -356,3 +429,7 @@ Current status:
 - [x] Matrix priorities confirmed in docs
 - [x] Benchmark baselines captured
 - [x] Auto Drive milestones executed (`M1`, `M2`, `M3`)
+
+Next planned status:
+
+- [ ] Milestone 4 execution started

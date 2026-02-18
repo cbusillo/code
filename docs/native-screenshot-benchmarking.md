@@ -32,6 +32,13 @@ Scenarios live in `native/CodeNative/automation/benchmarks/`:
 - `disconnected-state`
 - `settings-shell`
 
+Planned Milestone 4 additions:
+
+- `companion-pairing`
+- `companion-connected`
+- `companion-auth-error`
+- `tui-coexistence`
+
 Deterministic fixture data lives in
 `native/CodeNative/automation/benchmarks/fixtures/` with one fixture per
 scenario.
@@ -151,3 +158,10 @@ show connection/runtime state plus non-zero history telemetry counters
 For PAR-023 (`cross-app screenshot parity evidence`), keep milestone-tagged
 triplets current in `docs/reference/native-ui/parity/` and verify with
 `scripts/ux/verify-parity-triplets.sh` after refreshing captures.
+
+## Milestone 4 Companion Gate (Planned)
+
+For Milestone 4 companion productionization, treat
+`companion-pairing`, `companion-connected`, `companion-auth-error`, and
+`tui-coexistence` as required deterministic checkpoints before marking
+PAR-024..PAR-029 present.

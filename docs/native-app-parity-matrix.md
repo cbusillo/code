@@ -11,7 +11,7 @@ Legend:
 
 - `Status`: `present`, `partial`, `missing`
 - `Priority`: `P0` (must-have), `P1` (high value), `P2` (strategic)
-- `Milestone`: `Phase0`, `M1`, `M2`, `M3`
+- `Milestone`: `Phase0`, `M1`, `M2`, `M3`, `M4`
 
 ## Matrix Summary
 
@@ -40,6 +40,12 @@ Legend:
 | PAR-021 | Voice interaction parity hardening | Codex Mac | present | P2 | M3 |
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | present | P0 | M1 |
+| PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | missing | P0 | M4 |
+| PAR-025 | TUI binary compatibility contract | Every Code TUI | missing | P0 | M4 |
+| PAR-026 | Companion pairing/auth gateway (iOS↔macOS) | Native companion | missing | P0 | M4 |
+| PAR-027 | iOS/iPadOS companion connection UX | Codex Mac-inspired | missing | P1 | M4 |
+| PAR-028 | Companion security hardening and revocation | Native security | missing | P0 | M4 |
+| PAR-029 | Unified release/install pipeline proof | Release ops | partial | P1 | M4 |
 
 ## Detailed Rows
 
@@ -327,12 +333,62 @@ Legend:
   `docs/native-screenshot-benchmarking.md` and enforced by
   `scripts/ux/verify-parity-triplets.sh`.
 
+## PAR-024
+
+- Dependencies: M1-M3 complete.
+- Acceptance criteria: macOS app bundles fork backend, supervises lifecycle,
+  and starts GUI with no external backend prerequisite.
+- Validation gate: native launch + backend health scenario + `./build-fast.sh`.
+- Progress: not started (planned in M4-A).
+
+## PAR-025
+
+- Dependencies: PAR-024.
+- Acceptance criteria: core TUI commands/flags remain `code`-compatible and
+  script-safe while supporting Every Code Companion branding (`ecc` alias).
+- Validation gate: CLI compatibility smoke suite + manual TUI coexistence check.
+- Progress: not started (planned in M4-B).
+
+## PAR-026
+
+- Dependencies: PAR-024.
+- Acceptance criteria: paired iOS/iPadOS devices authenticate via companion
+  gateway and unpaired devices are rejected before session attach.
+- Validation gate: pairing/auth integration tests + deterministic benchmark.
+- Progress: not started (planned in M4-C).
+
+## PAR-027
+
+- Dependencies: PAR-026.
+- Acceptance criteria: mobile apps show clear discovery/pair/connect/reconnect
+  states and permit manual endpoint fallback.
+- Validation gate: connection UX scenario + accessibility checks.
+- Progress: not started (planned in M4-D).
+
+## PAR-028
+
+- Dependencies: PAR-026.
+- Acceptance criteria: short-lived tokens, revocation, and auth-failure
+  messaging are enforced with no insecure fallback path.
+- Validation gate: auth regression tests + negative-connect scenarios.
+- Progress: not started (planned in M4-C/M4-D).
+
+## PAR-029
+
+- Dependencies: PAR-024, PAR-026.
+- Acceptance criteria: reproducible macOS+iOS/iPadOS release pipeline with
+  deterministic signing/export docs and install verification evidence.
+- Validation gate: CI workflow dry-run + signed artifact checklist.
+- Progress: in progress (existing TestFlight workflow hardening continues in
+  M4-E).
+
 ## Milestone Rollup
 
 - `Phase0`: PAR-001, PAR-002, PAR-003, PAR-004
 - `M1`: PAR-005, PAR-006, PAR-007, PAR-008, PAR-009, PAR-010, PAR-020, PAR-023
 - `M2`: PAR-011, PAR-012, PAR-013, PAR-014, PAR-015, PAR-016, PAR-019, PAR-022
 - `M3`: PAR-017, PAR-018, PAR-021
+- `M4`: PAR-024, PAR-025, PAR-026, PAR-027, PAR-028, PAR-029
 
 ## Matrix Operating Rules
 
