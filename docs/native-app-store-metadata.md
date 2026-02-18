@@ -84,14 +84,31 @@ Required repository secrets:
 - `APP_STORE_CONNECT_KEY_ID`: App Store Connect API key id.
 - `APP_STORE_CONNECT_ISSUER_ID`: App Store Connect API issuer id.
 - `APP_STORE_CONNECT_PRIVATE_KEY`: Raw `.p8` API private key contents.
+- `MACOS_APPSTORE_PROFILE_BASE64`: Base64-encoded macOS App Store profile.
+- `MACOS_APPSTORE_PROFILE_NAME`: macOS provisioning profile name.
 
 Workflow notes:
 
 - Team ID is tracked in workflow as `MM5YXC7T6E`.
-- The job always emits an IPA artifact (`EveryCodeCompanion-ipa`).
-- Push tags matching `ios-v*` for automatic release-driven uploads.
-- Set `upload_to_testflight = true` when dispatching to publish to TestFlight.
+- iOS workflow emits an IPA artifact (`EveryCodeCompanion-ipa`).
+- macOS workflow emits a PKG artifact (`EveryCodeCompanion-macos-pkg`).
+- Push tags matching `ios-v*` for iOS uploads.
+- Push tags matching `macos-v*` for macOS uploads.
+- Set `upload_to_testflight = true` when dispatching to publish.
+- Workflows install the App Store Connect API key into
+  `~/.appstoreconnect/private_keys/` before upload.
+
+### macOS setup prerequisites
+
+Before running macOS TestFlight workflow:
+
+- Create `com.shinycomputers.everycodecompanion.macos` App ID in Apple
+  Developer.
+- Create/download a `macOS App Store` provisioning profile for that bundle id.
+- Base64-encode the profile and set `MACOS_APPSTORE_PROFILE_BASE64` secret.
+- Set `MACOS_APPSTORE_PROFILE_NAME` to the profile Name field exactly.
 
 Tag helper:
 
 - `scripts/release-ios-tag.sh 1.4.0` creates and pushes `ios-v1.4.0`.
+- `scripts/release-macos-tag.sh 1.4.0` creates and pushes `macos-v1.4.0`.

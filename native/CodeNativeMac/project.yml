@@ -1,0 +1,34 @@
+---
+name: CodeNativeMac
+options:
+  minimumXcodeGenVersion: 2.38.0
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+targets:
+  CodeNativeMac:
+    type: application
+    platform: macOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.everycodecompanion.macos
+        PRODUCT_NAME: EveryCodeCompanion
+        MARKETING_VERSION: 1.0.0
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: true
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_CFBundleDisplayName: Every Code Companion
+        INFOPLIST_KEY_CFBundleIconName: AppIcon
+        INFOPLIST_KEY_CFBundleShortVersionString: $(MARKETING_VERSION)
+        INFOPLIST_KEY_CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: >-
+          Voice capture sends your speech to on-device recognition.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: >-
+          Speech recognition converts your voice into prompt text.
+        SUPPORTS_MACCATALYST: false
+    sources:
+      - path: ../CodeNative/Sources/CodeNativeApp
+      - path: CodeNativeMac/Assets.xcassets

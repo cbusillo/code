@@ -1,10 +1,10 @@
 ---
-name: Native iOS TestFlight
+name: Native macOS TestFlight
 
 'on':
   push:
     tags:
-      - 'ios-v*'
+      - 'macos-v*'
   workflow_dispatch:
     inputs:
       git_ref:
@@ -12,7 +12,7 @@ name: Native iOS TestFlight
         required: false
         default: ""
       upload_to_testflight:
-        description: "Upload exported IPA to TestFlight"
+        description: "Upload exported package to TestFlight"
         required: true
         type: boolean
         default: true
@@ -21,22 +21,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-ios-testflight-${{ github.ref }}
+  group: native-macos-testflight-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build-and-upload:
-    name: Build signed IPA
+    name: Build signed macOS package
     runs-on: macos-15
     env:
       APPLE_TEAM_ID: MM5YXC7T6E
-      BUNDLE_ID: com.shinycomputers.everycodecompanion
-      SCHEME: CodeNativeiOSDemo
-      XCODE_PROJECT: native/CodeNativeiOS/CodeNativeiOSDemo.xcodeproj
-      ARCHIVE_PATH: /tmp/ecc-ios/EveryCodeCompanion.xcarchive
-      EXPORT_PATH: /tmp/ecc-ios/export
-      EXPORT_OPTIONS_PATH: /tmp/ecc-ios/ExportOptions.plist
-      PROFILE_PATH: /tmp/ecc-ios/every-code-companion.mobileprovision
+      BUNDLE_ID: com.shinycomputers.everycodecompanion.macos
+      SCHEME: CodeNativeMac
+      XCODE_PROJECT: native/CodeNativeMac/CodeNativeMac.xcodeproj
+      ARCHIVE_PATH: /tmp/ecc-macos/EveryCodeCompanion.xcarchive
+      EXPORT_PATH: /tmp/ecc-macos/export
+      EXPORT_OPTIONS_PATH: /tmp/ecc-macos/ExportOptions.plist
+      PROFILE_PATH: /tmp/ecc-macos/every-code-companion-macos.provisionprofile
     steps:
       - name: Resolve checkout ref
         id: resolve_ref
@@ -61,6 +61,12 @@ jobs:
           fetch-depth: 0
           ref: ${{ steps.resolve_ref.outputs.value }}
 
+      - name: Generate macOS project
+        run: |
+          set -euo pipefail
+          cd native/CodeNativeMac
+          xcodegen generate
+
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -70,9 +76,10 @@ jobs:
         env:
           IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
-          IOS_APPSTORE_PROFILE_BASE64:
-            ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
-          IOS_APPSTORE_PROFILE_NAME: ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
+          MACOS_APPSTORE_PROFILE_BASE64:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_BASE64 }}
+          MACOS_APPSTORE_PROFILE_NAME:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_NAME }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID:
             ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -84,8 +91,8 @@ jobs:
           for name in \
             IOS_DIST_CERT_P12_BASE64 \
             IOS_DIST_CERT_PASSWORD \
-            IOS_APPSTORE_PROFILE_BASE64 \
-            IOS_APPSTORE_PROFILE_NAME \
+            MACOS_APPSTORE_PROFILE_BASE64 \
+            MACOS_APPSTORE_PROFILE_NAME \
             APP_STORE_CONNECT_KEY_ID \
             APP_STORE_CONNECT_ISSUER_ID \
             APP_STORE_CONNECT_PRIVATE_KEY; do
@@ -106,14 +113,14 @@ jobs:
           p12-file-base64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
 
-      - name: Install App Store provisioning profile
+      - name: Install Mac App Store provisioning profile
         env:
-          IOS_APPSTORE_PROFILE_BASE64:
-            ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          MACOS_APPSTORE_PROFILE_BASE64:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$IOS_APPSTORE_PROFILE_BASE64" | base64 --decode \
+          echo "$MACOS_APPSTORE_PROFILE_BASE64" | base64 --decode \
             > "$PROFILE_PATH"
           profile_plist=$(security cms -D -i "$PROFILE_PATH")
           profile_uuid=$(
@@ -121,11 +128,12 @@ jobs:
               <<<"$profile_plist"
           )
           profiles_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$PROFILE_PATH" "$profiles_dir/$profile_uuid.mobileprovision"
+          cp "$PROFILE_PATH" "$profiles_dir/$profile_uuid.provisionprofile"
 
       - name: Write export options
         env:
-          IOS_APPSTORE_PROFILE_NAME: ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
+          MACOS_APPSTORE_PROFILE_NAME:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_NAME }}
         run: |
           set -euo pipefail
           cat > "$EXPORT_OPTIONS_PATH" <<EOF
@@ -147,31 +155,32 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>${BUNDLE_ID}</key>
-              <string>${IOS_APPSTORE_PROFILE_NAME}</string>
+              <string>${MACOS_APPSTORE_PROFILE_NAME}</string>
             </dict>
           </dict>
           </plist>
           EOF
 
-      - name: Archive iOS app
+      - name: Archive macOS app
         env:
-          IOS_APPSTORE_PROFILE_NAME: ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
+          MACOS_APPSTORE_PROFILE_NAME:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_NAME }}
         run: |
           set -euo pipefail
           xcodebuild \
             -project "$XCODE_PROJECT" \
             -scheme "$SCHEME" \
             -configuration Release \
-            -destination "generic/platform=iOS" \
+            -destination "generic/platform=macOS" \
             -archivePath "$ARCHIVE_PATH" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="$IOS_APPSTORE_PROFILE_NAME" \
+            PROVISIONING_PROFILE_SPECIFIER="$MACOS_APPSTORE_PROFILE_NAME" \
             clean archive
 
-      - name: Export IPA
+      - name: Export package
         run: |
           set -euo pipefail
           xcodebuild \
@@ -180,12 +189,12 @@ jobs:
             -exportPath "$EXPORT_PATH" \
             -exportOptionsPlist "$EXPORT_OPTIONS_PATH"
 
-          ipa_path=$(find "$EXPORT_PATH" -maxdepth 1 -name '*.ipa' -print -quit)
-          if [ -z "$ipa_path" ]; then
-            echo "No IPA produced by export" >&2
+          pkg_path=$(find "$EXPORT_PATH" -maxdepth 1 -name '*.pkg' -print -quit)
+          if [ -z "$pkg_path" ]; then
+            echo "No PKG produced by export" >&2
             exit 1
           fi
-          mv "$ipa_path" "$EXPORT_PATH/EveryCodeCompanion.ipa"
+          mv "$pkg_path" "$EXPORT_PATH/EveryCodeCompanion.pkg"
 
       - name: Install App Store Connect API key
         env:
@@ -200,12 +209,12 @@ jobs:
           printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$key_path"
           chmod 600 "$key_path"
 
-      - name: Upload IPA artifact
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EveryCodeCompanion-ipa
+          name: EveryCodeCompanion-macos-pkg
           path: |
-            ${{ env.EXPORT_PATH }}/EveryCodeCompanion.ipa
+            ${{ env.EXPORT_PATH }}/EveryCodeCompanion.pkg
             ${{ env.ARCHIVE_PATH }}/dSYMs
           if-no-files-found: error
 
@@ -219,11 +228,11 @@ jobs:
             ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           set -euo pipefail
-          log_path=/tmp/ecc-ios-upload.log
+          log_path=/tmp/ecc-macos-upload.log
           xcrun altool --output-format xml \
             --upload-app \
-            --file "$EXPORT_PATH/EveryCodeCompanion.ipa" \
-            --type ios \
+            --file "$EXPORT_PATH/EveryCodeCompanion.pkg" \
+            --type macos \
             --apiKey "$APP_STORE_CONNECT_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
             | tee "$log_path"

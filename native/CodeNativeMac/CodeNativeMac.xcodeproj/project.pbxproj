@@ -1,0 +1,374 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		3AFA80F6B988C10A3804F92E /* VoiceInteractionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90272EDD4249923ACA647334 /* VoiceInteractionPolicy.swift */; };
+		413236565524A9DDE50D9316 /* DiffRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8691848117699A57ADA132D8 /* DiffRecovery.swift */; };
+		61055957ED949BB0659F2FA0 /* IDEIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE666656EC3A4A4C89D9259 /* IDEIntegration.swift */; };
+		62B2B3DC835A543C59D3C7FA /* VoiceOutputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F79B5F5DDD90A57C9A51E9ED /* VoiceOutputController.swift */; };
+		7300652074E069487ACA5E84 /* SessionMirrorStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1613FD7351B898CBBF2611E /* SessionMirrorStore.swift */; };
+		7E968DF43D382ED09A70CA20 /* CodeNativeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6387676E09B2B7104C892D80 /* CodeNativeApp.swift */; };
+		B41BE4D2F6FCE10937CDBE7F /* SessionVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84C2FD40E7894E00ABBB9D1B /* SessionVisibility.swift */; };
+		B7AFACFF90B6C6C2D0136959 /* VoiceInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D2A97505135F62A7E043560 /* VoiceInputController.swift */; };
+		CA17AFE9552D51C9F42AE5A3 /* SessionRailLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47885B7901DB3D7B5514098 /* SessionRailLayout.swift */; };
+		CB85F43E6B214506FC518264 /* WorkflowSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4126CA56ACB8A1ED96CDF089 /* WorkflowSettings.swift */; };
+		DB036B775AE7265D18705A18 /* SessionProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F34EA9E662521D6CE92A444E /* SessionProtocol.swift */; };
+		E84F4C21B6DA94B9E75F5896 /* SessionStreamReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 742F9774418B3924EB02A5E4 /* SessionStreamReducer.swift */; };
+		EA46123B957343FAC68AD73B /* ComposerAssist.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D96001A1F07EBE4CC0D9769 /* ComposerAssist.swift */; };
+		FBCD400B57BBA7615D38023E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8E5EC4ED9EBE0F2D22E5F386 /* Assets.xcassets */; };
+		FC16B3CC8807972856381BC6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7ACF38D5765A9EE050AA96 /* ContentView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		356E08E08139D980E63A4E17 /* CodeNativeMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodeNativeMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4126CA56ACB8A1ED96CDF089 /* WorkflowSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowSettings.swift; sourceTree = "<group>"; };
+		6387676E09B2B7104C892D80 /* CodeNativeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeNativeApp.swift; sourceTree = "<group>"; };
+		6D96001A1F07EBE4CC0D9769 /* ComposerAssist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAssist.swift; sourceTree = "<group>"; };
+		742F9774418B3924EB02A5E4 /* SessionStreamReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStreamReducer.swift; sourceTree = "<group>"; };
+		84C2FD40E7894E00ABBB9D1B /* SessionVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVisibility.swift; sourceTree = "<group>"; };
+		8691848117699A57ADA132D8 /* DiffRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffRecovery.swift; sourceTree = "<group>"; };
+		8D2A97505135F62A7E043560 /* VoiceInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputController.swift; sourceTree = "<group>"; };
+		8E5EC4ED9EBE0F2D22E5F386 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		90272EDD4249923ACA647334 /* VoiceInteractionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInteractionPolicy.swift; sourceTree = "<group>"; };
+		AAE666656EC3A4A4C89D9259 /* IDEIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IDEIntegration.swift; sourceTree = "<group>"; };
+		AE7ACF38D5765A9EE050AA96 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C47885B7901DB3D7B5514098 /* SessionRailLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRailLayout.swift; sourceTree = "<group>"; };
+		E1613FD7351B898CBBF2611E /* SessionMirrorStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMirrorStore.swift; sourceTree = "<group>"; };
+		F34EA9E662521D6CE92A444E /* SessionProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionProtocol.swift; sourceTree = "<group>"; };
+		F79B5F5DDD90A57C9A51E9ED /* VoiceOutputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceOutputController.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		3A0A91E75C0EEED5FC29802B = {
+			isa = PBXGroup;
+			children = (
+				7F8B72615797C222260E6820 /* CodeNativeApp */,
+				5937A7AAC09BD1491320FB2A /* CodeNativeMac */,
+				4E46438AC9E15FC588112481 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4E46438AC9E15FC588112481 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				356E08E08139D980E63A4E17 /* CodeNativeMac.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		5937A7AAC09BD1491320FB2A /* CodeNativeMac */ = {
+			isa = PBXGroup;
+			children = (
+				8E5EC4ED9EBE0F2D22E5F386 /* Assets.xcassets */,
+			);
+			path = CodeNativeMac;
+			sourceTree = "<group>";
+		};
+		7F8B72615797C222260E6820 /* CodeNativeApp */ = {
+			isa = PBXGroup;
+			children = (
+				6387676E09B2B7104C892D80 /* CodeNativeApp.swift */,
+				6D96001A1F07EBE4CC0D9769 /* ComposerAssist.swift */,
+				AE7ACF38D5765A9EE050AA96 /* ContentView.swift */,
+				8691848117699A57ADA132D8 /* DiffRecovery.swift */,
+				AAE666656EC3A4A4C89D9259 /* IDEIntegration.swift */,
+				E1613FD7351B898CBBF2611E /* SessionMirrorStore.swift */,
+				F34EA9E662521D6CE92A444E /* SessionProtocol.swift */,
+				C47885B7901DB3D7B5514098 /* SessionRailLayout.swift */,
+				742F9774418B3924EB02A5E4 /* SessionStreamReducer.swift */,
+				84C2FD40E7894E00ABBB9D1B /* SessionVisibility.swift */,
+				8D2A97505135F62A7E043560 /* VoiceInputController.swift */,
+				90272EDD4249923ACA647334 /* VoiceInteractionPolicy.swift */,
+				F79B5F5DDD90A57C9A51E9ED /* VoiceOutputController.swift */,
+				4126CA56ACB8A1ED96CDF089 /* WorkflowSettings.swift */,
+			);
+			name = CodeNativeApp;
+			path = ../CodeNative/Sources/CodeNativeApp;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FF2B419E028FCD4C7593A8C6 /* CodeNativeMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 608DFDAA436586346AB36688 /* Build configuration list for PBXNativeTarget "CodeNativeMac" */;
+			buildPhases = (
+				9430E07E87F1A04FE01FAA01 /* Sources */,
+				37B51D2A768465283E3DFF72 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CodeNativeMac;
+			packageProductDependencies = (
+			);
+			productName = CodeNativeMac;
+			productReference = 356E08E08139D980E63A4E17 /* CodeNativeMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AAFE9C1CFA4EBEA12ABC610B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+			};
+			buildConfigurationList = EEEC7C035739796F586A3186 /* Build configuration list for PBXProject "CodeNativeMac" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 3A0A91E75C0EEED5FC29802B;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FF2B419E028FCD4C7593A8C6 /* CodeNativeMac */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		37B51D2A768465283E3DFF72 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FBCD400B57BBA7615D38023E /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9430E07E87F1A04FE01FAA01 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7E968DF43D382ED09A70CA20 /* CodeNativeApp.swift in Sources */,
+				EA46123B957343FAC68AD73B /* ComposerAssist.swift in Sources */,
+				FC16B3CC8807972856381BC6 /* ContentView.swift in Sources */,
+				413236565524A9DDE50D9316 /* DiffRecovery.swift in Sources */,
+				61055957ED949BB0659F2FA0 /* IDEIntegration.swift in Sources */,
+				7300652074E069487ACA5E84 /* SessionMirrorStore.swift in Sources */,
+				DB036B775AE7265D18705A18 /* SessionProtocol.swift in Sources */,
+				CA17AFE9552D51C9F42AE5A3 /* SessionRailLayout.swift in Sources */,
+				E84F4C21B6DA94B9E75F5896 /* SessionStreamReducer.swift in Sources */,
+				B41BE4D2F6FCE10937CDBE7F /* SessionVisibility.swift in Sources */,
+				B7AFACFF90B6C6C2D0136959 /* VoiceInputController.swift in Sources */,
+				3AFA80F6B988C10A3804F92E /* VoiceInteractionPolicy.swift in Sources */,
+				62B2B3DC835A543C59D3C7FA /* VoiceOutputController.swift in Sources */,
+				CB85F43E6B214506FC518264 /* WorkflowSettings.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		145FAEBA662B8192734A7D54 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		715F80D40C728C844678A694 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		94321858B04E030DB0D876B9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
+				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.shinycomputers.everycodecompanion.macos;
+				PRODUCT_NAME = EveryCodeCompanion;
+				SDKROOT = macosx;
+				SUPPORTS_MACCATALYST = NO;
+			};
+			name = Debug;
+		};
+		D70FBA505CC24587B0106E57 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
+				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.shinycomputers.everycodecompanion.macos;
+				PRODUCT_NAME = EveryCodeCompanion;
+				SDKROOT = macosx;
+				SUPPORTS_MACCATALYST = NO;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		608DFDAA436586346AB36688 /* Build configuration list for PBXNativeTarget "CodeNativeMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				94321858B04E030DB0D876B9 /* Debug */,
+				D70FBA505CC24587B0106E57 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EEEC7C035739796F586A3186 /* Build configuration list for PBXProject "CodeNativeMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				145FAEBA662B8192734A7D54 /* Debug */,
+				715F80D40C728C844678A694 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AAFE9C1CFA4EBEA12ABC610B /* Project object */;
+}
