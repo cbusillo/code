@@ -8781,6 +8781,42 @@ private struct NativeSettingsView: View {
         #endif
     }
 
+    private var publicAppName: String {
+        let info = Bundle.main.infoDictionary
+        let displayName = info?["CFBundleDisplayName"] as? String
+        if let displayName, displayName.isEmpty == false {
+            return displayName
+        }
+
+        let bundleName = info?["CFBundleName"] as? String
+        if let bundleName, bundleName.isEmpty == false {
+            return bundleName
+        }
+
+        return "Every Code Companion"
+    }
+
+    private var publicAppAttributionText: String {
+        "\(publicAppName) is an independent, unofficial client and is not affiliated with or endorsed by Every Code."
+    }
+
+    private var publicAppVersionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String
+        let build = info?["CFBundleVersion"] as? String
+
+        switch (version, build) {
+        case let (version?, build?) where version.isEmpty == false && build.isEmpty == false:
+            return "Version \(version) (\(build))"
+        case let (version?, _) where version.isEmpty == false:
+            return "Version \(version)"
+        case let (_, build?) where build.isEmpty == false:
+            return "Build \(build)"
+        default:
+            return "Version information unavailable"
+        }
+    }
+
     private var isCompactSettingsLayout: Bool {
         #if os(iOS)
         return horizontalSizeClass == .compact
@@ -9010,6 +9046,9 @@ private struct NativeSettingsView: View {
                 .pickerStyle(.segmented)
                 .frame(width: isCompactSettingsLayout ? nil : 220)
             }
+
+            SettingsInfoCard(text: publicAppAttributionText)
+            SettingsInfoCard(text: publicAppVersionText)
 
         case .configuration:
             SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {

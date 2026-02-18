@@ -20,6 +20,13 @@ This creates `CodeNativeiOSDemo.xcodeproj`.
 
 By default, Every Code Companion connects to `ws://127.0.0.1:4317/ws`.
 
+## Branding and Attribution
+
+Use the following legal attribution in release metadata and in-app surfaces:
+
+`Every Code Companion is an independent project and is not affiliated with or
+endorsed by Every Code.`
+
 ## iOS Core Controls
 
 - Top bar actions now include:
@@ -68,3 +75,8 @@ xcodebuild \
   `native/CodeNative/Sources/CodeNativeApp`.
 - Keep platform APIs at the edges (`#if os(macOS)` / iOS-specific wrappers).
 - Avoid importing `AppKit` in shared files unless guarded.
+
+## Release Metadata Source
+
+App Store/TestFlight listing copy lives in
+`docs/native-app-store-metadata.md`.
