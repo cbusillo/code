@@ -9,7 +9,7 @@
         "id": "00000000-0000-0000-0000-00000000c017",
         "conversation_id": "00000000-0000-0000-0000-00000000c017",
         "model": "gpt-5.3-codex",
-        "cwd": "/Users/cbusillo/Developer/code",
+        "cwd": ".",
         "created_at_unix_ms": 1700000900000,
         "last_event_at_unix_ms": 1700000990000,
         "title": "Multi-agent progress"
@@ -143,3 +143,4 @@
     "total_latency_ms": 801
   }
 }
+

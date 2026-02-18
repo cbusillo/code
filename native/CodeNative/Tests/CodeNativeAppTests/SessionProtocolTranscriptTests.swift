@@ -309,7 +309,7 @@ final class SessionProtocolTranscriptTests: XCTestCase {
             payload: .object([
                 "type": .string("user_message"),
                 "message": .string(
-                    "Need help reviewing this patch.\n\n== System Status ==\n[automatic message added by system]\n\ncwd: /Users/cbusillo/Developer/code\nbranch: native-apple-apps\nreasoning: High"
+                    "Need help reviewing this patch.\n\n== System Status ==\n[automatic message added by system]\n\ncwd: .\nbranch: native-apple-apps\nreasoning: High"
                 )
             ])
         )
@@ -325,7 +325,7 @@ final class SessionProtocolTranscriptTests: XCTestCase {
             payload: .object([
                 "type": .string("user_message"),
                 "message": .string(
-                    "== System Status ==\n[automatic message added by system]\n\ncwd: /Users/cbusillo/Developer/code\nbranch: native-apple-apps\nreasoning: High"
+                    "== System Status ==\n[automatic message added by system]\n\ncwd: .\nbranch: native-apple-apps\nreasoning: High"
                 )
             ])
         )
@@ -671,3 +671,4 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         )
     }
 }
+

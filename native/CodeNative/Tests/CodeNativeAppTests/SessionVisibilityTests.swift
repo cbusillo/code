@@ -4,7 +4,7 @@ import XCTest
 final class SessionVisibilityTests: XCTestCase {
     func testAutoReviewWorktreeSessionsAreHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/.code/working/code/branches/auto-review-a1b2",
+            cwd: "/workspace/.code/working/code/branches/auto-review-a1b2",
             title: "Normal title"
         )
 
@@ -13,8 +13,8 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testContextPromptSessionsAreHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
-            title: "Context: Repo /Users/cbusillo/Developer/code. Need implement UI polish."
+            cwd: "code",
+            title: "Context: Repo code. Need implement UI polish."
         )
 
         XCTAssertEqual(SessionVisibility.hiddenReason(for: session), .automationPrompt)
@@ -22,7 +22,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testStrictReviewSessionsAreHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "Strict review: find concrete bugs/security regressions only."
         )
 
@@ -31,7 +31,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testDiffPayloadPromptSessionsAreHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "Review this diff and identify critical bugs. diff --git a/main.swift b/main.swift"
         )
 
@@ -40,7 +40,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testUuidTitledSessionsAreHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "277c36fc-8ea3-4899-8390-fbe472ea9795"
         )
 
@@ -49,7 +49,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testNaturalLanguageSessionsStayVisible() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "Can we refine the macOS thread list and make it calmer?"
         )
 
@@ -58,7 +58,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testHarnessReadOnlyReviewPromptIsHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "Review native/CodeNative/Sources/CodeNativeApp/ContentView.swift ... [Running in read-only mode - no modifications allowed]"
         )
 
@@ -67,7 +67,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testHarnessStructuredReviewPromptIsHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "Review ContentView.swift and propose changes. Output: patch suggestions. Files to consider: ContentView.swift"
         )
 
@@ -76,7 +76,7 @@ final class SessionVisibilityTests: XCTestCase {
 
     func testEveryCodeHarnessMarkerIsHidden() {
         let session = makeSession(
-            cwd: "/Users/cbusillo/Developer/code",
+            cwd: ".",
             title: "This session is not from me, it's from the Every Code harness."
         )
 
@@ -95,3 +95,4 @@ final class SessionVisibilityTests: XCTestCase {
         )
     }
 }
+

@@ -9,7 +9,7 @@
         "id": "00000000-0000-0000-0000-00000000a601",
         "conversation_id": "00000000-0000-0000-0000-00000000a601",
         "model": "gpt-5.3-codex",
-        "cwd": "/Users/cbusillo/Developer/code",
+        "cwd": ".",
         "created_at_unix_ms": 1700000500000,
         "last_event_at_unix_ms": 1700000502000,
         "title": "Milestone 2 request-user-input"
@@ -54,3 +54,4 @@
     }
   ]
 }
+

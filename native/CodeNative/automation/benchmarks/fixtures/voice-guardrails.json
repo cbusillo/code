@@ -10,7 +10,7 @@
         "id": "00000000-0000-0000-0000-00000000ab01",
         "conversation_id": "00000000-0000-0000-0000-00000000ab01",
         "model": "gpt-5.3-codex",
-        "cwd": "/Users/cbusillo/Developer/code",
+        "cwd": ".",
         "created_at_unix_ms": 1700000900000,
         "last_event_at_unix_ms": 1700000909000,
         "title": "Milestone 3 voice guardrails"
@@ -53,3 +53,4 @@
     }
   ]
 }
+

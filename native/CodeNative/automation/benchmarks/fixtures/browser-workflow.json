@@ -9,7 +9,7 @@
         "id": "00000000-0000-0000-0000-00000000b018",
         "conversation_id": "00000000-0000-0000-0000-00000000b018",
         "model": "gpt-5.3-codex",
-        "cwd": "/Users/cbusillo/Developer/code",
+        "cwd": ".",
         "created_at_unix_ms": 1700000800000,
         "last_event_at_unix_ms": 1700000890000,
         "title": "Browser workflow parity"
@@ -129,3 +129,4 @@
     "total_latency_ms": 712
   }
 }
+
