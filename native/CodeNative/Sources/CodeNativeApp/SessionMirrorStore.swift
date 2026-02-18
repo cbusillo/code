@@ -4,6 +4,7 @@ import OSLog
 @MainActor
 final class SessionMirrorStore: ObservableObject {
     private static let logger = Logger(subsystem: "com.every.code.native", category: "session-mirror")
+    static let defaultEndpoint = "ws://127.0.0.1:4317/ws"
     // Large catalogs can contain hundreds of sessions; keep periodic refreshes
     // sparse so list decoding doesn't interrupt typing responsiveness.
     private static let catalogRefreshIntervalNanoseconds: UInt64 = 15_000_000_000
@@ -58,7 +59,7 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
-    @Published var endpoint: String = "ws://127.0.0.1:4317/ws"
+    @Published var endpoint: String
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var statusLine: String = "Disconnected"
     @Published private(set) var sessions: [SessionSummary] = []
@@ -125,6 +126,10 @@ final class SessionMirrorStore: ObservableObject {
         encoder.keyEncodingStrategy = .convertToSnakeCase
         return encoder
     }()
+
+    init(initialEndpoint: String = SessionMirrorStore.defaultEndpoint) {
+        endpoint = initialEndpoint
+    }
 
     var selectedSession: SessionSummary? {
         guard let selectedSessionID else {

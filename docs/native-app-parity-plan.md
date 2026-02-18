@@ -432,4 +432,4 @@ Current status:
 
 Next planned status:
 
-- [ ] Milestone 4 execution started
+- [x] Milestone 4 execution started (`M4-A` in progress)

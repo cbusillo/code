@@ -40,7 +40,7 @@ Legend:
 | PAR-021 | Voice interaction parity hardening | Codex Mac | present | P2 | M3 |
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | present | P0 | M1 |
-| PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | missing | P0 | M4 |
+| PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | partial | P0 | M4 |
 | PAR-025 | TUI binary compatibility contract | Every Code TUI | missing | P0 | M4 |
 | PAR-026 | Companion pairing/auth gateway (iOS↔macOS) | Native companion | missing | P0 | M4 |
 | PAR-027 | iOS/iPadOS companion connection UX | Codex Mac-inspired | missing | P1 | M4 |
@@ -339,7 +339,13 @@ Legend:
 - Acceptance criteria: macOS app bundles fork backend, supervises lifecycle,
   and starts GUI with no external backend prerequisite.
 - Validation gate: native launch + backend health scenario + `./build-fast.sh`.
-- Progress: not started (planned in M4-A).
+- Progress: runtime supervisor now launches a managed local backend on a
+  random loopback port, applies crash-loop restart suppression, and updates the
+  native endpoint automatically while keeping benchmark-fixture runs disabled.
+  Unit coverage was added for manage/disable gating, binary-path resolution,
+  and loopback-port reservation (`LocalBackendRuntimeSupervisorTests`).
+  Remaining gap: ship the binary in the macOS app bundle and prove
+  launch-without-repo on clean machines.
 
 ## PAR-025
 
