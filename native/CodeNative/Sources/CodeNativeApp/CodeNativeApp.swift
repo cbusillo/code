@@ -3,12 +3,38 @@ import Foundation
 import OSLog
 import SwiftUI
 
+struct CompanionPairingEntry: Codable, Equatable, Identifiable {
+    let id: String
+    var label: String
+    var sessionToken: String
+    let createdAtUnixMs: UInt64
+    var revokedAtUnixMs: UInt64?
+
+    var isRevoked: Bool {
+        revokedAtUnixMs != nil
+    }
+
+    var displayLabel: String {
+        if !label.isEmpty {
+            return label
+        }
+
+        let shortID = String(id.prefix(8))
+        if !shortID.isEmpty {
+            return "Device \(shortID)"
+        }
+
+        return "Device"
+    }
+}
+
 @MainActor
 final class LocalBackendRuntimeSupervisor: ObservableObject {
     struct LaunchPlan: Equatable {
         let binaryURL: URL
         let port: UInt16
-        let sessionToken: String
+        let localSessionToken: String
+        let sessionTokens: [String]
         let lanEndpoint: String?
 
         var endpoint: String {
@@ -37,6 +63,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     @Published private(set) var endpoint: String?
     @Published private(set) var sessionToken: String?
     @Published private(set) var lanEndpoint: String?
+    @Published private(set) var companionPairingEntries: [CompanionPairingEntry] = []
     @Published private(set) var canRotateCompanionSessionToken: Bool
     @Published private(set) var launchState: LaunchState = .idle
     @Published private(set) var restartCount: UInt64 = 0
@@ -55,6 +82,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private var restartTask: Task<Void, Never>?
     private var requestedStop = false
     private var unexpectedTerminationDates: [Date] = []
+    private var lastAppliedSessionTokens: Set<String> = []
 
     init(
         arguments: [String] = ProcessInfo.processInfo.arguments,
@@ -119,12 +147,16 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
         let process = Process()
         process.executableURL = launchPlan.binaryURL
-        process.arguments = [
+        var processArguments: [String] = [
             "web",
             "--host", Self.managedBackendBindHost,
             "--port", "\(launchPlan.port)",
-            "--session-token", launchPlan.sessionToken,
         ]
+        for token in launchPlan.sessionTokens {
+            processArguments.append("--session-token")
+            processArguments.append(token)
+        }
+        process.arguments = processArguments
         process.environment = environment
         process.terminationHandler = { [weak self] terminatedProcess in
             Task { @MainActor [weak self] in
@@ -137,6 +169,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             self.process = process
             endpoint = launchPlan.endpoint
             lanEndpoint = launchPlan.lanEndpoint
+            sessionToken = launchPlan.localSessionToken
+            lastAppliedSessionTokens = Set(launchPlan.sessionTokens)
             launchState = .running
             Self.logger.info(
                 "Managed backend started from \(launchPlan.binaryURL.path, privacy: .public) on \(launchPlan.endpoint, privacy: .public)"
@@ -146,6 +180,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             endpoint = SessionMirrorStore.defaultEndpoint
             lanEndpoint = nil
             sessionToken = nil
+            lastAppliedSessionTokens = []
             launchState = .failed("Failed to start managed backend: \(error.localizedDescription)")
             Self.logger.error("Failed to start managed backend: \(error.localizedDescription, privacy: .public)")
         }
@@ -164,6 +199,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             process.terminate()
         }
         self.process = nil
+        lastAppliedSessionTokens = []
         launchState = .idle
     }
 
@@ -184,6 +220,96 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         stop()
         refreshLaunchPlan()
         startIfNeeded()
+    }
+
+    func setCompanionPairingEntries(_ entries: [CompanionPairingEntry]) {
+        let normalized = Self.normalizeCompanionPairingEntries(entries)
+        guard normalized != companionPairingEntries else {
+            return
+        }
+
+        companionPairingEntries = normalized
+        reconfigureCompanionSessionTokensIfNeeded()
+    }
+
+    func createCompanionPairing(label: String?) {
+        let trimmedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let pairing = CompanionPairingEntry(
+            id: UUID().uuidString.lowercased(),
+            label: trimmedLabel,
+            sessionToken: Self.generateCompanionSessionToken(),
+            createdAtUnixMs: Self.nowUnixMs(),
+            revokedAtUnixMs: nil
+        )
+
+        var updatedEntries = companionPairingEntries
+        updatedEntries.append(pairing)
+        setCompanionPairingEntries(updatedEntries)
+    }
+
+    func revokeCompanionPairing(id: String) {
+        let nowUnixMs = Self.nowUnixMs()
+        let updatedEntries = companionPairingEntries.map { entry -> CompanionPairingEntry in
+            guard entry.id == id else {
+                return entry
+            }
+
+            var revoked = entry
+            revoked.revokedAtUnixMs = revoked.revokedAtUnixMs ?? nowUnixMs
+            return revoked
+        }
+        setCompanionPairingEntries(updatedEntries)
+    }
+
+    func restoreCompanionPairing(id: String) {
+        let updatedEntries = companionPairingEntries.map { entry -> CompanionPairingEntry in
+            guard entry.id == id else {
+                return entry
+            }
+
+            var restored = entry
+            restored.revokedAtUnixMs = nil
+            return restored
+        }
+        setCompanionPairingEntries(updatedEntries)
+    }
+
+    func deleteCompanionPairing(id: String) {
+        let updatedEntries = companionPairingEntries.filter { $0.id != id }
+        setCompanionPairingEntries(updatedEntries)
+    }
+
+    private func reconfigureCompanionSessionTokensIfNeeded() {
+        if isDisabled {
+            return
+        }
+
+        let desiredTokens = Set(activeCompanionSessionTokens())
+        if desiredTokens == lastAppliedSessionTokens,
+           launchPlan != nil {
+            return
+        }
+
+        if process != nil {
+            stop()
+            refreshLaunchPlan()
+            startIfNeeded()
+            return
+        }
+
+        refreshLaunchPlan()
+    }
+
+    private func activeCompanionSessionTokens() -> [String] {
+        var tokens: [String] = [managedSessionToken]
+        for entry in companionPairingEntries where !entry.isRevoked {
+            let trimmedToken = entry.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedToken.isEmpty {
+                continue
+            }
+            tokens.append(trimmedToken)
+        }
+        return Self.normalizeCompanionSessionTokens(tokens)
     }
 
     private var isDisabled: Bool {
@@ -225,13 +351,14 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         let launchPlan = LaunchPlan(
             binaryURL: binaryURL,
             port: port,
-            sessionToken: managedSessionToken,
+            localSessionToken: managedSessionToken,
+            sessionTokens: activeCompanionSessionTokens(),
             lanEndpoint: Self.resolveLANEndpoint(port: port)
         )
         self.launchPlan = launchPlan
         endpoint = launchPlan.endpoint
         lanEndpoint = launchPlan.lanEndpoint
-        sessionToken = launchPlan.sessionToken
+        sessionToken = launchPlan.localSessionToken
         if case .failed = launchState {
             launchState = .idle
         }
@@ -313,6 +440,65 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
     nonisolated static func generateCompanionSessionToken() -> String {
         return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    nonisolated static func normalizeCompanionSessionTokens(_ tokens: [String]) -> [String] {
+        var normalized: [String] = []
+        var seen: Set<String> = []
+        for token in tokens {
+            let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedToken.isEmpty || seen.contains(trimmedToken) {
+                continue
+            }
+
+            seen.insert(trimmedToken)
+            normalized.append(trimmedToken)
+        }
+
+        return normalized
+    }
+
+    nonisolated static func normalizeCompanionPairingEntries(
+        _ entries: [CompanionPairingEntry]
+    ) -> [CompanionPairingEntry] {
+        var normalized: [CompanionPairingEntry] = []
+        var seenIDs: Set<String> = []
+
+        for entry in entries {
+            let normalizedID = entry.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedID.isEmpty || seenIDs.contains(normalizedID) {
+                continue
+            }
+
+            let normalizedToken = entry.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalizedToken.isEmpty {
+                continue
+            }
+
+            let normalizedLabel = entry.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            var normalizedEntry = entry
+            normalizedEntry = CompanionPairingEntry(
+                id: normalizedID,
+                label: normalizedLabel,
+                sessionToken: normalizedToken,
+                createdAtUnixMs: entry.createdAtUnixMs,
+                revokedAtUnixMs: entry.revokedAtUnixMs
+            )
+
+            seenIDs.insert(normalizedID)
+            normalized.append(normalizedEntry)
+        }
+
+        return normalized.sorted {
+            if $0.createdAtUnixMs == $1.createdAtUnixMs {
+                return $0.id < $1.id
+            }
+            return $0.createdAtUnixMs < $1.createdAtUnixMs
+        }
+    }
+
+    nonisolated static func nowUnixMs() -> UInt64 {
+        UInt64(Date().timeIntervalSince1970 * 1_000)
     }
 
     nonisolated static func resolveBinaryURL(
@@ -523,6 +709,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
 @main
 struct CodeNativeApp: App {
+    private static let companionPairingsDefaultsKey = "code_native_companion_pairings"
+
     @StateObject private var store: SessionMirrorStore
     @StateObject private var runtimeSupervisor: LocalBackendRuntimeSupervisor
     private let benchmarkFixturePath: String?
@@ -539,6 +727,7 @@ struct CodeNativeApp: App {
             arguments: arguments,
             environment: environment
         )
+        runtimeSupervisor.setCompanionPairingEntries(Self.loadCompanionPairingEntries())
         _runtimeSupervisor = StateObject(wrappedValue: runtimeSupervisor)
         _store = StateObject(
             wrappedValue: SessionMirrorStore(
@@ -553,9 +742,26 @@ struct CodeNativeApp: App {
         WindowGroup {
             ContentView(
                 store: store,
+                companionPairingEntries: runtimeSupervisor.companionPairingEntries,
                 canRotateCompanionToken: runtimeSupervisor.canRotateCompanionSessionToken,
                 rotateCompanionToken: {
                     runtimeSupervisor.rotateCompanionSessionToken()
+                    syncStoreFromRuntimeSupervisor()
+                },
+                createCompanionPairing: { label in
+                    runtimeSupervisor.createCompanionPairing(label: label)
+                    syncStoreFromRuntimeSupervisor()
+                },
+                revokeCompanionPairing: { pairingID in
+                    runtimeSupervisor.revokeCompanionPairing(id: pairingID)
+                    syncStoreFromRuntimeSupervisor()
+                },
+                restoreCompanionPairing: { pairingID in
+                    runtimeSupervisor.restoreCompanionPairing(id: pairingID)
+                    syncStoreFromRuntimeSupervisor()
+                },
+                deleteCompanionPairing: { pairingID in
+                    runtimeSupervisor.deleteCompanionPairing(id: pairingID)
                     syncStoreFromRuntimeSupervisor()
                 }
             )
@@ -577,6 +783,9 @@ struct CodeNativeApp: App {
                 }
                 .onReceive(runtimeSupervisor.$lanEndpoint) { _ in
                     syncStoreFromRuntimeSupervisor()
+                }
+                .onReceive(runtimeSupervisor.$companionPairingEntries) { entries in
+                    Self.saveCompanionPairingEntries(entries)
                 }
         }
     }
@@ -612,5 +821,27 @@ struct CodeNativeApp: App {
         }
         let fixturePath = arguments[valueIndex]
         return fixturePath.isEmpty ? nil : fixturePath
+    }
+
+    private static func loadCompanionPairingEntries() -> [CompanionPairingEntry] {
+        let raw = UserDefaults.standard.string(forKey: companionPairingsDefaultsKey) ?? "[]"
+        guard let data = raw.data(using: .utf8),
+              let entries = try? JSONDecoder().decode([CompanionPairingEntry].self, from: data)
+        else {
+            return []
+        }
+
+        return LocalBackendRuntimeSupervisor.normalizeCompanionPairingEntries(entries)
+    }
+
+    private static func saveCompanionPairingEntries(_ entries: [CompanionPairingEntry]) {
+        let normalized = LocalBackendRuntimeSupervisor.normalizeCompanionPairingEntries(entries)
+        guard let data = try? JSONEncoder().encode(normalized),
+              let raw = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+
+        UserDefaults.standard.set(raw, forKey: companionPairingsDefaultsKey)
     }
 }

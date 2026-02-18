@@ -373,9 +373,10 @@ Legend:
 - Progress: in progress. Managed runtime now requires a companion bearer token
   on websocket attach (`code web --session-token` + native
   `Authorization: Bearer <token>` wiring). Unauthorized clients are rejected
-  with `401` before session attach. Native settings now surface a LAN endpoint
-  and import/export pairing code (`ecccompanion://pair?...`) for bootstrap;
-  device-key QR pairing remains pending.
+  with `401` before session attach. Native settings now surface a LAN endpoint,
+  per-device pairing registry, and import/export pairing code
+  (`ecccompanion://pair?...`) with QR previews for bootstrap; device-key QR
+  scanning remains pending.
 
 ## PAR-027
 
@@ -392,9 +393,10 @@ Legend:
   messaging are enforced with no insecure fallback path.
 - Validation gate: auth regression tests + negative-connect scenarios.
 - Progress: in progress. Session-token enforcement is now active for managed
-  websocket clients and auth failures are explicit (`401`). Native settings
-  now support manual token rotation (runtime restart + new pairing code), but
-  explicit device-level revocation and expiry enforcement remain pending.
+  websocket clients and auth failures are explicit (`401`). Companion runtime
+  now maintains a per-device token set and supports explicit per-device
+  revoke/restore/delete controls plus global token rotation; token expiry is
+  still pending.
 
 ## PAR-029
 

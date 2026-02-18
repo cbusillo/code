@@ -26,6 +26,58 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
         XCTAssertTrue(supervisor.canRotateCompanionSessionToken)
     }
 
+    func testNormalizeCompanionSessionTokensRemovesDuplicatesAndWhitespace() {
+        XCTAssertEqual(
+            LocalBackendRuntimeSupervisor.normalizeCompanionSessionTokens([
+                " token-a ",
+                "",
+                "token-b",
+                "token-a",
+                "   ",
+            ]),
+            ["token-a", "token-b"]
+        )
+    }
+
+    func testNormalizeCompanionPairingEntriesDropsInvalidAndSortsStable() {
+        let entries = [
+            CompanionPairingEntry(
+                id: "b-id",
+                label: " Tablet ",
+                sessionToken: " token-b ",
+                createdAtUnixMs: 20,
+                revokedAtUnixMs: nil
+            ),
+            CompanionPairingEntry(
+                id: "",
+                label: "Invalid",
+                sessionToken: "token-invalid",
+                createdAtUnixMs: 10,
+                revokedAtUnixMs: nil
+            ),
+            CompanionPairingEntry(
+                id: "a-id",
+                label: "Phone",
+                sessionToken: "token-a",
+                createdAtUnixMs: 10,
+                revokedAtUnixMs: nil
+            ),
+            CompanionPairingEntry(
+                id: "a-id",
+                label: "Duplicate",
+                sessionToken: "token-dup",
+                createdAtUnixMs: 30,
+                revokedAtUnixMs: nil
+            ),
+        ]
+
+        let normalized = LocalBackendRuntimeSupervisor.normalizeCompanionPairingEntries(entries)
+
+        XCTAssertEqual(normalized.map(\.id), ["a-id", "b-id"])
+        XCTAssertEqual(normalized.map(\.sessionToken), ["token-a", "token-b"])
+        XCTAssertEqual(normalized.map(\.label), ["Phone", "Tablet"])
+    }
+
     func testShouldManageBackendDisabledForBenchmarkFixtureEnvironment() {
         XCTAssertFalse(
             LocalBackendRuntimeSupervisor.shouldManageBackend(

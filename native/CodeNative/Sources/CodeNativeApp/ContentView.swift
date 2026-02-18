@@ -39,8 +39,13 @@ func requestInputShortcutDigit(questionIndex: Int, optionIndex: Int) -> String? 
 
 struct ContentView: View {
     @ObservedObject var store: SessionMirrorStore
+    let companionPairingEntries: [CompanionPairingEntry]
     let canRotateCompanionToken: Bool
     let rotateCompanionToken: (() -> Void)?
+    let createCompanionPairing: ((String?) -> Void)?
+    let revokeCompanionPairing: ((String) -> Void)?
+    let restoreCompanionPairing: ((String) -> Void)?
+    let deleteCompanionPairing: ((String) -> Void)?
     @Environment(\.openURL) private var openURL
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -48,12 +53,22 @@ struct ContentView: View {
 
     init(
         store: SessionMirrorStore,
+        companionPairingEntries: [CompanionPairingEntry] = [],
         canRotateCompanionToken: Bool = false,
-        rotateCompanionToken: (() -> Void)? = nil
+        rotateCompanionToken: (() -> Void)? = nil,
+        createCompanionPairing: ((String?) -> Void)? = nil,
+        revokeCompanionPairing: ((String) -> Void)? = nil,
+        restoreCompanionPairing: ((String) -> Void)? = nil,
+        deleteCompanionPairing: ((String) -> Void)? = nil
     ) {
         self.store = store
+        self.companionPairingEntries = companionPairingEntries
         self.canRotateCompanionToken = canRotateCompanionToken
         self.rotateCompanionToken = rotateCompanionToken
+        self.createCompanionPairing = createCompanionPairing
+        self.revokeCompanionPairing = revokeCompanionPairing
+        self.restoreCompanionPairing = restoreCompanionPairing
+        self.deleteCompanionPairing = deleteCompanionPairing
     }
 
     private static let shortDateFormatter: DateFormatter = {
@@ -804,8 +819,13 @@ struct ContentView: View {
     private var settingsSheetContent: some View {
         NativeSettingsView(
             store: store,
+            companionPairingEntries: companionPairingEntries,
             canRotateCompanionToken: canRotateCompanionToken,
             rotateCompanionToken: rotateCompanionToken,
+            createCompanionPairing: createCompanionPairing,
+            revokeCompanionPairing: revokeCompanionPairing,
+            restoreCompanionPairing: restoreCompanionPairing,
+            deleteCompanionPairing: deleteCompanionPairing,
             autoSpeakAssistant: $autoSpeakAssistant,
             autoSubmitVoice: $autoSubmitVoice,
             themeModeRaw: $themeModeRaw,
@@ -8875,8 +8895,13 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
 
 private struct NativeSettingsView: View {
     @ObservedObject var store: SessionMirrorStore
+    let companionPairingEntries: [CompanionPairingEntry]
     let canRotateCompanionToken: Bool
     let rotateCompanionToken: (() -> Void)?
+    let createCompanionPairing: ((String?) -> Void)?
+    let revokeCompanionPairing: ((String) -> Void)?
+    let restoreCompanionPairing: ((String) -> Void)?
+    let deleteCompanionPairing: ((String) -> Void)?
     @Binding var autoSpeakAssistant: Bool
     @Binding var autoSubmitVoice: Bool
     @Binding var themeModeRaw: String
@@ -8903,6 +8928,7 @@ private struct NativeSettingsView: View {
 
     @State private var selectedCategory: SettingsCategory = .general
     @State private var pairingCodeImportText = ""
+    @State private var newPairingLabel = ""
 
     private let modelOptions = WorkflowSettings.modelOptions
     private let reasoningOptions = WorkflowSettings.reasoningOptions
@@ -8959,6 +8985,32 @@ private struct NativeSettingsView: View {
         #else
         return false
         #endif
+    }
+
+    private var pairingCodeEndpoint: String? {
+        if let companionLANEndpoint = store.companionLANEndpoint {
+            let trimmedLANEndpoint = companionLANEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLANEndpoint.isEmpty {
+                return trimmedLANEndpoint
+            }
+        }
+
+        let trimmedEndpoint = store.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedEndpoint.isEmpty {
+            return nil
+        }
+        return trimmedEndpoint
+    }
+
+    private func pairingCode(for entry: CompanionPairingEntry) -> String? {
+        guard let pairingCodeEndpoint else {
+            return nil
+        }
+
+        return SessionMirrorStore.buildCompanionPairingCode(
+            endpoint: pairingCodeEndpoint,
+            token: entry.sessionToken
+        )
     }
 
     @ViewBuilder
@@ -9225,7 +9277,88 @@ private struct NativeSettingsView: View {
                 }
             }
 
-            SettingsRow(title: "Pairing code", description: "Copy this code to bootstrap a remote iOS/iPadOS companion.") {
+            SettingsRow(title: "Create pairing", description: "Mint a device-specific token and pairing code.") {
+                HStack(spacing: 8) {
+                    TextField("Device label (optional)", text: $newPairingLabel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: isCompactSettingsLayout ? nil : 260)
+
+                    Button("Create") {
+                        createCompanionPairing?(newPairingLabel)
+                        newPairingLabel = ""
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(createCompanionPairing == nil)
+                }
+            }
+
+            SettingsRow(title: "Paired devices", description: "Revoke or delete individual devices without rotating every token.") {
+                if companionPairingEntries.isEmpty {
+                    Text("No device-specific pairings yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(companionPairingEntries) { pairing in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 8) {
+                                    Text(pairing.displayLabel)
+                                        .font(.subheadline.weight(.semibold))
+
+                                    if pairing.isRevoked {
+                                        Text("Revoked")
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.red)
+                                    } else {
+                                        Text("Active")
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.green)
+                                    }
+                                }
+
+                                HStack(spacing: 8) {
+                                    if pairing.isRevoked {
+                                        Button("Restore") {
+                                            restoreCompanionPairing?(pairing.id)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .disabled(restoreCompanionPairing == nil)
+                                    } else {
+                                        Button("Revoke") {
+                                            revokeCompanionPairing?(pairing.id)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .disabled(revokeCompanionPairing == nil)
+                                    }
+
+                                    Button("Delete") {
+                                        deleteCompanionPairing?(pairing.id)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(deleteCompanionPairing == nil)
+                                }
+
+                                if !pairing.isRevoked,
+                                   let pairingCode = pairingCode(for: pairing) {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text(pairingCode)
+                                            .font(.caption.monospaced())
+                                            .textSelection(.enabled)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        PairingQRCodeView(payload: pairingCode, sideLength: 92)
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+            }
+
+            SettingsRow(title: "Local pairing code", description: "Fallback pairing code tied to the local companion token.") {
                 Group {
                     if let companionPairingCode = store.companionPairingCode {
                         HStack(alignment: .top, spacing: 12) {
