@@ -29,6 +29,27 @@ The target now bundles a managed backend binary into
 loopback port. If you need an explicit binary, set
 `CODE_NATIVE_BACKEND_BINARY` in the scheme environment.
 
+## Optional CLI shims
+
+Install `ecc` (and optionally `code`) wrappers that execute the bundled backend:
+
+```bash
+scripts/install-ecc-shims.sh
+```
+
+Also install `code` shim (opt-in):
+
+```bash
+scripts/install-ecc-shims.sh --install-code
+```
+
+Run compatibility smoke checks for core CLI flows:
+
+```bash
+scripts/cli-compat-smoke.sh --code ~/.local/bin/ecc
+scripts/cli-compat-smoke.sh --code ~/.local/bin/code --ecc ~/.local/bin/ecc
+```
+
 ## TestFlight workflow
 
 Use `.github/workflows/native-macos-testflight.yml` to archive, export, and

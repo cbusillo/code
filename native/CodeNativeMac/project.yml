@@ -50,6 +50,7 @@ targets:
           destination_dir="${TARGET_BUILD_DIR}/"
           destination_dir+="${UNLOCALIZED_RESOURCES_FOLDER_PATH}/backend"
           destination_path="${destination_dir}/code"
+          ecc_path="${destination_dir}/ecc"
           source_path="${CODE_NATIVE_BACKEND_BINARY:-}"
 
           if [ -n "${source_path}" ] \
@@ -97,4 +98,10 @@ targets:
           mkdir -p "${destination_dir}"
           cp "${source_path}" "${destination_path}"
           chmod 755 "${destination_path}"
+          cat > "${ecc_path}" <<'EOF'
+          #!/bin/sh
+          script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+          exec "${script_dir}/code" "$@"
+          EOF
+          chmod 755 "${ecc_path}"
           echo "Bundled managed backend from ${source_path}"
