@@ -184,12 +184,21 @@ jobs:
             <string>export</string>
             <key>method</key>
             <string>app-store-connect</string>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>installerSigningCertificate</key>
+            <string>3rd Party Mac Developer Installer</string>
             <key>signingStyle</key>
             <string>manual</string>
             <key>stripSwiftSymbols</key>
             <true/>
             <key>teamID</key>
             <string>${APPLE_TEAM_ID}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${MACOS_APPSTORE_PROFILE_NAME}</string>
+            </dict>
           </dict>
           </plist>
           EOF
