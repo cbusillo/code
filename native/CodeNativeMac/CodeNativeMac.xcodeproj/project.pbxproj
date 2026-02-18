@@ -297,18 +297,20 @@
 		};
 		94321858B04E030DB0D876B9 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
-				INFOPLIST_KEY_CFBundleIconName = AppIcon;
-				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
-				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
+				buildSettings = {
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					CODE_SIGN_ENTITLEMENTS = CodeNativeMac/CodeNativeMac.entitlements;
+					COMBINE_HIDPI_IMAGES = YES;
+					CURRENT_PROJECT_VERSION = 1;
+					GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
+					INFOPLIST_KEY_CFBundleIconName = AppIcon;
+					INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+					INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+					INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+					INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+					INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
+					INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -323,18 +325,20 @@
 		};
 		D70FBA505CC24587B0106E57 /* Release */ = {
 			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
-				INFOPLIST_KEY_CFBundleIconName = AppIcon;
-				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
-				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
+				buildSettings = {
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					CODE_SIGN_ENTITLEMENTS = CodeNativeMac/CodeNativeMac.entitlements;
+					COMBINE_HIDPI_IMAGES = YES;
+					CURRENT_PROJECT_VERSION = 1;
+					GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_KEY_CFBundleDisplayName = "Every Code Companion";
+					INFOPLIST_KEY_CFBundleIconName = AppIcon;
+					INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+					INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+					INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+					INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+					INFOPLIST_KEY_NSMicrophoneUsageDescription = "Voice capture sends your speech to on-device recognition.";
+					INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Speech recognition converts your voice into prompt text.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

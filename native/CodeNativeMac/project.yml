@@ -24,10 +24,12 @@ targets:
         INFOPLIST_KEY_CFBundleShortVersionString: $(MARKETING_VERSION)
         INFOPLIST_KEY_CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSMicrophoneUsageDescription: >-
           Voice capture sends your speech to on-device recognition.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: >-
           Speech recognition converts your voice into prompt text.
+        CODE_SIGN_ENTITLEMENTS: CodeNativeMac/CodeNativeMac.entitlements
         SUPPORTS_MACCATALYST: false
     sources:
       - path: ../CodeNative/Sources/CodeNativeApp
