@@ -70,6 +70,10 @@ jobs:
         env:
           IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          MACOS_INSTALLER_CERT_P12_BASE64:
+            ${{ secrets.MACOS_INSTALLER_CERT_P12_BASE64 }}
+          MACOS_INSTALLER_CERT_PASSWORD:
+            ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
           MACOS_APPSTORE_PROFILE_BASE64:
             ${{ secrets.MACOS_APPSTORE_PROFILE_BASE64 }}
           MACOS_APPSTORE_PROFILE_NAME:
@@ -107,6 +111,13 @@ jobs:
           p12-file-base64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
 
+      - name: Import Mac Installer certificate
+        if: ${{ secrets.MACOS_INSTALLER_CERT_P12_BASE64 != '' }}
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_INSTALLER_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
+
       - name: Verify installer certificate availability
         run: |
           set -euo pipefail
@@ -116,9 +127,9 @@ jobs:
             >/dev/null 2>&1; then
             echo "Missing Mac Installer Distribution certificate" \
               "in keychain." >&2
-            echo "Export a .p12 containing that certificate/private key and" >&2
-            echo "store it in IOS_DIST_CERT_P12_BASE64, or include it in" >&2
-            echo "the existing distribution .p12, before rerunning." >&2
+            echo "Provide MACOS_INSTALLER_CERT_P12_BASE64/" >&2
+            echo "MACOS_INSTALLER_CERT_PASSWORD, or include installer cert" >&2
+            echo "in IOS_DIST_CERT_P12_BASE64 before rerunning." >&2
             exit 1
           fi
 
