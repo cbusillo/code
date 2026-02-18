@@ -33,10 +33,10 @@ jobs:
       BUNDLE_ID: com.shinycomputers.everycodecompanion
       SCHEME: CodeNativeiOSDemo
       XCODE_PROJECT: native/CodeNativeiOS/CodeNativeiOSDemo.xcodeproj
-      ARCHIVE_PATH: ${{ runner.temp }}/EveryCodeCompanion.xcarchive
-      EXPORT_PATH: ${{ runner.temp }}/every-code-companion-export
-      EXPORT_OPTIONS_PATH: ${{ runner.temp }}/ExportOptions.plist
-      PROFILE_PATH: ${{ runner.temp }}/every-code-companion.mobileprovision
+      ARCHIVE_PATH: /tmp/ecc-ios/EveryCodeCompanion.xcarchive
+      EXPORT_PATH: /tmp/ecc-ios/export
+      EXPORT_OPTIONS_PATH: /tmp/ecc-ios/ExportOptions.plist
+      PROFILE_PATH: /tmp/ecc-ios/every-code-companion.mobileprovision
     steps:
       - name: Resolve checkout ref
         id: resolve_ref
@@ -48,6 +48,12 @@ jobs:
             ref="${{ github.event.inputs.git_ref }}"
           fi
           echo "value=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare build directories
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ARCHIVE_PATH")"
+          mkdir -p "$EXPORT_PATH"
 
       - name: Checkout
         uses: actions/checkout@v4
