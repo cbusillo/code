@@ -1,4 +1,6 @@
 import SwiftUI
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 #if os(macOS)
 import AppKit
@@ -4768,6 +4770,60 @@ private struct VoiceStatusBadge: View {
     }
 }
 
+private struct PairingQRCodeView: View {
+    let payload: String
+    let sideLength: CGFloat
+
+    var body: some View {
+        if let qrImage {
+            qrImage
+                .resizable()
+                .interpolation(.none)
+                .scaledToFit()
+                .frame(width: sideLength, height: sideLength)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                )
+        } else {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(width: sideLength, height: sideLength)
+                .overlay {
+                    Text("QR unavailable")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+        }
+    }
+
+    private var qrImage: Image? {
+        let context = CIContext()
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(payload.utf8)
+        filter.correctionLevel = "M"
+
+        guard let outputImage = filter.outputImage else {
+            return nil
+        }
+
+        let scaled = outputImage.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else {
+            return nil
+        }
+
+        #if os(macOS)
+        let size = NSSize(width: cgImage.width, height: cgImage.height)
+        let nsImage = NSImage(cgImage: cgImage, size: size)
+        return Image(nsImage: nsImage)
+        #else
+        let uiImage = UIImage(cgImage: cgImage)
+        return Image(uiImage: uiImage)
+        #endif
+    }
+}
+
 private struct ConnectionPopover: View {
     @ObservedObject var store: SessionMirrorStore
     @State private var pairingCodeInput = ""
@@ -4807,6 +4863,9 @@ private struct ConnectionPopover: View {
                         .foregroundStyle(.primary)
                         .accessibilityIdentifier("connection.pairing-code")
                 }
+
+                PairingQRCodeView(payload: companionPairingCode, sideLength: 128)
+                    .accessibilityIdentifier("connection.pairing-qr")
             }
 
             HStack(spacing: 8) {
@@ -9169,10 +9228,14 @@ private struct NativeSettingsView: View {
             SettingsRow(title: "Pairing code", description: "Copy this code to bootstrap a remote iOS/iPadOS companion.") {
                 Group {
                     if let companionPairingCode = store.companionPairingCode {
-                        Text(companionPairingCode)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(alignment: .top, spacing: 12) {
+                            Text(companionPairingCode)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            PairingQRCodeView(payload: companionPairingCode, sideLength: 104)
+                        }
                     } else {
                         Text("Pairing code unavailable until endpoint and token are set.")
                             .font(.caption)
