@@ -202,6 +202,10 @@ struct WebCommand {
     /// Open browser after server starts.
     #[arg(long = "open", default_value_t = false)]
     open: bool,
+
+    /// Require websocket clients to provide this bearer token.
+    #[arg(long = "session-token")]
+    session_token: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -513,10 +517,14 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
             code_app_server::run_main(code_linux_sandbox_exe, root_config_overrides).await?;
         }
         Some(Subcommand::Web(web)) => {
+            let session_token = web
+                .session_token
+                .or_else(|| std::env::var("CODE_NATIVE_COMPANION_TOKEN").ok());
             let options = WebServerOptions {
                 host: web.host,
                 port: web.port,
                 open_browser: web.open,
+                session_token,
             };
             code_app_server::run_web_main(code_linux_sandbox_exe, root_config_overrides, options)
                 .await?;

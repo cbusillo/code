@@ -107,4 +107,17 @@ final class LocalBackendRuntimeSupervisorTests: XCTestCase {
         XCTAssertNotNil(port)
         XCTAssertGreaterThan(port ?? 0, 0)
     }
+
+    func testResolveCompanionSessionTokenUsesConfiguredValue() {
+        let token = LocalBackendRuntimeSupervisor.resolveCompanionSessionToken(
+            environment: ["CODE_NATIVE_COMPANION_TOKEN": "paired-token"]
+        )
+        XCTAssertEqual(token, "paired-token")
+    }
+
+    func testResolveCompanionSessionTokenGeneratesFallback() {
+        let token = LocalBackendRuntimeSupervisor.resolveCompanionSessionToken(environment: [:])
+        XCTAssertNotNil(token)
+        XCTAssertGreaterThan(token?.count ?? 0, 20)
+    }
 }

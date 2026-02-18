@@ -13,9 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::Router;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::AUTHORIZATION;
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::DateTime;
@@ -57,6 +61,7 @@ pub struct WebServerOptions {
     pub host: String,
     pub port: u16,
     pub open_browser: bool,
+    pub session_token: Option<String>,
 }
 
 impl Default for WebServerOptions {
@@ -65,6 +70,7 @@ impl Default for WebServerOptions {
             host: "127.0.0.1".to_string(),
             port: 4317,
             open_browser: false,
+            session_token: None,
         }
     }
 }
@@ -72,6 +78,12 @@ impl Default for WebServerOptions {
 #[derive(Clone)]
 struct AppState {
     hub: Arc<SessionHub>,
+    session_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WsAuthQuery {
+    token: Option<String>,
 }
 
 pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions) -> IoResult<()> {
@@ -92,7 +104,10 @@ pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions)
     );
     let conversation_manager = Arc::new(ConversationManager::new(auth_manager, SessionSource::Mcp));
     let hub = Arc::new(SessionHub::new(base_config, conversation_manager));
-    let state = AppState { hub };
+    let state = AppState {
+        hub,
+        session_token: options.session_token,
+    };
 
     let app = Router::new()
         .route("/", get(index))
@@ -129,7 +144,17 @@ async fn list_sessions(State(state): State<AppState>) -> Json<Vec<SessionSummary
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WsAuthQuery>,
 ) -> impl IntoResponse {
+    if !ws_client_authorized(
+        state.session_token.as_deref(),
+        headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()),
+        query.token.as_deref(),
+    ) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -1930,6 +1955,43 @@ fn host_is_loopback(host: &str) -> bool {
     }
 }
 
+fn ws_client_authorized(
+    required_token: Option<&str>,
+    authorization_header: Option<&str>,
+    query_token: Option<&str>,
+) -> bool {
+    let Some(required_token) = required_token else {
+        return true;
+    };
+
+    if let Some(header_value) = authorization_header {
+        if let Some(parsed_header_token) = parse_bearer_header(header_value) {
+            if parsed_header_token == required_token {
+                return true;
+            }
+        }
+    }
+
+    match query_token {
+        Some(token) => token == required_token,
+        None => false,
+    }
+}
+
+fn parse_bearer_header(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1939,6 +2001,46 @@ mod tests {
     use std::time::Duration;
 
     use tokio::time::timeout;
+
+    #[test]
+    fn ws_client_authorized_without_token_requirement() {
+        assert!(ws_client_authorized(None, None, None));
+    }
+
+    #[test]
+    fn ws_client_authorized_accepts_bearer_header() {
+        assert!(ws_client_authorized(
+            Some("token-123"),
+            Some("Bearer token-123"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn ws_client_authorized_accepts_query_fallback() {
+        assert!(ws_client_authorized(
+            Some("token-123"),
+            Some("Bearer wrong"),
+            Some("token-123"),
+        ));
+    }
+
+    #[test]
+    fn ws_client_authorized_rejects_mismatch() {
+        assert!(!ws_client_authorized(
+            Some("token-123"),
+            Some("Bearer wrong"),
+            Some("other"),
+        ));
+    }
+
+    #[test]
+    fn parse_bearer_header_rejects_invalid_values() {
+        assert_eq!(parse_bearer_header(""), None);
+        assert_eq!(parse_bearer_header("Token abc"), None);
+        assert_eq!(parse_bearer_header("Bearer"), None);
+        assert_eq!(parse_bearer_header("Bearer    "), None);
+    }
 
     fn make_system_item(seq: u64) -> SessionStreamItem {
         SessionStreamItem::System {

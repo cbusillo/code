@@ -93,6 +93,7 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var transportFailureCount: UInt64 = 0
     @Published private(set) var lastTransportFailureAt: Date?
+    var companionSessionToken: String?
 
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -127,8 +128,12 @@ final class SessionMirrorStore: ObservableObject {
         return encoder
     }()
 
-    init(initialEndpoint: String = SessionMirrorStore.defaultEndpoint) {
+    init(
+        initialEndpoint: String = SessionMirrorStore.defaultEndpoint,
+        companionSessionToken: String? = nil
+    ) {
         endpoint = initialEndpoint
+        self.companionSessionToken = companionSessionToken
     }
 
     var selectedSession: SessionSummary? {
@@ -231,7 +236,13 @@ final class SessionMirrorStore: ObservableObject {
         catalogRefreshTask?.cancel()
         catalogRefreshTask = nil
 
-        let task = URLSession.shared.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        if let companionSessionToken,
+           !companionSessionToken.isEmpty {
+            request.setValue("Bearer \(companionSessionToken)", forHTTPHeaderField: "Authorization")
+        }
+
+        let task = URLSession.shared.webSocketTask(with: request)
         task.maximumMessageSize = 8_000_000
         task.resume()
 

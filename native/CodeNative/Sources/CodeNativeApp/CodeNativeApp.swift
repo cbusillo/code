@@ -8,6 +8,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     struct LaunchPlan: Equatable {
         let binaryURL: URL
         let port: UInt16
+        let sessionToken: String
 
         var endpoint: String {
             "ws://127.0.0.1:\(port)/ws"
@@ -25,12 +26,14 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private static let logger = Logger(subsystem: "com.every.code.native", category: "managed-runtime")
     nonisolated private static let managedBackendDisableEnv = "CODE_NATIVE_DISABLE_MANAGED_BACKEND"
     nonisolated private static let managedBackendBinaryEnv = "CODE_NATIVE_BACKEND_BINARY"
+    nonisolated private static let companionSessionTokenEnv = "CODE_NATIVE_COMPANION_TOKEN"
     nonisolated private static let managedBackendHost = "127.0.0.1"
     private static let restartDelayNanoseconds: UInt64 = 1_000_000_000
     private static let crashLoopWindowSeconds: TimeInterval = 30
     private static let crashLoopFailureLimit = 3
 
     @Published private(set) var endpoint: String?
+    @Published private(set) var sessionToken: String?
     @Published private(set) var launchState: LaunchState = .idle
     @Published private(set) var restartCount: UInt64 = 0
 
@@ -41,6 +44,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private let bundleResourceURL: URL?
     private let fileManager: FileManager
     private let now: () -> Date
+    private let managedSessionToken: String?
 
     private var launchPlan: LaunchPlan?
     private var process: Process?
@@ -64,8 +68,10 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         self.bundleResourceURL = bundleResourceURL
         self.fileManager = fileManager
         self.now = now
+        self.managedSessionToken = Self.resolveCompanionSessionToken(environment: environment)
 
         guard Self.shouldManageBackend(arguments: arguments, environment: environment) else {
+            sessionToken = nil
             launchState = .disabled("Managed runtime disabled for benchmark/explicit override")
             return
         }
@@ -110,6 +116,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             "web",
             "--host", Self.managedBackendHost,
             "--port", "\(launchPlan.port)",
+            "--session-token", launchPlan.sessionToken,
         ]
         process.environment = environment
         process.terminationHandler = { [weak self] terminatedProcess in
@@ -129,6 +136,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         } catch {
             self.process = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            sessionToken = nil
             launchState = .failed("Failed to start managed backend: \(error.localizedDescription)")
             Self.logger.error("Failed to start managed backend: \(error.localizedDescription, privacy: .public)")
         }
@@ -167,6 +175,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         ) else {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            sessionToken = nil
             launchState = .failed(
                 "Managed runtime unavailable: no launchable code binary found. Set CODE_NATIVE_BACKEND_BINARY to override."
             )
@@ -174,17 +183,28 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             return
         }
 
+        guard let managedSessionToken else {
+            launchPlan = nil
+            endpoint = SessionMirrorStore.defaultEndpoint
+            sessionToken = nil
+            launchState = .failed("Managed runtime unavailable: companion session token not configured.")
+            Self.logger.error("Managed runtime unavailable: companion session token not configured")
+            return
+        }
+
         guard let port = Self.reserveLoopbackPort() else {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            sessionToken = nil
             launchState = .failed("Managed runtime unavailable: failed to reserve local port.")
             Self.logger.error("Managed runtime unavailable: failed to reserve local port")
             return
         }
 
-        let launchPlan = LaunchPlan(binaryURL: binaryURL, port: port)
+        let launchPlan = LaunchPlan(binaryURL: binaryURL, port: port, sessionToken: managedSessionToken)
         self.launchPlan = launchPlan
         endpoint = launchPlan.endpoint
+        sessionToken = launchPlan.sessionToken
         if case .failed = launchState {
             launchState = .idle
         }
@@ -214,6 +234,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
         if unexpectedTerminationDates.count >= Self.crashLoopFailureLimit {
             endpoint = SessionMirrorStore.defaultEndpoint
+            sessionToken = nil
             launchState = .failed("Managed backend stopped repeatedly; restart suppressed.")
             return
         }
@@ -246,6 +267,16 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
 
         return true
+    }
+
+    nonisolated static func resolveCompanionSessionToken(environment: [String: String]) -> String? {
+        if let configuredToken = environment[Self.companionSessionTokenEnv]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           configuredToken.isEmpty == false {
+            return configuredToken
+        }
+
+        return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
     nonisolated static func resolveBinaryURL(
@@ -417,7 +448,8 @@ struct CodeNativeApp: App {
         _runtimeSupervisor = StateObject(wrappedValue: runtimeSupervisor)
         _store = StateObject(
             wrappedValue: SessionMirrorStore(
-                initialEndpoint: runtimeSupervisor.endpoint ?? SessionMirrorStore.defaultEndpoint
+                initialEndpoint: runtimeSupervisor.endpoint ?? SessionMirrorStore.defaultEndpoint,
+                companionSessionToken: runtimeSupervisor.sessionToken
             )
         )
     }
@@ -436,6 +468,9 @@ struct CodeNativeApp: App {
                     if let endpoint = runtimeSupervisor.endpoint,
                        store.endpoint != endpoint {
                         store.endpoint = endpoint
+                    }
+                    if store.companionSessionToken != runtimeSupervisor.sessionToken {
+                        store.companionSessionToken = runtimeSupervisor.sessionToken
                     }
                 }
         }
