@@ -2,6 +2,17 @@ import XCTest
 @testable import CodeNativeApp
 
 final class SessionMirrorStoreTests: XCTestCase {
+    func testEndpointPolicyAllowsRemoteHostsWhenConfigured() {
+        let remoteEndpoint = URL(string: "wss://companion.example.com/ws")!
+
+        XCTAssertTrue(
+            SessionMirrorStore.endpointIsAllowed(remoteEndpoint, policy: .anyHost)
+        )
+        XCTAssertFalse(
+            SessionMirrorStore.endpointIsAllowed(remoteEndpoint, policy: .loopbackOnly)
+        )
+    }
+
     @MainActor
     func testConnectRejectsNonLoopbackEndpoint() async {
         let store = SessionMirrorStore()

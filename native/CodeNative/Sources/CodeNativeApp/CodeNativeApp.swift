@@ -9,9 +9,10 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         let binaryURL: URL
         let port: UInt16
         let sessionToken: String
+        let lanEndpoint: String?
 
         var endpoint: String {
-            "ws://127.0.0.1:\(port)/ws"
+            "ws://\(LocalBackendRuntimeSupervisor.managedBackendConnectHost):\(port)/ws"
         }
     }
 
@@ -27,13 +28,15 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     nonisolated private static let managedBackendDisableEnv = "CODE_NATIVE_DISABLE_MANAGED_BACKEND"
     nonisolated private static let managedBackendBinaryEnv = "CODE_NATIVE_BACKEND_BINARY"
     nonisolated private static let companionSessionTokenEnv = "CODE_NATIVE_COMPANION_TOKEN"
-    nonisolated private static let managedBackendHost = "127.0.0.1"
+    nonisolated private static let managedBackendBindHost = "0.0.0.0"
+    nonisolated private static let managedBackendConnectHost = "127.0.0.1"
     private static let restartDelayNanoseconds: UInt64 = 1_000_000_000
     private static let crashLoopWindowSeconds: TimeInterval = 30
     private static let crashLoopFailureLimit = 3
 
     @Published private(set) var endpoint: String?
     @Published private(set) var sessionToken: String?
+    @Published private(set) var lanEndpoint: String?
     @Published private(set) var launchState: LaunchState = .idle
     @Published private(set) var restartCount: UInt64 = 0
 
@@ -71,6 +74,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         self.managedSessionToken = Self.resolveCompanionSessionToken(environment: environment)
 
         guard Self.shouldManageBackend(arguments: arguments, environment: environment) else {
+            lanEndpoint = nil
             sessionToken = nil
             launchState = .disabled("Managed runtime disabled for benchmark/explicit override")
             return
@@ -114,7 +118,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         process.executableURL = launchPlan.binaryURL
         process.arguments = [
             "web",
-            "--host", Self.managedBackendHost,
+            "--host", Self.managedBackendBindHost,
             "--port", "\(launchPlan.port)",
             "--session-token", launchPlan.sessionToken,
         ]
@@ -129,6 +133,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             try process.run()
             self.process = process
             endpoint = launchPlan.endpoint
+            lanEndpoint = launchPlan.lanEndpoint
             launchState = .running
             Self.logger.info(
                 "Managed backend started from \(launchPlan.binaryURL.path, privacy: .public) on \(launchPlan.endpoint, privacy: .public)"
@@ -136,6 +141,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         } catch {
             self.process = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            lanEndpoint = nil
             sessionToken = nil
             launchState = .failed("Failed to start managed backend: \(error.localizedDescription)")
             Self.logger.error("Failed to start managed backend: \(error.localizedDescription, privacy: .public)")
@@ -175,6 +181,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         ) else {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            lanEndpoint = nil
             sessionToken = nil
             launchState = .failed(
                 "Managed runtime unavailable: no launchable code binary found. Set CODE_NATIVE_BACKEND_BINARY to override."
@@ -186,6 +193,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         guard let managedSessionToken else {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            lanEndpoint = nil
             sessionToken = nil
             launchState = .failed("Managed runtime unavailable: companion session token not configured.")
             Self.logger.error("Managed runtime unavailable: companion session token not configured")
@@ -195,15 +203,22 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         guard let port = Self.reserveLoopbackPort() else {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
+            lanEndpoint = nil
             sessionToken = nil
             launchState = .failed("Managed runtime unavailable: failed to reserve local port.")
             Self.logger.error("Managed runtime unavailable: failed to reserve local port")
             return
         }
 
-        let launchPlan = LaunchPlan(binaryURL: binaryURL, port: port, sessionToken: managedSessionToken)
+        let launchPlan = LaunchPlan(
+            binaryURL: binaryURL,
+            port: port,
+            sessionToken: managedSessionToken,
+            lanEndpoint: Self.resolveLANEndpoint(port: port)
+        )
         self.launchPlan = launchPlan
         endpoint = launchPlan.endpoint
+        lanEndpoint = launchPlan.lanEndpoint
         sessionToken = launchPlan.sessionToken
         if case .failed = launchState {
             launchState = .idle
@@ -234,6 +249,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
         if unexpectedTerminationDates.count >= Self.crashLoopFailureLimit {
             endpoint = SessionMirrorStore.defaultEndpoint
+            lanEndpoint = nil
             sessionToken = nil
             launchState = .failed("Managed backend stopped repeatedly; restart suppressed.")
             return
@@ -344,7 +360,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = in_port_t(0).bigEndian
-        address.sin_addr = in_addr(s_addr: inet_addr(Self.managedBackendHost))
+        address.sin_addr = in_addr(s_addr: inet_addr(Self.managedBackendBindHost))
 
         let bindResult = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -370,6 +386,64 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
         let port = UInt16(bigEndian: resolvedAddress.sin_port)
         return port == 0 ? nil : port
+    }
+
+    nonisolated static func resolveLANEndpoint(port: UInt16) -> String? {
+        guard let ipAddress = primaryLANIPv4Address() else {
+            return nil
+        }
+        return "ws://\(ipAddress):\(port)/ws"
+    }
+
+    nonisolated private static func primaryLANIPv4Address() -> String? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0,
+              let firstInterface = interfaces
+        else {
+            return nil
+        }
+        defer {
+            freeifaddrs(interfaces)
+        }
+
+        var pointer: UnsafeMutablePointer<ifaddrs>? = firstInterface
+        while let interface = pointer {
+            defer {
+                pointer = interface.pointee.ifa_next
+            }
+
+            let flags = Int32(interface.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0,
+                  (flags & IFF_LOOPBACK) == 0,
+                  let sockaddrPointer = interface.pointee.ifa_addr,
+                  sockaddrPointer.pointee.sa_family == sa_family_t(AF_INET)
+            else {
+                continue
+            }
+
+            var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                sockaddrPointer,
+                socklen_t(sockaddrPointer.pointee.sa_len),
+                &hostBuffer,
+                socklen_t(hostBuffer.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+
+            guard result == 0 else {
+                continue
+            }
+
+            let hostBytes = hostBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+            let ipAddress = String(decoding: hostBytes, as: UTF8.self)
+            if ipAddress.isEmpty == false {
+                return ipAddress
+            }
+        }
+
+        return nil
     }
 
     nonisolated private static func parseDisabledFlag(_ value: String?) -> Bool {
@@ -449,7 +523,8 @@ struct CodeNativeApp: App {
         _store = StateObject(
             wrappedValue: SessionMirrorStore(
                 initialEndpoint: runtimeSupervisor.endpoint ?? SessionMirrorStore.defaultEndpoint,
-                companionSessionToken: runtimeSupervisor.sessionToken
+                companionSessionToken: runtimeSupervisor.sessionToken,
+                companionLANEndpoint: runtimeSupervisor.lanEndpoint
             )
         )
     }
@@ -471,6 +546,9 @@ struct CodeNativeApp: App {
                     }
                     if store.companionSessionToken != runtimeSupervisor.sessionToken {
                         store.companionSessionToken = runtimeSupervisor.sessionToken
+                    }
+                    if store.companionLANEndpoint != runtimeSupervisor.lanEndpoint {
+                        store.companionLANEndpoint = runtimeSupervisor.lanEndpoint
                     }
                 }
         }

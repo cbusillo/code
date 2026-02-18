@@ -59,6 +59,29 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
+    enum EndpointAccessPolicy {
+        case loopbackOnly
+        case anyHost
+
+        var rejectionStatusLine: String {
+            switch self {
+            case .loopbackOnly:
+                return "Loopback endpoints only"
+            case .anyHost:
+                return "Unsupported endpoint"
+            }
+        }
+
+        var rejectionMessage: String {
+            switch self {
+            case .loopbackOnly:
+                return "Endpoint must use ws://localhost, ws://127.0.0.1, or ws://[::1]."
+            case .anyHost:
+                return "Endpoint must use ws:// or wss:// with a host name."
+            }
+        }
+    }
+
     @Published var endpoint: String
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var statusLine: String = "Disconnected"
@@ -93,7 +116,10 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var transportFailureCount: UInt64 = 0
     @Published private(set) var lastTransportFailureAt: Date?
-    var companionSessionToken: String?
+    @Published var companionSessionToken: String?
+    @Published var companionLANEndpoint: String?
+
+    let endpointAccessPolicy: EndpointAccessPolicy
 
     private var webSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -130,10 +156,14 @@ final class SessionMirrorStore: ObservableObject {
 
     init(
         initialEndpoint: String = SessionMirrorStore.defaultEndpoint,
-        companionSessionToken: String? = nil
+        companionSessionToken: String? = nil,
+        companionLANEndpoint: String? = nil,
+        endpointAccessPolicy: EndpointAccessPolicy = .loopbackOnly
     ) {
         endpoint = initialEndpoint
         self.companionSessionToken = companionSessionToken
+        self.companionLANEndpoint = companionLANEndpoint
+        self.endpointAccessPolicy = endpointAccessPolicy
     }
 
     var selectedSession: SessionSummary? {
@@ -221,9 +251,9 @@ final class SessionMirrorStore: ObservableObject {
             return
         }
 
-        guard endpointIsAllowed(url) else {
-            statusLine = "Loopback endpoints only"
-            lastError = "Endpoint must use ws://localhost, ws://127.0.0.1, or ws://[::1]."
+        guard Self.endpointIsAllowed(url, policy: endpointAccessPolicy) else {
+            statusLine = endpointAccessPolicy.rejectionStatusLine
+            lastError = endpointAccessPolicy.rejectionMessage
             return
         }
 
@@ -848,12 +878,23 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     private func endpointIsAllowed(_ url: URL) -> Bool {
+        Self.endpointIsAllowed(url, policy: endpointAccessPolicy)
+    }
+
+    nonisolated static func endpointIsAllowed(_ url: URL, policy: EndpointAccessPolicy) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "ws" || scheme == "wss" else {
             return false
         }
 
         guard let host = url.host?.lowercased() else {
             return false
+        }
+
+        switch policy {
+        case .anyHost:
+            return true
+        case .loopbackOnly:
+            break
         }
 
         return host == "localhost" || host == "127.0.0.1" || host == "::1"

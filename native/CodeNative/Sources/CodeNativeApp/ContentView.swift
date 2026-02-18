@@ -4757,6 +4757,16 @@ private struct VoiceStatusBadge: View {
 private struct ConnectionPopover: View {
     @ObservedObject var store: SessionMirrorStore
 
+    private var companionTokenBinding: Binding<String> {
+        Binding(
+            get: { store.companionSessionToken ?? "" },
+            set: { value in
+                let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                store.companionSessionToken = trimmedValue.isEmpty ? nil : trimmedValue
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Session Connection")
@@ -4765,6 +4775,25 @@ private struct ConnectionPopover: View {
             TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("connection.endpoint")
+
+            TextField("Bearer token", text: companionTokenBinding)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption.monospaced())
+                .accessibilityIdentifier("connection.token")
+
+            if let lanEndpoint = store.companionLANEndpoint,
+               !lanEndpoint.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("LAN companion endpoint")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(lanEndpoint)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .foregroundStyle(.primary)
+                        .accessibilityIdentifier("connection.lan-endpoint")
+                }
+            }
 
             HStack(spacing: 8) {
                 Button("Connect") {
@@ -9055,6 +9084,32 @@ private struct NativeSettingsView: View {
                 TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: isCompactSettingsLayout ? nil : 320)
+            }
+
+            SettingsRow(title: "Companion token", description: "Bearer token required by managed companion runtime.") {
+                TextField(
+                    "Bearer token",
+                    text: Binding(
+                        get: { store.companionSessionToken ?? "" },
+                        set: { value in
+                            let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                            store.companionSessionToken = trimmedValue.isEmpty ? nil : trimmedValue
+                        }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.caption.monospaced())
+                .frame(width: isCompactSettingsLayout ? nil : 320)
+            }
+
+            if let lanEndpoint = store.companionLANEndpoint,
+               !lanEndpoint.isEmpty {
+                SettingsRow(title: "LAN endpoint", description: "Share this endpoint with iOS/iPadOS clients on your local network.") {
+                    Text(lanEndpoint)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
             SettingsRow(title: "Connection status", description: "Current server status for this workspace.") {

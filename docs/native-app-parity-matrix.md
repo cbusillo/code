@@ -370,7 +370,11 @@ Legend:
 - Acceptance criteria: paired iOS/iPadOS devices authenticate via companion
   gateway and unpaired devices are rejected before session attach.
 - Validation gate: pairing/auth integration tests + deterministic benchmark.
-- Progress: not started (planned in M4-C).
+- Progress: in progress. Managed runtime now requires a companion bearer token
+  on websocket attach (`code web --session-token` + native
+  `Authorization: Bearer <token>` wiring). Unauthorized clients are rejected
+  with `401` before session attach. Current bootstrap is manual (token + LAN
+  endpoint surfaced in native settings); device-key QR pairing remains pending.
 
 ## PAR-027
 
@@ -386,7 +390,9 @@ Legend:
 - Acceptance criteria: short-lived tokens, revocation, and auth-failure
   messaging are enforced with no insecure fallback path.
 - Validation gate: auth regression tests + negative-connect scenarios.
-- Progress: not started (planned in M4-C/M4-D).
+- Progress: in progress. Session-token enforcement is now active for managed
+  websocket clients and auth failures are explicit (`401`). Token rotation,
+  revocation UX, and expiry enforcement remain pending.
 
 ## PAR-029
 

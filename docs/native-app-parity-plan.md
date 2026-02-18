@@ -435,3 +435,4 @@ Current Milestone 4 status:
 - [x] Milestone 4 execution started
 - [x] `M4-A` runtime host hardening complete
 - [x] `M4-B` TUI coexistence and compatibility complete
+- [ ] `M4-C` pairing/auth gateway in progress (token-gated ws + LAN bootstrap)
