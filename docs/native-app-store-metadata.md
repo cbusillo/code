@@ -65,7 +65,7 @@ Required line for App Store listing, in-app settings, and README:
 ## Submission Checklist
 
 - Confirm display name is `Every Code Companion`.
-- Confirm bundle identifier is `com.cbusillo.everycodecompanion`.
+- Confirm bundle identifier is `com.shinycomputers.everycodecompanion`.
 - Confirm legal attribution appears in settings and listing text.
 - Confirm screenshots match deterministic benchmark artifacts.
 - Confirm privacy/support URLs are set before submission.

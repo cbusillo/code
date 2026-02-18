@@ -30,7 +30,7 @@ jobs:
     runs-on: macos-15
     env:
       APPLE_TEAM_ID: MM5YXC7T6E
-      BUNDLE_ID: com.cbusillo.everycodecompanion
+      BUNDLE_ID: com.shinycomputers.everycodecompanion
       SCHEME: CodeNativeiOSDemo
       XCODE_PROJECT: native/CodeNativeiOS/CodeNativeiOSDemo.xcodeproj
       ARCHIVE_PATH: ${{ runner.temp }}/EveryCodeCompanion.xcarchive
