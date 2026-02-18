@@ -37,6 +37,7 @@ jobs:
       EXPORT_PATH: /tmp/ecc-ios/export
       EXPORT_OPTIONS_PATH: /tmp/ecc-ios/ExportOptions.plist
       PROFILE_PATH: /tmp/ecc-ios/every-code-companion.mobileprovision
+      BUILD_NUMBER: ${{ github.run_number }}
     steps:
       - name: Resolve checkout ref
         id: resolve_ref
@@ -168,6 +169,7 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             PROVISIONING_PROFILE_SPECIFIER="$IOS_APPSTORE_PROFILE_NAME" \
             clean archive
 
