@@ -253,6 +253,14 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="$MACOS_APPSTORE_PROFILE_NAME" \
             clean archive
 
+      - name: Run CLI compatibility smoke checks
+        run: |
+          set -euo pipefail
+          backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app/Contents/Resources/backend"
+          scripts/cli-compat-smoke.sh \
+            --code "$backend_dir/code" \
+            --ecc "$backend_dir/ecc"
+
       - name: Export package
         run: |
           set -euo pipefail

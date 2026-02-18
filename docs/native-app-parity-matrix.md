@@ -41,7 +41,7 @@ Legend:
 | PAR-022 | Session rail/grouping ergonomics at scale | Codex Mac | present | P1 | M2 |
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | present | P0 | M1 |
 | PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | present | P0 | M4 |
-| PAR-025 | TUI binary compatibility contract | Every Code TUI | partial | P0 | M4 |
+| PAR-025 | TUI binary compatibility contract | Every Code TUI | present | P0 | M4 |
 | PAR-026 | Companion pairing/auth gateway (iOS↔macOS) | Native companion | missing | P0 | M4 |
 | PAR-027 | iOS/iPadOS companion connection UX | Codex Mac-inspired | missing | P1 | M4 |
 | PAR-028 | Companion security hardening and revocation | Native security | missing | P0 | M4 |
@@ -359,9 +359,10 @@ Legend:
   (`Contents/Resources/backend/ecc`) and ships installable user shims via
   `scripts/install-ecc-shims.sh`. A deterministic CLI sweep now exists in
   `scripts/cli-compat-smoke.sh` and checks core surfaces (`--help`, `exec`,
-  `resume`, `web`, `mcp`) plus optional code/ecc version parity. Remaining
-  gap: wire smoke checks into release CI and capture formal coexistence
-  evidence against shared session state.
+  `resume`, `web`, `mcp`) plus code/ecc version parity and shared
+  `CODE_HOME`/sessions resolution via `doctor`. The TestFlight macOS workflow
+  now runs this smoke suite against the archived app-bundled
+  `backend/{code,ecc}` binaries before export/upload.
 
 ## PAR-026
 

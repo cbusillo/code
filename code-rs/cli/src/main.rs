@@ -1472,6 +1472,28 @@ async fn doctor_main() -> anyhow::Result<()> {
     println!("code version: {}", code_version::version());
     println!("current_exe: {}", exe);
 
+    let code_home_env = env::var("CODE_HOME").unwrap_or_else(|_| "<unset>".to_string());
+    let codex_home_env = env::var("CODEX_HOME").unwrap_or_else(|_| "<unset>".to_string());
+    println!("CODE_HOME env: {}", code_home_env);
+    println!("CODEX_HOME env: {}", codex_home_env);
+
+    match code_core::config::find_code_home() {
+        Ok(code_home) => {
+            println!("resolved code_home: {}", code_home.display());
+            println!(
+                "resolved sessions_dir: {}",
+                code_home.join(code_core::SESSIONS_SUBDIR).display()
+            );
+            println!(
+                "resolved archived_sessions_dir: {}",
+                code_home.join(code_core::ARCHIVED_SESSIONS_SUBDIR).display()
+            );
+        }
+        Err(error) => {
+            println!("resolved code_home: <error: {}>", error);
+        }
+    }
+
     // PATH
     let path = env::var("PATH").unwrap_or_default();
     println!("PATH: {}", path);
