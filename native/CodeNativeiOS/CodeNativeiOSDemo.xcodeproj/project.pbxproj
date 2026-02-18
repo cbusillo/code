@@ -11,6 +11,13 @@
 		0C8E5828484E8FBA6F240D8A /* SessionMirrorStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 304B55E2363CDB34189D560E /* SessionMirrorStore.swift */; };
 		1E14315A1C7BA2027701A0FD /* SessionStreamReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E93E37CC2F03423AF4E7F13 /* SessionStreamReducer.swift */; };
 		24EB94055C91E34424CD82C0 /* CodeNativeiOSDemoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4A62FAB53671C8773012B6 /* CodeNativeiOSDemoUITests.swift */; };
+		B2C3D4E5F60718293A4B5C6D /* ComposerAssist.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1F2A30415263748A9B5C6D8 /* ComposerAssist.swift */; };
+		C1D2E3F40516273849A5B6C7 /* WorkflowSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* WorkflowSettings.swift */; };
+		C2D3E4F5061728394A5B6C7D /* DiffRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E60718293A4B5D /* DiffRecovery.swift */; };
+		D1E2F30415263748A9B5C6D7 /* SessionRailLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* SessionRailLayout.swift */; };
+		D2E3F40516273849A5B6C7D8 /* VoiceInteractionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B3C4D5E6F708192A3B4C5D /* VoiceInteractionPolicy.swift */; };
+		F2A3B4C5D6E708192A3B4C5E /* IDEIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A40516273849A5B6C7D9 /* IDEIntegration.swift */; };
+		93D15A59A0D04E8232BDFD9B /* SessionVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F0C804B3D6D16C59339D7A /* SessionVisibility.swift */; };
 		A398BEA621B89841204EC5A6 /* VoiceOutputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95F52E697B95B5C4B2FC5ADA /* VoiceOutputController.swift */; };
 		A3DDFBD9AE7EAE285A1EA89B /* SessionProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0372532E4BE36A1B3DAA85F1 /* SessionProtocol.swift */; };
 		A54889FA59C1D833CCBAAFF9 /* CodeNativeiOSDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 803CA2EB2C0C43A5D049C67F /* CodeNativeiOSDemoApp.swift */; };
@@ -32,12 +39,19 @@
 		1ABFE7A95769D63F009B491E /* CodeNativeiOSDemo.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CodeNativeiOSDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2E93E37CC2F03423AF4E7F13 /* SessionStreamReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStreamReducer.swift; sourceTree = "<group>"; };
 		304B55E2363CDB34189D560E /* SessionMirrorStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMirrorStore.swift; sourceTree = "<group>"; };
+		32F0C804B3D6D16C59339D7A /* SessionVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVisibility.swift; sourceTree = "<group>"; };
 		7E4A62FAB53671C8773012B6 /* CodeNativeiOSDemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeNativeiOSDemoUITests.swift; sourceTree = "<group>"; };
 		803CA2EB2C0C43A5D049C67F /* CodeNativeiOSDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeNativeiOSDemoApp.swift; sourceTree = "<group>"; };
 		95F52E697B95B5C4B2FC5ADA /* VoiceOutputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceOutputController.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B5C /* WorkflowSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowSettings.swift; sourceTree = "<group>"; };
+		A2B3C4D5E6F708192A3B4C5D /* VoiceInteractionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInteractionPolicy.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5061728394A5B6C /* SessionRailLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRailLayout.swift; sourceTree = "<group>"; };
 		C272ED60A72AC843B6084B36 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C41EF688226672A2778147C9 /* VoiceInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputController.swift; sourceTree = "<group>"; };
 		CF498EBFA1191BC6401ACFCF /* CodeNativeiOSDemoUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CodeNativeiOSDemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E1F2A30415263748A9B5C6D8 /* ComposerAssist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAssist.swift; sourceTree = "<group>"; };
+		E2F3A40516273849A5B6C7D9 /* IDEIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IDEIntegration.swift; sourceTree = "<group>"; };
+		F1A2B3C4D5E60718293A4B5D /* DiffRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffRecovery.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -62,12 +76,19 @@
 		4F4EE68BD6B2A3FD3A1CCD42 /* CodeNativeApp */ = {
 			isa = PBXGroup;
 			children = (
+				E1F2A30415263748A9B5C6D8 /* ComposerAssist.swift */,
 				C272ED60A72AC843B6084B36 /* ContentView.swift */,
+				F1A2B3C4D5E60718293A4B5D /* DiffRecovery.swift */,
+				E2F3A40516273849A5B6C7D9 /* IDEIntegration.swift */,
 				304B55E2363CDB34189D560E /* SessionMirrorStore.swift */,
 				0372532E4BE36A1B3DAA85F1 /* SessionProtocol.swift */,
+				B1C2D3E4F5061728394A5B6C /* SessionRailLayout.swift */,
 				2E93E37CC2F03423AF4E7F13 /* SessionStreamReducer.swift */,
+				32F0C804B3D6D16C59339D7A /* SessionVisibility.swift */,
+				A2B3C4D5E6F708192A3B4C5D /* VoiceInteractionPolicy.swift */,
 				C41EF688226672A2778147C9 /* VoiceInputController.swift */,
 				95F52E697B95B5C4B2FC5ADA /* VoiceOutputController.swift */,
+				A1B2C3D4E5F60718293A4B5C /* WorkflowSettings.swift */,
 			);
 			name = CodeNativeApp;
 			path = ../CodeNative/Sources/CodeNativeApp;
@@ -177,12 +198,19 @@
 			buildActionMask = 2147483647;
 			files = (
 				A54889FA59C1D833CCBAAFF9 /* CodeNativeiOSDemoApp.swift in Sources */,
+				B2C3D4E5F60718293A4B5C6D /* ComposerAssist.swift in Sources */,
 				03C8238D8069DE4664D808ED /* ContentView.swift in Sources */,
+				C2D3E4F5061728394A5B6C7D /* DiffRecovery.swift in Sources */,
+				F2A3B4C5D6E708192A3B4C5E /* IDEIntegration.swift in Sources */,
 				0C8E5828484E8FBA6F240D8A /* SessionMirrorStore.swift in Sources */,
 				A3DDFBD9AE7EAE285A1EA89B /* SessionProtocol.swift in Sources */,
+				D1E2F30415263748A9B5C6D7 /* SessionRailLayout.swift in Sources */,
 				1E14315A1C7BA2027701A0FD /* SessionStreamReducer.swift in Sources */,
+				93D15A59A0D04E8232BDFD9B /* SessionVisibility.swift in Sources */,
+				D2E3F40516273849A5B6C7D8 /* VoiceInteractionPolicy.swift in Sources */,
 				D9F9626E486F28DE142354BB /* VoiceInputController.swift in Sources */,
 				A398BEA621B89841204EC5A6 /* VoiceOutputController.swift in Sources */,
+				C1D2E3F40516273849A5B6C7 /* WorkflowSettings.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
