@@ -279,11 +279,14 @@ jobs:
             --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
             | tee "$log_path"
 
-          if rg -q "UPLOAD FAILED|Validation failed| ERROR:" "$log_path"; then
+          if grep -Eq \
+            "UPLOAD FAILED|Validation failed| ERROR:" \
+            "$log_path"; then
             echo "Detected upload failure markers in altool output" >&2
             exit 1
           fi
-          if ! rg -q "UPLOAD SUCCEEDED with no errors" "$log_path"; then
+          if ! grep -Eq "UPLOAD SUCCEEDED with no errors" \
+            "$log_path"; then
             echo "Upload result did not include success marker" >&2
             exit 1
           fi
