@@ -5,6 +5,8 @@ import OSLog
 final class SessionMirrorStore: ObservableObject {
     private static let logger = Logger(subsystem: "com.every.code.native", category: "session-mirror")
     static let defaultEndpoint = "ws://127.0.0.1:4317/ws"
+    nonisolated static let companionPairingScheme = "ecccompanion"
+    nonisolated static let companionPairingHost = "pair"
     // Large catalogs can contain hundreds of sessions; keep periodic refreshes
     // sparse so list decoding doesn't interrupt typing responsiveness.
     private static let catalogRefreshIntervalNanoseconds: UInt64 = 15_000_000_000
@@ -188,6 +190,16 @@ final class SessionMirrorStore: ObservableObject {
         Set(unavailableSessionErrors.keys)
     }
 
+    var companionPairingCode: String? {
+        guard let endpoint = preferredCompanionPairingEndpoint(),
+              let companionSessionToken = normalizedCompanionSessionToken()
+        else {
+            return nil
+        }
+
+        return Self.buildCompanionPairingCode(endpoint: endpoint, token: companionSessionToken)
+    }
+
     func runtimeState(for sessionID: UUID?) -> SessionRuntimeState {
         if let sessionID,
            isSessionUnavailable(sessionID) {
@@ -281,6 +293,28 @@ final class SessionMirrorStore: ObservableObject {
         receiveTask = Task {
             await self.receiveLoop()
         }
+    }
+
+    @discardableResult
+    func importCompanionPairingCode(_ raw: String) -> Bool {
+        guard let payload = Self.parseCompanionPairingCode(raw) else {
+            lastError = "Pairing code is invalid."
+            statusLine = "Pairing code invalid"
+            return false
+        }
+
+        guard let endpointURL = URL(string: payload.endpoint),
+              Self.endpointIsAllowed(endpointURL, policy: endpointAccessPolicy)
+        else {
+            lastError = endpointAccessPolicy.rejectionMessage
+            statusLine = endpointAccessPolicy.rejectionStatusLine
+            return false
+        }
+
+        endpoint = payload.endpoint
+        companionSessionToken = payload.token
+        lastError = nil
+        return true
     }
 
     func loadBenchmarkFixture(from path: String) {
@@ -877,10 +911,6 @@ final class SessionMirrorStore: ObservableObject {
         }
     }
 
-    private func endpointIsAllowed(_ url: URL) -> Bool {
-        Self.endpointIsAllowed(url, policy: endpointAccessPolicy)
-    }
-
     nonisolated static func endpointIsAllowed(_ url: URL, policy: EndpointAccessPolicy) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "ws" || scheme == "wss" else {
             return false
@@ -898,6 +928,44 @@ final class SessionMirrorStore: ObservableObject {
         }
 
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    nonisolated static func buildCompanionPairingCode(endpoint: String, token: String) -> String? {
+        var components = URLComponents()
+        components.scheme = companionPairingScheme
+        components.host = companionPairingHost
+        components.queryItems = [
+            URLQueryItem(name: "endpoint", value: endpoint),
+            URLQueryItem(name: "token", value: token),
+        ]
+        return components.string
+    }
+
+    nonisolated static func parseCompanionPairingCode(_ raw: String) -> (endpoint: String, token: String)? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let components = URLComponents(string: trimmed),
+              components.scheme?.lowercased() == companionPairingScheme,
+              components.host?.lowercased() == companionPairingHost
+        else {
+            return nil
+        }
+
+        let queryItems = components.queryItems ?? []
+        let endpoint = queryItems.first(where: { $0.name == "endpoint" })?.value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = queryItems.first(where: { $0.name == "token" })?.value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let endpoint,
+              !endpoint.isEmpty,
+              let token,
+              !token.isEmpty
+        else {
+            return nil
+        }
+
+        return (endpoint: endpoint, token: token)
     }
 
     private func recordTransportFailure(context: String, details: String?) {
@@ -919,11 +987,18 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     private func statusLineForDisconnect(status: String, error: String?) -> String {
+        Self.disconnectStatusLine(status: status, error: error)
+    }
+
+    nonisolated static func disconnectStatusLine(status: String, error: String?) -> String {
         guard let error else {
             return status
         }
 
         let normalized = error.lowercased()
+        if normalized.contains("401") || normalized.contains("unauthorized") {
+            return "Pair required; update companion token."
+        }
         if normalized.contains("could not connect") || normalized.contains("not connected") {
             return "Backend offline; retrying..."
         }
@@ -931,6 +1006,33 @@ final class SessionMirrorStore: ObservableObject {
             return "Connection timed out; retrying..."
         }
         return status
+    }
+
+    private func preferredCompanionPairingEndpoint() -> String? {
+        if let companionLANEndpoint {
+            let trimmedLANEndpoint = companionLANEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLANEndpoint.isEmpty {
+                return trimmedLANEndpoint
+            }
+        }
+
+        let trimmedEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedEndpoint.isEmpty {
+            return nil
+        }
+        return trimmedEndpoint
+    }
+
+    private func normalizedCompanionSessionToken() -> String? {
+        guard let companionSessionToken else {
+            return nil
+        }
+
+        let trimmedToken = companionSessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedToken.isEmpty {
+            return nil
+        }
+        return trimmedToken
     }
 
     private func sessionActivityUnixMs(_ session: SessionSummary) -> UInt64 {

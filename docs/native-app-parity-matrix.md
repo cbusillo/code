@@ -373,8 +373,9 @@ Legend:
 - Progress: in progress. Managed runtime now requires a companion bearer token
   on websocket attach (`code web --session-token` + native
   `Authorization: Bearer <token>` wiring). Unauthorized clients are rejected
-  with `401` before session attach. Current bootstrap is manual (token + LAN
-  endpoint surfaced in native settings); device-key QR pairing remains pending.
+  with `401` before session attach. Native settings now surface a LAN endpoint
+  and import/export pairing code (`ecccompanion://pair?...`) for bootstrap;
+  device-key QR pairing remains pending.
 
 ## PAR-027
 

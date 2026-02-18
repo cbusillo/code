@@ -4756,6 +4756,7 @@ private struct VoiceStatusBadge: View {
 
 private struct ConnectionPopover: View {
     @ObservedObject var store: SessionMirrorStore
+    @State private var pairingCodeInput = ""
 
     private var companionTokenBinding: Binding<String> {
         Binding(
@@ -4780,6 +4781,36 @@ private struct ConnectionPopover: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.caption.monospaced())
                 .accessibilityIdentifier("connection.token")
+
+            if let companionPairingCode = store.companionPairingCode {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pairing code")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(companionPairingCode)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .foregroundStyle(.primary)
+                        .accessibilityIdentifier("connection.pairing-code")
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("Paste pairing code", text: $pairingCodeInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospaced())
+                    .accessibilityIdentifier("connection.pairing-import")
+
+                Button("Import") {
+                    let imported = store.importCompanionPairingCode(pairingCodeInput)
+                    if imported {
+                        pairingCodeInput = ""
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(pairingCodeInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("connection.pairing-import-action")
+            }
 
             if let lanEndpoint = store.companionLANEndpoint,
                !lanEndpoint.isEmpty {
@@ -8796,6 +8827,7 @@ private struct NativeSettingsView: View {
     #endif
 
     @State private var selectedCategory: SettingsCategory = .general
+    @State private var pairingCodeImportText = ""
 
     private let modelOptions = WorkflowSettings.modelOptions
     private let reasoningOptions = WorkflowSettings.reasoningOptions
@@ -9100,6 +9132,40 @@ private struct NativeSettingsView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.caption.monospaced())
                 .frame(width: isCompactSettingsLayout ? nil : 320)
+            }
+
+            SettingsRow(title: "Pairing code", description: "Copy this code to bootstrap a remote iOS/iPadOS companion.") {
+                Group {
+                    if let companionPairingCode = store.companionPairingCode {
+                        Text(companionPairingCode)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("Pairing code unavailable until endpoint and token are set.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+
+            SettingsRow(title: "Import pairing code", description: "Paste a pairing code to set endpoint and token together.") {
+                HStack(spacing: 8) {
+                    TextField("ecccompanion://pair?...", text: $pairingCodeImportText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption.monospaced())
+                        .frame(width: isCompactSettingsLayout ? nil : 320)
+
+                    Button("Import") {
+                        let imported = store.importCompanionPairingCode(pairingCodeImportText)
+                        if imported {
+                            pairingCodeImportText = ""
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(pairingCodeImportText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
 
             if let lanEndpoint = store.companionLANEndpoint,

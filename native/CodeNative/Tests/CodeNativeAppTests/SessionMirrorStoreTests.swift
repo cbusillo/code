@@ -2,6 +2,41 @@ import XCTest
 @testable import CodeNativeApp
 
 final class SessionMirrorStoreTests: XCTestCase {
+    @MainActor
+    func testCompanionPairingCodeRoundTripsEndpointAndToken() {
+        let sourceStore = SessionMirrorStore(
+            initialEndpoint: "ws://127.0.0.1:4317/ws",
+            companionSessionToken: "paired-token",
+            companionLANEndpoint: "ws://192.168.1.44:4317/ws"
+        )
+        let targetStore = SessionMirrorStore(endpointAccessPolicy: .anyHost)
+
+        let pairingCode = sourceStore.companionPairingCode
+        XCTAssertNotNil(pairingCode)
+        XCTAssertTrue(targetStore.importCompanionPairingCode(pairingCode ?? ""))
+        XCTAssertEqual(targetStore.endpoint, "ws://192.168.1.44:4317/ws")
+        XCTAssertEqual(targetStore.companionSessionToken, "paired-token")
+    }
+
+    @MainActor
+    func testImportCompanionPairingCodeRejectsMalformedPayload() {
+        let store = SessionMirrorStore(endpointAccessPolicy: .anyHost)
+
+        XCTAssertFalse(store.importCompanionPairingCode("invalid"))
+        XCTAssertEqual(store.statusLine, "Pairing code invalid")
+        XCTAssertEqual(store.lastError, "Pairing code is invalid.")
+    }
+
+    func testDisconnectStatusLineClassifiesUnauthorizedErrorAsPairRequired() {
+        XCTAssertEqual(
+            SessionMirrorStore.disconnectStatusLine(
+                status: "Disconnected unexpectedly",
+                error: "HTTP upgrade failed with 401 Unauthorized"
+            ),
+            "Pair required; update companion token."
+        )
+    }
+
     func testEndpointPolicyAllowsRemoteHostsWhenConfigured() {
         let remoteEndpoint = URL(string: "wss://companion.example.com/ws")!
 
