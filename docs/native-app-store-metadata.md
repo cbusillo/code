@@ -69,3 +69,24 @@ Required line for App Store listing, in-app settings, and README:
 - Confirm legal attribution appears in settings and listing text.
 - Confirm screenshots match deterministic benchmark artifacts.
 - Confirm privacy/support URLs are set before submission.
+
+## CI TestFlight Workflow
+
+Use `.github/workflows/native-ios-testflight.yml` to build a signed IPA and
+upload to TestFlight.
+
+Required repository secrets:
+
+- `IOS_DIST_CERT_P12_BASE64`: Base64-encoded Apple Distribution `.p12`.
+- `IOS_DIST_CERT_PASSWORD`: Password for the distribution `.p12`.
+- `IOS_APPSTORE_PROFILE_BASE64`: Base64-encoded App Store provisioning profile.
+- `IOS_APPSTORE_PROFILE_NAME`: Provisioning profile name used during export.
+- `APP_STORE_CONNECT_KEY_ID`: App Store Connect API key id.
+- `APP_STORE_CONNECT_ISSUER_ID`: App Store Connect API issuer id.
+- `APP_STORE_CONNECT_PRIVATE_KEY`: Raw `.p8` API private key contents.
+
+Workflow notes:
+
+- Team ID is tracked in workflow as `MM5YXC7T6E`.
+- The job always emits an IPA artifact (`EveryCodeCompanion-ipa`).
+- Set `upload_to_testflight = true` when dispatching to publish to TestFlight.

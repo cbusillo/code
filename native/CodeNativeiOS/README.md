@@ -80,3 +80,8 @@ xcodebuild \
 
 App Store/TestFlight listing copy lives in
 `docs/native-app-store-metadata.md`.
+
+## CI TestFlight Build
+
+Use `.github/workflows/native-ios-testflight.yml` (manual dispatch) to produce
+a signed IPA artifact and optionally upload it to TestFlight.
