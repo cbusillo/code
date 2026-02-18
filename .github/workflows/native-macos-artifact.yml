@@ -1,0 +1,73 @@
+---
+name: Native macOS Artifact
+
+'on':
+  push:
+    tags:
+      - 'macos-v*'
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref to build (branch, tag, or SHA)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-macos-artifact-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos-artifact:
+    name: Build macOS artifact
+    runs-on: macos-15
+    env:
+      STAGE_DIR: /tmp/ecc-macos
+      APP_BINARY_NAME: EveryCodeCompanion
+    steps:
+      - name: Resolve checkout ref
+        id: resolve_ref
+        run: |
+          set -euo pipefail
+          ref="$GITHUB_REF"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            && [ -n "${{ github.event.inputs.git_ref }}" ]; then
+            ref="${{ github.event.inputs.git_ref }}"
+          fi
+          echo "value=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.resolve_ref.outputs.value }}
+
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          swift build --configuration release --package-path native/CodeNative
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE_DIR"
+          cp native/CodeNative/.build/release/CodeNativeApp \
+            "$STAGE_DIR/$APP_BINARY_NAME"
+          chmod +x "$STAGE_DIR/$APP_BINARY_NAME"
+          arch="$(uname -m)"
+          archive="$STAGE_DIR/${APP_BINARY_NAME}-macos-${arch}.tar.gz"
+          tar -C "$STAGE_DIR" -czf "$archive" "$APP_BINARY_NAME"
+          shasum -a 256 "$archive" > "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        id: package
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EveryCodeCompanion-macos
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error

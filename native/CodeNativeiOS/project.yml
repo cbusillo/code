@@ -22,6 +22,7 @@ targets:
         INFOPLIST_KEY_CFBundleIconName: AppIcon
         INFOPLIST_KEY_CFBundleShortVersionString: $(MARKETING_VERSION)
         INFOPLIST_KEY_CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: false
         INFOPLIST_KEY_NSMicrophoneUsageDescription: >-
           Voice capture sends your speech to on-device recognition.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: >-
