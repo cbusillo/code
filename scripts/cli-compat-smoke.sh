@@ -112,6 +112,19 @@ run_doctor_checks() {
   local resolved_sessions
   resolved_sessions="$(extract_doctor_field "$doctor_output" "resolved sessions_dir")"
 
+  if [[ -z "$resolved_home" || -z "$resolved_sessions" ]]; then
+    if [[ "$bin_path" == *"/Contents/Resources/backend/"* ]]; then
+      echo "[cli-smoke] $label doctor fields unavailable for bundled sandboxed binary;" >&2
+      echo "[cli-smoke] skipping path assertions" >&2
+      printf '%s\n' "bundled-sandbox|bundled-sandbox"
+      return 0
+    fi
+
+    echo "[cli-smoke] $label doctor output missing expected fields" >&2
+    echo "$doctor_output" >&2
+    exit 1
+  fi
+
   local expected_sessions
   expected_sessions="${expected_home}/sessions"
 
