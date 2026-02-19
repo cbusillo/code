@@ -263,7 +263,7 @@ jobs:
             --code "$backend_code" \
             --ecc "$backend_dir/ecc"
 
-      - name: Verify backend sandbox inheritance
+      - name: Verify backend sandbox entitlements
         run: |
           set -euo pipefail
           backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app"
@@ -273,22 +273,18 @@ jobs:
           entitlements_xml="$(
             codesign -d --entitlements :- "$backend_code" 2>/dev/null || true
           )"
-          inherit_key="com.apple.security.inherit"
-          sandbox_key="com.apple.security.app-sandbox"
+          required_keys=(
+            com.apple.security.app-sandbox
+            com.apple.security.network.client
+            com.apple.security.network.server
+          )
 
-          if [[ "$entitlements_xml" != *"$inherit_key"* ]]; then
-            echo "Bundled backend must be signed with"
-            echo "$inherit_key" >&2
-            exit 1
-          fi
-          if [[ "$entitlements_xml" == *"$sandbox_key"* ]]; then
-            echo "Bundled backend must not carry a standalone"
-            echo "app sandbox entitlement" >&2
-            exit 1
-          fi
-
-          sandbox-exec -p '(version 1) (allow default)' \
-            "$backend_code" --version >/dev/null
+          for key in "${required_keys[@]}"; do
+            if [[ "$entitlements_xml" != *"$key"* ]]; then
+              echo "Bundled backend must be signed with $key" >&2
+              exit 1
+            fi
+          done
 
       - name: Export package
         run: |
