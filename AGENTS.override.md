@@ -11,9 +11,9 @@ repository. Read `AGENTS.md` first, then apply this file as an override.
 
 ## Branching And Git Flow
 
-- Default integration target is `origin/webui-main`.
-- Start feature work from `origin/webui-main` on a dedicated feature branch.
-- Do not commit directly to `main` or `webui-main` except release/maintainer flows.
+- Default integration target is `origin/fork-main`.
+- Start feature work from `origin/fork-main` on a dedicated feature branch.
+- Do not commit directly to `main` or `fork-main` except release/maintainer flows.
 - Prefer merge-based sync (no rebase-first workflow unless explicitly requested).
 
 ## Fork And Upstream Expectations
