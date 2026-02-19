@@ -104,4 +104,26 @@ targets:
           exec "${script_dir}/code" "$@"
           EOF
           chmod 755 "${ecc_path}"
+
+          if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] \
+            && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ] \
+            && [ "${EXPANDED_CODE_SIGN_IDENTITY}" != "-" ]; then
+            backend_entitlements="${SRCROOT}/CodeNativeMac/CodeNativeBackend.entitlements"
+            if [ ! -f "${backend_entitlements}" ]; then
+              echo "error: missing backend entitlements" >&2
+              echo "expected at ${backend_entitlements}" >&2
+              exit 1
+            fi
+
+            codesign --force \
+              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+              --entitlements "${backend_entitlements}" \
+              --timestamp=none \
+              "${destination_path}"
+            codesign --force \
+              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+              --timestamp=none \
+              "${ecc_path}"
+          fi
+
           echo "Bundled managed backend from ${source_path}"

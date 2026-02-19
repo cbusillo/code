@@ -10,6 +10,44 @@ import AppKit
 import UIKit
 #endif
 
+#if os(iOS)
+// iOS demo target compiles shared UI sources without the macOS runtime supervisor.
+// Provide a lightweight pairing model so shared settings UI still builds.
+struct CompanionPairingEntry: Equatable, Identifiable {
+    let id: String
+    var label: String
+    var sessionToken: String
+    let createdAtUnixMs: UInt64
+    var expiresAtUnixMs: UInt64
+    var revokedAtUnixMs: UInt64?
+
+    var isRevoked: Bool {
+        revokedAtUnixMs != nil
+    }
+
+    func isExpired(referenceUnixMs: UInt64) -> Bool {
+        referenceUnixMs >= expiresAtUnixMs
+    }
+
+    var displayLabel: String {
+        if !label.isEmpty {
+            return label
+        }
+
+        let shortID = String(id.prefix(8))
+        if !shortID.isEmpty {
+            return "Device \(shortID)"
+        }
+
+        return "Device"
+    }
+}
+#endif
+
+private func currentUnixTimeMilliseconds() -> UInt64 {
+    UInt64(Date().timeIntervalSince1970 * 1_000)
+}
+
 private func formatCompactTokenCount(_ value: Int) -> String {
     let absolute = Double(abs(value))
     let sign = value < 0 ? "-" : ""
@@ -9048,7 +9086,7 @@ private struct NativeSettingsView: View {
     }
 
     private func pairingStatus(for entry: CompanionPairingEntry) -> PairingStatus {
-        let nowUnixMs = LocalBackendRuntimeSupervisor.nowUnixMs()
+        let nowUnixMs = currentUnixTimeMilliseconds()
         if entry.isRevoked {
             return .revoked
         }
