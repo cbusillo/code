@@ -630,27 +630,50 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         bundleResourceURL: URL?,
         fileManager: FileManager
     ) -> URL? {
-        var candidates: [URL] = []
+        var visited: Set<String> = []
+
+        func firstExecutable(in candidates: [URL]) -> URL? {
+            for candidate in candidates {
+                let normalized = candidate.standardizedFileURL.path
+                if visited.contains(normalized) {
+                    continue
+                }
+                visited.insert(normalized)
+
+                if fileManager.isExecutableFile(atPath: normalized) {
+                    return URL(fileURLWithPath: normalized)
+                }
+            }
+
+            return nil
+        }
 
         if let overridePath = environment[Self.managedBackendBinaryEnv],
            overridePath.isEmpty == false {
-            candidates.append(URL(fileURLWithPath: overridePath))
+            if let resolved = firstExecutable(in: [URL(fileURLWithPath: overridePath)]) {
+                return resolved
+            }
         }
 
         if let bundleResourceURL {
-            candidates.append(
+            let bundleCandidates: [URL] = [
                 bundleResourceURL
                     .appendingPathComponent("backend")
                     .appendingPathComponent("CodeBackend.app")
                     .appendingPathComponent("Contents")
                     .appendingPathComponent("MacOS")
-                    .appendingPathComponent("code")
-            )
-            candidates.append(bundleResourceURL.appendingPathComponent("code"))
-            candidates.append(bundleResourceURL.appendingPathComponent("Backend/code"))
-            candidates.append(bundleResourceURL.appendingPathComponent("backend/code"))
+                    .appendingPathComponent("code"),
+                bundleResourceURL.appendingPathComponent("code"),
+                bundleResourceURL.appendingPathComponent("Backend/code"),
+                bundleResourceURL.appendingPathComponent("backend/code"),
+            ]
+
+            if let resolved = firstExecutable(in: bundleCandidates) {
+                return resolved
+            }
         }
 
+        var candidates: [URL] = []
         let repositoryRootCandidates = [
             findRepositoryRoot(startingAt: currentDirectoryURL, fileManager: fileManager),
             findRepositoryRoot(startingAt: executableDirectoryURL, fileManager: fileManager),
@@ -667,17 +690,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             }
         }
 
-        var visited: Set<String> = []
-        for candidate in candidates {
-            let normalized = candidate.standardizedFileURL.path
-            if visited.contains(normalized) {
-                continue
-            }
-            visited.insert(normalized)
-
-            if fileManager.isExecutableFile(atPath: normalized) {
-                return URL(fileURLWithPath: normalized)
-            }
+        if let resolved = firstExecutable(in: candidates) {
+            return resolved
         }
 
         return nil
