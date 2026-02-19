@@ -263,6 +263,33 @@ jobs:
             --code "$backend_code" \
             --ecc "$backend_dir/ecc"
 
+      - name: Verify backend sandbox inheritance
+        run: |
+          set -euo pipefail
+          backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app"
+          backend_dir+="/Contents/Resources/backend"
+          backend_code="$backend_dir/CodeBackend.app/Contents/MacOS/code"
+
+          entitlements_xml="$(
+            codesign -d --entitlements :- "$backend_code" 2>/dev/null || true
+          )"
+          inherit_key="com.apple.security.inherit"
+          sandbox_key="com.apple.security.app-sandbox"
+
+          if [[ "$entitlements_xml" != *"$inherit_key"* ]]; then
+            echo "Bundled backend must be signed with"
+            echo "$inherit_key" >&2
+            exit 1
+          fi
+          if [[ "$entitlements_xml" == *"$sandbox_key"* ]]; then
+            echo "Bundled backend must not carry a standalone"
+            echo "app sandbox entitlement" >&2
+            exit 1
+          fi
+
+          sandbox-exec -p '(version 1) (allow default)' \
+            "$backend_code" --version >/dev/null
+
       - name: Export package
         run: |
           set -euo pipefail
