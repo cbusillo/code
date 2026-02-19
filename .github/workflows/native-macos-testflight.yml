@@ -256,9 +256,11 @@ jobs:
       - name: Run CLI compatibility smoke checks
         run: |
           set -euo pipefail
-          backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app/Contents/Resources/backend"
+          backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app"
+          backend_dir+="/Contents/Resources/backend"
+          backend_code="$backend_dir/CodeBackend.app/Contents/MacOS/code"
           scripts/cli-compat-smoke.sh \
-            --code "$backend_dir/code" \
+            --code "$backend_code" \
             --ecc "$backend_dir/ecc"
 
       - name: Export package

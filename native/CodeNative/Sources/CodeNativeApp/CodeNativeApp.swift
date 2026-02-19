@@ -638,6 +638,14 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
 
         if let bundleResourceURL {
+            candidates.append(
+                bundleResourceURL
+                    .appendingPathComponent("backend")
+                    .appendingPathComponent("CodeBackend.app")
+                    .appendingPathComponent("Contents")
+                    .appendingPathComponent("MacOS")
+                    .appendingPathComponent("code")
+            )
             candidates.append(bundleResourceURL.appendingPathComponent("code"))
             candidates.append(bundleResourceURL.appendingPathComponent("Backend/code"))
             candidates.append(bundleResourceURL.appendingPathComponent("backend/code"))

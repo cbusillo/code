@@ -49,7 +49,11 @@ targets:
 
           destination_dir="${TARGET_BUILD_DIR}/"
           destination_dir+="${UNLOCALIZED_RESOURCES_FOLDER_PATH}/backend"
-          destination_path="${destination_dir}/code"
+          backend_bundle_dir="${destination_dir}/CodeBackend.app"
+          backend_contents_dir="${backend_bundle_dir}/Contents"
+          backend_macos_dir="${backend_contents_dir}/MacOS"
+          destination_path="${backend_macos_dir}/code"
+          backend_info_plist="${backend_contents_dir}/Info.plist"
           ecc_path="${destination_dir}/ecc"
           source_path="${CODE_NATIVE_BACKEND_BINARY:-}"
 
@@ -95,13 +99,36 @@ targets:
             exit 0
           fi
 
-          mkdir -p "${destination_dir}"
+          mkdir -p "${backend_macos_dir}"
           cp "${source_path}" "${destination_path}"
           chmod 755 "${destination_path}"
+
+          cat > "${backend_info_plist}" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.shinycomputers.everycodecompanion.backend</string>
+            <key>CFBundleExecutable</key>
+            <string>code</string>
+            <key>CFBundleName</key>
+            <string>CodeBackend</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+          </dict>
+          </plist>
+          EOF
+
           cat > "${ecc_path}" <<'EOF'
           #!/bin/sh
           script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-          exec "${script_dir}/code" "$@"
+          exec "${script_dir}/CodeBackend.app/Contents/MacOS/code" "$@"
           EOF
           chmod 755 "${ecc_path}"
 
@@ -120,6 +147,10 @@ targets:
               --entitlements "${backend_entitlements}" \
               --timestamp=none \
               "${destination_path}"
+            codesign --force \
+              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+              --timestamp=none \
+              "${backend_bundle_dir}"
             codesign --force \
               --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
               --timestamp=none \
