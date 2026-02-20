@@ -3,6 +3,289 @@ import Foundation
 import OSLog
 import SwiftUI
 
+struct ImportedProfileState: Equatable {
+    let sourcePath: String
+    let importedAt: Date
+}
+
+enum LocalProfileImportError: LocalizedError {
+    case missingProfileDirectories
+
+    var errorDescription: String? {
+        switch self {
+        case .missingProfileDirectories:
+            return "No .code or .codex directory was found in the selected location."
+        }
+    }
+}
+
+enum LocalProfileImportManager {
+    private static let importedSourcePathDefaultsKey = "code_native_imported_profile_source_path"
+    private static let importedAtDefaultsKey = "code_native_imported_profile_imported_at"
+
+    private static let codeExclusions: Set<String> = [
+        ".DS_Store",
+        "app-server.sock",
+        "app-server.stamp.json",
+        "cleanup.lock",
+        "debug_logs",
+        "working",
+    ]
+
+    private static let codexExclusions: Set<String> = [
+        ".DS_Store",
+        "tmp",
+    ]
+
+    static func currentState(
+        userDefaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) -> ImportedProfileState? {
+        guard let sourcePath = userDefaults.string(forKey: importedSourcePathDefaultsKey),
+              let importedAt = userDefaults.object(forKey: importedAtDefaultsKey) as? Date
+        else {
+            return nil
+        }
+
+        if importedCodeHomeURL(fileManager: fileManager) == nil,
+           importedCodexHomeURL(fileManager: fileManager) == nil {
+            return nil
+        }
+
+        return ImportedProfileState(sourcePath: sourcePath, importedAt: importedAt)
+    }
+
+    static func importedCodeHomeURL(fileManager: FileManager = .default) -> URL? {
+        guard let profileRootURL = try? importedProfileRootURL(fileManager: fileManager) else {
+            return nil
+        }
+
+        let codeHomeURL = profileRootURL.appendingPathComponent(".code", isDirectory: true)
+        return directoryExists(codeHomeURL, fileManager: fileManager) ? codeHomeURL : nil
+    }
+
+    static func importedCodexHomeURL(fileManager: FileManager = .default) -> URL? {
+        guard let profileRootURL = try? importedProfileRootURL(fileManager: fileManager) else {
+            return nil
+        }
+
+        let codexHomeURL = profileRootURL.appendingPathComponent(".codex", isDirectory: true)
+        return directoryExists(codexHomeURL, fileManager: fileManager) ? codexHomeURL : nil
+    }
+
+    @discardableResult
+    static func importProfile(
+        from selectedDirectoryURL: URL,
+        userDefaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) throws -> ImportedProfileState {
+        let source = resolveSourceDirectories(from: selectedDirectoryURL, fileManager: fileManager)
+        guard source.codeDirectoryURL != nil || source.codexDirectoryURL != nil else {
+            throw LocalProfileImportError.missingProfileDirectories
+        }
+
+        let profileRootURL = try importedProfileRootURL(fileManager: fileManager)
+        let stagingRootURL = profileRootURL.appendingPathComponent(
+            ".profile-import-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+
+        try fileManager.createDirectory(at: stagingRootURL, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: stagingRootURL)
+        }
+
+        if let codeDirectoryURL = source.codeDirectoryURL {
+            let stagedCodeHomeURL = stagingRootURL.appendingPathComponent(".code", isDirectory: true)
+            try copyProfileDirectory(
+                from: codeDirectoryURL,
+                to: stagedCodeHomeURL,
+                excludingTopLevelEntries: codeExclusions,
+                fileManager: fileManager
+            )
+        }
+
+        if let codexDirectoryURL = source.codexDirectoryURL {
+            let stagedCodexHomeURL = stagingRootURL.appendingPathComponent(".codex", isDirectory: true)
+            try copyProfileDirectory(
+                from: codexDirectoryURL,
+                to: stagedCodexHomeURL,
+                excludingTopLevelEntries: codexExclusions,
+                fileManager: fileManager
+            )
+        }
+
+        try replaceImportedDirectory(
+            named: ".code",
+            in: profileRootURL,
+            withStagedDirectoryIn: stagingRootURL,
+            fileManager: fileManager
+        )
+        try replaceImportedDirectory(
+            named: ".codex",
+            in: profileRootURL,
+            withStagedDirectoryIn: stagingRootURL,
+            fileManager: fileManager
+        )
+
+        let importedAt = Date()
+        userDefaults.set(source.sourcePath, forKey: importedSourcePathDefaultsKey)
+        userDefaults.set(importedAt, forKey: importedAtDefaultsKey)
+
+        return ImportedProfileState(sourcePath: source.sourcePath, importedAt: importedAt)
+    }
+
+    static func clearImportedProfile(
+        userDefaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) {
+        guard let profileRootURL = try? importedProfileRootURL(fileManager: fileManager) else {
+            userDefaults.removeObject(forKey: importedSourcePathDefaultsKey)
+            userDefaults.removeObject(forKey: importedAtDefaultsKey)
+            return
+        }
+
+        let importedCodeHomeURL = profileRootURL.appendingPathComponent(".code", isDirectory: true)
+        if fileManager.fileExists(atPath: importedCodeHomeURL.path) {
+            try? fileManager.removeItem(at: importedCodeHomeURL)
+        }
+
+        let importedCodexHomeURL = profileRootURL.appendingPathComponent(".codex", isDirectory: true)
+        if fileManager.fileExists(atPath: importedCodexHomeURL.path) {
+            try? fileManager.removeItem(at: importedCodexHomeURL)
+        }
+
+        userDefaults.removeObject(forKey: importedSourcePathDefaultsKey)
+        userDefaults.removeObject(forKey: importedAtDefaultsKey)
+    }
+
+    private struct SourceDirectories {
+        let sourcePath: String
+        let codeDirectoryURL: URL?
+        let codexDirectoryURL: URL?
+    }
+
+    private static func resolveSourceDirectories(
+        from selectedDirectoryURL: URL,
+        fileManager: FileManager
+    ) -> SourceDirectories {
+        let selectedURL = selectedDirectoryURL.standardizedFileURL
+        var sourceHomeURL = selectedURL
+        var codeDirectoryURL: URL?
+        var codexDirectoryURL: URL?
+
+        switch selectedURL.lastPathComponent {
+        case ".code":
+            codeDirectoryURL = selectedURL
+            sourceHomeURL = selectedURL.deletingLastPathComponent()
+        case ".codex":
+            codexDirectoryURL = selectedURL
+            sourceHomeURL = selectedURL.deletingLastPathComponent()
+        default:
+            let codeCandidateURL = selectedURL.appendingPathComponent(".code", isDirectory: true)
+            if directoryExists(codeCandidateURL, fileManager: fileManager) {
+                codeDirectoryURL = codeCandidateURL
+            }
+
+            let codexCandidateURL = selectedURL.appendingPathComponent(".codex", isDirectory: true)
+            if directoryExists(codexCandidateURL, fileManager: fileManager) {
+                codexDirectoryURL = codexCandidateURL
+            }
+        }
+
+        if codeDirectoryURL == nil {
+            let siblingCodeURL = sourceHomeURL.appendingPathComponent(".code", isDirectory: true)
+            if directoryExists(siblingCodeURL, fileManager: fileManager) {
+                codeDirectoryURL = siblingCodeURL
+            }
+        }
+
+        if codexDirectoryURL == nil {
+            let siblingCodexURL = sourceHomeURL.appendingPathComponent(".codex", isDirectory: true)
+            if directoryExists(siblingCodexURL, fileManager: fileManager) {
+                codexDirectoryURL = siblingCodexURL
+            }
+        }
+
+        return SourceDirectories(
+            sourcePath: sourceHomeURL.path,
+            codeDirectoryURL: codeDirectoryURL,
+            codexDirectoryURL: codexDirectoryURL
+        )
+    }
+
+    private static func copyProfileDirectory(
+        from sourceDirectoryURL: URL,
+        to destinationDirectoryURL: URL,
+        excludingTopLevelEntries: Set<String>,
+        fileManager: FileManager
+    ) throws {
+        try fileManager.createDirectory(at: destinationDirectoryURL, withIntermediateDirectories: true)
+
+        let children = try fileManager.contentsOfDirectory(
+            at: sourceDirectoryURL,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+
+        for childURL in children {
+            if excludingTopLevelEntries.contains(childURL.lastPathComponent) {
+                continue
+            }
+
+            let destinationURL = destinationDirectoryURL.appendingPathComponent(childURL.lastPathComponent)
+            try fileManager.copyItem(at: childURL, to: destinationURL)
+        }
+    }
+
+    private static func replaceImportedDirectory(
+        named directoryName: String,
+        in profileRootURL: URL,
+        withStagedDirectoryIn stagingRootURL: URL,
+        fileManager: FileManager
+    ) throws {
+        let stagedDirectoryURL = stagingRootURL.appendingPathComponent(directoryName, isDirectory: true)
+        guard fileManager.fileExists(atPath: stagedDirectoryURL.path) else {
+            return
+        }
+
+        let importedDirectoryURL = profileRootURL.appendingPathComponent(directoryName, isDirectory: true)
+        if fileManager.fileExists(atPath: importedDirectoryURL.path) {
+            try fileManager.removeItem(at: importedDirectoryURL)
+        }
+
+        try fileManager.moveItem(at: stagedDirectoryURL, to: importedDirectoryURL)
+    }
+
+    private static func importedProfileRootURL(fileManager: FileManager) throws -> URL {
+        let appSupportRootURL = appSupportRootURL(fileManager: fileManager)
+        let importedProfileRootURL = appSupportRootURL
+            .appendingPathComponent("CodeNative", isDirectory: true)
+            .appendingPathComponent("ImportedProfile", isDirectory: true)
+        try fileManager.createDirectory(at: importedProfileRootURL, withIntermediateDirectories: true)
+        return importedProfileRootURL
+    }
+
+    private static func appSupportRootURL(fileManager: FileManager) -> URL {
+        if let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            return appSupportURL
+        }
+
+        let fallbackURL = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+        return fallbackURL
+    }
+
+    private static func directoryExists(_ directoryURL: URL, fileManager: FileManager) -> Bool {
+        var isDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDirectory) {
+            return isDirectory.boolValue
+        }
+        return false
+    }
+}
+
 struct CompanionPairingEntry: Codable, Equatable, Identifiable {
     let id: String
     var label: String
@@ -111,6 +394,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     @Published private(set) var canRotateCompanionSessionToken: Bool
     @Published private(set) var launchState: LaunchState = .idle
     @Published private(set) var restartCount: UInt64 = 0
+    @Published private(set) var importedProfileState: ImportedProfileState?
 
     private let arguments: [String]
     private let environment: [String: String]
@@ -148,6 +432,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         let configuredToken = Self.environmentCompanionSessionToken(environment: environment)
         self.canRotateCompanionSessionToken = configuredToken == nil
         self.managedSessionToken = configuredToken ?? Self.generateCompanionSessionToken()
+        self.importedProfileState = LocalProfileImportManager.currentState(fileManager: fileManager)
 
         guard Self.shouldManageBackend(arguments: arguments, environment: environment) else {
             lanEndpoint = nil
@@ -206,7 +491,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
         process.executableURL = launchPlan.binaryURL
         process.arguments = launchArguments
-        process.environment = environment
+        process.environment = backendEnvironment()
         process.terminationHandler = { [weak self] terminatedProcess in
             Task { @MainActor [weak self] in
                 self?.handleUnexpectedTermination(of: terminatedProcess)
@@ -334,6 +619,23 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         setCompanionPairingEntries(updatedEntries)
     }
 
+    @discardableResult
+    func importCLIProfile(from selectedDirectoryURL: URL) throws -> ImportedProfileState {
+        let importedState = try LocalProfileImportManager.importProfile(
+            from: selectedDirectoryURL,
+            fileManager: fileManager
+        )
+        importedProfileState = importedState
+        restartManagedBackendForEnvironmentChange()
+        return importedState
+    }
+
+    func clearImportedCLIProfile() {
+        LocalProfileImportManager.clearImportedProfile(fileManager: fileManager)
+        importedProfileState = nil
+        restartManagedBackendForEnvironmentChange()
+    }
+
     private func reconfigureCompanionSessionTokensIfNeeded() {
         if isDisabled {
             return
@@ -361,6 +663,34 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             pairingEntries: companionPairingEntries,
             referenceUnixMs: Self.nowUnixMs()
         )
+    }
+
+    private func backendEnvironment() -> [String: String] {
+        var launchEnvironment = environment
+
+        if let importedCodeHomeURL = LocalProfileImportManager.importedCodeHomeURL(fileManager: fileManager) {
+            launchEnvironment["CODE_HOME"] = importedCodeHomeURL.path
+        }
+        if let importedCodexHomeURL = LocalProfileImportManager.importedCodexHomeURL(fileManager: fileManager) {
+            launchEnvironment["CODEX_HOME"] = importedCodexHomeURL.path
+        }
+
+        return launchEnvironment
+    }
+
+    private func restartManagedBackendForEnvironmentChange() {
+        if process != nil {
+            stop()
+            refreshLaunchPlan()
+            startIfNeeded()
+            return
+        }
+
+        if isDisabled {
+            return
+        }
+
+        refreshLaunchPlan()
     }
 
     private func scheduleCompanionPairingExpiryRefresh() {
@@ -909,6 +1239,16 @@ struct CodeNativeApp: App {
                 },
                 deleteCompanionPairing: { pairingID in
                     runtimeSupervisor.deleteCompanionPairing(id: pairingID)
+                    syncStoreFromRuntimeSupervisor()
+                },
+                importedProfileState: runtimeSupervisor.importedProfileState,
+                importCLIProfile: { selectedDirectoryURL in
+                    let importedState = try runtimeSupervisor.importCLIProfile(from: selectedDirectoryURL)
+                    syncStoreFromRuntimeSupervisor()
+                    return importedState
+                },
+                clearImportedCLIProfile: {
+                    runtimeSupervisor.clearImportedCLIProfile()
                     syncStoreFromRuntimeSupervisor()
                 }
             )

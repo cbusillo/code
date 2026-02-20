@@ -84,6 +84,9 @@ struct ContentView: View {
     let revokeCompanionPairing: ((String) -> Void)?
     let restoreCompanionPairing: ((String) -> Void)?
     let deleteCompanionPairing: ((String) -> Void)?
+    let importedProfileState: ImportedProfileState?
+    let importCLIProfile: ((URL) throws -> ImportedProfileState)?
+    let clearImportedCLIProfile: (() -> Void)?
     @Environment(\.openURL) private var openURL
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -97,7 +100,10 @@ struct ContentView: View {
         createCompanionPairing: ((String?) -> Void)? = nil,
         revokeCompanionPairing: ((String) -> Void)? = nil,
         restoreCompanionPairing: ((String) -> Void)? = nil,
-        deleteCompanionPairing: ((String) -> Void)? = nil
+        deleteCompanionPairing: ((String) -> Void)? = nil,
+        importedProfileState: ImportedProfileState? = nil,
+        importCLIProfile: ((URL) throws -> ImportedProfileState)? = nil,
+        clearImportedCLIProfile: (() -> Void)? = nil
     ) {
         self.store = store
         self.companionPairingEntries = companionPairingEntries
@@ -107,6 +113,9 @@ struct ContentView: View {
         self.revokeCompanionPairing = revokeCompanionPairing
         self.restoreCompanionPairing = restoreCompanionPairing
         self.deleteCompanionPairing = deleteCompanionPairing
+        self.importedProfileState = importedProfileState
+        self.importCLIProfile = importCLIProfile
+        self.clearImportedCLIProfile = clearImportedCLIProfile
     }
 
     private static let shortDateFormatter: DateFormatter = {
@@ -936,6 +945,9 @@ struct ContentView: View {
             revokeCompanionPairing: revokeCompanionPairing,
             restoreCompanionPairing: restoreCompanionPairing,
             deleteCompanionPairing: deleteCompanionPairing,
+            importedProfileState: importedProfileState,
+            importCLIProfile: importCLIProfile,
+            clearImportedCLIProfile: clearImportedCLIProfile,
             autoSpeakAssistant: $autoSpeakAssistant,
             autoSubmitVoice: $autoSubmitVoice,
             themeModeRaw: $themeModeRaw,
@@ -9106,6 +9118,9 @@ private struct NativeSettingsView: View {
     let revokeCompanionPairing: ((String) -> Void)?
     let restoreCompanionPairing: ((String) -> Void)?
     let deleteCompanionPairing: ((String) -> Void)?
+    let importedProfileState: ImportedProfileState?
+    let importCLIProfile: ((URL) throws -> ImportedProfileState)?
+    let clearImportedCLIProfile: (() -> Void)?
     @Binding var autoSpeakAssistant: Bool
     @Binding var autoSubmitVoice: Bool
     @Binding var themeModeRaw: String
@@ -9133,10 +9148,18 @@ private struct NativeSettingsView: View {
     @State private var selectedCategory: SettingsCategory = .general
     @State private var pairingCodeImportText = ""
     @State private var newPairingLabel = ""
+    @State private var profileImportMessage: String?
+    @State private var profileImportError: String?
 
     private static let pairingExpiryFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, h:mm a"
+        return formatter
+    }()
+
+    private static let profileImportFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy h:mm a"
         return formatter
     }()
 
@@ -9268,6 +9291,51 @@ private struct NativeSettingsView: View {
         let expiryDate = Date(timeIntervalSince1970: Double(entry.expiresAtUnixMs) / 1_000)
         return "Expires \(Self.pairingExpiryFormatter.string(from: expiryDate))"
     }
+
+    private var importedProfileStatusText: String {
+        guard let importedProfileState else {
+            return "No imported CLI profile. Companion uses the app sandbox profile by default."
+        }
+
+        let importedAtText = Self.profileImportFormatter.string(from: importedProfileState.importedAt)
+        return "Imported from \(importedProfileState.sourcePath) at \(importedAtText)."
+    }
+
+    #if os(macOS)
+    private func importCLIProfileFromPanel() {
+        guard let importCLIProfile else {
+            profileImportError = "CLI profile import is unavailable."
+            profileImportMessage = nil
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Import"
+        panel.title = "Import CLI Profile"
+        panel.message = "Select your home folder, .code, or .codex directory."
+
+        let response = panel.runModal()
+        guard response == .OK,
+              let selectedDirectoryURL = panel.url
+        else {
+            return
+        }
+
+        do {
+            let importedState = try importCLIProfile(selectedDirectoryURL)
+            let importedAtText = Self.profileImportFormatter.string(from: importedState.importedAt)
+            profileImportMessage = "Imported profile from \(importedState.sourcePath) at \(importedAtText)."
+            profileImportError = nil
+        } catch {
+            profileImportError = error.localizedDescription
+            profileImportMessage = nil
+        }
+    }
+    #endif
 
     @ViewBuilder
     private var settingsSidebar: some View {
@@ -9651,6 +9719,48 @@ private struct NativeSettingsView: View {
                     .buttonStyle(.bordered)
                     .disabled(pairingCodeImportText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+            }
+
+            SettingsRow(title: "CLI profile", description: "Import ~/.code and ~/.codex into the app sandbox so auth, config, and sessions match your local CLI.") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(importedProfileStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    #if os(macOS)
+                    HStack(spacing: 8) {
+                        Button("Import from folder…") {
+                            importCLIProfileFromPanel()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Clear imported copy") {
+                            clearImportedCLIProfile?()
+                            profileImportMessage = "Cleared imported CLI profile."
+                            profileImportError = nil
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(clearImportedCLIProfile == nil || importedProfileState == nil)
+                    }
+                    #else
+                    Text("Profile import is available on macOS.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    #endif
+
+                    if let profileImportMessage {
+                        Text(profileImportMessage)
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+
+                    if let profileImportError {
+                        Text(profileImportError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if let lanEndpoint = store.companionLANEndpoint,
