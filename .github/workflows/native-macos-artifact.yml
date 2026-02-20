@@ -25,7 +25,10 @@ jobs:
     runs-on: macos-15
     env:
       STAGE_DIR: /tmp/ecc-macos
-      APP_BINARY_NAME: EveryCodeCompanion
+      DERIVED_DATA_PATH: /tmp/ecc-macos/DerivedData
+      APP_BUNDLE_NAME: EveryCodeCompanion.app
+      SCHEME: CodeNativeMac
+      XCODE_PROJECT: native/CodeNativeMac/CodeNativeMac.xcodeproj
     steps:
       - name: Resolve checkout ref
         id: resolve_ref
@@ -44,21 +47,41 @@ jobs:
           fetch-depth: 0
           ref: ${{ steps.resolve_ref.outputs.value }}
 
-      - name: Build release binary
+      - name: Build managed backend
         run: |
           set -euo pipefail
-          swift build --configuration release --package-path native/CodeNative
+          ./build-fast.sh
+
+      - name: Build release app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
 
       - name: Package artifact
         run: |
           set -euo pipefail
           mkdir -p "$STAGE_DIR"
-          cp native/CodeNative/.build/release/CodeNativeApp \
-            "$STAGE_DIR/$APP_BINARY_NAME"
-          chmod +x "$STAGE_DIR/$APP_BINARY_NAME"
+
+          app_source="$DERIVED_DATA_PATH/Build/Products/Release/$APP_BUNDLE_NAME"
+          if [ ! -d "$app_source" ]; then
+            echo "missing app bundle at $app_source" >&2
+            exit 1
+          fi
+
+          cp -R "$app_source" "$STAGE_DIR/$APP_BUNDLE_NAME"
           arch="$(uname -m)"
-          archive="$STAGE_DIR/${APP_BINARY_NAME}-macos-${arch}.tar.gz"
-          tar -C "$STAGE_DIR" -czf "$archive" "$APP_BINARY_NAME"
+          archive="$STAGE_DIR/EveryCodeCompanion-macos-${arch}.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$STAGE_DIR/$APP_BUNDLE_NAME" \
+            "$archive"
           shasum -a 256 "$archive" > "$archive.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
         id: package
