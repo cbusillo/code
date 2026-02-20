@@ -93,7 +93,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         case failed(String)
     }
 
-    private static let logger = Logger(subsystem: "com.every.code.native", category: "managed-runtime")
+    nonisolated private static let logger = Logger(subsystem: "com.every.code.native", category: "managed-runtime")
     nonisolated private static let managedBackendDisableEnv = "CODE_NATIVE_DISABLE_MANAGED_BACKEND"
     nonisolated private static let managedBackendBinaryEnv = "CODE_NATIVE_BACKEND_BINARY"
     nonisolated private static let companionSessionTokenEnv = "CODE_NATIVE_COMPANION_TOKEN"
