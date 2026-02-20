@@ -125,9 +125,7 @@ for _ in {1..40}; do
       | select(($baseline | length) == 0 or ((.databaseId | tostring) != $baseline))
       | .databaseId
       ' <<<"$runs_json" | head -n1)"
-  fi
-
-  if [[ -z "$run_id" ]]; then
+  else
     run_id="$(jq -r --arg baseline "$baseline_run_id" '
       .[]
       | select(($baseline | length) == 0 or ((.databaseId | tostring) != $baseline))
@@ -173,11 +171,16 @@ if [[ -z "$pkg_path" ]]; then
 fi
 
 echo "Installing pkg for local smoke check..."
-installer -pkg "$pkg_path" -target / >/dev/null
+if ! installer -pkg "$pkg_path" -target / >/dev/null 2>&1; then
+  installer -pkg "$pkg_path" -target CurrentUserHomeDirectory >/dev/null
+fi
 
 app_path="/Applications/Every Code Companion.app"
 if [[ ! -d "$app_path" ]]; then
-  echo "error: installed app not found at ${app_path}" >&2
+  app_path="$HOME/Applications/Every Code Companion.app"
+fi
+if [[ ! -d "$app_path" ]]; then
+  echo "error: installed app not found at expected paths" >&2
   exit 1
 fi
 
