@@ -668,14 +668,47 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private func backendEnvironment() -> [String: String] {
         var launchEnvironment = environment
 
-        if let importedCodeHomeURL = LocalProfileImportManager.importedCodeHomeURL(fileManager: fileManager) {
-            launchEnvironment["CODE_HOME"] = importedCodeHomeURL.path
+        if Self.isSandboxedProcess(environment: environment) {
+            if let importedCodeHomeURL = LocalProfileImportManager.importedCodeHomeURL(fileManager: fileManager) {
+                launchEnvironment["CODE_HOME"] = importedCodeHomeURL.path
+            }
+            if let importedCodexHomeURL = LocalProfileImportManager.importedCodexHomeURL(fileManager: fileManager) {
+                launchEnvironment["CODEX_HOME"] = importedCodexHomeURL.path
+            }
+            return launchEnvironment
         }
-        if let importedCodexHomeURL = LocalProfileImportManager.importedCodexHomeURL(fileManager: fileManager) {
-            launchEnvironment["CODEX_HOME"] = importedCodexHomeURL.path
+
+        let homeDirectoryURL = fileManager.homeDirectoryForCurrentUser
+        let realCodeHomeURL = homeDirectoryURL.appendingPathComponent(".code", isDirectory: true)
+        if fileManager.fileExists(atPath: realCodeHomeURL.path) {
+            launchEnvironment["CODE_HOME"] = realCodeHomeURL.path
+        }
+
+        let realCodexHomeURL = homeDirectoryURL.appendingPathComponent(".codex", isDirectory: true)
+        if fileManager.fileExists(atPath: realCodexHomeURL.path) {
+            launchEnvironment["CODEX_HOME"] = realCodexHomeURL.path
         }
 
         return launchEnvironment
+    }
+
+    nonisolated private static func isSandboxedProcess(environment: [String: String]) -> Bool {
+        if let sandboxContainerID = environment["APP_SANDBOX_CONTAINER_ID"],
+           sandboxContainerID.isEmpty == false {
+            return true
+        }
+
+        if let fixedHome = environment["CFFIXED_USER_HOME"],
+           fixedHome.contains("/Library/Containers/") {
+            return true
+        }
+
+        if let home = environment["HOME"],
+           home.contains("/Library/Containers/") {
+            return true
+        }
+
+        return false
     }
 
     private func restartManagedBackendForEnvironmentChange() {

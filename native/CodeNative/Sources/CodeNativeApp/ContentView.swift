@@ -9301,28 +9301,18 @@ private struct NativeSettingsView: View {
         return "Imported from \(importedProfileState.sourcePath) at \(importedAtText)."
     }
 
-    #if os(macOS)
-    private func importCLIProfileFromPanel() {
+    private func importSelectedCLIProfile(from selectedDirectoryURL: URL) {
         guard let importCLIProfile else {
             profileImportError = "CLI profile import is unavailable."
             profileImportMessage = nil
             return
         }
 
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Import"
-        panel.title = "Import CLI Profile"
-        panel.message = "Select your home folder, .code, or .codex directory."
-
-        let response = panel.runModal()
-        guard response == .OK,
-              let selectedDirectoryURL = panel.url
-        else {
-            return
+        let accessedSecurityScope = selectedDirectoryURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessedSecurityScope {
+                selectedDirectoryURL.stopAccessingSecurityScopedResource()
+            }
         }
 
         do {
@@ -9334,6 +9324,34 @@ private struct NativeSettingsView: View {
             profileImportError = error.localizedDescription
             profileImportMessage = nil
         }
+    }
+
+    #if os(macOS)
+    private func importCLIProfileFromPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Import"
+        panel.title = "Import CLI Profile"
+        panel.message = "Select your home folder, .code, or .codex directory."
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        let response = panel.runModal()
+        guard response == .OK,
+              let selectedDirectoryURL = panel.url
+        else {
+            self.profileImportMessage = nil
+            self.profileImportError = "Import cancelled."
+            return
+        }
+
+        importSelectedCLIProfile(from: selectedDirectoryURL)
+    }
+
+    private func importCLIProfileFromHomeDirectory() {
+        let homeDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        importSelectedCLIProfile(from: homeDirectoryURL)
     }
     #endif
 
@@ -9730,7 +9748,14 @@ private struct NativeSettingsView: View {
                     #if os(macOS)
                     HStack(spacing: 8) {
                         Button("Import from folder…") {
+                            profileImportMessage = "Opening folder picker..."
+                            profileImportError = nil
                             importCLIProfileFromPanel()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Import from home (~)") {
+                            importCLIProfileFromHomeDirectory()
                         }
                         .buttonStyle(.bordered)
 
