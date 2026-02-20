@@ -156,7 +156,7 @@ struct ContentView: View {
     @AppStorage("code_native_multiline_behavior") private var multilineBehaviorRaw = MultilineBehavior.cmdEnter.rawValue
     @AppStorage("code_native_prevent_sleep") private var preventSleep = false
     @AppStorage("code_native_glass_window") private var glassWindow = true
-    @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = true
+    @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = false
     @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
     @AppStorage("code_native_show_activity_events") private var showActivityEvents = true
     @AppStorage("code_native_ide_context_enabled") private var ideContextEnabled = true
@@ -235,6 +235,20 @@ struct ContentView: View {
         }
 
         return "Starts voice input and keeps the captured text in the composer."
+    }
+
+    private var voicePlaybackIconName: String {
+        autoSpeakAssistant ? "speaker.wave.2.fill" : "speaker.slash.fill"
+    }
+
+    private var voicePlaybackAccessibilityLabel: String {
+        autoSpeakAssistant ? "Disable voice playback" : "Enable voice playback"
+    }
+
+    private var voicePlaybackAccessibilityHint: String {
+        autoSpeakAssistant
+            ? "Turns off spoken assistant responses."
+            : "Turns on spoken assistant responses."
     }
 
     private var composerHelperText: String? {
@@ -855,6 +869,11 @@ struct ContentView: View {
             if let activeTranscriptItemID,
                !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
                 self.activeTranscriptItemID = nil
+            }
+        }
+        .onChange(of: autoSpeakAssistant) { _, isEnabled in
+            if !isEnabled {
+                voiceOutput.stop()
             }
         }
         .onChange(of: store.selectedSessionID) { _, _ in
@@ -2607,6 +2626,20 @@ struct ContentView: View {
                     Spacer(minLength: 6)
 
                     Button {
+                        toggleAutoSpeakAssistant()
+                    } label: {
+                        Image(systemName: voicePlaybackIconName)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(autoSpeakAssistant ? .green : .white.opacity(0.66))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .accessibilityIdentifier("composer.auto-speak-toggle")
+                    .accessibilityLabel(voicePlaybackAccessibilityLabel)
+                    .accessibilityHint(voicePlaybackAccessibilityHint)
+
+                    Button {
                         handleVoiceToggleTap()
                     } label: {
                         Image(systemName: voiceInput.isRecording ? "mic.fill" : "mic")
@@ -2747,6 +2780,20 @@ struct ContentView: View {
 
             if !isCompactPhoneLayout {
                 HStack(spacing: 8) {
+                    Button {
+                        toggleAutoSpeakAssistant()
+                    } label: {
+                        Image(systemName: voicePlaybackIconName)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(autoSpeakAssistant ? .green : .white.opacity(0.66))
+                    .frame(width: 24, height: 24)
+                    .background(Color.white.opacity(0.05), in: Circle())
+                    .accessibilityIdentifier("composer.auto-speak-toggle")
+                    .accessibilityLabel(voicePlaybackAccessibilityLabel)
+                    .accessibilityHint(voicePlaybackAccessibilityHint)
+
                     Button {
                         handleVoiceToggleTap()
                     } label: {
@@ -2900,6 +2947,20 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
 
                 Spacer()
+
+                Button {
+                    toggleAutoSpeakAssistant()
+                } label: {
+                    Image(systemName: voicePlaybackIconName)
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(autoSpeakAssistant ? .green : .secondary)
+                .frame(width: 24, height: 24)
+                .background(Color.white.opacity(0.05), in: Circle())
+                .accessibilityIdentifier("composer.auto-speak-toggle")
+                .accessibilityLabel(voicePlaybackAccessibilityLabel)
+                .accessibilityHint(voicePlaybackAccessibilityHint)
 
                 Button {
                     handleVoiceToggleTap()
@@ -4416,6 +4477,13 @@ struct ContentView: View {
 
         lastSpokenItemID = lastItem.id
         voiceOutput.speak(text)
+    }
+
+    private func toggleAutoSpeakAssistant() {
+        autoSpeakAssistant.toggle()
+        if !autoSpeakAssistant {
+            voiceOutput.stop()
+        }
     }
 }
 
