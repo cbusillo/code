@@ -269,5 +269,10 @@ if [[ "$entitlements_xml" != *"com.apple.security.inherit"* ]]; then
   echo "Missing backend entitlement: com.apple.security.inherit" >&2
   exit 1
 fi
+if [[ "$entitlements_xml" != *"com.apple.security.app-sandbox"* ]]; then
+  echo "result: FAIL"
+  echo "Missing backend entitlement: com.apple.security.app-sandbox" >&2
+  exit 1
+fi
 
 echo "result: PASS"

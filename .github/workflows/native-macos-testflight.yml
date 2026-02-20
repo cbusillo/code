@@ -300,21 +300,13 @@ jobs:
           )"
           inherit_key="com.apple.security.inherit"
           app_sandbox_key="com.apple.security.app-sandbox"
-          has_inherit=false
-          has_app_sandbox=false
-          if [[ "$entitlements_xml" == *"$inherit_key"* ]]; then
-            has_inherit=true
+          if [[ "$entitlements_xml" != *"$inherit_key"* ]]; then
+            echo "Bundled backend missing entitlement: $inherit_key" >&2
+            exit 1
           fi
-          if [[ "$entitlements_xml" == *"$app_sandbox_key"* ]]; then
-            has_app_sandbox=true
-          fi
-
-          if [[ "$has_inherit" != true ]]; then
-            if [[ "$has_app_sandbox" != true ]]; then
-              echo "Bundled backend must be signed with" >&2
-              echo "com.apple.security.inherit or app-sandbox" >&2
-              exit 1
-            fi
+          if [[ "$entitlements_xml" != *"$app_sandbox_key"* ]]; then
+            echo "Bundled backend missing entitlement: $app_sandbox_key" >&2
+            exit 1
           fi
 
       - name: Export package
