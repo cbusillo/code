@@ -128,6 +128,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     private var requestedStop = false
     private var unexpectedTerminationDates: [Date] = []
     private var lastAppliedSessionTokens: Set<String> = []
+    private var launchedBinaryPath: String?
+    private var launchedViaBundleOpen = false
 
     init(
         arguments: [String] = ProcessInfo.processInfo.arguments,
@@ -167,6 +169,10 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
            process.isRunning {
             process.terminate()
         }
+        if launchedViaBundleOpen,
+           let launchedBinaryPath {
+            Self.terminateBundledBackendProcess(binaryPath: launchedBinaryPath)
+        }
     }
 
     func startIfNeeded() {
@@ -204,12 +210,23 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             launchArguments.append(token)
         }
 
-        process.executableURL = launchPlan.binaryURL
-        process.arguments = launchArguments
-        process.environment = Self.managedBackendEnvironment(
-            baseEnvironment: environment,
-            fileManager: fileManager
-        )
+        if let backendBundleURL = Self.backendBundleURL(for: launchPlan.binaryURL) {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = [
+                "-n",
+                "-g",
+                "-W",
+                backendBundleURL.path,
+                "--args",
+            ] + launchArguments
+            launchedViaBundleOpen = true
+        } else {
+            process.executableURL = launchPlan.binaryURL
+            process.arguments = launchArguments
+            launchedViaBundleOpen = false
+        }
+        launchedBinaryPath = launchPlan.binaryURL.path
+        process.environment = environment
         process.terminationHandler = { [weak self] terminatedProcess in
             Task { @MainActor [weak self] in
                 self?.handleUnexpectedTermination(of: terminatedProcess)
@@ -233,6 +250,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             lanEndpoint = nil
             sessionToken = nil
             lastAppliedSessionTokens = []
+            launchedBinaryPath = nil
+            launchedViaBundleOpen = false
             launchState = .failed("Failed to start managed backend: \(error.localizedDescription)")
             Self.logger.error("Failed to start managed backend: \(error.localizedDescription, privacy: .public)")
         }
@@ -249,12 +268,22 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             return
         }
 
+        let launchedViaBundleOpen = self.launchedViaBundleOpen
+        let launchedBinaryPath = self.launchedBinaryPath
+
         if process.isRunning {
             process.terminate()
         }
 
+        if launchedViaBundleOpen,
+           let launchedBinaryPath {
+            Self.terminateBundledBackendProcess(binaryPath: launchedBinaryPath)
+        }
+
         self.process = nil
         lastAppliedSessionTokens = []
+        self.launchedBinaryPath = nil
+        self.launchedViaBundleOpen = false
         launchState = .idle
     }
 
@@ -461,6 +490,8 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
 
         process = nil
+        launchedBinaryPath = nil
+        launchedViaBundleOpen = false
 
         if requestedStop {
             requestedStop = false
@@ -703,37 +734,27 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         return nil
     }
 
-    nonisolated static func managedBackendEnvironment(
-        baseEnvironment: [String: String],
-        fileManager: FileManager
-    ) -> [String: String] {
-        var resolvedEnvironment = baseEnvironment
-        let configuredCodeHome = resolvedEnvironment["CODE_HOME"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let configuredCodexHome = resolvedEnvironment["CODEX_HOME"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if configuredCodeHome.isEmpty,
-           configuredCodexHome.isEmpty,
-           let applicationSupportURL = fileManager.urls(
-               for: .applicationSupportDirectory,
-               in: .userDomainMask
-           ).first {
-            let codeHomeURL = applicationSupportURL
-                .appendingPathComponent("EveryCodeCompanion", isDirectory: true)
-                .appendingPathComponent("CodeHome", isDirectory: true)
-            do {
-                try fileManager.createDirectory(
-                    at: codeHomeURL,
-                    withIntermediateDirectories: true
-                )
-            } catch {
-                logger.error("Failed to prepare managed backend CODE_HOME: \(error.localizedDescription, privacy: .public)")
-            }
-            resolvedEnvironment["CODE_HOME"] = codeHomeURL.path
-            resolvedEnvironment["CODEX_HOME"] = codeHomeURL.path
+    nonisolated static func backendBundleURL(for binaryURL: URL) -> URL? {
+        let binaryPath = binaryURL.standardizedFileURL.path
+        let suffix = "/CodeBackend.app/Contents/MacOS/code"
+        guard binaryPath.hasSuffix(suffix) else {
+            return nil
         }
 
-        return resolvedEnvironment
+        let appPath = String(binaryPath.dropLast(suffix.count)) + "/CodeBackend.app"
+        return URL(fileURLWithPath: appPath)
+    }
+
+    nonisolated static func terminateBundledBackendProcess(binaryPath: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        process.arguments = ["-f", binaryPath]
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            logger.error("Failed to terminate bundled backend process: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     nonisolated static func reserveLoopbackPort() -> UInt16? {

@@ -231,39 +231,32 @@ fi
 echo "Running local CLI compatibility smoke checks..."
 scripts/cli-compat-smoke.sh --code "$backend_code" --ecc "$backend_ecc"
 
-echo "Running sandbox launch smoke for backend executable..."
-smoke_cmd=("$backend_code")
-if command -v sandbox-exec >/dev/null 2>&1; then
-  if sandbox-exec -p '(version 1) (allow default)' \
-    "$backend_code" --version >/dev/null 2>&1; then
-    smoke_cmd=(sandbox-exec -p '(version 1) (allow default)' "$backend_code")
-  else
-    echo "warning: sandbox-exec launch probe failed; falling back to direct launch smoke" >&2
-  fi
-fi
-
+echo "Running backend launch smoke..."
 smoke_port="43199"
-"${smoke_cmd[@]}" web \
+/usr/bin/open -n -g "$backend_bundle" --args web \
   --host 0.0.0.0 \
   --port "$smoke_port" \
   --session-token native-smoke >"${ARTIFACT_DIR}/backend-sandbox-smoke.log" 2>&1 &
-smoke_pid="$!"
+open_pid="$!"
 
 cleanup() {
-  kill "$smoke_pid" >/dev/null 2>&1 || true
+  kill "$open_pid" >/dev/null 2>&1 || true
+  pkill -f "$backend_code" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 for _ in {1..20}; do
-  if lsof -nP -a -p "$smoke_pid" -iTCP:"$smoke_port" -sTCP:LISTEN >/dev/null 2>&1; then
+  if lsof -nP -iTCP:"$smoke_port" -sTCP:LISTEN \
+    | grep -F "$backend_code" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
 
-if ! lsof -nP -a -p "$smoke_pid" -iTCP:"$smoke_port" -sTCP:LISTEN >/dev/null 2>&1; then
+if ! lsof -nP -iTCP:"$smoke_port" -sTCP:LISTEN \
+  | grep -F "$backend_code" >/dev/null 2>&1; then
   echo "result: FAIL"
-  echo "Bundled backend failed sandbox web launch smoke" >&2
+  echo "Bundled backend failed launch smoke" >&2
   cat "${ARTIFACT_DIR}/backend-sandbox-smoke.log" >&2 || true
   exit 1
 fi
@@ -274,8 +267,13 @@ echo "Artifact dir: ${ARTIFACT_DIR}"
 echo "Payload app: ${app_path}"
 
 entitlements_xml="$(codesign -d --entitlements :- "$backend_code" 2>/dev/null || true)"
+if [[ "$entitlements_xml" != *"com.apple.security.app-sandbox"* ]]; then
+  echo "result: FAIL"
+  echo "Missing backend sandbox entitlement: com.apple.security.app-sandbox" >&2
+  exit 1
+fi
+
 for key in \
-  com.apple.security.inherit \
   com.apple.security.network.client \
   com.apple.security.network.server; do
   if [[ "$entitlements_xml" != *"$key"* ]]; then
