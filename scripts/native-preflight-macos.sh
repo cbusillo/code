@@ -6,16 +6,14 @@ usage() {
 Usage: scripts/native-preflight-macos.sh [options]
 
 Build a signed macOS package via GitHub Actions without TestFlight upload,
-download the artifact, expand the pkg, launch the app payload, and run a
-basic managed-backend crash smoke check.
+download the artifact, expand the pkg, and run backend payload smoke checks.
 
 Options:
-  -r, --repo OWNER/REPO       GitHub repo (default: current gh repo)
+  -r, --repo OWNER/REPO       GitHub repo (default: current git origin)
   -b, --branch BRANCH         Branch/ref to build (default: current branch)
   -w, --workflow FILE         Workflow file (default: native-macos-testflight.yml)
   -n, --workflow-name NAME    Workflow display name (default: Native macOS TestFlight)
   -d, --artifact-dir PATH     Artifact output dir (default: /tmp/ecc-preflight)
-  -s, --smoke-seconds N       Seconds to observe runtime logs (default: 25)
   -i, --interval N            GH polling interval seconds (default: 15)
   -h, --help                  Show this help text
 EOF
@@ -28,16 +26,57 @@ require_cmd() {
   fi
 }
 
+parse_repo_from_remote_url() {
+  local remote_url="$1"
+
+  case "$remote_url" in
+    git@github.com:*)
+      remote_url="${remote_url#git@github.com:}"
+      remote_url="${remote_url%.git}"
+      ;;
+    https://github.com/*)
+      remote_url="${remote_url#https://github.com/}"
+      remote_url="${remote_url%.git}"
+      ;;
+    *)
+      remote_url=""
+      ;;
+  esac
+
+  if [[ "$remote_url" == */* ]]; then
+    echo "$remote_url"
+  fi
+}
+
+default_repo() {
+  local remote_url=""
+  local parsed=""
+
+  for remote in origin fork upstream; do
+    remote_url="$(git remote get-url "$remote" 2>/dev/null || true)"
+    if [[ -z "$remote_url" ]]; then
+      continue
+    fi
+
+    parsed="$(parse_repo_from_remote_url "$remote_url")"
+    if [[ -n "$parsed" ]]; then
+      echo "$parsed"
+      return 0
+    fi
+  done
+
+  gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true
+}
+
 current_branch() {
   git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "fork-main"
 }
 
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+REPO="$(default_repo)"
 BRANCH="$(current_branch)"
 WORKFLOW_FILE="native-macos-testflight.yml"
 WORKFLOW_NAME="Native macOS TestFlight"
 ARTIFACT_DIR="/tmp/ecc-preflight"
-SMOKE_SECONDS="25"
 INTERVAL="15"
 
 while [[ $# -gt 0 ]]; do
@@ -60,10 +99,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     -d|--artifact-dir)
       ARTIFACT_DIR="${2:-}"
-      shift 2
-      ;;
-    -s|--smoke-seconds)
-      SMOKE_SECONDS="${2:-}"
       shift 2
       ;;
     -i|--interval)
@@ -91,7 +126,6 @@ require_cmd gh
 require_cmd jq
 require_cmd pkgutil
 require_cmd open
-require_cmd log
 
 expected_sha="$(git rev-parse "$BRANCH" 2>/dev/null || echo "")"
 baseline_run_id="$(gh run list \
@@ -145,9 +179,10 @@ if [[ -z "$run_id" ]]; then
 fi
 
 echo "Waiting for run ${run_id}..."
-GH_REPO="$REPO" scripts/wait-for-gh-run.sh \
-  --run "$run_id" \
-  --interval "$INTERVAL"
+gh run watch "$run_id" \
+  -R "$REPO" \
+  --interval "$INTERVAL" \
+  --exit-status
 
 run_url="https://github.com/${REPO}/actions/runs/${run_id}"
 echo "Run succeeded: ${run_url}"
@@ -170,58 +205,84 @@ if [[ -z "$pkg_path" ]]; then
   exit 1
 fi
 
-echo "Installing pkg for local smoke check..."
-if ! installer -pkg "$pkg_path" -target / >/dev/null 2>&1; then
-  installer -pkg "$pkg_path" -target CurrentUserHomeDirectory >/dev/null
-fi
+expanded_dir="${ARTIFACT_DIR}/pkg-expanded"
+rm -rf "$expanded_dir"
+pkgutil --expand-full "$pkg_path" "$expanded_dir" >/dev/null
 
-app_path="/Applications/Every Code Companion.app"
-if [[ ! -d "$app_path" ]]; then
-  app_path="$HOME/Applications/Every Code Companion.app"
-fi
-if [[ ! -d "$app_path" ]]; then
-  echo "error: installed app not found at expected paths" >&2
+app_path="$(find "$expanded_dir" -type d -name 'EveryCodeCompanion.app' -print -quit)"
+if [[ -z "$app_path" ]]; then
+  echo "error: payload app not found in expanded pkg" >&2
   exit 1
 fi
 
-start_epoch="$(date +%s)"
-echo "Launching payload app for ${SMOKE_SECONDS}s smoke check..."
-open -na "$app_path"
-sleep "$SMOKE_SECONDS"
+backend_bundle="$app_path/Contents/Resources/backend/CodeBackend.app"
+backend_code="$backend_bundle/Contents/MacOS/code"
+backend_ecc="$app_path/Contents/Resources/backend/ecc"
 
-log_path="${ARTIFACT_DIR}/runtime.log"
-log show --style compact --last "${SMOKE_SECONDS}s" \
-  --predicate 'subsystem == "com.every.code.native" OR process == "code" OR process == "secinitd"' \
-  > "$log_path" 2>/dev/null || true
-
-crash_hits="$(
-  find "$HOME/Library/Logs/DiagnosticReports" \
-    "$HOME/Library/Logs/DiagnosticReports/Retired" \
-    -name 'code-*.ips' \
-    -type f \
-    -newermt "@${start_epoch}" 2>/dev/null | wc -l | tr -d ' '
-)"
-
-has_term=0
-has_bundle_id_fault=0
-if rg -q 'Managed backend terminated unexpectedly' "$log_path"; then
-  has_term=1
+if [[ ! -x "$backend_code" ]]; then
+  echo "error: backend code binary missing at ${backend_code}" >&2
+  exit 1
 fi
-if rg -q 'Unable to get bundle identifier because Info.plist from code signature information has no value for kCFBundleIdentifierKey' "$log_path"; then
-  has_bundle_id_fault=1
+if [[ ! -x "$backend_ecc" ]]; then
+  echo "error: backend ecc shim missing at ${backend_ecc}" >&2
+  exit 1
+fi
+
+echo "Running local CLI compatibility smoke checks..."
+scripts/cli-compat-smoke.sh --code "$backend_code" --ecc "$backend_ecc"
+
+echo "Running sandbox launch smoke for backend executable..."
+smoke_cmd=("$backend_code")
+if command -v sandbox-exec >/dev/null 2>&1; then
+  if sandbox-exec -p '(version 1) (allow default)' \
+    "$backend_code" --version >/dev/null 2>&1; then
+    smoke_cmd=(sandbox-exec -p '(version 1) (allow default)' "$backend_code")
+  else
+    echo "warning: sandbox-exec launch probe failed; falling back to direct launch smoke" >&2
+  fi
+fi
+
+smoke_port="43199"
+"${smoke_cmd[@]}" web \
+  --host 0.0.0.0 \
+  --port "$smoke_port" \
+  --session-token native-smoke >"${ARTIFACT_DIR}/backend-sandbox-smoke.log" 2>&1 &
+smoke_pid="$!"
+
+cleanup() {
+  kill "$smoke_pid" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+for _ in {1..20}; do
+  if lsof -nP -a -p "$smoke_pid" -iTCP:"$smoke_port" -sTCP:LISTEN >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+if ! lsof -nP -a -p "$smoke_pid" -iTCP:"$smoke_port" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "result: FAIL"
+  echo "Bundled backend failed sandbox web launch smoke" >&2
+  cat "${ARTIFACT_DIR}/backend-sandbox-smoke.log" >&2 || true
+  exit 1
 fi
 
 echo "--- Preflight summary ---"
 echo "Run: ${run_url}"
 echo "Artifact dir: ${ARTIFACT_DIR}"
 echo "Payload app: ${app_path}"
-echo "Runtime log: ${log_path}"
-echo "New code crash reports: ${crash_hits}"
 
-if [[ "$has_term" -eq 1 || "$has_bundle_id_fault" -eq 1 || "$crash_hits" -gt 0 ]]; then
-  echo "result: FAIL"
-  echo "Detected runtime startup regressions in managed backend." >&2
-  exit 1
-fi
+entitlements_xml="$(codesign -d --entitlements :- "$backend_code" 2>/dev/null || true)"
+for key in \
+  com.apple.security.inherit \
+  com.apple.security.network.client \
+  com.apple.security.network.server; do
+  if [[ "$entitlements_xml" != *"$key"* ]]; then
+    echo "result: FAIL"
+    echo "Missing backend entitlement: $key" >&2
+    exit 1
+  fi
+done
 
 echo "result: PASS"

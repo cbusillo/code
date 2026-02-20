@@ -263,18 +263,52 @@ jobs:
             --code "$backend_code" \
             --ecc "$backend_dir/ecc"
 
-      - name: Verify backend sandbox entitlements
+      - name: Verify backend sandbox launch + entitlements
         run: |
           set -euo pipefail
           backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app"
           backend_dir+="/Contents/Resources/backend"
           backend_code="$backend_dir/CodeBackend.app/Contents/MacOS/code"
 
+          # The backend is launched as a child process
+          # of the sandboxed host app,
+          # so it must support inherited sandbox execution.
+          sandbox-exec -p '(version 1) (allow default)' \
+            "$backend_code" --version >/dev/null
+
+          smoke_port=43199
+          sandbox-exec -p '(version 1) (allow default)' \
+            "$backend_code" web \
+            --host 0.0.0.0 \
+            --port "$smoke_port" \
+            --session-token native-smoke >/tmp/backend-sandbox-smoke.log 2>&1 &
+          smoke_pid=$!
+
+          cleanup() {
+            kill "$smoke_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for _ in {1..20}; do
+            if lsof -nP -a -p "$smoke_pid" \
+              -iTCP:"$smoke_port" -sTCP:LISTEN >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! lsof -nP -a -p "$smoke_pid" \
+            -iTCP:"$smoke_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "Bundled backend failed sandbox launch smoke" >&2
+            cat /tmp/backend-sandbox-smoke.log >&2 || true
+            exit 1
+          fi
+
           entitlements_xml="$(
             codesign -d --entitlements :- "$backend_code" 2>/dev/null || true
           )"
           required_keys=(
-            com.apple.security.app-sandbox
+            com.apple.security.inherit
             com.apple.security.network.client
             com.apple.security.network.server
           )
