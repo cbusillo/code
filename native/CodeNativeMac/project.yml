@@ -133,8 +133,7 @@ targets:
           chmod 755 "${ecc_path}"
 
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] \
-            && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ] \
-            && [ "${EXPANDED_CODE_SIGN_IDENTITY}" != "-" ]; then
+            && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
             backend_entitlements="${SRCROOT}/CodeNativeMac/CodeNativeBackend.entitlements"
             if [ ! -f "${backend_entitlements}" ]; then
               echo "error: missing backend entitlements" >&2

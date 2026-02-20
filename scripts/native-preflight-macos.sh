@@ -264,20 +264,10 @@ echo "Artifact dir: ${ARTIFACT_DIR}"
 echo "Payload app: ${app_path}"
 
 entitlements_xml="$(codesign -d --entitlements :- "$backend_code" 2>/dev/null || true)"
-if [[ "$entitlements_xml" != *"com.apple.security.app-sandbox"* ]]; then
+if [[ "$entitlements_xml" != *"com.apple.security.inherit"* ]]; then
   echo "result: FAIL"
-  echo "Missing backend sandbox entitlement: com.apple.security.app-sandbox" >&2
+  echo "Missing backend entitlement: com.apple.security.inherit" >&2
   exit 1
 fi
-
-for key in \
-  com.apple.security.network.client \
-  com.apple.security.network.server; do
-  if [[ "$entitlements_xml" != *"$key"* ]]; then
-    echo "result: FAIL"
-    echo "Missing backend entitlement: $key" >&2
-    exit 1
-  fi
-done
 
 echo "result: PASS"

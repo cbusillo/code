@@ -101,6 +101,44 @@ Workflow notes:
 - Workflows install the App Store Connect API key into
   `~/.appstoreconnect/private_keys/` before upload.
 
+### Deterministic dry-run commands
+
+Use workflow dispatch with upload disabled, then wait for each run:
+
+```bash
+gh workflow run native-ios-testflight.yml \
+  -f git_ref="$(git rev-parse --abbrev-ref HEAD)" \
+  -f upload_to_testflight=false
+
+gh workflow run native-macos-testflight.yml \
+  -f git_ref="$(git rev-parse --abbrev-ref HEAD)" \
+  -f upload_to_testflight=false
+
+scripts/wait-for-gh-run.sh --workflow "Native iOS TestFlight" \
+  --branch "$(git rev-parse --abbrev-ref HEAD)"
+scripts/wait-for-gh-run.sh --workflow "Native macOS TestFlight" \
+  --branch "$(git rev-parse --abbrev-ref HEAD)"
+```
+
+### Signed artifact checklist
+
+After successful dry-run workflows, download and verify exported artifacts:
+
+```bash
+gh run download <ios-run-id> --name EveryCodeCompanion-ipa --dir /tmp/ecc-ios-artifact
+gh run download <macos-run-id> --name EveryCodeCompanion-macos-pkg --dir /tmp/ecc-macos-artifact
+
+unzip -l /tmp/ecc-ios-artifact/export/EveryCodeCompanion.ipa | head
+pkgutil --check-signature /tmp/ecc-macos-artifact/export/EveryCodeCompanion.pkg
+```
+
+Expected results:
+
+- IPA exists at `/tmp/ecc-ios-artifact/export/EveryCodeCompanion.ipa` with
+  `Payload/` contents.
+- PKG exists at `/tmp/ecc-macos-artifact/export/EveryCodeCompanion.pkg` and
+  `pkgutil --check-signature` reports a valid signed package.
+
 ### macOS setup prerequisites
 
 Before running macOS TestFlight workflow:
