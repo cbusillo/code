@@ -1,0 +1,32 @@
+{
+  "connection_state": "connected",
+  "status_line": "Connected as bench-companion",
+  "endpoint": "ws://127.0.0.1:4317/ws",
+  "client_id": "bench-companion-connected",
+  "companion_session_token": "companion-token-connected-001",
+  "companion_lan_endpoint": "ws://192.168.1.77:4317/ws",
+  "selected_session_id": "00000000-0000-0000-0000-00000000d201",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000d201",
+        "conversation_id": "00000000-0000-0000-0000-00000000d201",
+        "model": "gpt-5.3-codex",
+        "cwd": ".",
+        "created_at_unix_ms": 1700001200000,
+        "last_event_at_unix_ms": 1700001204000,
+        "title": "Companion connected benchmark"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000d201",
+          "seq": 1,
+          "level": "info",
+          "message": "Companion tunnel is healthy."
+        }
+      ]
+    }
+  ]
+}

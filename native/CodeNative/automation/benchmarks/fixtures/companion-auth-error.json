@@ -1,0 +1,33 @@
+{
+  "connection_state": "disconnected",
+  "status_line": "Pair required; update companion token.",
+  "last_error": "Unauthorized (401) from companion gateway",
+  "endpoint": "ws://192.168.1.77:4317/ws",
+  "client_id": "bench-companion-auth-error",
+  "companion_session_token": "stale-token-needs-rotation",
+  "companion_lan_endpoint": "ws://192.168.1.77:4317/ws",
+  "selected_session_id": "00000000-0000-0000-0000-00000000d202",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000d202",
+        "conversation_id": "00000000-0000-0000-0000-00000000d202",
+        "model": "gpt-5.3-codex",
+        "cwd": ".",
+        "created_at_unix_ms": 1700001210000,
+        "last_event_at_unix_ms": 1700001212000,
+        "title": "Companion auth error benchmark"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000d202",
+          "seq": 1,
+          "level": "error",
+          "message": "Pairing token rejected by companion runtime."
+        }
+      ]
+    }
+  ]
+}

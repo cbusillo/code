@@ -27,6 +27,42 @@ final class SessionMirrorStoreTests: XCTestCase {
         XCTAssertEqual(store.lastError, "Pairing code is invalid.")
     }
 
+    @MainActor
+    func testImportCompanionPairingCodeRejectsExpiredPayload() {
+        let store = SessionMirrorStore(endpointAccessPolicy: .anyHost)
+        let now = SessionMirrorStore.currentUnixTimeMilliseconds()
+        let expiredAt = now > 0 ? now - 1 : 0
+        let pairingCode = SessionMirrorStore.buildCompanionPairingCode(
+            endpoint: "ws://192.168.1.44:4317/ws",
+            token: "expired-token",
+            deviceID: "ipad-pro",
+            expiresAtUnixMs: expiredAt
+        )
+
+        XCTAssertFalse(store.importCompanionPairingCode(pairingCode ?? ""))
+        XCTAssertEqual(store.statusLine, "Pairing code expired")
+        XCTAssertEqual(
+            store.lastError,
+            "Pairing code has expired. Request a fresh code from your Mac companion."
+        )
+    }
+
+    func testParseCompanionPairingCodeReadsOptionalMetadata() {
+        let expiresAt = SessionMirrorStore.currentUnixTimeMilliseconds() + 60_000
+        let pairingCode = SessionMirrorStore.buildCompanionPairingCode(
+            endpoint: "ws://192.168.1.44:4317/ws",
+            token: "paired-token",
+            deviceID: "phone-01",
+            expiresAtUnixMs: expiresAt
+        )
+
+        let parsed = SessionMirrorStore.parseCompanionPairingCode(pairingCode ?? "")
+        XCTAssertEqual(parsed?.endpoint, "ws://192.168.1.44:4317/ws")
+        XCTAssertEqual(parsed?.token, "paired-token")
+        XCTAssertEqual(parsed?.deviceID, "phone-01")
+        XCTAssertEqual(parsed?.expiresAtUnixMs, expiresAt)
+    }
+
     func testDisconnectStatusLineClassifiesUnauthorizedErrorAsPairRequired() {
         XCTAssertEqual(
             SessionMirrorStore.disconnectStatusLine(
@@ -1111,6 +1147,8 @@ final class SessionMirrorStoreTests: XCTestCase {
           "connection_state": "connected",
           "status_line": "Connected as fixture",
           "client_id": "fixture-client",
+          "companion_session_token": "fixture-companion-token",
+          "companion_lan_endpoint": "ws://192.168.1.77:4317/ws",
           "selected_session_id": "\(sessionId.uuidString)",
           "sessions": [
             {
@@ -1151,6 +1189,8 @@ final class SessionMirrorStoreTests: XCTestCase {
 
         XCTAssertEqual(store.connectionState, .connected)
         XCTAssertEqual(store.statusLine, "Connected as fixture")
+        XCTAssertEqual(store.companionSessionToken, "fixture-companion-token")
+        XCTAssertEqual(store.companionLANEndpoint, "ws://192.168.1.77:4317/ws")
         XCTAssertEqual(store.selectedSessionID, sessionId)
         XCTAssertEqual(store.selectedSession?.title, "Fixture session")
         XCTAssertEqual(store.selectedSessionItems.map(\.seq), [1, 2])

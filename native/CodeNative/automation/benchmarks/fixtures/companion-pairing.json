@@ -1,0 +1,32 @@
+{
+  "connection_state": "disconnected",
+  "status_line": "Pairing ready",
+  "endpoint": "ws://192.168.1.77:4317/ws",
+  "client_id": "bench-companion-pairing",
+  "companion_session_token": "pairing-token-abc123",
+  "companion_lan_endpoint": "ws://192.168.1.77:4317/ws",
+  "selected_session_id": "00000000-0000-0000-0000-00000000d200",
+  "sessions": [
+    {
+      "summary": {
+        "id": "00000000-0000-0000-0000-00000000d200",
+        "conversation_id": "00000000-0000-0000-0000-00000000d200",
+        "model": "gpt-5.3-codex",
+        "cwd": ".",
+        "created_at_unix_ms": 1700001190000,
+        "last_event_at_unix_ms": 1700001192000,
+        "title": "Companion pairing benchmark"
+      },
+      "has_more_history_before": false,
+      "items": [
+        {
+          "type": "system",
+          "session_id": "00000000-0000-0000-0000-00000000d200",
+          "seq": 1,
+          "level": "info",
+          "message": "Pairing payload is ready for import on iOS."
+        }
+      ]
+    }
+  ]
+}

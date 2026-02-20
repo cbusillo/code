@@ -30,6 +30,10 @@ SCENARIOS=(
 	"session-rail-scale"
 	"disconnected-state"
 	"settings-shell"
+	"companion-pairing"
+	"companion-connected"
+	"companion-auth-error"
+	"tui-coexistence"
 )
 
 mkdir -p "$CURRENT_DIR"

@@ -511,6 +511,78 @@ struct ContentView: View {
         }
     }
 
+    private var hasPendingCompanionApproval: Bool {
+        for item in store.selectedSessionItems.reversed() {
+            guard item.type == "core_event",
+                  let payloadType = item.event?.payload?.typeHint
+            else {
+                continue
+            }
+
+            if payloadType == "exec_approval_request"
+                || payloadType == "apply_patch_approval_request"
+                || payloadType == "request_user_input"
+            {
+                return true
+            }
+
+            if payloadType == "agent_message"
+                || payloadType == "user_message"
+                || payloadType == "turn_aborted"
+                || payloadType == "exec_command_begin"
+                || payloadType == "patch_apply_begin"
+                || payloadType == "user_input_answer"
+            {
+                return false
+            }
+        }
+
+        return false
+    }
+
+    private var companionConnectionState: CompanionConnectionState {
+        CompanionConnectionState.resolve(
+            connectionState: store.connectionState,
+            statusLine: store.statusLine,
+            lastError: store.lastError,
+            hasPendingApproval: hasPendingCompanionApproval
+        )
+    }
+
+    private var companionConnectionColor: Color {
+        switch companionConnectionState {
+        case .discovering:
+            return Color.blue.opacity(0.88)
+        case .pairRequired:
+            return Color.orange.opacity(0.9)
+        case .approvalPending:
+            return Color.yellow.opacity(0.92)
+        case .connected:
+            return Color.green.opacity(0.85)
+        case .reconnecting:
+            return Color.orange.opacity(0.9)
+        case .offline:
+            return Color.red.opacity(0.86)
+        }
+    }
+
+    private var companionConnectionIcon: String {
+        switch companionConnectionState {
+        case .discovering:
+            return "dot.radiowaves.left.and.right"
+        case .pairRequired:
+            return "qrcode"
+        case .approvalPending:
+            return "hand.raised"
+        case .connected:
+            return "link"
+        case .reconnecting:
+            return "arrow.clockwise"
+        case .offline:
+            return "wifi.slash"
+        }
+    }
+
     private var voiceStateLabel: String {
         if voiceInput.isRecording {
             switch voiceInput.transcriptState {
@@ -1312,9 +1384,15 @@ struct ContentView: View {
 
                 Spacer(minLength: 8)
 
+                #if os(iOS)
+                if true {
+                    statusChip
+                }
+                #else
                 if store.connectionState != .connected {
                     statusChip
                 }
+                #endif
 
                 topBarActions
             }
@@ -1471,12 +1549,21 @@ struct ContentView: View {
             showConnectionPopover.toggle()
         } label: {
             HStack(spacing: 6) {
+                #if os(iOS)
+                Image(systemName: companionConnectionIcon)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(companionConnectionColor)
+                Text(companionConnectionState.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(companionConnectionColor)
+                #else
                 Circle()
                     .fill(connectionChipColor)
                     .frame(width: 8, height: 8)
                 Text(store.selectedSessionRuntimeState.label)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(runtimeStateColor)
+                #endif
 
                 Text("•")
                     .font(.caption2)
@@ -4896,10 +4983,89 @@ private struct ConnectionPopover: View {
         )
     }
 
+    private var hasPendingCompanionApproval: Bool {
+        for item in store.selectedSessionItems.reversed() {
+            guard item.type == "core_event",
+                  let payloadType = item.event?.payload?.typeHint
+            else {
+                continue
+            }
+
+            if payloadType == "exec_approval_request"
+                || payloadType == "apply_patch_approval_request"
+                || payloadType == "request_user_input"
+            {
+                return true
+            }
+
+            if payloadType == "agent_message"
+                || payloadType == "user_message"
+                || payloadType == "turn_aborted"
+                || payloadType == "exec_command_begin"
+                || payloadType == "patch_apply_begin"
+                || payloadType == "user_input_answer"
+            {
+                return false
+            }
+        }
+
+        return false
+    }
+
+    private var companionState: CompanionConnectionState {
+        CompanionConnectionState.resolve(
+            connectionState: store.connectionState,
+            statusLine: store.statusLine,
+            lastError: store.lastError,
+            hasPendingApproval: hasPendingCompanionApproval
+        )
+    }
+
+    private var companionStateColor: Color {
+        switch companionState {
+        case .discovering:
+            return .blue
+        case .pairRequired:
+            return .orange
+        case .approvalPending:
+            return .yellow
+        case .connected:
+            return .green
+        case .reconnecting:
+            return .orange
+        case .offline:
+            return .red
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Session Connection")
                 .font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(companionState.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(companionStateColor)
+                Text(companionState.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button("Use localhost") {
+                    store.endpoint = SessionMirrorStore.defaultEndpoint
+                }
+                .buttonStyle(.bordered)
+
+                if let lanEndpoint = store.companionLANEndpoint,
+                   !lanEndpoint.isEmpty {
+                    Button("Use LAN endpoint") {
+                        store.endpoint = lanEndpoint
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
 
             TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
                 .textFieldStyle(.roundedBorder)
@@ -9081,7 +9247,9 @@ private struct NativeSettingsView: View {
 
         return SessionMirrorStore.buildCompanionPairingCode(
             endpoint: pairingCodeEndpoint,
-            token: entry.sessionToken
+            token: entry.sessionToken,
+            deviceID: entry.id,
+            expiresAtUnixMs: entry.expiresAtUnixMs
         )
     }
 

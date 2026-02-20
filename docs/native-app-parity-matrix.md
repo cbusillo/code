@@ -42,10 +42,10 @@ Legend:
 | PAR-023 | Cross-app screenshot parity evidence | TUI + Codex Mac + native | present | P0 | M1 |
 | PAR-024 | Bundled backend runtime supervisor (macOS) | Native productization | present | P0 | M4 |
 | PAR-025 | TUI binary compatibility contract | Every Code TUI | present | P0 | M4 |
-| PAR-026 | Companion pairing/auth gateway (iOS↔macOS) | Native companion | missing | P0 | M4 |
-| PAR-027 | iOS/iPadOS companion connection UX | Codex Mac-inspired | missing | P1 | M4 |
-| PAR-028 | Companion security hardening and revocation | Native security | missing | P0 | M4 |
-| PAR-029 | Unified release/install pipeline proof | Release ops | partial | P1 | M4 |
+| PAR-026 | Companion pairing/auth gateway (iOS↔macOS) | Native companion | present | P0 | M4 |
+| PAR-027 | iOS/iPadOS companion connection UX | Codex Mac-inspired | present | P1 | M4 |
+| PAR-028 | Companion security hardening and revocation | Native security | present | P0 | M4 |
+| PAR-029 | Unified release/install pipeline proof | Release ops | present | P1 | M4 |
 
 ## Detailed Rows
 
@@ -369,43 +369,55 @@ Legend:
 - Dependencies: PAR-024.
 - Acceptance criteria: paired iOS/iPadOS devices authenticate via companion
   gateway and unpaired devices are rejected before session attach.
-- Validation gate: pairing/auth integration tests + deterministic benchmark.
-- Progress: in progress. Managed runtime now requires a companion bearer token
-  on websocket attach (`code web --session-token` + native
-  `Authorization: Bearer <token>` wiring). Unauthorized clients are rejected
-  with `401` before session attach. Native settings now surface a LAN endpoint,
-  per-device pairing registry, and import/export pairing code
-  (`ecccompanion://pair?...`) with QR previews for bootstrap; device-key QR
-  scanning remains pending.
+- Validation gate: `swift test --package-path native/CodeNative` +
+  `scripts/ux/benchmark-native-ui.sh` (includes `companion-pairing`).
+- Progress: present. Managed runtime enforces companion bearer tokens at
+  websocket attach (`code web --session-token` + native
+  `Authorization: Bearer <token>`). Unpaired clients are rejected with `401`
+  before session attach. Pairing import/export now uses
+  `ecccompanion://pair?...` payloads with QR bootstrap and supports direct
+  import via app deep link (`onOpenURL`) across macOS and iOS demo targets.
 
 ## PAR-027
 
 - Dependencies: PAR-026.
 - Acceptance criteria: mobile apps show clear discovery/pair/connect/reconnect
   states and permit manual endpoint fallback.
-- Validation gate: connection UX scenario + accessibility checks.
-- Progress: not started (planned in M4-D).
+- Validation gate: `swift test --package-path native/CodeNative` +
+  `scripts/ux/benchmark-native-ui.sh` (includes `companion-connected`,
+  `companion-auth-error`, and `tui-coexistence`).
+- Progress: present. Companion connection state now resolves deterministically
+  (`discovering`, `pair required`, `approval pending`, `connected`,
+  `reconnecting`, `offline`) and drives iOS status-chip labeling. Connection
+  UI exposes explicit localhost/LAN fallback actions in the popover and
+  companion state detail in settings.
 
 ## PAR-028
 
 - Dependencies: PAR-026.
 - Acceptance criteria: short-lived tokens, revocation, and auth-failure
   messaging are enforced with no insecure fallback path.
-- Validation gate: auth regression tests + negative-connect scenarios.
-- Progress: in progress. Session-token enforcement is now active for managed
-  websocket clients and auth failures are explicit (`401`). Companion runtime
-  now maintains a per-device token set and supports explicit per-device
-  revoke/restore/delete controls plus global token rotation; token expiry is
-  still pending.
+- Validation gate: `swift test --package-path native/CodeNative` +
+  `scripts/ux/benchmark-native-ui.sh` (includes `companion-auth-error`).
+- Progress: present. Companion pairings are short-lived (24h), expired pairings
+  are excluded from active runtime tokens, expired pairing-code imports are
+  rejected, and per-device revoke/restore/delete plus global token rotation are
+  active. Auth failures surface explicit pair-required messaging (`401`/token
+  mismatch) with no insecure unauthenticated attach path.
 
 ## PAR-029
 
 - Dependencies: PAR-024, PAR-026.
 - Acceptance criteria: reproducible macOS+iOS/iPadOS release pipeline with
   deterministic signing/export docs and install verification evidence.
-- Validation gate: CI workflow dry-run + signed artifact checklist.
-- Progress: in progress (existing TestFlight workflow hardening continues in
-  M4-E).
+- Validation gate: workflow dry-run dispatch with upload disabled and run
+  monitoring (`gh workflow run ... upload_to_testflight=false` +
+  `scripts/wait-for-gh-run.sh`), plus signed artifact checklist in
+  `docs/native-app-store-metadata.md`.
+- Progress: present. Native iOS/macOS TestFlight workflows now follow the same
+  deterministic pattern (secret validation, manual signing config, archive,
+  export, artifact upload, optional TestFlight upload), and release docs now
+  include exact dry-run commands plus artifact verification steps.
 
 ## Milestone Rollup
 

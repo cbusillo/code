@@ -15,6 +15,13 @@ final class SessionMirrorStore: ObservableObject {
     private static let slowHistoryPageThresholdMs: Double = 350
     private static let inactiveSessionItemRetentionLimit = 1_500
 
+    struct CompanionPairingCodePayload: Equatable {
+        let endpoint: String
+        let token: String
+        let deviceID: String?
+        let expiresAtUnixMs: UInt64?
+    }
+
     struct HistoryPageTelemetry {
         var requestCount: UInt64 = 0
         var successCount: UInt64 = 0
@@ -303,6 +310,13 @@ final class SessionMirrorStore: ObservableObject {
             return false
         }
 
+        if let expiresAtUnixMs = payload.expiresAtUnixMs,
+           Self.currentUnixTimeMilliseconds() >= expiresAtUnixMs {
+            lastError = "Pairing code has expired. Request a fresh code from your Mac companion."
+            statusLine = "Pairing code expired"
+            return false
+        }
+
         guard let endpointURL = URL(string: payload.endpoint),
               Self.endpointIsAllowed(endpointURL, policy: endpointAccessPolicy)
         else {
@@ -313,6 +327,7 @@ final class SessionMirrorStore: ObservableObject {
 
         endpoint = payload.endpoint
         companionSessionToken = payload.token
+        statusLine = payload.deviceID.map { "Paired: \($0)" } ?? "Pairing imported"
         lastError = nil
         return true
     }
@@ -930,18 +945,33 @@ final class SessionMirrorStore: ObservableObject {
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
-    nonisolated static func buildCompanionPairingCode(endpoint: String, token: String) -> String? {
+    nonisolated static func buildCompanionPairingCode(
+        endpoint: String,
+        token: String,
+        deviceID: String? = nil,
+        expiresAtUnixMs: UInt64? = nil
+    ) -> String? {
         var components = URLComponents()
         components.scheme = companionPairingScheme
         components.host = companionPairingHost
-        components.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "endpoint", value: endpoint),
             URLQueryItem(name: "token", value: token),
         ]
+        if let deviceID,
+           !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            queryItems.append(URLQueryItem(name: "device_id", value: deviceID))
+        }
+        if let expiresAtUnixMs {
+            queryItems.append(
+                URLQueryItem(name: "expires_at_unix_ms", value: "\(expiresAtUnixMs)")
+            )
+        }
+        components.queryItems = queryItems
         return components.string
     }
 
-    nonisolated static func parseCompanionPairingCode(_ raw: String) -> (endpoint: String, token: String)? {
+    nonisolated static func parseCompanionPairingCode(_ raw: String) -> CompanionPairingCodePayload? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let components = URLComponents(string: trimmed),
@@ -965,7 +995,33 @@ final class SessionMirrorStore: ObservableObject {
             return nil
         }
 
-        return (endpoint: endpoint, token: token)
+        let deviceID = queryItems
+            .first(where: { $0.name == "device_id" || $0.name == "device" })?
+            .value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDeviceID: String?
+        if let deviceID,
+           !deviceID.isEmpty {
+            normalizedDeviceID = deviceID
+        } else {
+            normalizedDeviceID = nil
+        }
+
+        let expiresAtUnixMs = queryItems
+            .first(where: { $0.name == "expires_at_unix_ms" || $0.name == "expires_at" })?
+            .value
+            .flatMap(UInt64.init)
+
+        return CompanionPairingCodePayload(
+            endpoint: endpoint,
+            token: token,
+            deviceID: normalizedDeviceID,
+            expiresAtUnixMs: expiresAtUnixMs
+        )
+    }
+
+    nonisolated static func currentUnixTimeMilliseconds() -> UInt64 {
+        UInt64(Date().timeIntervalSince1970 * 1_000)
     }
 
     private func recordTransportFailure(context: String, details: String?) {
@@ -1265,6 +1321,8 @@ final class SessionMirrorStore: ObservableObject {
         expectedAttachedSessionID = nil
 
         composerText = fixture.composerText ?? ""
+        companionSessionToken = fixture.companionSessionToken
+        companionLANEndpoint = fixture.companionLanEndpoint
         connectionState = fixture.connectionState
         statusLine = fixture.statusLine ?? fixture.connectionState.defaultStatusLine
         lastError = fixture.lastError
@@ -1354,6 +1412,8 @@ private struct BenchmarkFixture: Decodable {
     let statusLine: String?
     let lastError: String?
     let clientId: String?
+    let companionSessionToken: String?
+    let companionLanEndpoint: String?
     let composerText: String?
     let selectedSessionID: UUID?
     let sessions: [BenchmarkFixtureSession]

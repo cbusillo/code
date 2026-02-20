@@ -7,6 +7,9 @@ struct CodeNativeiOSDemoApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(store: store)
+                .onOpenURL { url in
+                    _ = store.importCompanionPairingCode(url.absoluteString)
+                }
         }
     }
 }
