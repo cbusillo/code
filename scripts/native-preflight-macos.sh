@@ -93,6 +93,15 @@ require_cmd pkgutil
 require_cmd open
 require_cmd log
 
+expected_sha="$(git rev-parse "$BRANCH" 2>/dev/null || echo "")"
+baseline_run_id="$(gh run list \
+  -R "$REPO" \
+  --workflow "$WORKFLOW_NAME" \
+  --branch "$BRANCH" \
+  --limit 1 \
+  --json databaseId \
+  -q '.[0].databaseId // ""' 2>/dev/null || true)"
+
 echo "Dispatching ${WORKFLOW_FILE} on ${REPO} (${BRANCH}) with upload_to_testflight=false..."
 gh workflow run "$WORKFLOW_FILE" \
   -R "$REPO" \
@@ -101,15 +110,32 @@ gh workflow run "$WORKFLOW_FILE" \
   -f upload_to_testflight=false
 
 run_id=""
-for _ in {1..20}; do
-  run_id="$(gh run list \
+for _ in {1..40}; do
+  runs_json="$(gh run list \
     -R "$REPO" \
     --workflow "$WORKFLOW_NAME" \
     --branch "$BRANCH" \
-    --limit 1 \
-    --json databaseId \
-    -q '.[0].databaseId // ""')"
-  if [[ -n "$run_id" ]]; then
+    --limit 10 \
+    --json databaseId,headSha 2>/dev/null || echo '[]')"
+
+  if [[ -n "$expected_sha" ]]; then
+    run_id="$(jq -r --arg sha "$expected_sha" --arg baseline "$baseline_run_id" '
+      .[]
+      | select(.headSha == $sha)
+      | select(($baseline | length) == 0 or ((.databaseId | tostring) != $baseline))
+      | .databaseId
+      ' <<<"$runs_json" | head -n1)"
+  fi
+
+  if [[ -z "$run_id" ]]; then
+    run_id="$(jq -r --arg baseline "$baseline_run_id" '
+      .[]
+      | select(($baseline | length) == 0 or ((.databaseId | tostring) != $baseline))
+      | .databaseId
+      ' <<<"$runs_json" | head -n1)"
+  fi
+
+  if [[ -n "$run_id" && "$run_id" != "null" ]]; then
     break
   fi
   sleep 3
@@ -137,19 +163,21 @@ gh run download "$run_id" \
   -n EveryCodeCompanion-macos-pkg \
   -D "$ARTIFACT_DIR"
 
-pkg_path="$(find "$ARTIFACT_DIR" -maxdepth 2 -name '*.pkg' -print -quit)"
+pkg_path="$(find "$ARTIFACT_DIR" -path '*/export/EveryCodeCompanion.pkg' -print -quit)"
+if [[ -z "$pkg_path" ]]; then
+  pkg_path="$(find "$ARTIFACT_DIR" -maxdepth 3 -name '*.pkg' -print -quit)"
+fi
 if [[ -z "$pkg_path" ]]; then
   echo "error: pkg artifact not found under ${ARTIFACT_DIR}" >&2
   exit 1
 fi
 
-expanded_dir="${ARTIFACT_DIR}/pkg-expanded"
-rm -rf "$expanded_dir"
-pkgutil --expand-full "$pkg_path" "$expanded_dir" >/dev/null
+echo "Installing pkg for local smoke check..."
+installer -pkg "$pkg_path" -target / >/dev/null
 
-app_path="$(find "$expanded_dir" -type d -name 'EveryCodeCompanion.app' -print -quit)"
-if [[ -z "$app_path" ]]; then
-  echo "error: EveryCodeCompanion.app not found in expanded pkg" >&2
+app_path="/Applications/Every Code Companion.app"
+if [[ ! -d "$app_path" ]]; then
+  echo "error: installed app not found at ${app_path}" >&2
   exit 1
 fi
 

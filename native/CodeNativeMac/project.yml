@@ -146,10 +146,6 @@ targets:
               --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
               --entitlements "${backend_entitlements}" \
               --timestamp=none \
-              "${destination_path}"
-            codesign --force \
-              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
-              --timestamp=none \
               "${backend_bundle_dir}"
             codesign --force \
               --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
