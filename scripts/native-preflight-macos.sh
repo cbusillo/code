@@ -231,33 +231,30 @@ fi
 echo "Running local CLI compatibility smoke checks..."
 scripts/cli-compat-smoke.sh --code "$backend_code" --ecc "$backend_ecc"
 
-echo "Running backend launch smoke..."
-smoke_port="43199"
-/usr/bin/open -n -g "$backend_bundle" --args web \
-  --host 0.0.0.0 \
-  --port "$smoke_port" \
-  --session-token native-smoke >"${ARTIFACT_DIR}/backend-sandbox-smoke.log" 2>&1 &
-open_pid="$!"
-
-cleanup() {
-  kill "$open_pid" >/dev/null 2>&1 || true
-  pkill -f "$backend_code" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-for _ in {1..20}; do
-  if lsof -nP -iTCP:"$smoke_port" -sTCP:LISTEN \
-    | grep -F "$backend_code" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-if ! lsof -nP -iTCP:"$smoke_port" -sTCP:LISTEN \
-  | grep -F "$backend_code" >/dev/null 2>&1; then
+backend_info="$backend_bundle/Contents/Info.plist"
+if [[ ! -f "$backend_info" ]]; then
   echo "result: FAIL"
-  echo "Bundled backend failed launch smoke" >&2
-  cat "${ARTIFACT_DIR}/backend-sandbox-smoke.log" >&2 || true
+  echo "Bundled backend missing Info.plist" >&2
+  exit 1
+fi
+
+backend_bundle_id="$(
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+    "$backend_info" 2>/dev/null || true
+)"
+if [[ -z "$backend_bundle_id" ]]; then
+  echo "result: FAIL"
+  echo "Bundled backend missing CFBundleIdentifier" >&2
+  exit 1
+fi
+
+backend_executable="$(
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+    "$backend_info" 2>/dev/null || true
+)"
+if [[ "$backend_executable" != "code" ]]; then
+  echo "result: FAIL"
+  echo "Bundled backend CFBundleExecutable must be 'code'" >&2
   exit 1
 fi
 

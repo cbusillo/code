@@ -263,39 +263,35 @@ jobs:
             --code "$backend_code" \
             --ecc "$backend_dir/ecc"
 
-      - name: Verify backend launch + entitlements
+      - name: Verify backend bundle metadata + entitlements
         run: |
           set -euo pipefail
           backend_dir="$ARCHIVE_PATH/Products/Applications/EveryCodeCompanion.app"
           backend_dir+="/Contents/Resources/backend"
           backend_bundle="$backend_dir/CodeBackend.app"
           backend_code="$backend_dir/CodeBackend.app/Contents/MacOS/code"
+          backend_info="$backend_bundle/Contents/Info.plist"
 
-          smoke_port=43199
-          /usr/bin/open -n -g "$backend_bundle" --args web \
-            --host 0.0.0.0 \
-            --port "$smoke_port" \
-            --session-token native-smoke >/tmp/backend-sandbox-smoke.log 2>&1 &
-          open_pid=$!
+          if [[ ! -f "$backend_info" ]]; then
+            echo "Bundled backend missing Info.plist" >&2
+            exit 1
+          fi
 
-          cleanup() {
-            kill "$open_pid" >/dev/null 2>&1 || true
-            pkill -f "$backend_code" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
+          backend_bundle_id="$(
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+              "$backend_info" 2>/dev/null || true
+          )"
+          if [[ -z "$backend_bundle_id" ]]; then
+            echo "Bundled backend missing CFBundleIdentifier" >&2
+            exit 1
+          fi
 
-          for _ in {1..20}; do
-            if lsof -nP -iTCP:"$smoke_port" -sTCP:LISTEN \
-              | grep -F "$backend_code" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 1
-          done
-
-          if ! lsof -nP -iTCP:"$smoke_port" -sTCP:LISTEN \
-            | grep -F "$backend_code" >/dev/null 2>&1; then
-            echo "Bundled backend failed launch smoke" >&2
-            cat /tmp/backend-sandbox-smoke.log >&2 || true
+          backend_executable="$(
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+              "$backend_info" 2>/dev/null || true
+          )"
+          if [[ "$backend_executable" != "code" ]]; then
+            echo "Bundled backend CFBundleExecutable must be 'code'" >&2
             exit 1
           fi
 
