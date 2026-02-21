@@ -13,7 +13,7 @@ name: Native macOS Artifact
         default: ""
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: native-macos-artifact-${{ github.ref }}
@@ -94,3 +94,30 @@ jobs:
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.archive }}.sha256
           if-no-files-found: error
+
+      - name: Resolve release tag
+        id: release_tag
+        run: |
+          set -euo pipefail
+          candidate="${{ steps.resolve_ref.outputs.value }}"
+          case "$candidate" in
+            refs/tags/*)
+              candidate="${candidate#refs/tags/}"
+              ;;
+          esac
+
+          if [[ "$candidate" =~ ^macos-v.+$ ]]; then
+            echo "value=$candidate" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub release assets
+        if: steps.release_tag.outputs.value != ''
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.release_tag.outputs.value }}
+          name: EveryCodeCompanion ${{ steps.release_tag.outputs.value }}
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
