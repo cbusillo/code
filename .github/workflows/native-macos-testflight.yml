@@ -2,9 +2,6 @@
 name: Native macOS TestFlight
 
 'on':
-  push:
-    tags:
-      - 'macos-v*'
   workflow_dispatch:
     inputs:
       git_ref:
