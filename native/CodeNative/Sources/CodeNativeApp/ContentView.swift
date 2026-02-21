@@ -157,6 +157,8 @@ struct ContentView: View {
     @AppStorage("code_native_prevent_sleep") private var preventSleep = false
     @AppStorage("code_native_glass_window") private var glassWindow = true
     @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = false
+    @AppStorage("code_native_voice_identifier") private var preferredVoiceIdentifier = ""
+    @AppStorage("code_native_voice_rate") private var voicePlaybackRate = 0.46
     @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
     @AppStorage("code_native_show_activity_events") private var showActivityEvents = true
     @AppStorage("code_native_ide_context_enabled") private var ideContextEnabled = true
@@ -249,6 +251,11 @@ struct ContentView: View {
         autoSpeakAssistant
             ? "Turns off spoken assistant responses."
             : "Turns on spoken assistant responses."
+    }
+
+    private var selectedVoiceIdentifier: String? {
+        let trimmed = preferredVoiceIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private var composerHelperText: String? {
@@ -876,6 +883,12 @@ struct ContentView: View {
                 voiceOutput.stop()
             }
         }
+        .onChange(of: preferredVoiceIdentifier) { _, _ in
+            voiceOutput.stop()
+        }
+        .onChange(of: voicePlaybackRate) { _, _ in
+            voiceOutput.stop()
+        }
         .onChange(of: store.selectedSessionID) { _, _ in
             if voiceInput.isRecording {
                 stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
@@ -968,7 +981,10 @@ struct ContentView: View {
             importCLIProfile: importCLIProfile,
             clearImportedCLIProfile: clearImportedCLIProfile,
             autoSpeakAssistant: $autoSpeakAssistant,
+            preferredVoiceIdentifier: $preferredVoiceIdentifier,
+            voicePlaybackRate: $voicePlaybackRate,
             autoSubmitVoice: $autoSubmitVoice,
+            previewVoiceSample: previewVoiceSample,
             themeModeRaw: $themeModeRaw,
             threadDensityRaw: $threadDensityRaw,
             sessionGroupingModeRaw: $sessionGroupingModeRaw,
@@ -4476,7 +4492,20 @@ struct ContentView: View {
         }
 
         lastSpokenItemID = lastItem.id
-        voiceOutput.speak(text)
+        voiceOutput.speak(
+            text,
+            voiceIdentifier: selectedVoiceIdentifier,
+            rate: Float(voicePlaybackRate)
+        )
+    }
+
+    private func previewVoiceSample() {
+        voiceOutput.stop()
+        voiceOutput.speak(
+            "Voice preview. Assistant responses will play with this voice and speed.",
+            voiceIdentifier: selectedVoiceIdentifier,
+            rate: Float(voicePlaybackRate)
+        )
     }
 
     private func toggleAutoSpeakAssistant() {
@@ -9190,7 +9219,10 @@ private struct NativeSettingsView: View {
     let importCLIProfile: ((URL) throws -> ImportedProfileState)?
     let clearImportedCLIProfile: (() -> Void)?
     @Binding var autoSpeakAssistant: Bool
+    @Binding var preferredVoiceIdentifier: String
+    @Binding var voicePlaybackRate: Double
     @Binding var autoSubmitVoice: Bool
+    let previewVoiceSample: (() -> Void)?
     @Binding var themeModeRaw: String
     @Binding var threadDensityRaw: String
     @Binding var sessionGroupingModeRaw: String
@@ -9257,6 +9289,51 @@ private struct NativeSettingsView: View {
                 .red
             }
         }
+    }
+
+    private struct VoiceSelectionItem: Identifiable {
+        let identifier: String
+        let label: String
+
+        var id: String { identifier }
+    }
+
+    private var normalizedPreferredVoiceIdentifier: String {
+        preferredVoiceIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var voiceSelectionItems: [VoiceSelectionItem] {
+        let availableItems = VoiceOutputController.availableVoiceOptions().map { option in
+            VoiceSelectionItem(
+                identifier: option.identifier,
+                label: "\(option.displayName) (\(option.languageCode), \(option.qualityLabel))"
+            )
+        }
+
+        var items: [VoiceSelectionItem] = [
+            VoiceSelectionItem(
+                identifier: "",
+                label: "Automatic (Best available)"
+            )
+        ]
+        items.append(contentsOf: availableItems)
+
+        let selectedIdentifier = normalizedPreferredVoiceIdentifier
+        if !selectedIdentifier.isEmpty,
+           !items.contains(where: { $0.identifier == selectedIdentifier }) {
+            items.append(
+                VoiceSelectionItem(
+                    identifier: selectedIdentifier,
+                    label: "Saved voice (Unavailable on this device)"
+                )
+            )
+        }
+
+        return items
+    }
+
+    private var voicePlaybackRateLabel: String {
+        String(format: "%.2f", voicePlaybackRate)
     }
 
     private let modelOptions = WorkflowSettings.modelOptions
@@ -9886,6 +9963,46 @@ private struct NativeSettingsView: View {
             SettingsRow(title: "Window style", description: "Use translucent shell treatment for sidebars and cards.") {
                 Toggle("", isOn: $glassWindow)
                     .labelsHidden()
+            }
+
+            SettingsRow(title: "Assistant voice", description: "Choose the voice used for spoken assistant responses.") {
+                Picker(
+                    "",
+                    selection: Binding(
+                        get: { normalizedPreferredVoiceIdentifier },
+                        set: { preferredVoiceIdentifier = $0 }
+                    )
+                ) {
+                    ForEach(voiceSelectionItems) { item in
+                        Text(item.label).tag(item.identifier)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: isCompactSettingsLayout ? nil : 320)
+            }
+
+            SettingsRow(title: "Voice speed", description: "Fine-tune spoken response speed.") {
+                HStack(spacing: 10) {
+                    Slider(
+                        value: $voicePlaybackRate,
+                        in: 0.35...0.58,
+                        step: 0.01
+                    )
+                    .frame(width: isCompactSettingsLayout ? nil : 220)
+
+                    Text(voicePlaybackRateLabel)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+            }
+
+            SettingsRow(title: "Preview voice", description: "Play a short sample with current voice settings.") {
+                Button("Play sample") {
+                    previewVoiceSample?()
+                }
+                .buttonStyle(.bordered)
+                .disabled(previewVoiceSample == nil)
             }
 
             SettingsRow(title: "Auto speak responses", description: "Speak assistant replies when new messages arrive.") {
