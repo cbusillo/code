@@ -196,6 +196,20 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return normalizeStructuredText(message)
         }
 
+        if payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta",
+           let delta = object["delta"]?.stringValue {
+            return normalizeStructuredText(delta)
+        }
+
+        if payloadType == "agent_reasoning_delta"
+            || payloadType == "agent_reasoning_raw_content_delta"
+            || payloadType == "reasoning_content_delta"
+            || payloadType == "reasoning_raw_content_delta",
+            let delta = object["delta"]?.stringValue
+        {
+            return truncate(normalizeReasoningText(delta), maxCharacters: 3_000)
+        }
+
         if payloadType == "user_message",
            let message = object["message"]?.stringValue {
             let sanitizedMessage = sanitizeUserMessage(message)
@@ -2167,6 +2181,61 @@ extension SessionStreamItem {
         return sanitized.isEmpty ? nil : sanitized
     }
 
+    var corePayloadType: String? {
+        guard type == "core_event",
+              let payload = event?.payload
+        else {
+            return nil
+        }
+
+        if let object = payload.objectValue,
+           let payloadType = object["type"]?.stringValue,
+           !payloadType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return payloadType
+        }
+
+        return payload.typeHint
+    }
+
+    var assistantDeltaText: String? {
+        guard type == "core_event",
+              let payloadType = corePayloadType,
+              payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta",
+              let object = event?.payload?.objectValue,
+              let delta = object["delta"]?.stringValue
+        else {
+            return nil
+        }
+
+        let normalized = normalizeStructuredText(delta)
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : normalized
+    }
+
+    var reasoningDeltaText: String? {
+        guard type == "core_event",
+              let payloadType = corePayloadType,
+              payloadType == "agent_reasoning_delta"
+                || payloadType == "agent_reasoning_raw_content_delta"
+                || payloadType == "reasoning_content_delta"
+                || payloadType == "reasoning_raw_content_delta",
+              let object = event?.payload?.objectValue,
+              let delta = object["delta"]?.stringValue
+        else {
+            return nil
+        }
+
+        let normalized = normalizeReasoningText(delta)
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : normalized
+    }
+
+    var isAssistantDeltaEvent: Bool {
+        assistantDeltaText != nil
+    }
+
+    var isReasoningDeltaEvent: Bool {
+        reasoningDeltaText != nil
+    }
+
     var isImagePlaceholderUserMessage: Bool {
         guard let userMessageText else {
             return false
@@ -2452,6 +2521,14 @@ extension SessionStreamItem {
             return true
         }
 
+        if payloadType == "agent_reasoning_delta"
+            || payloadType == "agent_reasoning_raw_content_delta"
+            || payloadType == "reasoning_content_delta"
+            || payloadType == "reasoning_raw_content_delta"
+        {
+            return true
+        }
+
         if payloadType == "task_started" {
             return true
         }
@@ -2520,6 +2597,10 @@ extension SessionStreamItem {
 
         if payloadType == "agent_reasoning_section_break"
             || payloadType == "agent_reasoning"
+            || payloadType == "agent_reasoning_delta"
+            || payloadType == "agent_reasoning_raw_content_delta"
+            || payloadType == "reasoning_content_delta"
+            || payloadType == "reasoning_raw_content_delta"
             || payloadType == "task_started"
             || payloadType == "task_complete"
             || payloadType == "exec_command_begin"
@@ -2656,6 +2737,9 @@ extension SessionStreamItem {
                 return .user
             }
             if payloadType == "agent_message" {
+                return .assistant
+            }
+            if payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta" {
                 return .assistant
             }
             if payloadType.contains("reasoning") {

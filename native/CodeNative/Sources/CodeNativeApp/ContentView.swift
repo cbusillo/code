@@ -2080,10 +2080,12 @@ struct ContentView: View {
         let taskMerged = mergeTaskActivityIntoTaskCards(in: replayPruned)
         let reducedItems = dedupeAssistantMessagesWithinTurn(
             in: collapseConsecutiveReasoningCards(
-                in: dedupeObsoleteBackgroundEvents(
-                    in: collapseTokenUsageBursts(
-                        in: removeRedundantPatchSummaries(
-                            from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: taskMerged.items))
+                in: collapseStreamingDeltaCards(
+                    in: dedupeObsoleteBackgroundEvents(
+                        in: collapseTokenUsageBursts(
+                            in: removeRedundantPatchSummaries(
+                                from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: taskMerged.items))
+                            )
                         )
                     )
                 )
@@ -2191,6 +2193,112 @@ struct ContentView: View {
         }
 
         return keptReversed.reversed()
+    }
+
+    private func collapseStreamingDeltaCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return items
+        }
+
+        var collapsed: [SessionStreamItem] = []
+        collapsed.reserveCapacity(items.count)
+
+        for item in items {
+            if let assistantDelta = item.assistantDeltaText {
+                if let last = collapsed.last,
+                   last.isAssistantDeltaEvent,
+                   shouldMergeStreamingDelta(last: last, incoming: item),
+                   let payloadType = last.corePayloadType ?? item.corePayloadType,
+                   let merged = mergedStreamingDeltaItem(
+                       base: last,
+                       incoming: item,
+                       payloadType: payloadType,
+                       mergedText: (last.assistantDeltaText ?? "") + assistantDelta
+                   ) {
+                    collapsed[collapsed.count - 1] = merged
+                    continue
+                }
+
+                collapsed.append(item)
+                continue
+            }
+
+            if let reasoningDelta = item.reasoningDeltaText {
+                if let last = collapsed.last,
+                   last.isReasoningDeltaEvent,
+                   shouldMergeStreamingDelta(last: last, incoming: item),
+                   let payloadType = last.corePayloadType ?? item.corePayloadType,
+                   let merged = mergedStreamingDeltaItem(
+                       base: last,
+                       incoming: item,
+                       payloadType: payloadType,
+                       mergedText: (last.reasoningDeltaText ?? "") + reasoningDelta
+                   ) {
+                    collapsed[collapsed.count - 1] = merged
+                    continue
+                }
+
+                collapsed.append(item)
+                continue
+            }
+
+            collapsed.append(item)
+        }
+
+        return collapsed
+    }
+
+    private func shouldMergeStreamingDelta(last: SessionStreamItem, incoming: SessionStreamItem) -> Bool {
+        guard last.type == "core_event", incoming.type == "core_event" else {
+            return false
+        }
+
+        let lastID = last.event?.id.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let incomingID = incoming.event?.id.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if !lastID.isEmpty, !incomingID.isEmpty {
+            return lastID == incomingID
+        }
+
+        return true
+    }
+
+    private func mergedStreamingDeltaItem(
+        base: SessionStreamItem,
+        incoming: SessionStreamItem,
+        payloadType: String,
+        mergedText: String
+    ) -> SessionStreamItem? {
+        guard base.type == "core_event",
+              let baseEvent = base.event
+        else {
+            return nil
+        }
+
+        let payload = JSONValue.object([
+            "type": .string(payloadType),
+            "delta": .string(mergedText),
+        ])
+
+        let mergedEvent = CoreEventPayload(
+            id: baseEvent.id,
+            eventSeq: incoming.event?.eventSeq ?? baseEvent.eventSeq,
+            kind: incoming.event?.kind ?? baseEvent.kind,
+            payload: payload
+        )
+
+        return SessionStreamItem(
+            type: base.type,
+            sessionId: base.sessionId,
+            seq: base.seq,
+            event: mergedEvent,
+            rev: incoming.rev ?? base.rev,
+            text: base.text,
+            cursor: base.cursor,
+            sourceClientId: base.sourceClientId,
+            level: base.level,
+            message: base.message
+        )
     }
 
     private func assistantMessageSignature(for item: SessionStreamItem) -> String? {
