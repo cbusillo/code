@@ -1864,6 +1864,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                     .frame(minHeight: geometry.size.height, alignment: transcriptContentAlignment)
                 }
+                .id("transcript.session.\(session.id)")
                 .onAppear {
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                 }
@@ -2002,11 +2003,12 @@ struct ContentView: View {
     }
 
     private var transcriptTailIdentity: String {
+        let sessionID = store.selectedSessionID?.uuidString ?? "none"
         guard let last = transcriptItems.last else {
-            return "empty:\(transcriptItems.count)"
+            return "\(sessionID):empty:\(transcriptItems.count)"
         }
 
-        return "\(last.id):\(last.body.count):\(transcriptItems.count)"
+        return "\(sessionID):\(last.id):\(last.body.count):\(transcriptItems.count)"
     }
 
     private func refreshTranscriptCache() {
