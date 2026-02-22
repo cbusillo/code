@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -71,11 +75,167 @@ where
 pub(crate) fn create_env_for_mcp_server(
     extra_env: Option<HashMap<String, String>>,
 ) -> HashMap<String, String> {
-    DEFAULT_ENV_VARS
+    let mut env_vars = DEFAULT_ENV_VARS
         .iter()
         .filter_map(|var| env::var(var).ok().map(|value| (var.to_string(), value)))
-        .chain(extra_env.unwrap_or_default())
-        .collect()
+        .collect::<HashMap<_, _>>();
+
+    if let Some(extra_env) = extra_env {
+        env_vars.extend(extra_env);
+    }
+
+    let home = env_vars.get("HOME").cloned().or_else(|| env::var("HOME").ok());
+    let path = env_vars.get("PATH").cloned().or_else(|| env::var("PATH").ok());
+    let augmented_path = build_augmented_path(path.as_deref(), home.as_deref());
+    env_vars.insert("PATH".to_string(), augmented_path);
+
+    env_vars
+}
+
+pub(crate) fn resolve_mcp_command(
+    program: &OsString,
+    extra_env: Option<&HashMap<String, String>>,
+) -> OsString {
+    let program_path = Path::new(program);
+    if program_path.is_absolute() || program_path.components().count() > 1 {
+        return program.clone();
+    }
+
+    let Some(program_name) = program.to_str() else {
+        return program.clone();
+    };
+
+    let resolved_env = create_env_for_mcp_server(extra_env.cloned());
+    let Some(path) = resolved_env.get("PATH") else {
+        return program.clone();
+    };
+
+    let path_entries: Vec<PathBuf> = env::split_paths(path).collect();
+    find_executable_in_path(program_name, &path_entries, &resolved_env)
+        .map(PathBuf::into_os_string)
+        .unwrap_or_else(|| program.clone())
+}
+
+fn build_augmented_path(base_path: Option<&str>, home: Option<&str>) -> String {
+    let mut entries: Vec<PathBuf> = base_path
+        .map(env::split_paths)
+        .map(Iterator::collect)
+        .unwrap_or_default();
+
+    for dir in common_path_fallbacks(home) {
+        push_unique_path_entry(&mut entries, dir);
+    }
+
+    env::join_paths(entries)
+        .unwrap_or_else(|_| OsString::from(base_path.unwrap_or_default()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn push_unique_path_entry(entries: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !entries.iter().any(|entry| entry == &candidate) {
+        entries.push(candidate);
+    }
+}
+
+fn common_path_fallbacks(home: Option<&str>) -> Vec<PathBuf> {
+    let mut fallbacks = Vec::new();
+
+    #[cfg(unix)]
+    {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+            fallbacks.push(PathBuf::from(dir));
+        }
+
+        if let Some(home) = home {
+            let home = PathBuf::from(home);
+            for suffix in [".local/bin", ".cargo/bin", ".volta/bin", "bin"] {
+                fallbacks.push(home.join(suffix));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(home) = home {
+            let home = PathBuf::from(home);
+            fallbacks.push(home.join(".cargo\\bin"));
+            fallbacks.push(home.join(".local\\bin"));
+        }
+    }
+
+    fallbacks
+}
+
+fn find_executable_in_path(
+    program_name: &str,
+    path_entries: &[PathBuf],
+    _env_vars: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    let program = Path::new(program_name);
+
+    for dir in path_entries {
+        let candidate = dir.join(program);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+
+        #[cfg(windows)]
+        {
+            if program.extension().is_none() {
+                if let Some(candidate) = windows_candidate_with_pathext(dir, program_name, _env_vars)
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(windows)]
+fn windows_candidate_with_pathext(
+    dir: &Path,
+    program_name: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    let pathext = env_vars
+        .get("PATHEXT")
+        .cloned()
+        .or_else(|| env::var("PATHEXT").ok())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+
+    for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
+        let ext = ext.trim_start_matches('.');
+        let candidate = dir.join(format!("{program_name}.{ext}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 #[cfg(unix)]
@@ -111,6 +271,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use rmcp::model::CallToolResult as RmcpCallToolResult;
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn create_env_honors_overrides() {
@@ -156,5 +319,54 @@ mod tests {
         assert_eq!(result.is_error, Some(false));
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_env_augments_path_with_common_bins() {
+        let env = create_env_for_mcp_server(Some(HashMap::from([
+            ("HOME".to_string(), "/tmp/code-home".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ])));
+
+        let path = env.get("PATH").expect("PATH is always populated");
+        let parts: Vec<_> = std::env::split_paths(path).collect();
+
+        assert!(parts.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert!(parts.contains(&PathBuf::from("/tmp/code-home/.local/bin")));
+        assert!(parts.contains(&PathBuf::from("/tmp/code-home/.cargo/bin")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_mcp_command_uses_augmented_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = format!(
+            "code-rmcp-client-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock went backwards")
+                .as_nanos()
+        );
+        let temp_root = std::env::temp_dir().join(unique);
+        let bin_dir = temp_root.join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin directory");
+
+        let executable_path = bin_dir.join("toolx");
+        fs::write(&executable_path, "#!/bin/sh\nexit 0\n").expect("write fake tool");
+        let mut permissions = fs::metadata(&executable_path)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable_path, permissions).expect("set mode");
+
+        let env = HashMap::from([(String::from("PATH"), bin_dir.to_string_lossy().to_string())]);
+        let resolved = resolve_mcp_command(&OsString::from("toolx"), Some(&env));
+
+        assert_eq!(resolved, executable_path.into_os_string());
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 }

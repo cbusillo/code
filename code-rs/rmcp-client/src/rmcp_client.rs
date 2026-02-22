@@ -37,6 +37,7 @@ use crate::utils::convert_call_tool_result;
 use crate::utils::convert_to_mcp;
 use crate::utils::convert_to_rmcp;
 use crate::utils::create_env_for_mcp_server;
+use crate::utils::resolve_mcp_command;
 use crate::utils::run_with_timeout;
 
 enum PendingTransport {
@@ -65,18 +66,20 @@ impl RmcpClient {
         args: Vec<OsString>,
         env: Option<HashMap<String, String>>,
     ) -> io::Result<Self> {
-        let program_name = program.to_string_lossy().into_owned();
+        let resolved_program = resolve_mcp_command(&program, env.as_ref());
+        let program_name = resolved_program.to_string_lossy().into_owned();
+        let child_env = create_env_for_mcp_server(env.clone());
         let mut last_err: Option<io::Error> = None;
         let mut spawned: Option<(TokioChildProcess, Option<tokio::process::ChildStderr>)> = None;
 
         for delay_ms in [0_u64, 10, 50] {
-            let mut command = Command::new(&program);
+            let mut command = Command::new(&resolved_program);
             command
                 .kill_on_drop(true)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .env_clear()
-                .envs(create_env_for_mcp_server(env.clone()))
+                .envs(child_env.clone())
                 .args(&args);
 
             match TokioChildProcess::builder(command)
