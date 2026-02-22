@@ -279,6 +279,7 @@ struct ContentView: View {
     @State private var pendingPrependAnchorItemID: String?
     @State private var pendingBottomScrollAfterThreadSwitch = false
     @State private var transcriptIsNearBottom = true
+    @State private var transcriptUserHasScrolled = false
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @State private var showSlashCommandLauncher = false
@@ -1011,6 +1012,7 @@ struct ContentView: View {
             voiceInteractionNotice = nil
             activeTranscriptItemID = nil
             transcriptIsNearBottom = true
+            transcriptUserHasScrolled = false
             pendingBottomScrollAfterThreadSwitch = true
             composerDraft = store.composerText
             refreshTranscriptCache()
@@ -1824,7 +1826,8 @@ struct ContentView: View {
                                 .frame(height: 1)
                                 .id(firstItemID.map { "transcript.top.\($0)" } ?? "transcript.top")
                                 .onAppear {
-                                    if store.requestOlderHistoryIfNeeded(for: session.id) {
+                                    if !pendingBottomScrollAfterThreadSwitch,
+                                       store.requestOlderHistoryIfNeeded(for: session.id) {
                                         markPendingPrependAnchorForHistoryLoad()
                                     }
                                 }
@@ -1851,7 +1854,8 @@ struct ContentView: View {
                                 transcriptRow(item: item)
                                     .onAppear {
                                         if index < 8 {
-                                            if store.requestOlderHistoryIfNeeded(for: session.id) {
+                                            if !pendingBottomScrollAfterThreadSwitch,
+                                               store.requestOlderHistoryIfNeeded(for: session.id) {
                                                 markPendingPrependAnchorForHistoryLoad()
                                             }
                                         }
@@ -1879,6 +1883,12 @@ struct ContentView: View {
                 }
                 .id("transcript.session.\(session.id)")
                 .coordinateSpace(name: transcriptScrollCoordinateSpaceName)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { _ in
+                            transcriptUserHasScrolled = true
+                        }
+                )
                 .onPreferenceChange(TranscriptBottomOffsetPreferenceKey.self) { bottomOffset in
                     transcriptIsNearBottom = bottomOffset <= geometry.size.height + 32
                 }
@@ -4594,7 +4604,7 @@ struct ContentView: View {
     }
 
     private func markPendingPrependAnchorForHistoryLoad() {
-        if pendingBottomScrollAfterThreadSwitch || transcriptIsNearBottom {
+        if pendingBottomScrollAfterThreadSwitch || transcriptIsNearBottom || !transcriptUserHasScrolled {
             pendingPrependAnchorItemID = nil
             return
         }
