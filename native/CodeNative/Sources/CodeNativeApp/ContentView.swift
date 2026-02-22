@@ -1018,7 +1018,6 @@ struct ContentView: View {
             transcriptUserHasScrolled = false
             pendingBottomScrollAfterThreadSwitch = true
             composerDraft = store.composerText
-            applyCachedTranscriptForSelectedSession()
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
             #if os(iOS)
@@ -1887,6 +1886,7 @@ struct ContentView: View {
                     .frame(minHeight: geometry.size.height, alignment: transcriptContentAlignment)
                 }
                 .id("transcript.session.\(session.id)")
+                .defaultScrollAnchor(.bottom)
                 .coordinateSpace(name: transcriptScrollCoordinateSpaceName)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4)
@@ -1903,10 +1903,6 @@ struct ContentView: View {
                 .onChange(of: store.selectedSessionID) { _, _ in
                     pendingPrependAnchorItemID = nil
                     pendingBottomScrollAfterThreadSwitch = true
-                    scrollTranscriptToBottom(proxy: proxy, animated: false)
-                    DispatchQueue.main.async {
-                        scrollTranscriptToBottom(proxy: proxy, animated: false)
-                    }
                 }
                 .onChange(of: transcriptTailIdentity) { _, _ in
                     if pendingPrependAnchorItemID != nil {
@@ -4706,20 +4702,6 @@ struct ContentView: View {
     private func clearTranscriptSessionCaches() {
         transcriptCacheBySessionID.removeAll(keepingCapacity: true)
         transcriptCacheUsageOrder.removeAll(keepingCapacity: true)
-    }
-
-    private func applyCachedTranscriptForSelectedSession() {
-        guard let sessionID = store.selectedSessionID,
-              let sourceKey = transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID),
-              let cached = transcriptCacheBySessionID[sessionID],
-              cached.sourceKey == sourceKey
-        else {
-            return
-        }
-
-        cachedTranscriptItems = cached.items
-        taskActivityByStartItemID = cached.taskActivityByStartItemID
-        touchTranscriptCache(sessionID)
     }
 
     private func openSelectedWorkspace() {
