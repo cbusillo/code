@@ -277,6 +277,7 @@ struct ContentView: View {
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
     @State private var pendingPrependAnchorItemID: String?
+    @State private var pendingBottomScrollAfterThreadSwitch = false
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @State private var showSlashCommandLauncher = false
@@ -1007,6 +1008,7 @@ struct ContentView: View {
             }
             voiceInteractionNotice = nil
             activeTranscriptItemID = nil
+            pendingBottomScrollAfterThreadSwitch = true
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
@@ -1867,6 +1869,7 @@ struct ContentView: View {
                 }
                 .onChange(of: store.selectedSessionID) { _, _ in
                     pendingPrependAnchorItemID = nil
+                    pendingBottomScrollAfterThreadSwitch = true
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                     DispatchQueue.main.async {
                         scrollTranscriptToBottom(proxy: proxy, animated: false)
@@ -1876,6 +1879,13 @@ struct ContentView: View {
                     guard pendingPrependAnchorItemID == nil else {
                         return
                     }
+
+                    if pendingBottomScrollAfterThreadSwitch {
+                        pendingBottomScrollAfterThreadSwitch = false
+                        scrollTranscriptToBottom(proxy: proxy, animated: false)
+                        return
+                    }
+
                     scrollTranscriptToBottom(proxy: proxy, animated: true)
                 }
                 .onChange(of: transcriptItems.first?.id) { _, newFirstID in
@@ -3522,13 +3532,8 @@ struct ContentView: View {
                 continue
             }
 
-            if payloadType == "agent_message"
-                || payloadType == "user_message"
-                || payloadType == "turn_aborted"
-                || payloadType == "request_user_input"
-                || payloadType == "exec_approval_request"
-                || payloadType == "apply_patch_approval_request"
-            {
+            // Treat a user turn boundary as the cutoff for pinned tool activity.
+            if payloadType == "user_message" || payloadType == "turn_aborted" {
                 return nil
             }
 
@@ -10278,6 +10283,35 @@ private struct NativeSettingsView: View {
         }
     }
 
+    private var publicAppBuildMarkerText: String {
+        if let info = Bundle.main.infoDictionary,
+           let gitSHA = info["CODE_NATIVE_GIT_SHA"] as? String,
+           !gitSHA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Build commit: \(gitSHA)"
+        }
+
+        guard let executableURL = Bundle.main.executableURL,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: executableURL.path)
+        else {
+            return "Build marker unavailable"
+        }
+
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let modifiedAt = attributes[.modificationDate] as? Date
+        let marker = "\(String(size, radix: 16))"
+        if let modifiedAt {
+            let timestamp = Int(modifiedAt.timeIntervalSince1970)
+            return "Build marker: \(marker)-\(String(timestamp, radix: 16))"
+        }
+
+        return "Build marker: \(marker)"
+    }
+
+    private var publicAppBinaryPathText: String {
+        let bundlePath = Bundle.main.bundleURL.path
+        return "Bundle path: \(bundlePath)"
+    }
+
     private var isCompactSettingsLayout: Bool {
         #if os(iOS)
         return horizontalSizeClass == .compact
@@ -10617,6 +10651,8 @@ private struct NativeSettingsView: View {
 
             SettingsInfoCard(text: publicAppAttributionText)
             SettingsInfoCard(text: publicAppVersionText)
+            SettingsInfoCard(text: publicAppBuildMarkerText)
+            SettingsInfoCard(text: publicAppBinaryPathText)
 
         case .configuration:
             SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {
