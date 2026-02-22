@@ -245,7 +245,11 @@ struct ContentView: View {
     @AppStorage("code_native_open_destination") private var openDestinationRaw = OpenDestination.finder.rawValue
     @AppStorage("code_native_session_ide_map") private var sessionIDEMapRaw = "{}"
     @AppStorage("code_native_followup_mode") private var followupModeRaw = FollowupMode.steer.rawValue
+    #if os(iOS)
+    @AppStorage("code_native_multiline_behavior") private var multilineBehaviorRaw = MultilineBehavior.enter.rawValue
+    #else
     @AppStorage("code_native_multiline_behavior") private var multilineBehaviorRaw = MultilineBehavior.cmdEnter.rawValue
+    #endif
     @AppStorage("code_native_prevent_sleep") private var preventSleep = false
     @AppStorage("code_native_glass_window") private var glassWindow = true
     @AppStorage("code_native_auto_speak") private var autoSpeakAssistant = false
@@ -291,6 +295,10 @@ struct ContentView: View {
     private let reasoningOptions = WorkflowSettings.reasoningOptions
     private let sandboxOptions = WorkflowSettings.sandboxOptions
     private let approvalPolicyOptions = WorkflowSettings.approvalPolicyOptions
+
+    private var selectedMultilineBehavior: MultilineBehavior {
+        MultilineBehavior(rawValue: multilineBehaviorRaw) ?? .enter
+    }
 
     private var canSendTurns: Bool {
         store.connectionState == .connected && store.selectedSession != nil
@@ -1466,6 +1474,13 @@ struct ContentView: View {
                 emptyState
             }
 
+            if let toolUsageBannerState {
+                toolUsageBanner(state: toolUsageBannerState)
+                    .padding(.horizontal, isCompactPhoneLayout ? 12 : 18)
+                    .padding(.top, 6)
+                    .padding(.bottom, usesBottomInsetComposer ? 8 : 6)
+            }
+
             if !usesBottomInsetComposer {
                 composerPanel
             }
@@ -1551,6 +1566,51 @@ struct ContentView: View {
         .padding(.horizontal, isCompactPhoneLayout ? 14 : 18)
         .padding(.vertical, isCompactPhoneLayout ? 8 : 10)
         .background(Color.black.opacity(0.24))
+    }
+
+    private func toolUsageBanner(state: ToolUsageBannerState) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: state.icon)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(state.tint)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(state.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+
+                if let detail = state.detail,
+                   !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.white.opacity(0.68))
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if state.phase == .active {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Text("Done")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.07), in: Capsule(style: .continuous))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.36), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(state.tint.opacity(0.30), lineWidth: 1)
+        )
+        .accessibilityIdentifier("transcript.tool-usage-banner")
     }
 
     @ViewBuilder
@@ -1808,8 +1868,14 @@ struct ContentView: View {
                 .onChange(of: store.selectedSessionID) { _, _ in
                     pendingPrependAnchorItemID = nil
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
+                    DispatchQueue.main.async {
+                        scrollTranscriptToBottom(proxy: proxy, animated: false)
+                    }
                 }
-                .onChange(of: store.selectedSessionItems.last?.id) { _, _ in
+                .onChange(of: transcriptTailIdentity) { _, _ in
+                    guard pendingPrependAnchorItemID == nil else {
+                        return
+                    }
                     scrollTranscriptToBottom(proxy: proxy, animated: true)
                 }
                 .onChange(of: transcriptItems.first?.id) { _, newFirstID in
@@ -1923,6 +1989,14 @@ struct ContentView: View {
 
     private var transcriptItems: [SessionStreamItem] {
         cachedTranscriptItems
+    }
+
+    private var transcriptTailIdentity: String {
+        guard let last = transcriptItems.last else {
+            return "empty:\(transcriptItems.count)"
+        }
+
+        return "\(last.id):\(last.body.count):\(transcriptItems.count)"
     }
 
     private func refreshTranscriptCache() {
@@ -2517,15 +2591,19 @@ struct ContentView: View {
                     .padding(.top, 4)
                     .accessibilityIdentifier("composer.input")
                     #else
-                    TextEditor(text: $composerDraft)
-                        .font(.body)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .scrollContentBackground(.hidden)
-                        .frame(height: composerEditorHeight)
-                        .focused($composerIsFocused)
-                        .padding(.horizontal, 12)
-                        .padding(.top, isCompactPhoneLayout ? 6 : 8)
-                        .accessibilityIdentifier("composer.input")
+                    IOSComposerTextView(
+                        text: $composerDraft,
+                        isFocused: composerIsFocused,
+                        measuredHeight: $composerMeasuredHeight,
+                        multilineBehavior: selectedMultilineBehavior,
+                        onFocusChange: { composerIsFocused = $0 },
+                        onSubmit: { submitComposerAction(text: $0) },
+                        onEditorKeyCommand: handleComposerKeyCommand
+                    )
+                    .frame(height: composerEditorHeight)
+                    .padding(.horizontal, 12)
+                    .padding(.top, isCompactPhoneLayout ? 6 : 8)
+                    .accessibilityIdentifier("composer.input")
                     #endif
 
                     if composerDraft.isEmpty {
@@ -3391,7 +3469,11 @@ struct ContentView: View {
     }
 
     private var filteredInlineContextPaths: [String] {
-        filteredContextPaths(query: inlineContextQuery)
+        guard trailingMentionMatch != nil else {
+            return []
+        }
+
+        return filteredContextPaths(query: inlineContextQuery)
     }
 
     private var displayedInlineContextPaths: [String] {
@@ -3415,6 +3497,208 @@ struct ContentView: View {
         let tint: Color
     }
 
+    private enum ToolUsageBannerPhase {
+        case active
+        case collapsed
+    }
+
+    private struct ToolUsageBannerState {
+        let phase: ToolUsageBannerPhase
+        let title: String
+        let detail: String?
+        let icon: String
+        let tint: Color
+    }
+
+    private var toolUsageBannerState: ToolUsageBannerState? {
+        guard store.selectedSessionID != nil else {
+            return nil
+        }
+
+        for item in store.selectedSessionItems.reversed() {
+            guard item.type == "core_event",
+                  let payloadType = item.event?.payload?.typeHint
+            else {
+                continue
+            }
+
+            if payloadType == "agent_message"
+                || payloadType == "user_message"
+                || payloadType == "turn_aborted"
+                || payloadType == "request_user_input"
+                || payloadType == "exec_approval_request"
+                || payloadType == "apply_patch_approval_request"
+            {
+                return nil
+            }
+
+            if let state = toolUsageBannerState(for: item, payloadType: payloadType) {
+                return state
+            }
+        }
+
+        return nil
+    }
+
+    private func toolUsageBannerState(for item: SessionStreamItem, payloadType: String) -> ToolUsageBannerState? {
+        if let browserWorkflow = item.browserWorkflowEvent {
+            let phase: ToolUsageBannerPhase = browserWorkflow.status == .inProgress ? .active : .collapsed
+            let tint: Color = {
+                switch browserWorkflow.status {
+                case .inProgress:
+                    return Color.blue.opacity(0.9)
+                case .succeeded:
+                    return Color.green.opacity(0.9)
+                case .failed:
+                    return Color.red.opacity(0.9)
+                }
+            }()
+
+            return ToolUsageBannerState(
+                phase: phase,
+                title: browserWorkflow.headline,
+                detail: condensedToolUsageDetail(browserWorkflow.detailLines.first),
+                icon: "globe",
+                tint: tint
+            )
+        }
+
+        if let collaborationProgress = item.collaborationProgressEvent {
+            let phase: ToolUsageBannerPhase = collaborationProgress.status == .inProgress ? .active : .collapsed
+            let tint: Color = {
+                switch collaborationProgress.status {
+                case .inProgress:
+                    return Color.indigo.opacity(0.9)
+                case .succeeded:
+                    return Color.green.opacity(0.9)
+                case .failed:
+                    return Color.red.opacity(0.9)
+                }
+            }()
+
+            return ToolUsageBannerState(
+                phase: phase,
+                title: collaborationProgress.headline,
+                detail: condensedToolUsageDetail(collaborationProgress.detailLines.first),
+                icon: "person.2.wave.2",
+                tint: tint
+            )
+        }
+
+        if payloadType == "exec_command_end",
+           let exec = item.execCommandInfo {
+            let succeeded = (exec.exitCode ?? 0) == 0
+            var detailParts: [String] = []
+            if !exec.command.isEmpty {
+                detailParts.append(exec.command)
+            }
+            if let duration = exec.duration,
+               !duration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                detailParts.append(duration)
+            }
+
+            return ToolUsageBannerState(
+                phase: .collapsed,
+                title: succeeded ? "Command finished" : "Command failed",
+                detail: detailParts.isEmpty ? nil : detailParts.joined(separator: " • "),
+                icon: succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                tint: succeeded ? Color.green.opacity(0.9) : Color.red.opacity(0.9)
+            )
+        }
+
+        if payloadType == "exec_command_begin" {
+            return ToolUsageBannerState(
+                phase: .active,
+                title: "Running command",
+                detail: condensedToolUsageDetail(item.body),
+                icon: "terminal",
+                tint: Color.green.opacity(0.9)
+            )
+        }
+
+        if payloadType == "exec_command_output_delta" {
+            return ToolUsageBannerState(
+                phase: .active,
+                title: "Streaming command output",
+                detail: condensedToolUsageDetail(item.body),
+                icon: "terminal",
+                tint: Color.green.opacity(0.9)
+            )
+        }
+
+        if payloadType == "patch_apply_begin" {
+            return ToolUsageBannerState(
+                phase: .active,
+                title: "Applying patch",
+                detail: condensedToolUsageDetail(item.body),
+                icon: "doc.badge.gearshape",
+                tint: Color.cyan.opacity(0.9)
+            )
+        }
+
+        if payloadType == "patch_apply_end" {
+            return ToolUsageBannerState(
+                phase: .collapsed,
+                title: "Patch applied",
+                detail: condensedToolUsageDetail(item.body),
+                icon: "checkmark.circle.fill",
+                tint: Color.green.opacity(0.9)
+            )
+        }
+
+        if payloadType == "mcp_tool_call_begin" {
+            return ToolUsageBannerState(
+                phase: .active,
+                title: "Running tool",
+                detail: condensedToolUsageDetail(item.body),
+                icon: "wrench.and.screwdriver",
+                tint: Color.cyan.opacity(0.9)
+            )
+        }
+
+        if payloadType == "mcp_tool_call_end" {
+            let failed = item.body.lowercased().contains("fail") || item.body.lowercased().contains("error")
+            return ToolUsageBannerState(
+                phase: .collapsed,
+                title: failed ? "Tool failed" : "Tool finished",
+                detail: condensedToolUsageDetail(item.body),
+                icon: failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                tint: failed ? Color.red.opacity(0.9) : Color.green.opacity(0.9)
+            )
+        }
+
+        return nil
+    }
+
+    private func condensedToolUsageDetail(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let normalized = value
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return nil
+        }
+
+        let firstLine = normalized
+            .components(separatedBy: "\n")
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? normalized
+
+        guard !firstLine.isEmpty else {
+            return nil
+        }
+
+        if firstLine.count <= 160 {
+            return firstLine
+        }
+
+        let end = firstLine.index(firstLine.startIndex, offsetBy: 160)
+        return "\(firstLine[..<end])…"
+    }
+
     private var composerActivityBadge: ComposerActivityBadge? {
         for item in store.selectedSessionItems.reversed() {
             guard item.type == "core_event",
@@ -3423,7 +3707,14 @@ struct ContentView: View {
                 continue
             }
 
-            if payloadType == "agent_message" || payloadType == "user_message" || payloadType == "turn_aborted" {
+            if payloadType == "agent_message"
+                || payloadType == "user_message"
+                || payloadType == "turn_aborted"
+                || payloadType == "task_complete"
+                || payloadType == "exec_command_end"
+                || payloadType == "patch_apply_end"
+                || payloadType == "turn_diff"
+            {
                 return nil
             }
 
@@ -3463,7 +3754,7 @@ struct ContentView: View {
                 }
             }
 
-            if payloadType == "turn_diff" || payloadType == "patch_apply_end" {
+            if payloadType == "patch_apply_begin" {
                 return ComposerActivityBadge(label: "Diffing…", icon: "doc.text.magnifyingglass", tint: Color.cyan.opacity(0.9))
             }
 
@@ -3743,23 +4034,9 @@ struct ContentView: View {
         let maxHeight: CGFloat = 120
         return min(maxHeight, max(minHeight, composerMeasuredHeight))
         #else
-        let text = composerDraft
-        guard !text.isEmpty else {
-            return isCompactPhoneLayout ? 36 : 48
-        }
-
-        let newlineCount = text.reduce(into: 1) { count, character in
-            if character == "\n" {
-                count += 1
-            }
-        }
-        let lineCount = max(1, newlineCount)
-        let lineHeight: CGFloat = 20
-        let verticalPadding: CGFloat = isCompactPhoneLayout ? 14 : 18
-        let height = CGFloat(lineCount) * lineHeight + verticalPadding
         let minHeight: CGFloat = isCompactPhoneLayout ? 36 : 48
         let maxHeight: CGFloat = isCompactPhoneLayout ? 140 : 176
-        return min(maxHeight, max(minHeight, height))
+        return min(maxHeight, max(minHeight, composerMeasuredHeight))
         #endif
     }
 
@@ -5779,6 +6056,180 @@ private enum ComposerEditorKeyCommand {
     case moveInlineContextSelectionUp
     case moveInlineContextSelectionDown
 }
+
+#if os(iOS)
+private struct IOSComposerTextView: UIViewRepresentable {
+    @Binding var text: String
+    var isFocused: Bool
+    @Binding var measuredHeight: CGFloat
+    var multilineBehavior: MultilineBehavior
+    let onFocusChange: (Bool) -> Void
+    let onSubmit: (String) -> Void
+    let onEditorKeyCommand: (ComposerEditorKeyCommand) -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> SubmitAwareTextView {
+        let textView = SubmitAwareTextView()
+        textView.backgroundColor = .clear
+        textView.font = UIFont.preferredFont(forTextStyle: .body)
+        textView.textColor = UIColor.white.withAlphaComponent(0.9)
+        textView.tintColor = UIColor.white.withAlphaComponent(0.95)
+        textView.adjustsFontForContentSizeCategory = true
+        textView.autocorrectionType = .yes
+        textView.autocapitalizationType = .sentences
+        textView.smartQuotesType = .no
+        textView.smartDashesType = .no
+        textView.smartInsertDeleteType = .no
+        textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.isScrollEnabled = true
+        textView.keyboardDismissMode = .interactive
+        textView.delegate = context.coordinator
+        textView.onSubmit = {
+            context.coordinator.commitPendingTextImmediately()
+            onSubmit(textView.text)
+        }
+        textView.onEditorKeyCommand = onEditorKeyCommand
+        textView.multilineBehavior = multilineBehavior
+        textView.text = text
+
+        DispatchQueue.main.async {
+            measuredHeight = Self.measuredEditorHeight(for: textView)
+        }
+
+        return textView
+    }
+
+    func updateUIView(_ uiView: SubmitAwareTextView, context: Context) {
+        context.coordinator.parent = self
+
+        if uiView.text != text {
+            context.coordinator.cancelPendingSync()
+            uiView.text = text
+        }
+
+        uiView.onSubmit = {
+            context.coordinator.commitPendingTextImmediately()
+            onSubmit(uiView.text)
+        }
+        uiView.onEditorKeyCommand = onEditorKeyCommand
+        uiView.multilineBehavior = multilineBehavior
+
+        if isFocused,
+           !uiView.isFirstResponder {
+            uiView.becomeFirstResponder()
+        } else if !isFocused,
+                  uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
+
+        let nextHeight = Self.measuredEditorHeight(for: uiView)
+        if abs(nextHeight - measuredHeight) > 0.5 {
+            measuredHeight = nextHeight
+        }
+    }
+
+    static func measuredEditorHeight(for textView: UITextView) -> CGFloat {
+        let fallbackWidth = UIScreen.main.bounds.width
+        let width = max(1, textView.bounds.width > 0 ? textView.bounds.width : fallbackWidth)
+        let fitting = textView.sizeThatFits(
+            CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        )
+        return ceil(max(24, fitting.height))
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: IOSComposerTextView
+        private var pendingSync: DispatchWorkItem?
+
+        init(parent: IOSComposerTextView) {
+            self.parent = parent
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            let updated = textView.text ?? ""
+            parent.measuredHeight = IOSComposerTextView.measuredEditorHeight(for: textView)
+
+            pendingSync?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else {
+                    return
+                }
+
+                if self.parent.text != updated {
+                    self.parent.text = updated
+                }
+            }
+            pendingSync = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            _ = textView
+            if !parent.isFocused {
+                parent.onFocusChange(true)
+            }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            _ = textView
+            if parent.isFocused {
+                parent.onFocusChange(false)
+            }
+        }
+
+        func textView(
+            _ textView: UITextView,
+            shouldChangeTextIn range: NSRange,
+            replacementText replacement: String
+        ) -> Bool {
+            guard replacement == "\n",
+                  parent.multilineBehavior == .enter
+            else {
+                return true
+            }
+
+            let current = textView.text ?? ""
+            let proposed = (current as NSString).replacingCharacters(in: range, with: "")
+            if parent.text != proposed {
+                parent.text = proposed
+            }
+
+            parent.onSubmit(proposed)
+            return false
+        }
+
+        func cancelPendingSync() {
+            pendingSync?.cancel()
+            pendingSync = nil
+        }
+
+        func commitPendingTextImmediately() {
+            pendingSync?.cancel()
+            pendingSync = nil
+        }
+    }
+
+    final class SubmitAwareTextView: UITextView {
+        var onSubmit: (() -> Void)?
+        var onEditorKeyCommand: ((ComposerEditorKeyCommand) -> Bool)?
+        var multilineBehavior: MultilineBehavior = .enter
+
+        override var keyCommands: [UIKeyCommand]? {
+            [
+                UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(handleCommandReturn)),
+            ]
+        }
+
+        @objc private func handleCommandReturn() {
+            onSubmit?()
+        }
+    }
+}
+#endif
 
 #if os(macOS)
 private struct MacComposerTextView: NSViewRepresentable {
