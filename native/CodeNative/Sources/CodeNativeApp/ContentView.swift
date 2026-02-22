@@ -276,6 +276,8 @@ struct ContentView: View {
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
+    @State private var transcriptCacheBySessionID: [UUID: TranscriptSessionCacheEntry] = [:]
+    @State private var transcriptCacheUsageOrder: [UUID] = []
     @State private var pendingPrependAnchorItemID: String?
     @State private var pendingBottomScrollAfterThreadSwitch = false
     @State private var transcriptIsNearBottom = true
@@ -295,6 +297,7 @@ struct ContentView: View {
 
     private let transcriptBottomAnchor = "transcript.bottom"
     private let transcriptScrollCoordinateSpaceName = "transcript.scroll"
+    private let transcriptSessionCacheLimit = 6
     private let modelOptions = WorkflowSettings.modelOptions
     private let reasoningOptions = WorkflowSettings.reasoningOptions
     private let sandboxOptions = WorkflowSettings.sandboxOptions
@@ -985,7 +988,7 @@ struct ContentView: View {
             }
             #endif
         }
-        .onChange(of: store.selectedSessionItems) { _, _ in
+        .onChange(of: selectedSessionTranscriptSourceKey) { _, _ in
             refreshTranscriptCache()
             handleAssistantSpeech()
             enforceVoiceCapturePolicy(clearTranscript: true)
@@ -1015,6 +1018,7 @@ struct ContentView: View {
             transcriptUserHasScrolled = false
             pendingBottomScrollAfterThreadSwitch = true
             composerDraft = store.composerText
+            applyCachedTranscriptForSelectedSession()
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
             #if os(iOS)
@@ -1046,6 +1050,7 @@ struct ContentView: View {
             ensureVisibleSelection()
         }
         .onChange(of: showActivityEvents) { _, _ in
+            clearTranscriptSessionCaches()
             refreshTranscriptCache()
         }
         .onChange(of: store.connectionState) { _, newState in
@@ -2047,14 +2052,37 @@ struct ContentView: View {
         return "\(sessionID):\(last.id):\(last.body.count):\(transcriptItems.count)"
     }
 
+    private var selectedSessionTranscriptSourceKey: TranscriptSessionSourceKey? {
+        guard let sessionID = store.selectedSessionID else {
+            return nil
+        }
+
+        return transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID)
+    }
+
     private func refreshTranscriptCache() {
+        guard let sessionID = store.selectedSessionID,
+              let sourceKey = transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID)
+        else {
+            cachedTranscriptItems = []
+            taskActivityByStartItemID = [:]
+            return
+        }
+
+        if let cached = transcriptCacheBySessionID[sessionID],
+           cached.sourceKey == sourceKey {
+            cachedTranscriptItems = cached.items
+            taskActivityByStartItemID = cached.taskActivityByStartItemID
+            touchTranscriptCache(sessionID)
+            return
+        }
+
         let visible = store.selectedSessionItems.filter {
             shouldIncludeInTranscript($0) && !$0.isReplayOmittedNotice
         }
         let replayPruned = pruneReplayHistoryCardsWhenRedundant(in: visible)
         let taskMerged = mergeTaskActivityIntoTaskCards(in: replayPruned)
-        taskActivityByStartItemID = taskMerged.activityByStartItemID
-        cachedTranscriptItems = dedupeAssistantMessagesWithinTurn(
+        let reducedItems = dedupeAssistantMessagesWithinTurn(
             in: collapseConsecutiveReasoningCards(
                 in: dedupeObsoleteBackgroundEvents(
                     in: collapseTokenUsageBursts(
@@ -2063,6 +2091,17 @@ struct ContentView: View {
                         )
                     )
                 )
+            )
+        )
+
+        cachedTranscriptItems = reducedItems
+        taskActivityByStartItemID = taskMerged.activityByStartItemID
+        storeTranscriptCache(
+            sessionID: sessionID,
+            entry: TranscriptSessionCacheEntry(
+                sourceKey: sourceKey,
+                items: reducedItems,
+                taskActivityByStartItemID: taskMerged.activityByStartItemID
             )
         )
     }
@@ -3566,6 +3605,21 @@ struct ContentView: View {
         }
     }
 
+    private struct TranscriptSessionSourceKey: Equatable {
+        let sessionID: UUID
+        let itemCount: Int
+        let firstSeq: UInt64
+        let middleSeq: UInt64
+        let lastSeq: UInt64
+        let lastRev: UInt64?
+    }
+
+    private struct TranscriptSessionCacheEntry {
+        let sourceKey: TranscriptSessionSourceKey
+        let items: [SessionStreamItem]
+        let taskActivityByStartItemID: [String: [String]]
+    }
+
     private var toolUsageBannerState: ToolUsageBannerState? {
         guard store.selectedSessionID != nil else {
             return nil
@@ -4610,6 +4664,62 @@ struct ContentView: View {
         }
 
         pendingPrependAnchorItemID = transcriptItems.first?.id
+    }
+
+    private func transcriptSourceKey(
+        for items: [SessionStreamItem],
+        sessionID: UUID
+    ) -> TranscriptSessionSourceKey? {
+        guard let first = items.first,
+              let last = items.last
+        else {
+            return nil
+        }
+
+        let middle = items[items.count / 2]
+        return TranscriptSessionSourceKey(
+            sessionID: sessionID,
+            itemCount: items.count,
+            firstSeq: first.seq,
+            middleSeq: middle.seq,
+            lastSeq: last.seq,
+            lastRev: last.rev
+        )
+    }
+
+    private func touchTranscriptCache(_ sessionID: UUID) {
+        transcriptCacheUsageOrder.removeAll(where: { $0 == sessionID })
+        transcriptCacheUsageOrder.append(sessionID)
+    }
+
+    private func storeTranscriptCache(sessionID: UUID, entry: TranscriptSessionCacheEntry) {
+        transcriptCacheBySessionID[sessionID] = entry
+        touchTranscriptCache(sessionID)
+
+        if transcriptCacheUsageOrder.count > transcriptSessionCacheLimit,
+           let evictedSessionID = transcriptCacheUsageOrder.first {
+            transcriptCacheUsageOrder.removeFirst()
+            transcriptCacheBySessionID.removeValue(forKey: evictedSessionID)
+        }
+    }
+
+    private func clearTranscriptSessionCaches() {
+        transcriptCacheBySessionID.removeAll(keepingCapacity: true)
+        transcriptCacheUsageOrder.removeAll(keepingCapacity: true)
+    }
+
+    private func applyCachedTranscriptForSelectedSession() {
+        guard let sessionID = store.selectedSessionID,
+              let sourceKey = transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID),
+              let cached = transcriptCacheBySessionID[sessionID],
+              cached.sourceKey == sourceKey
+        else {
+            return
+        }
+
+        cachedTranscriptItems = cached.items
+        taskActivityByStartItemID = cached.taskActivityByStartItemID
+        touchTranscriptCache(sessionID)
     }
 
     private func openSelectedWorkspace() {
