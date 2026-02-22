@@ -18,7 +18,9 @@ This creates `CodeNativeiOSDemo.xcodeproj`.
 2. Pick an iPhone or iPad simulator.
 3. Run `CodeNativeiOSDemo`.
 
-By default, Every Code Companion connects to `ws://127.0.0.1:4317/ws`.
+On iOS, Every Code Companion runs in companion mode and does not launch a
+local bundled backend. Connect it to a Mac/CLI endpoint using pairing or a
+manual `ws://` / `wss://` endpoint.
 
 ## Branding and Attribution
 

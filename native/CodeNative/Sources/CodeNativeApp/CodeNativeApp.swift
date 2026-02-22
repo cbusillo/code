@@ -437,7 +437,11 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         guard Self.shouldManageBackend(arguments: arguments, environment: environment) else {
             lanEndpoint = nil
             sessionToken = nil
+            #if os(iOS)
+            launchState = .disabled("iOS companion mode uses external endpoints.")
+            #else
             launchState = .disabled("Managed runtime disabled for benchmark/explicit override")
+            #endif
             return
         }
 
@@ -859,6 +863,9 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     }
 
     nonisolated static func shouldManageBackend(arguments: [String], environment: [String: String]) -> Bool {
+        #if os(iOS)
+        return false
+        #else
         if let fixturePath = environment["CODE_NATIVE_BENCHMARK_FIXTURE"],
            fixturePath.isEmpty == false {
             return false
@@ -873,6 +880,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
 
         return true
+        #endif
     }
 
     nonisolated static func resolveCompanionSessionToken(environment: [String: String]) -> String? {
@@ -1239,11 +1247,17 @@ struct CodeNativeApp: App {
         )
         runtimeSupervisor.setCompanionPairingEntries(Self.loadCompanionPairingEntries())
         _runtimeSupervisor = StateObject(wrappedValue: runtimeSupervisor)
+        #if os(iOS)
+        let endpointAccessPolicy: SessionMirrorStore.EndpointAccessPolicy = .anyHost
+        #else
+        let endpointAccessPolicy: SessionMirrorStore.EndpointAccessPolicy = .loopbackOnly
+        #endif
         _store = StateObject(
             wrappedValue: SessionMirrorStore(
                 initialEndpoint: runtimeSupervisor.endpoint ?? SessionMirrorStore.defaultEndpoint,
                 companionSessionToken: runtimeSupervisor.sessionToken,
-                companionLANEndpoint: runtimeSupervisor.lanEndpoint
+                companionLANEndpoint: runtimeSupervisor.lanEndpoint,
+                endpointAccessPolicy: endpointAccessPolicy
             )
         )
     }
