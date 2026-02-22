@@ -278,6 +278,7 @@ struct ContentView: View {
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
     @State private var pendingPrependAnchorItemID: String?
     @State private var pendingBottomScrollAfterThreadSwitch = false
+    @State private var threadSwitchBottomLockUntil: Date = .distantPast
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @State private var showSlashCommandLauncher = false
@@ -1009,6 +1010,7 @@ struct ContentView: View {
             voiceInteractionNotice = nil
             activeTranscriptItemID = nil
             pendingBottomScrollAfterThreadSwitch = true
+            threadSwitchBottomLockUntil = Date().addingTimeInterval(1.5)
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
@@ -1871,6 +1873,7 @@ struct ContentView: View {
                 .onChange(of: store.selectedSessionID) { _, _ in
                     pendingPrependAnchorItemID = nil
                     pendingBottomScrollAfterThreadSwitch = true
+                    threadSwitchBottomLockUntil = Date().addingTimeInterval(1.5)
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                     DispatchQueue.main.async {
                         scrollTranscriptToBottom(proxy: proxy, animated: false)
@@ -1899,6 +1902,11 @@ struct ContentView: View {
                     }
 
                     pendingPrependAnchorItemID = nil
+                    if Date() < threadSwitchBottomLockUntil {
+                        scrollTranscriptToBottom(proxy: proxy, animated: false)
+                        return
+                    }
+
                     var transaction = Transaction()
                     transaction.disablesAnimations = true
                     withTransaction(transaction) {
