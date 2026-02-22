@@ -1010,6 +1010,7 @@ struct ContentView: View {
             }
             voiceInteractionNotice = nil
             activeTranscriptItemID = nil
+            transcriptIsNearBottom = true
             pendingBottomScrollAfterThreadSwitch = true
             composerDraft = store.composerText
             refreshTranscriptCache()
@@ -1893,8 +1894,12 @@ struct ContentView: View {
                     }
                 }
                 .onChange(of: transcriptTailIdentity) { _, _ in
-                    guard pendingPrependAnchorItemID == nil else {
-                        return
+                    if pendingPrependAnchorItemID != nil {
+                        if transcriptIsNearBottom {
+                            pendingPrependAnchorItemID = nil
+                        } else {
+                            return
+                        }
                     }
 
                     if pendingBottomScrollAfterThreadSwitch {
@@ -4589,7 +4594,7 @@ struct ContentView: View {
     }
 
     private func markPendingPrependAnchorForHistoryLoad() {
-        if transcriptIsNearBottom {
+        if pendingBottomScrollAfterThreadSwitch || transcriptIsNearBottom {
             pendingPrependAnchorItemID = nil
             return
         }
