@@ -373,7 +373,18 @@ impl RolloutRecorder {
                                     role: "user".to_string(),
                                     content, end_turn: None, phase: None}));
                             }
-                            ProtoEventMsg::AgentMessage(_) => items.push(RolloutItem::Event(ev)),
+                            ProtoEventMsg::AgentMessage(agent_msg) => {
+                                let content = vec![ContentItem::OutputText {
+                                    text: agent_msg.message.clone(),
+                                }];
+                                items.push(RolloutItem::ResponseItem(ResponseItem::Message {
+                                    id: Some(ev.id.clone()),
+                                    role: "assistant".to_string(),
+                                    content,
+                                    end_turn: None,
+                                    phase: None,
+                                }));
+                            }
                             _ => items.push(RolloutItem::Event(ev)),
                         }
                     }

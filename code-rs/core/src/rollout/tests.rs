@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime};
 use code_protocol::models::{ContentItem, ResponseItem};
 use code_protocol::ThreadId;
 use code_protocol::protocol::{
+    AgentMessageEvent,
     EventMsg as ProtoEventMsg,
     RecordedEvent,
     RolloutItem,
@@ -278,6 +279,107 @@ async fn test_resume_reconstruct_history_drops_user_events() {
         user_messages,
         1,
         "expected one user message to survive resume replay"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_reconstruct_history_keeps_agent_message_events() {
+    let temp = TempDir::new().unwrap();
+    let code_home = temp.path();
+    let workspace = code_home.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let sessions_dir = code_home
+        .join("sessions")
+        .join("2025")
+        .join("10")
+        .join("07");
+    fs::create_dir_all(&sessions_dir).unwrap();
+
+    let rollout_ts = "2025-10-07T09-00-00";
+    let session_uuid = Uuid::from_u128(0xfeed_face_u128);
+    let rollout_path = sessions_dir.join(format!(
+        "rollout-{rollout_ts}-{session_uuid}.jsonl"
+    ));
+
+    let mut writer = BufWriter::new(File::create(&rollout_path).unwrap());
+
+    let session_meta = SessionMeta {
+        id: ThreadId::from_string(&session_uuid.to_string()).unwrap(),
+        timestamp: "2025-10-07T09:00:00.000Z".to_string(),
+        cwd: workspace.clone(),
+        originator: "regression-test".to_string(),
+        cli_version: "0.0.0-test".to_string(),
+        source: SessionSource::Cli,
+        model_provider: None,
+        base_instructions: None,
+        dynamic_tools: None,
+        forked_from_id: None,
+    };
+    serde_json::to_writer(&mut writer, &RolloutLine {
+        timestamp: session_meta.timestamp.clone(),
+        item: RolloutItem::SessionMeta(SessionMetaLine {
+            meta: session_meta,
+            git: None,
+        }),
+    })
+    .unwrap();
+    writer.write_all(b"\n").unwrap();
+
+    let assistant_event = RecordedEvent {
+        id: "evt-assistant-0".to_string(),
+        event_seq: 1,
+        order: None,
+        msg: ProtoEventMsg::AgentMessage(AgentMessageEvent {
+            message: "Assistant reply from event".to_string(),
+        }),
+    };
+    serde_json::to_writer(&mut writer, &RolloutLine {
+        timestamp: "2025-10-07T09:00:01.000Z".to_string(),
+        item: RolloutItem::Event(assistant_event),
+    })
+    .unwrap();
+    writer.write_all(b"\n").unwrap();
+    writer.flush().unwrap();
+
+    let mut overrides = ConfigOverrides::default();
+    overrides.cwd = Some(workspace.clone());
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        overrides,
+        code_home.to_path_buf(),
+    )
+    .unwrap();
+
+    let (recorder, saved) = crate::rollout::RolloutRecorder::resume(&config, &rollout_path)
+        .await
+        .expect("resume should succeed");
+    recorder.shutdown().await.unwrap();
+
+    let reconstructed = reconstruct_history_like_rollout(&saved.items);
+    let assistant_messages: Vec<String> = reconstructed
+        .iter()
+        .filter_map(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "assistant" => {
+                Some(
+                    content
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            ContentItem::OutputText { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                )
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        assistant_messages
+            .iter()
+            .any(|message| message == "Assistant reply from event"),
+        "expected assistant event message to survive resume replay"
     );
 }
 

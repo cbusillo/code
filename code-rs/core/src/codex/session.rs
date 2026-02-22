@@ -1856,15 +1856,34 @@ impl Session {
                     );
                 }
                 RolloutItem::Event(recorded_event) => {
-                    if let code_protocol::protocol::EventMsg::UserMessage(user_msg_event) = &recorded_event.msg {
-                        let response_item = ResponseItem::Message {
-                            id: Some(recorded_event.id.clone()),
-                            role: "user".to_string(),
-                            content: vec![ContentItem::InputText {
-                                text: user_msg_event.message.clone(),
-                            }], end_turn: None, phase: None};
-                        process_rollout_env_item(&mut replay_ctx, &response_item);
-                        history.push(response_item);
+                    match &recorded_event.msg {
+                        code_protocol::protocol::EventMsg::UserMessage(user_msg_event) => {
+                            let response_item = ResponseItem::Message {
+                                id: Some(recorded_event.id.clone()),
+                                role: "user".to_string(),
+                                content: vec![ContentItem::InputText {
+                                    text: user_msg_event.message.clone(),
+                                }],
+                                end_turn: None,
+                                phase: None,
+                            };
+                            process_rollout_env_item(&mut replay_ctx, &response_item);
+                            history.push(response_item);
+                        }
+                        code_protocol::protocol::EventMsg::AgentMessage(agent_msg_event) => {
+                            let response_item = ResponseItem::Message {
+                                id: Some(recorded_event.id.clone()),
+                                role: "assistant".to_string(),
+                                content: vec![ContentItem::OutputText {
+                                    text: agent_msg_event.message.clone(),
+                                }],
+                                end_turn: None,
+                                phase: None,
+                            };
+                            process_rollout_env_item(&mut replay_ctx, &response_item);
+                            history.push(response_item);
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
