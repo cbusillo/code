@@ -197,7 +197,7 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         if payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta",
-           let delta = object["delta"]?.stringValue {
+           let delta = extractStreamingDeltaText(from: object) {
             return normalizeStructuredText(delta)
         }
 
@@ -205,7 +205,7 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             || payloadType == "agent_reasoning_raw_content_delta"
             || payloadType == "reasoning_content_delta"
             || payloadType == "reasoning_raw_content_delta",
-            let delta = object["delta"]?.stringValue
+            let delta = extractStreamingDeltaText(from: object)
         {
             return truncate(normalizeReasoningText(delta), maxCharacters: 3_000)
         }
@@ -1383,6 +1383,72 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         return normalized
     }
 
+    private func extractStreamingDeltaText(from object: [String: JSONValue]) -> String? {
+        let candidates: [JSONValue?] = [
+            object["delta"],
+            object["content"],
+            object["text"],
+            object["message"],
+        ]
+
+        for candidate in candidates {
+            if let text = flattenStreamingText(candidate) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func flattenStreamingText(_ value: JSONValue?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        switch value {
+        case .string(let text):
+            return normalizeStructuredText(text)
+        case .array(let values):
+            let combined = values
+                .compactMap { flattenStreamingText($0) }
+                .joined()
+            return combined.isEmpty ? nil : combined
+        case .object(let object):
+            let preferredKeys = [
+                "delta",
+                "text",
+                "message",
+                "output_text",
+                "content",
+                "parts",
+                "items",
+            ]
+
+            var fragments: [String] = []
+            for key in preferredKeys {
+                if let fragment = flattenStreamingText(object[key]) {
+                    fragments.append(fragment)
+                }
+            }
+
+            if fragments.isEmpty {
+                for value in object.values {
+                    if let fragment = flattenStreamingText(value) {
+                        fragments.append(fragment)
+                    }
+                }
+            }
+
+            let combined = fragments.joined()
+            return combined.isEmpty ? nil : combined
+        case .number, .bool, .null:
+            return nil
+        }
+    }
+
     private func normalizeReasoningText(_ value: String) -> String {
         normalizeStructuredText(value)
             .replacingOccurrences(of: "**", with: "")
@@ -2202,7 +2268,7 @@ extension SessionStreamItem {
               let payloadType = corePayloadType,
               payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta",
               let object = event?.payload?.objectValue,
-              let delta = object["delta"]?.stringValue
+              let delta = extractStreamingDeltaText(from: object)
         else {
             return nil
         }
@@ -2219,7 +2285,7 @@ extension SessionStreamItem {
                 || payloadType == "reasoning_content_delta"
                 || payloadType == "reasoning_raw_content_delta",
               let object = event?.payload?.objectValue,
-              let delta = object["delta"]?.stringValue
+              let delta = extractStreamingDeltaText(from: object)
         else {
             return nil
         }
@@ -2294,7 +2360,7 @@ extension SessionStreamItem {
             return false
         }
 
-        let payloadType = event?.payload?.typeHint ?? ""
+        let payloadType = corePayloadType ?? ""
         return payloadType == "user_message" || payloadType == "agent_message"
     }
 
@@ -2508,7 +2574,7 @@ extension SessionStreamItem {
         }
 
         guard type == "core_event",
-              let payloadType = event?.payload?.typeHint
+              let payloadType = corePayloadType
         else {
             return false
         }
@@ -2590,7 +2656,7 @@ extension SessionStreamItem {
 
     var isOptionalActivityEvent: Bool {
         guard type == "core_event",
-              let payloadType = event?.payload?.typeHint
+              let payloadType = corePayloadType
         else {
             return false
         }
@@ -2732,7 +2798,7 @@ extension SessionStreamItem {
                 return .approval
             }
 
-            let payloadType = event?.payload?.typeHint ?? ""
+            let payloadType = corePayloadType ?? ""
             if payloadType == "user_message" {
                 return .user
             }
