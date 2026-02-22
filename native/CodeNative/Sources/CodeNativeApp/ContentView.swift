@@ -278,7 +278,7 @@ struct ContentView: View {
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
     @State private var pendingPrependAnchorItemID: String?
     @State private var pendingBottomScrollAfterThreadSwitch = false
-    @State private var threadSwitchBottomLockUntil: Date = .distantPast
+    @State private var transcriptIsNearBottom = true
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @State private var showSlashCommandLauncher = false
@@ -293,6 +293,7 @@ struct ContentView: View {
     @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
+    private let transcriptScrollCoordinateSpaceName = "transcript.scroll"
     private let modelOptions = WorkflowSettings.modelOptions
     private let reasoningOptions = WorkflowSettings.reasoningOptions
     private let sandboxOptions = WorkflowSettings.sandboxOptions
@@ -1010,7 +1011,6 @@ struct ContentView: View {
             voiceInteractionNotice = nil
             activeTranscriptItemID = nil
             pendingBottomScrollAfterThreadSwitch = true
-            threadSwitchBottomLockUntil = Date().addingTimeInterval(1.5)
             composerDraft = store.composerText
             refreshTranscriptCache()
             ensureContextIndexLoaded(forceReload: true)
@@ -1479,10 +1479,12 @@ struct ContentView: View {
             }
 
             if let toolUsageBannerState {
-                toolUsageBanner(state: toolUsageBannerState)
-                    .padding(.horizontal, isCompactPhoneLayout ? 12 : 18)
-                    .padding(.top, 6)
-                    .padding(.bottom, usesBottomInsetComposer ? 8 : 6)
+                if toolUsageBannerState.phase == .active {
+                    toolUsageBanner(state: toolUsageBannerState)
+                        .padding(.horizontal, isCompactPhoneLayout ? 12 : 18)
+                        .padding(.top, 6)
+                        .padding(.bottom, usesBottomInsetComposer ? 8 : 6)
+                }
             }
 
             if !usesBottomInsetComposer {
@@ -1822,7 +1824,7 @@ struct ContentView: View {
                                 .id(firstItemID.map { "transcript.top.\($0)" } ?? "transcript.top")
                                 .onAppear {
                                     if store.requestOlderHistoryIfNeeded(for: session.id) {
-                                        pendingPrependAnchorItemID = transcriptItems.first?.id
+                                        markPendingPrependAnchorForHistoryLoad()
                                     }
                                 }
 
@@ -1849,7 +1851,7 @@ struct ContentView: View {
                                     .onAppear {
                                         if index < 8 {
                                             if store.requestOlderHistoryIfNeeded(for: session.id) {
-                                                pendingPrependAnchorItemID = transcriptItems.first?.id
+                                                markPendingPrependAnchorForHistoryLoad()
                                             }
                                         }
                                     }
@@ -1859,6 +1861,14 @@ struct ContentView: View {
                         Color.clear
                             .frame(height: 1)
                             .id(transcriptBottomAnchor)
+                            .background(
+                                GeometryReader { proxy in
+                                    Color.clear.preference(
+                                        key: TranscriptBottomOffsetPreferenceKey.self,
+                                        value: proxy.frame(in: .named(transcriptScrollCoordinateSpaceName)).minY
+                                    )
+                                }
+                            )
                     }
                     .padding(.horizontal, transcriptHorizontalPadding)
                     .padding(.vertical, 24)
@@ -1867,13 +1877,16 @@ struct ContentView: View {
                     .frame(minHeight: geometry.size.height, alignment: transcriptContentAlignment)
                 }
                 .id("transcript.session.\(session.id)")
+                .coordinateSpace(name: transcriptScrollCoordinateSpaceName)
+                .onPreferenceChange(TranscriptBottomOffsetPreferenceKey.self) { bottomOffset in
+                    transcriptIsNearBottom = bottomOffset <= geometry.size.height + 32
+                }
                 .onAppear {
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                 }
                 .onChange(of: store.selectedSessionID) { _, _ in
                     pendingPrependAnchorItemID = nil
                     pendingBottomScrollAfterThreadSwitch = true
-                    threadSwitchBottomLockUntil = Date().addingTimeInterval(1.5)
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
                     DispatchQueue.main.async {
                         scrollTranscriptToBottom(proxy: proxy, animated: false)
@@ -1902,7 +1915,7 @@ struct ContentView: View {
                     }
 
                     pendingPrependAnchorItemID = nil
-                    if Date() < threadSwitchBottomLockUntil {
+                    if transcriptIsNearBottom {
                         scrollTranscriptToBottom(proxy: proxy, animated: false)
                         return
                     }
@@ -3530,6 +3543,14 @@ struct ContentView: View {
         let tint: Color
     }
 
+    private struct TranscriptBottomOffsetPreferenceKey: PreferenceKey {
+        static let defaultValue: CGFloat = .greatestFiniteMagnitude
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
+
     private var toolUsageBannerState: ToolUsageBannerState? {
         guard store.selectedSessionID != nil else {
             return nil
@@ -4565,6 +4586,15 @@ struct ContentView: View {
         } else {
             action()
         }
+    }
+
+    private func markPendingPrependAnchorForHistoryLoad() {
+        if transcriptIsNearBottom {
+            pendingPrependAnchorItemID = nil
+            return
+        }
+
+        pendingPrependAnchorItemID = transcriptItems.first?.id
     }
 
     private func openSelectedWorkspace() {
