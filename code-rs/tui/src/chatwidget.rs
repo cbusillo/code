@@ -13455,15 +13455,26 @@ impl ChatWidget<'_> {
                 let max_req = self.last_seen_request_index;
                 let mut processed_snapshot = false;
                 if let Some(snapshot_value) = history_snapshot {
-                    match serde_json::from_value::<HistorySnapshot>(snapshot_value) {
-                        Ok(snapshot) => {
-                            self.restore_history_snapshot(&snapshot);
-                            self.flush_history_snapshot_if_needed(true);
-                            processed_snapshot = true;
+                    // Resume snapshots can lag behind rollout JSONL when the previous
+                    // process exits abruptly. If replay items are present, trust them as
+                    // source of truth to avoid truncating the visible transcript to stale
+                    // snapshot state.
+                    if items.is_empty() {
+                        match serde_json::from_value::<HistorySnapshot>(snapshot_value) {
+                            Ok(snapshot) => {
+                                self.restore_history_snapshot(&snapshot);
+                                self.flush_history_snapshot_if_needed(true);
+                                processed_snapshot = true;
+                            }
+                            Err(err) => {
+                                tracing::warn!("failed to deserialize replay snapshot: {err}");
+                            }
                         }
-                        Err(err) => {
-                            tracing::warn!("failed to deserialize replay snapshot: {err}");
-                        }
+                    } else {
+                        tracing::debug!(
+                            "replay_history: ignored snapshot because {} replay items are present",
+                            items.len()
+                        );
                     }
                 }
                 if !processed_snapshot {
@@ -33765,6 +33776,86 @@ use code_core::protocol::OrderMeta;
         assert!(
             inserted_text.contains("new-assistant"),
             "resume insertion should surface the new assistant answer at the tail"
+        );
+    }
+
+    #[test]
+    fn replay_history_uses_items_when_snapshot_is_present() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let snapshot = HistorySnapshot {
+            records: vec![HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: "old-assistant-snapshot".to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                }],
+                metadata: None,
+            })],
+            next_id: 2,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![OrderKeySnapshot {
+                req: 1,
+                out: 0,
+                seq: 0,
+            }],
+            order_debug: Vec::new(),
+        };
+
+        let replay_item = ResponseItem::Message {
+            id: Some("msg-new-tail".to_string()),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "new-assistant-tail".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        };
+
+        harness.handle_event(Event {
+            id: "resume".to_string(),
+            event_seq: 0,
+            msg: EventMsg::ReplayHistory(code_core::protocol::ReplayHistoryEvent {
+                items: vec![replay_item],
+                history_snapshot: Some(serde_json::to_value(snapshot).expect("serialize snapshot")),
+            }),
+            order: None,
+        });
+
+        let mut visible_fragments: Vec<String> = Vec::new();
+        for cell in &harness.chat().history_cells {
+            for line in cell.display_lines_trimmed() {
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                if !text.trim().is_empty() {
+                    visible_fragments.push(text);
+                }
+            }
+        }
+        let visible_text = visible_fragments.join("\n");
+
+        assert!(
+            visible_text.contains("new-assistant-tail"),
+            "replay items should be rendered when present"
+        );
+        assert!(
+            !visible_text.contains("old-assistant-snapshot"),
+            "stale snapshot content should not replace fresher replay items"
         );
     }
 
