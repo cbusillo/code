@@ -584,38 +584,40 @@ fi
 FPRINT_FILE="./target/${PROFILE}/.env-fingerprint"
 # Collect fingerprint inputs (only env/toolchain/settings that affect codegen/caches)
 collect_fingerprint() {
-  local cargo_v rustc_v host which_cargo which_rustc uname_srm
+  local cargo_v rustc_v rustc_v_oneline host which_cargo which_rustc uname_srm
   cargo_v="$(CARGO_HOME="$CARGO_HOME" RUSTUP_HOME="$RUSTUP_HOME" ${USE_CARGO} -V 2>/dev/null || true)"
   rustc_v="$(rustup run "$TOOLCHAIN" rustc -vV 2>/dev/null || true)"
+  rustc_v_oneline="${rustc_v//$'\n'/ }"
   host="$(printf "%s\n" "$rustc_v" | awk -F': ' '/^host: /{print $2}' || true)"
   which_cargo="${REAL_CARGO_BIN}"
   which_rustc="${REAL_RUSTC_BIN}"
   uname_srm="$(uname -srm 2>/dev/null || true)"
-  cat <<FP
-profile=${PROFILE}
-toolchain=${TOOLCHAIN:-}
-host=${host}
-cargo_bin=${which_cargo}
-rustc_bin=${which_rustc}
-cargo_version=${cargo_v}
-rustc_version=$(printf "%s" "$rustc_v" | tr '\n' ' ')
-uname=${uname_srm}
-RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-}
-CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-}
-RUSTFLAGS=${RUSTFLAGS:-}
-RUSTC_WRAPPER=${RUSTC_WRAPPER:-}
-CARGO_BUILD_RUSTC_WRAPPER=${CARGO_BUILD_RUSTC_WRAPPER:-}
-SCCACHE=${SCCACHE:-}
-SCCACHE_BIN=${SCCACHE_BIN:-}
-CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-}
-MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-}
-CODE_HOME=${CODE_HOME:-}
-CODEX_HOME=${CODEX_HOME:-}
-FP
+  printf '%s\n' \
+    "profile=${PROFILE}" \
+    "toolchain=${TOOLCHAIN:-}" \
+    "host=${host}" \
+    "cargo_bin=${which_cargo}" \
+    "rustc_bin=${which_rustc}" \
+    "cargo_version=${cargo_v}" \
+    "rustc_version=${rustc_v_oneline}" \
+    "uname=${uname_srm}" \
+    "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-}" \
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-}" \
+    "RUSTFLAGS=${RUSTFLAGS:-}" \
+    "RUSTC_WRAPPER=${RUSTC_WRAPPER:-}" \
+    "CARGO_BUILD_RUSTC_WRAPPER=${CARGO_BUILD_RUSTC_WRAPPER:-}" \
+    "SCCACHE=${SCCACHE:-}" \
+    "SCCACHE_BIN=${SCCACHE_BIN:-}" \
+    "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-}" \
+    "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-}" \
+    "CODE_HOME=${CODE_HOME:-}" \
+    "CODEX_HOME=${CODEX_HOME:-}"
 }
 
-NEW_FPRINT_TEXT="$(collect_fingerprint)"
-NEW_FPRINT_HASH="$(printf "%s" "$NEW_FPRINT_TEXT" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+FPRINT_TMP="./target/${PROFILE}/.env-fingerprint.new"
+collect_fingerprint >"$FPRINT_TMP"
+NEW_FPRINT_TEXT="$(<"$FPRINT_TMP")"
+NEW_FPRINT_HASH="$(shasum -a 256 "$FPRINT_TMP" 2>/dev/null | awk '{print $1}')"
 
 FPRINT_CHANGED="0"
 if [ -f "$FPRINT_FILE" ]; then
