@@ -2653,9 +2653,10 @@ struct ContentView: View {
         isCompactPhoneLayout ? 34 : 0
     }
 
-    private var composerControlRows: some View {
+    private var composerControlRows: AnyView {
         #if os(iOS)
-        VStack(spacing: 0) {
+        AnyView(
+            VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if isCompactPhoneLayout {
                     Menu {
@@ -2981,9 +2982,11 @@ struct ContentView: View {
                 .padding(.top, 2)
                 .padding(.bottom, composerControlBottomPadding)
             }
-        }
+            }
+        )
         #else
-        VStack(spacing: 0) {
+        AnyView(
+            VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "plus")
                     .font(.headline)
@@ -3175,7 +3178,8 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.top, 4)
             .padding(.bottom, 8)
-        }
+            }
+        )
         #endif
     }
 
