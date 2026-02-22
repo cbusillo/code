@@ -22,6 +22,12 @@ On iOS, Every Code Companion runs in companion mode and does not launch a
 local bundled backend. Connect it to a Mac/CLI endpoint using pairing or a
 manual `ws://` / `wss://` endpoint.
 
+The connection flow is available from the connection status chip and supports:
+
+- QR pairing scan (camera)
+- pasted `ecccompanion://pair?...` codes
+- manual endpoint + bearer token fallback
+
 ## Branding and Attribution
 
 Use the following legal attribution in release metadata and in-app surfaces:

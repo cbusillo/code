@@ -94,4 +94,21 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(settingsDoneButton.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Settings"].exists)
     }
+
+    @MainActor
+    func testConnectionPopoverConnectOpensCompanionAssistant() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let connectionStatusButton = app.buttons["top.connection"]
+        XCTAssertTrue(connectionStatusButton.waitForExistence(timeout: 10))
+        connectionStatusButton.tap()
+
+        let connectButton = app.buttons["connection.connect"]
+        XCTAssertTrue(connectButton.waitForExistence(timeout: 5))
+        connectButton.tap()
+
+        XCTAssertTrue(app.buttons["connection.assistant.connect-now"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Close"].exists)
+    }
 }

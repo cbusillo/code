@@ -8,6 +8,7 @@ import AppKit
 
 #if os(iOS)
 import UIKit
+import VisionKit
 #endif
 
 #if os(iOS)
@@ -87,7 +88,7 @@ enum CompanionConnectionState: Equatable {
         case .reconnecting:
             return "Trying to restore the companion session after a disconnect."
         case .offline:
-            return "Companion is unreachable. Use LAN/manual endpoint fallback and reconnect."
+            return "Companion is unreachable. This iOS app has no local backend; pair with a Mac companion and reconnect."
         }
     }
 
@@ -267,6 +268,7 @@ struct ContentView: View {
     @State private var collapsedSessionRailGroupIDs: Set<String> = []
     @State private var voiceInteractionNotice: String?
     @State private var showConnectionPopover = false
+    @State private var showCompanionConnectAssistant = false
     @State private var activeTranscriptItemID: String?
     @State private var cachedTranscriptItems: [SessionStreamItem] = []
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
@@ -954,11 +956,22 @@ struct ContentView: View {
                     }
             }
         }
+        .sheet(isPresented: $showCompanionConnectAssistant) {
+            CompanionConnectAssistantSheet(store: store)
+        }
         #endif
         .task {
+            #if os(iOS)
+            // iOS is companion-only; avoid reconnect loops before the user pairs.
+            if store.connectionState == .disconnected,
+               store.companionSessionToken != nil {
+                await store.connect()
+            }
+            #else
             if store.connectionState == .disconnected {
                 await store.connect()
             }
+            #endif
         }
         .onChange(of: store.selectedSessionItems) { _, _ in
             refreshTranscriptCache()
@@ -1641,9 +1654,7 @@ struct ContentView: View {
 
         if store.connectionState == .disconnected {
             Button {
-                Task {
-                    await store.connect()
-                }
+                presentCompanionConnectAssistant()
             } label: {
                 Label("Reconnect", systemImage: "bolt.horizontal.circle")
             }
@@ -1720,7 +1731,10 @@ struct ContentView: View {
         .accessibilityLabel("Session connection status")
         .accessibilityIdentifier("top.connection")
         .popover(isPresented: $showConnectionPopover, arrowEdge: .bottom) {
-            ConnectionPopover(store: store)
+            ConnectionPopover(
+                store: store,
+                showConnectAssistant: $showCompanionConnectAssistant
+            )
                 .frame(width: 360)
                 .padding(12)
         }
@@ -3317,14 +3331,22 @@ struct ContentView: View {
         if store.connectionState == .connected {
             return "Create or choose a thread"
         }
+        #if os(iOS)
+        return "Connect to your Mac companion"
+        #else
         return "Connect to your local session"
+        #endif
     }
 
     private var emptyStateSubtitle: String {
         if store.connectionState == .connected {
             return "Start a new thread to mirror Codex events in real time."
         }
+        #if os(iOS)
+        return "Scan a pairing QR or import a pairing code from your Mac companion."
+        #else
         return "Use a local loopback endpoint, then pick a thread to begin."
+        #endif
     }
 
     private var emptyStatePrimaryActionTitle: String {
@@ -3339,7 +3361,11 @@ struct ContentView: View {
             if store.connectionState == .connected {
                 await store.createSession(cwd: nil)
             } else {
+                #if os(iOS)
+                presentCompanionConnectAssistant()
+                #else
                 await store.connect()
+                #endif
             }
         }
     }
@@ -3627,12 +3653,26 @@ struct ContentView: View {
         showSettings = true
     }
 
+    private func presentCompanionConnectAssistant() {
+        #if os(iOS)
+        showCompanionConnectAssistant = true
+        #else
+        Task {
+            await store.connect()
+        }
+        #endif
+    }
+
     private func composerPrimaryAction() {
         Task {
             if store.connectionState != .connected {
+                #if os(iOS)
+                presentCompanionConnectAssistant()
+                #else
                 await store.connect()
                 #if os(macOS)
                 focusComposerEditor(forceActivateApp: true)
+                #endif
                 #endif
                 return
             }
@@ -5175,6 +5215,7 @@ private struct PairingQRCodeView: View {
 
 private struct ConnectionPopover: View {
     @ObservedObject var store: SessionMirrorStore
+    @Binding var showConnectAssistant: Bool
     @State private var pairingCodeInput = ""
 
     private var companionTokenBinding: Binding<String> {
@@ -5256,11 +5297,19 @@ private struct ConnectionPopover: View {
                     .foregroundStyle(.secondary)
             }
 
+            #if os(iOS)
+            Text("Every Code Companion on iOS connects to a Mac companion endpoint. No local backend runs on device.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            #endif
+
             HStack(spacing: 8) {
+                #if os(macOS)
                 Button("Use localhost") {
                     store.endpoint = SessionMirrorStore.defaultEndpoint
                 }
                 .buttonStyle(.bordered)
+                #endif
 
                 if let lanEndpoint = store.companionLANEndpoint,
                    !lanEndpoint.isEmpty {
@@ -5329,11 +5378,17 @@ private struct ConnectionPopover: View {
 
             HStack(spacing: 8) {
                 Button("Connect") {
+                    #if os(iOS)
+                    showConnectAssistant = true
+                    #else
                     Task {
                         await store.connect()
                     }
+                    #endif
                 }
+                #if os(macOS)
                 .disabled(store.connectionState != .disconnected)
+                #endif
                 .accessibilityIdentifier("connection.connect")
 
                 Button("Disconnect") {
@@ -5389,6 +5444,298 @@ private struct ConnectionPopover: View {
         }
     }
 }
+
+#if os(iOS)
+private struct CompanionConnectAssistantSheet: View {
+    @ObservedObject var store: SessionMirrorStore
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedMethod: ConnectionMethod = .scanQR
+    @State private var pairingCodeInput = ""
+    @State private var manualEndpoint = ""
+    @State private var manualToken = ""
+    @State private var isApplying = false
+    @State private var localError: String?
+
+    private enum ConnectionMethod: String, CaseIterable, Identifiable {
+        case scanQR = "Scan QR"
+        case pasteCode = "Paste Code"
+        case manual = "Manual"
+
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text("Connect this iPhone/iPad to your Mac companion. The iOS app does not run a local backend.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    Picker("Method", selection: $selectedMethod) {
+                        ForEach(ConnectionMethod.allCases) { method in
+                            Text(method.rawValue).tag(method)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("connection.assistant.method")
+                }
+
+                switch selectedMethod {
+                case .scanQR:
+                    Section("Scan pairing QR") {
+                        PairingCodeScannerPanel { payload in
+                            Task {
+                                await applyPairingCode(payload)
+                            }
+                        }
+
+                        Button("Use Clipboard Pairing Code") {
+                            let clipboardValue = UIPasteboard.general.string ?? ""
+                            pairingCodeInput = clipboardValue
+                            selectedMethod = .pasteCode
+                        }
+                        .disabled((UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("connection.assistant.use-clipboard")
+                    }
+                case .pasteCode:
+                    Section("Paste pairing code") {
+                        TextField("ecccompanion://pair?...", text: $pairingCodeInput, axis: .vertical)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.caption.monospaced())
+                            .accessibilityIdentifier("connection.assistant.pairing-code")
+
+                        Button(isApplying ? "Connecting…" : "Import and Connect") {
+                            Task {
+                                await applyPairingCode(pairingCodeInput)
+                            }
+                        }
+                        .disabled(isApplying || pairingCodeInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("connection.assistant.import-connect")
+                    }
+                case .manual:
+                    Section("Manual endpoint") {
+                        TextField("wss://your-companion/ws", text: $manualEndpoint)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.caption.monospaced())
+                            .accessibilityIdentifier("connection.assistant.manual-endpoint")
+
+                        TextField("Bearer token", text: $manualToken)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.caption.monospaced())
+                            .accessibilityIdentifier("connection.assistant.manual-token")
+
+                        Button(isApplying ? "Connecting…" : "Save and Connect") {
+                            Task {
+                                await saveManualAndConnect()
+                            }
+                        }
+                        .disabled(isApplying || manualEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("connection.assistant.manual-connect")
+                    }
+                }
+
+                if let localError,
+                   !localError.isEmpty {
+                    Section {
+                        Text(localError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Connect Companion")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Connect now") {
+                        Task {
+                            await reconnectWithCurrentConfiguration()
+                        }
+                    }
+                    .disabled(isApplying)
+                    .accessibilityIdentifier("connection.assistant.connect-now")
+                }
+            }
+            .onAppear {
+                manualEndpoint = store.endpoint
+                manualToken = store.companionSessionToken ?? ""
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func applyPairingCode(_ rawCode: String) async {
+        let trimmedCode = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCode.isEmpty else {
+            return
+        }
+
+        localError = nil
+        isApplying = true
+        defer {
+            isApplying = false
+        }
+
+        let imported = store.importCompanionPairingCode(trimmedCode)
+        guard imported else {
+            localError = store.lastError ?? "Pairing code is invalid."
+            return
+        }
+
+        pairingCodeInput = ""
+        manualEndpoint = store.endpoint
+        manualToken = store.companionSessionToken ?? ""
+        await reconnectWithCurrentConfiguration()
+    }
+
+    private func saveManualAndConnect() async {
+        let endpoint = manualEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = manualToken.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !endpoint.isEmpty else {
+            localError = "Endpoint is required."
+            return
+        }
+
+        localError = nil
+        isApplying = true
+        defer {
+            isApplying = false
+        }
+
+        store.endpoint = endpoint
+        store.companionSessionToken = token.isEmpty ? nil : token
+        await reconnectWithCurrentConfiguration()
+    }
+
+    private func reconnectWithCurrentConfiguration() async {
+        if store.connectionState != .disconnected {
+            store.disconnect()
+        }
+
+        await store.connect()
+        if store.connectionState == .connected {
+            dismiss()
+            return
+        }
+
+        if let error = store.lastError,
+           !error.isEmpty {
+            localError = error
+        }
+    }
+}
+
+private struct PairingCodeScannerPanel: View {
+    let onScan: (String) -> Void
+
+    var body: some View {
+        if QRPairingScannerView.isAvailable {
+            QRPairingScannerView(onScan: onScan)
+                .frame(minHeight: 220)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .accessibilityIdentifier("connection.assistant.scanner")
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("QR scanning is unavailable on this device right now.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Use Paste Code or clipboard import instead.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+            .accessibilityIdentifier("connection.assistant.scanner-unavailable")
+        }
+    }
+}
+
+private struct QRPairingScannerView: UIViewControllerRepresentable {
+    let onScan: (String) -> Void
+
+    static var isAvailable: Bool {
+        DataScannerViewController.isSupported && DataScannerViewController.isAvailable
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScan: onScan)
+    }
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.qr])],
+            qualityLevel: .balanced,
+            recognizesMultipleItems: false,
+            isHighFrameRateTrackingEnabled: false,
+            isHighlightingEnabled: true
+        )
+        scanner.delegate = context.coordinator
+
+        do {
+            try scanner.startScanning()
+        } catch {}
+
+        return scanner
+    }
+
+    func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {
+        context.coordinator.onScan = onScan
+    }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        var onScan: (String) -> Void
+        private var didEmitCode = false
+
+        init(onScan: @escaping (String) -> Void) {
+            self.onScan = onScan
+        }
+
+        func dataScanner(
+            _ dataScanner: DataScannerViewController,
+            didAdd addedItems: [RecognizedItem],
+            allItems: [RecognizedItem]
+        ) {
+            guard !didEmitCode else {
+                return
+            }
+
+            for item in addedItems {
+                guard case let .barcode(barcode) = item,
+                      let payload = barcode.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !payload.isEmpty
+                else {
+                    continue
+                }
+
+                didEmitCode = true
+                dataScanner.stopScanning()
+                onScan(payload)
+                return
+            }
+        }
+
+    }
+}
+#endif
 
 private struct QuickPromptCard: View {
     let prompt: String
