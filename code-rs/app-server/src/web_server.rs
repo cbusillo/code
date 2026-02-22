@@ -1212,7 +1212,12 @@ fn is_duplicate_core_event(history: &[SessionStreamItem], candidate: &SessionStr
         .rev()
         .take(512)
         .any(|existing| match existing {
-            SessionStreamItem::CoreEvent { event, .. } => event.id == candidate_event.id,
+            SessionStreamItem::CoreEvent { event, .. } => {
+                event.id == candidate_event.id
+                    && event.event_seq == candidate_event.event_seq
+                    && event.kind == candidate_event.kind
+                    && event.order == candidate_event.order
+            }
             _ => false,
         })
 }
@@ -1226,7 +1231,7 @@ pub struct CoreEventPayload {
     payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WebOrderMeta {
     request_ordinal: u64,
     output_index: Option<u32>,
@@ -2061,6 +2066,28 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_core_event_allows_reused_id_with_new_event_seq() {
+        let history = vec![make_core_event_item(1, "1", 1)];
+        let candidate = make_core_event_item(2, "1", 2);
+
+        assert!(
+            !is_duplicate_core_event(&history, &candidate),
+            "events that reuse id but advance event_seq must not be dropped"
+        );
+    }
+
+    #[test]
+    fn duplicate_core_event_detects_exact_match() {
+        let history = vec![make_core_event_item(1, "1", 1)];
+        let candidate = make_core_event_item(2, "1", 1);
+
+        assert!(
+            is_duplicate_core_event(&history, &candidate),
+            "exactly repeated core events should still be deduped"
+        );
+    }
+
+    #[test]
     fn parse_bearer_header_rejects_invalid_values() {
         assert_eq!(parse_bearer_header(""), None);
         assert_eq!(parse_bearer_header("Token abc"), None);
@@ -2074,6 +2101,22 @@ mod tests {
             seq,
             level: "info".to_string(),
             message: format!("payload-{seq}"),
+        }
+    }
+
+    fn make_core_event_item(seq: u64, id: &str, event_seq: u64) -> SessionStreamItem {
+        SessionStreamItem::CoreEvent {
+            session_id: Uuid::nil(),
+            seq,
+            event: CoreEventPayload {
+                id: id.to_string(),
+                event_seq,
+                kind: "token_count".to_string(),
+                order: None,
+                payload: serde_json::json!({
+                    "type": "token_count",
+                }),
+            },
         }
     }
 
