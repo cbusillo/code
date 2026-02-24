@@ -1341,9 +1341,16 @@ struct CodeNativeApp: App {
                             title: Text("Update Available"),
                             message: Text(message),
                             primaryButton: .default(Text("Download")) {
+                                MacAppUpdateChecker.clearSkippedVersion()
                                 MacAppUpdateChecker.openDownload(for: candidate)
                             },
-                            secondaryButton: .cancel(Text("Later"))
+                            secondaryButton: .default(Text("Skip This Version")) {
+                                MacAppUpdateChecker.skipVersion(candidate.version)
+                                updateAlert = .info(
+                                    title: "Version Skipped",
+                                    message: "Version \(candidate.version) is now skipped. You can clear this in Settings > General > App updates."
+                                )
+                            }
                         )
                     case .info(let title, let message):
                         return Alert(
@@ -1403,6 +1410,13 @@ struct CodeNativeApp: App {
                     switch outcome {
                     case .available(let candidate):
                         updateAlert = .available(candidate)
+                    case .skipped(let version):
+                        if userInitiated {
+                            updateAlert = .info(
+                                title: "Version Skipped",
+                                message: "Version \(version) is currently skipped. Clear it in Settings > General > App updates to be prompted again."
+                            )
+                        }
                     case .upToDate:
                         if userInitiated {
                             updateAlert = .info(

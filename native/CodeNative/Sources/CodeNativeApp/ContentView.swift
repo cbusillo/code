@@ -12059,6 +12059,9 @@ private struct NativeSettingsView: View {
     @State private var newPairingLabel = ""
     @State private var profileImportMessage: String?
     @State private var profileImportError: String?
+    #if os(macOS)
+    @State private var updateMetadataRevision = 0
+    #endif
 
     private static let pairingExpiryFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -12067,6 +12070,12 @@ private struct NativeSettingsView: View {
     }()
 
     private static let profileImportFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy h:mm a"
+        return formatter
+    }()
+
+    private static let updateCheckFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, yyyy h:mm a"
         return formatter
@@ -12220,6 +12229,27 @@ private struct NativeSettingsView: View {
         let bundlePath = Bundle.main.bundleURL.path
         return "Bundle path: \(bundlePath)"
     }
+
+    #if os(macOS)
+    private var updateLastCheckedText: String {
+        _ = updateMetadataRevision
+        guard let lastCheckedAt = MacAppUpdateChecker.lastCheckedAt() else {
+            return "Never"
+        }
+
+        return Self.updateCheckFormatter.string(from: lastCheckedAt)
+    }
+
+    private var skippedUpdateVersionText: String {
+        _ = updateMetadataRevision
+        return MacAppUpdateChecker.skippedVersion() ?? "None"
+    }
+
+    private func clearSkippedUpdateVersion() {
+        MacAppUpdateChecker.clearSkippedVersion()
+        updateMetadataRevision += 1
+    }
+    #endif
 
     private var isCompactSettingsLayout: Bool {
         #if os(iOS)
@@ -12557,6 +12587,31 @@ private struct NativeSettingsView: View {
                 .pickerStyle(.segmented)
                 .frame(width: isCompactSettingsLayout ? nil : 220)
             }
+
+            #if os(macOS)
+            SettingsRow(title: "App updates", description: "GitHub release checks for this macOS build channel.") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Current version: \(MacAppUpdateChecker.currentVersion())")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    Text("Last checked: \(updateLastCheckedText)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text("Skipped version: \(skippedUpdateVersionText)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+
+                        Button("Clear skipped") {
+                            clearSkippedUpdateVersion()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(MacAppUpdateChecker.skippedVersion() == nil)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            #endif
 
             SettingsInfoCard(text: publicAppAttributionText)
             SettingsInfoCard(text: publicAppVersionText)

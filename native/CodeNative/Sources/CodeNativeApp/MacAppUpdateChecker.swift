@@ -28,8 +28,15 @@ enum MacAppUpdateAlert: Identifiable, Equatable {
 
 enum MacAppUpdateCheckOutcome {
     case available(MacAppUpdateCandidate)
+    case skipped(String)
     case upToDate
     case managedByStore
+}
+
+enum MacAppUpdateAvailability: Equatable {
+    case updateAvailable
+    case skipped
+    case upToDate
 }
 
 enum MacAppUpdateCheckError: LocalizedError {
@@ -57,6 +64,7 @@ enum MacAppUpdateChecker {
     private static let defaultRepoName = "code"
     private static let releaseTagPrefix = "macos-v"
     private static let lastCheckDefaultsKey = "code_native_macos_update_last_check_at"
+    private static let skippedVersionDefaultsKey = "code_native_macos_update_skipped_version"
     private static let automaticCheckInterval: TimeInterval = 60 * 60 * 6
 
     static func shouldPerformAutomaticCheck(
@@ -96,6 +104,52 @@ enum MacAppUpdateChecker {
         return "unknown"
     }
 
+    static func lastCheckedAt(userDefaults: UserDefaults = .standard) -> Date? {
+        userDefaults.object(forKey: lastCheckDefaultsKey) as? Date
+    }
+
+    static func skippedVersion(userDefaults: UserDefaults = .standard) -> String? {
+        let raw = userDefaults.string(forKey: skippedVersionDefaultsKey)
+        let normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalized,
+           !normalized.isEmpty {
+            return normalized
+        }
+        return nil
+    }
+
+    static func skipVersion(_ version: String, userDefaults: UserDefaults = .standard) {
+        let normalized = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty {
+            userDefaults.removeObject(forKey: skippedVersionDefaultsKey)
+            return
+        }
+
+        userDefaults.set(normalized, forKey: skippedVersionDefaultsKey)
+    }
+
+    static func clearSkippedVersion(userDefaults: UserDefaults = .standard) {
+        userDefaults.removeObject(forKey: skippedVersionDefaultsKey)
+    }
+
+    static func classifyUpdateAvailability(
+        installedVersion: String,
+        releaseVersion: String,
+        skippedVersion: String?
+    ) -> MacAppUpdateAvailability {
+        let comparison = compareVersionStrings(installedVersion, releaseVersion)
+        if comparison != .orderedAscending {
+            return .upToDate
+        }
+
+        if let skippedVersion,
+           compareVersionStrings(skippedVersion, releaseVersion) == .orderedSame {
+            return .skipped
+        }
+
+        return .updateAvailable
+    }
+
     static func checkForUpdate() async throws -> MacAppUpdateCheckOutcome {
         if isStoreManagedInstall() {
             return .managedByStore
@@ -107,9 +161,17 @@ enum MacAppUpdateChecker {
         }
 
         let installedVersion = currentVersion()
-        let comparison = compareVersionStrings(installedVersion, releaseVersion)
-        if comparison != .orderedAscending {
+        switch classifyUpdateAvailability(
+            installedVersion: installedVersion,
+            releaseVersion: releaseVersion,
+            skippedVersion: skippedVersion()
+        ) {
+        case .upToDate:
             return .upToDate
+        case .skipped:
+            return .skipped(releaseVersion)
+        case .updateAvailable:
+            break
         }
 
         guard let assetURL = selectDownloadAsset(from: release.assets) else {
