@@ -347,28 +347,50 @@ pub async fn prepare_reusable_worktree(
             .map_err(|e| format!("Failed to reset reusable worktree: {}", e))?;
         if !reset.status.success() {
             let stderr = String::from_utf8_lossy(&reset.stderr);
-            return Err(format!("Failed to reset reusable worktree: {stderr}"));
-        }
+            let broken_registration = stderr.contains("not a git repository")
+                || stderr.contains("No such file or directory");
+            if !broken_registration {
+                return Err(format!("Failed to reset reusable worktree: {stderr}"));
+            }
 
-        let clean_args = if keep_gitignored {
-            vec!["clean", "-fd"]
+            // The worktree directory exists but its gitdir registration is stale.
+            // Remove the broken path and prune stale registrations so we can
+            // recreate it cleanly below.
+            let _ = Command::new("git")
+                .current_dir(git_root)
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    worktree_path
+                        .to_str()
+                        .ok_or_else(|| "Invalid worktree path".to_string())?,
+                ])
+                .output()
+                .await;
+            let _ = tokio::fs::remove_dir_all(&worktree_path).await;
+            prune_stale_worktrees(git_root).await?;
         } else {
-            vec!["clean", "-fdx"]
-        };
-        let clean = Command::new("git")
-            .current_dir(&worktree_path)
-            .args(&clean_args)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to clean reusable worktree: {}", e))?;
-        if !clean.status.success() {
-            let stderr = String::from_utf8_lossy(&clean.stderr);
-            return Err(format!("Failed to clean reusable worktree: {stderr}"));
-        }
+            let clean_args = if keep_gitignored {
+                vec!["clean", "-fd"]
+            } else {
+                vec!["clean", "-fdx"]
+            };
+            let clean = Command::new("git")
+                .current_dir(&worktree_path)
+                .args(&clean_args)
+                .output()
+                .await
+                .map_err(|e| format!("Failed to clean reusable worktree: {}", e))?;
+            if !clean.status.success() {
+                let stderr = String::from_utf8_lossy(&clean.stderr);
+                return Err(format!("Failed to clean reusable worktree: {stderr}"));
+            }
 
-        bump_snapshot_epoch_for(&worktree_path);
-        record_worktree_in_session(git_root, &worktree_path).await;
-        return Ok(worktree_path);
+            bump_snapshot_epoch_for(&worktree_path);
+            record_worktree_in_session(git_root, &worktree_path).await;
+            return Ok(worktree_path);
+        }
     }
 
     // Create detached worktree at the snapshot commit.
@@ -871,6 +893,34 @@ mod tests {
         let second = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
             .await
             .expect("recreated worktree");
+
+        assert_eq!(first, second);
+        assert!(second.exists());
+
+        restore_home(prev_home);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn prepare_reusable_worktree_recovers_broken_gitdir_pointer() {
+        let temp_home = TempDir::new().expect("temp home");
+        let repo_dir = temp_home.path().join("repo");
+        init_repo(&repo_dir).await;
+
+        let prev_home = std::env::var("HOME").ok();
+        set_home(temp_home.path());
+
+        let first = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
+            .await
+            .expect("first worktree");
+        assert!(first.exists());
+
+        let broken_registration_dir = repo_dir.join(".git/worktrees/auto-review");
+        std::fs::remove_dir_all(&broken_registration_dir).expect("remove registration dir");
+
+        let second = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
+            .await
+            .expect("recreated after broken pointer");
 
         assert_eq!(first, second);
         assert!(second.exists());
