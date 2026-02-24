@@ -137,8 +137,37 @@ enum SessionIDEPreferences {
 
 #if os(macOS)
 enum IDEAvailability {
+    private static let cacheLock = NSLock()
+    private nonisolated(unsafe) static var cachedSelections: [SessionIDESelection]?
+    private nonisolated(unsafe) static var cachedAt = Date.distantPast
+    private static let cacheLifetime: TimeInterval = 8
+
     static func availableSelections(
         using resolver: IDEApplicationResolving = LiveIDEApplicationResolver.shared
+    ) -> [SessionIDESelection] {
+        if resolver is LiveIDEApplicationResolver {
+            let now = Date()
+            cacheLock.lock()
+            if let cachedSelections,
+               now.timeIntervalSince(cachedAt) <= cacheLifetime {
+                cacheLock.unlock()
+                return cachedSelections
+            }
+            cacheLock.unlock()
+
+            let resolved = resolveAvailableSelections(using: resolver)
+            cacheLock.lock()
+            cachedSelections = resolved
+            cachedAt = now
+            cacheLock.unlock()
+            return resolved
+        }
+
+        return resolveAvailableSelections(using: resolver)
+    }
+
+    private static func resolveAvailableSelections(
+        using resolver: IDEApplicationResolving
     ) -> [SessionIDESelection] {
         SessionIDESelection.allCases.filter { selection in
             selection.isInstalled(using: resolver)
