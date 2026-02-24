@@ -996,7 +996,19 @@ struct ContentView: View {
         #if os(iOS)
         .sheet(isPresented: $showThreadPicker) {
             NavigationStack {
-                sidebar
+                ZStack {
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.09, green: 0.10, blue: 0.13),
+                            Color(red: 0.06, green: 0.07, blue: 0.09)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .ignoresSafeArea()
+
+                    sidebar
+                }
                     .navigationTitle("Threads")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -1513,6 +1525,10 @@ struct ContentView: View {
         #endif
         .background(
             ZStack {
+                let sidebarBase = Color(red: 0.08, green: 0.09, blue: 0.12)
+                RoundedRectangle(cornerRadius: 0)
+                    .fill(sidebarBase.opacity(glassWindow ? 0.86 : 0.95))
+
                 if glassWindow {
                     RoundedRectangle(cornerRadius: 0)
                         .fill(Color.white.opacity(0.03))
@@ -1572,8 +1588,35 @@ struct ContentView: View {
                 composerPanel
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    maybeOpenThreadPicker(with: value)
+                }
+        )
         #endif
     }
+
+    #if os(iOS)
+    private func maybeOpenThreadPicker(with value: DragGesture.Value) {
+        guard isCompactPhoneLayout,
+              !showsIPadSplitLayout,
+              !showThreadPicker else {
+            return
+        }
+
+        let startedAtLeadingEdge = value.startLocation.x <= 24
+        let horizontalDistance = value.translation.width
+        let verticalDrift = abs(value.translation.height)
+        guard startedAtLeadingEdge,
+              horizontalDistance > 90,
+              verticalDrift < 80 else {
+            return
+        }
+
+        showThreadPicker = true
+    }
+    #endif
 
     private var usesBottomInsetComposer: Bool {
         #if os(iOS)
