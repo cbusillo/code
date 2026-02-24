@@ -285,8 +285,6 @@ struct ContentView: View {
     @State private var transcriptIsNearBottom = true
     @State private var transcriptUserHasScrolled = false
     @State private var composerDraft = ""
-    @State private var cachedTrailingMentionMatch: ComposerContextMentionMatch?
-    @State private var cachedComposerActivityBadge: ComposerActivityBadge?
     @State private var composerMeasuredHeight: CGFloat = 34
     @State private var showSlashCommandLauncher = false
     @State private var slashCommandQuery = ""
@@ -1069,7 +1067,6 @@ struct ContentView: View {
             #else
             focusComposerEditor(forceActivateApp: true)
             #endif
-            refreshComposerActivityBadge()
         }
         .onChange(of: store.composerText) { _, newValue in
             guard newValue != composerDraft else {
@@ -1081,18 +1078,12 @@ struct ContentView: View {
             }
         }
         .onChange(of: composerDraft) { _, newValue in
-            let mentionMatch = ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue)
-            cachedTrailingMentionMatch = mentionMatch
-
             if ideContextEnabled,
-               mentionMatch != nil {
+               ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
                 ensureContextIndexLoaded()
             }
             syncInlineContextSelection()
             syncSlashCommandLauncher(with: newValue)
-        }
-        .onChange(of: selectedSessionTranscriptSourceKey) { _, _ in
-            refreshComposerActivityBadge()
         }
         .onChange(of: showSlashCommandLauncher) { _, isPresented in
             if !isPresented {
@@ -1145,24 +1136,20 @@ struct ContentView: View {
         .onAppear {
             enforceIDEContextEnabled()
             composerDraft = store.composerText
-            cachedTrailingMentionMatch = ComposerContextReferenceFormatter.trailingMentionMatch(in: composerDraft)
             scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
             ensureContextIndexLoaded()
             normalizeWorkflowSettings()
             pruneSessionIDEPreferences()
-            refreshComposerActivityBadge()
             focusComposerEditor(forceActivateApp: true)
         }
         #else
         .onAppear {
             enforceIDEContextEnabled()
             composerDraft = store.composerText
-            cachedTrailingMentionMatch = ComposerContextReferenceFormatter.trailingMentionMatch(in: composerDraft)
             scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
             ensureContextIndexLoaded()
             normalizeWorkflowSettings()
             pruneSessionIDEPreferences()
-            refreshComposerActivityBadge()
         }
         #endif
     }
@@ -4168,7 +4155,7 @@ struct ContentView: View {
     }
 
     private var trailingMentionMatch: ComposerContextMentionMatch? {
-        cachedTrailingMentionMatch
+        ComposerContextReferenceFormatter.trailingMentionMatch(in: composerDraft)
     }
 
     private var inlineContextQuery: String {
@@ -4470,15 +4457,7 @@ struct ContentView: View {
     }
 
     private var composerActivityBadge: ComposerActivityBadge? {
-        cachedComposerActivityBadge
-    }
-
-    private func refreshComposerActivityBadge() {
-        cachedComposerActivityBadge = deriveComposerActivityBadge(from: store.selectedSessionItems)
-    }
-
-    private func deriveComposerActivityBadge(from items: [SessionStreamItem]) -> ComposerActivityBadge? {
-        for item in items.reversed() {
+        for item in store.selectedSessionItems.reversed() {
             guard item.type == "core_event",
                   let payloadType = item.event?.payload?.typeHint
             else {
