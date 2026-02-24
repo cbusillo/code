@@ -41,6 +41,7 @@ use code_core::config_types::AutoDriveModelRoutingEntry;
 use code_core::config_types::Notifications;
 use code_core::config_types::ReasoningEffort;
 use code_core::config_types::TextVerbosity;
+use code_core::error::CodexErr;
 use code_core::spawn::spawn_std_command_with_retry;
 use code_core::plan_tool::{PlanItemArg, StepStatus, UpdatePlanArgs};
 use code_core::model_family::derive_default_model_family;
@@ -1049,13 +1050,154 @@ use ratatui::widgets::Scrollbar;
 use ratatui::widgets::ScrollbarOrientation;
 use ratatui::widgets::ScrollbarState;
 use ratatui::widgets::StatefulWidget;
+use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::net::TcpListener;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedConnection {
     port: Option<u16>,
     ws: Option<String>,
+}
+
+const DEFAULT_MIRROR_ENDPOINT: &str = "ws://127.0.0.1:4317/ws";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MirrorServerMessage {
+    Hello {
+        client_id: String,
+    },
+    SessionAttached {
+        session_id: uuid::Uuid,
+        from_seq: u64,
+        has_more_before: bool,
+        items: Vec<MirrorSessionStreamItem>,
+    },
+    SessionStream {
+        item: MirrorSessionStreamItem,
+    },
+    SessionDetached {
+        session_id: uuid::Uuid,
+    },
+    Ack {
+        request_id: Option<String>,
+    },
+    Error {
+        request_id: Option<String>,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MirrorSessionStreamItem {
+    CoreEvent {
+        session_id: uuid::Uuid,
+        seq: u64,
+        event: MirrorCoreEventPayload,
+    },
+    Composer {
+        session_id: uuid::Uuid,
+        seq: u64,
+        rev: u64,
+        text: String,
+        cursor: usize,
+        source_client_id: Option<String>,
+    },
+    System {
+        session_id: uuid::Uuid,
+        seq: u64,
+        level: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MirrorCoreEventPayload {
+    id: String,
+    event_seq: u64,
+    kind: String,
+    order: Option<MirrorOrderMeta>,
+    payload: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MirrorOrderMeta {
+    request_ordinal: u64,
+    output_index: Option<u32>,
+    sequence_number: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MirrorClientMessage {
+    AttachSession {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+        from_seq: Option<u64>,
+    },
+    ComposerUpdate {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+        text: String,
+        cursor: usize,
+    },
+    SubmitTurn {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+    },
+    InterruptTurn {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+    },
+    ExecApproval {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+        call_id: String,
+        turn_id: Option<String>,
+        decision: MirrorReviewDecision,
+    },
+    PatchApproval {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+        call_id: String,
+        decision: MirrorReviewDecision,
+    },
+    UserInputAnswer {
+        request_id: Option<String>,
+        session_id: uuid::Uuid,
+        turn_id: String,
+        answers: std::collections::HashMap<String, MirrorRequestUserInputAnswer>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MirrorReviewDecision {
+    Approved,
+    ApprovedForSession,
+    Denied,
+    Abort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MirrorRequestUserInputAnswer {
+    answers: Vec<String>,
+}
+
+impl MirrorSessionStreamItem {
+    const fn seq(&self) -> u64 {
+        match self {
+            MirrorSessionStreamItem::CoreEvent { seq, .. }
+            | MirrorSessionStreamItem::Composer { seq, .. }
+            | MirrorSessionStreamItem::System { seq, .. } => *seq,
+        }
+    }
 }
 
 async fn read_cached_connection() -> Option<(Option<u16>, Option<String>)> {
@@ -3198,13 +3340,58 @@ impl ChatWidget<'_> {
                 Ok(conv) => conv,
                 Err(e) => {
                     tracing::error!("failed to initialize conversation: {e}");
-                    app_event_tx_clone.send_background_event_with_ticket(
-                        &ticket,
-                        format!(
-                            "❌ Failed to initialize model session: {}.\n• Ensure an OpenAI API key is set (CODE_OPENAI_API_KEY / OPENAI_API_KEY) or run `code login`.\n• Also verify config.cwd is an absolute path.",
-                            e
-                        ),
-                    );
+                    match e {
+                        CodexErr::SessionInUse {
+                            conversation_id,
+                            details,
+                        } => {
+                            let hinted_endpoint =
+                                ChatWidget::mirror_endpoint_from_details(Some(&details));
+                            let attach_endpoint = hinted_endpoint
+                                .as_deref()
+                                .unwrap_or(DEFAULT_MIRROR_ENDPOINT);
+                            app_event_tx_clone.send_background_event_with_ticket(
+                                &ticket,
+                                format!(
+                                    "🔁 Session {conversation_id} is active in another Code runtime{details}. Attempting mirror attach via {attach_endpoint}..."
+                                ),
+                            );
+
+                            match ChatWidget::run_session_in_use_mirror_runtime(
+                                code_op_rx,
+                                app_event_tx_clone.clone(),
+                                ticket.clone(),
+                                conversation_id,
+                                hinted_endpoint,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    app_event_tx_clone.send_background_event_with_ticket(
+                                        &ticket,
+                                        "🔌 Mirror session ended".to_string(),
+                                    );
+                                }
+                                Err(mirror_err) => {
+                                    app_event_tx_clone.send_background_event_with_ticket(
+                                        &ticket,
+                                        format!(
+                                            "❌ Mirror attach failed for session {conversation_id}: {mirror_err}"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        other => {
+                            app_event_tx_clone.send_background_event_with_ticket(
+                                &ticket,
+                                format!(
+                                    "❌ Failed to initialize model session: {}.\n• Ensure an OpenAI API key is set (CODE_OPENAI_API_KEY / OPENAI_API_KEY) or run `code login`.\n• Also verify config.cwd is an absolute path.",
+                                    other
+                                ),
+                            );
+                        }
+                    }
                     return;
                 }
             };
@@ -3215,16 +3402,18 @@ impl ChatWidget<'_> {
                 msg: EventMsg::SessionConfigured(new_conversation.session_configured),
                 order: None,
             };
-            app_event_tx_clone.send(AppEvent::CodexEvent(event));
+            app_event_tx_clone.send(AppEvent::CodexEvent(event.clone()));
 
+            let session_id: uuid::Uuid = new_conversation.conversation_id.into();
             let conversation = new_conversation.conversation;
-            let conversation_clone = conversation.clone();
+
+            let (submit_tx, mut submit_rx) = unbounded_channel::<Op>();
             let app_event_tx_submit = app_event_tx_clone.clone();
             let ticket_for_submit = ticket_for_submit.clone();
-
+            let conversation_for_submit = conversation.clone();
             tokio::spawn(async move {
-                while let Some(op) = code_op_rx.recv().await {
-                    if let Err(e) = conversation_clone.submit(op).await {
+                while let Some(op) = submit_rx.recv().await {
+                    if let Err(e) = conversation_for_submit.submit(op).await {
                         tracing::error!("failed to submit op: {e}");
                         app_event_tx_submit.send_background_event_with_ticket(
                             &ticket_for_submit,
@@ -3234,11 +3423,963 @@ impl ChatWidget<'_> {
                 }
             });
 
+            let submit_tx_for_local = submit_tx.clone();
+            tokio::spawn(async move {
+                while let Some(op) = code_op_rx.recv().await {
+                    if let Err(err) = submit_tx_for_local.send(op) {
+                        tracing::warn!("dropping local op after submit channel closed: {err}");
+                        break;
+                    }
+                }
+            });
+
+            let mirror_history = Arc::new(Mutex::new(Vec::<MirrorSessionStreamItem>::new()));
+            let mirror_seq = Arc::new(AtomicU64::new(1));
+            let (mirror_stream_tx, _) = tokio::sync::broadcast::channel::<MirrorSessionStreamItem>(1024);
+
+            if let Ok(initial_mirror_item) = ChatWidget::mirror_stream_item_from_event(
+                session_id,
+                mirror_seq.fetch_add(1, Ordering::SeqCst),
+                event,
+            ) {
+                if let Ok(mut history) = mirror_history.lock() {
+                    history.push(initial_mirror_item.clone());
+                }
+                let _ = mirror_stream_tx.send(initial_mirror_item);
+            }
+
+            match ChatWidget::spawn_local_owner_mirror_server(
+                session_id,
+                submit_tx.clone(),
+                mirror_history.clone(),
+                mirror_stream_tx.clone(),
+                mirror_seq.clone(),
+            )
+            .await
+            {
+                Ok(endpoint) => {
+                    conversation.set_owner_endpoint(Some(&endpoint));
+                    app_event_tx_clone.send_background_event_with_ticket(
+                        &ticket,
+                        format!("🔌 Local mirror owner ready at {endpoint}"),
+                    );
+                }
+                Err(err) => {
+                    conversation.set_owner_endpoint(None);
+                    app_event_tx_clone.send_background_event_with_ticket(
+                        &ticket,
+                        format!("⚠️ Local mirror owner unavailable: {err}"),
+                    );
+                }
+            }
+
             while let Ok(event) = conversation.next_event().await {
-                app_event_tx_clone.send(AppEvent::CodexEvent(event));
+                app_event_tx_clone.send(AppEvent::CodexEvent(event.clone()));
+                if let Ok(stream_item) = ChatWidget::mirror_stream_item_from_event(
+                    session_id,
+                    mirror_seq.fetch_add(1, Ordering::SeqCst),
+                    event,
+                ) {
+                    if let Ok(mut history) = mirror_history.lock() {
+                        history.push(stream_item.clone());
+                    }
+                    let _ = mirror_stream_tx.send(stream_item);
+                }
             }
             // (debug end notice removed)
         });
+    }
+
+    fn mirror_endpoint_from_details(details: Option<&str>) -> Option<String> {
+        let details = details?;
+        let marker = "endpoint ";
+        let start = details.find(marker)?;
+        let tail = &details[start + marker.len()..];
+        let endpoint = tail
+            .split([',', ')'])
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .trim_matches(['\"', '\''])
+            .to_string();
+        if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+            Some(endpoint)
+        } else {
+            None
+        }
+    }
+
+    fn mirror_stream_item_from_event(
+        session_id: uuid::Uuid,
+        seq: u64,
+        event: Event,
+    ) -> Result<MirrorSessionStreamItem, String> {
+        let payload = serde_json::to_value(&event.msg)
+            .map_err(|err| format!("failed to serialize event payload for mirror stream: {err}"))?;
+        Ok(MirrorSessionStreamItem::CoreEvent {
+            session_id,
+            seq,
+            event: MirrorCoreEventPayload {
+                id: event.id,
+                event_seq: event.event_seq,
+                kind: event.msg.to_string(),
+                order: event.order.map(|order| MirrorOrderMeta {
+                    request_ordinal: order.request_ordinal,
+                    output_index: order.output_index,
+                    sequence_number: order.sequence_number,
+                }),
+                payload,
+            },
+        })
+    }
+
+    fn push_mirror_stream_item(
+        history: &Arc<Mutex<Vec<MirrorSessionStreamItem>>>,
+        stream_tx: &tokio::sync::broadcast::Sender<MirrorSessionStreamItem>,
+        item: MirrorSessionStreamItem,
+    ) {
+        if let Ok(mut locked) = history.lock() {
+            locked.push(item.clone());
+        }
+        let _ = stream_tx.send(item);
+    }
+
+    async fn spawn_local_owner_mirror_server(
+        session_id: uuid::Uuid,
+        submit_tx: UnboundedSender<Op>,
+        mirror_history: Arc<Mutex<Vec<MirrorSessionStreamItem>>>,
+        mirror_stream_tx: tokio::sync::broadcast::Sender<MirrorSessionStreamItem>,
+        mirror_seq: Arc<AtomicU64>,
+    ) -> Result<String, String> {
+        let bind_addr = std::env::var("CODE_TUI_MIRROR_BIND")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "127.0.0.1:0".to_string());
+        let listener = TcpListener::bind(&bind_addr)
+            .await
+            .map_err(|err| format!("bind local mirror listener failed on {bind_addr}: {err}"))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|err| format!("read local mirror listener address failed: {err}"))?;
+        let host = if local_addr.ip().is_unspecified() {
+            "127.0.0.1".to_string()
+        } else {
+            local_addr.ip().to_string()
+        };
+        let endpoint = format!("ws://{host}:{}/ws", local_addr.port());
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::warn!("local mirror accept failed for session {session_id}: {err}");
+                        break;
+                    }
+                };
+
+                let submit_tx = submit_tx.clone();
+                let mirror_history = mirror_history.clone();
+                let mirror_stream_tx = mirror_stream_tx.clone();
+                let mirror_seq = mirror_seq.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = ChatWidget::run_local_owner_mirror_connection(
+                        stream,
+                        session_id,
+                        submit_tx,
+                        mirror_history,
+                        mirror_stream_tx,
+                        mirror_seq,
+                    )
+                    .await
+                    {
+                        tracing::warn!("local mirror connection ended for session {session_id}: {err}");
+                    }
+                });
+            }
+        });
+
+        Ok(endpoint)
+    }
+
+    async fn run_local_owner_mirror_connection(
+        stream: tokio::net::TcpStream,
+        session_id: uuid::Uuid,
+        submit_tx: UnboundedSender<Op>,
+        mirror_history: Arc<Mutex<Vec<MirrorSessionStreamItem>>>,
+        mirror_stream_tx: tokio::sync::broadcast::Sender<MirrorSessionStreamItem>,
+        mirror_seq: Arc<AtomicU64>,
+    ) -> Result<(), String> {
+        let websocket = accept_async(stream)
+            .await
+            .map_err(|err| format!("local mirror websocket handshake failed: {err}"))?;
+        let (mut writer, mut reader) = websocket.split();
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let mut attached = false;
+        let mut attached_high_water_seq: u64 = 0;
+        let mut composer_rev: u64 = 0;
+        let mut composer_text = String::new();
+        let mut stream_rx = mirror_stream_tx.subscribe();
+
+        let hello = MirrorServerMessage::Hello {
+            client_id: client_id.clone(),
+        };
+        let hello_payload =
+            serde_json::to_string(&hello).map_err(|err| format!("mirror hello encode failed: {err}"))?;
+        writer
+            .send(WebSocketMessage::Text(hello_payload.into()))
+            .await
+            .map_err(|err| format!("mirror hello send failed: {err}"))?;
+
+        loop {
+            tokio::select! {
+                incoming = reader.next() => {
+                    let incoming = match incoming {
+                        Some(Ok(incoming)) => incoming,
+                        Some(Err(err)) => return Err(format!("local mirror receive failed: {err}")),
+                        None => return Ok(()),
+                    };
+
+                    let text = match incoming {
+                        WebSocketMessage::Text(text) => text.to_string(),
+                        WebSocketMessage::Binary(_) => continue,
+                        WebSocketMessage::Ping(payload) => {
+                            writer
+                                .send(WebSocketMessage::Pong(payload))
+                                .await
+                                .map_err(|err| format!("local mirror pong send failed: {err}"))?;
+                            continue;
+                        }
+                        WebSocketMessage::Pong(_) => continue,
+                        WebSocketMessage::Close(_) => return Ok(()),
+                        WebSocketMessage::Frame(_) => continue,
+                    };
+
+                    let parsed = match serde_json::from_str::<MirrorClientMessage>(&text) {
+                        Ok(parsed) => parsed,
+                        Err(err) => {
+                            let message = MirrorServerMessage::Error {
+                                request_id: None,
+                                message: format!("invalid mirror JSON payload: {err}"),
+                            };
+                            let payload = serde_json::to_string(&message)
+                                .map_err(|encode_err| format!("local mirror error encode failed: {encode_err}"))?;
+                            writer
+                                .send(WebSocketMessage::Text(payload.into()))
+                                .await
+                                .map_err(|send_err| format!("local mirror error send failed: {send_err}"))?;
+                            continue;
+                        }
+                    };
+
+                    match parsed {
+                        MirrorClientMessage::AttachSession {
+                            request_id,
+                            session_id: requested_session,
+                            from_seq,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror attach error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror attach error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            let from_seq = from_seq.unwrap_or(0);
+                            let items = {
+                                let locked = mirror_history.lock();
+                                match locked {
+                                    Ok(locked) => locked
+                                        .iter()
+                                        .filter(|item| item.seq() > from_seq)
+                                        .cloned()
+                                        .collect::<Vec<MirrorSessionStreamItem>>(),
+                                    Err(_) => Vec::new(),
+                                }
+                            };
+                            let replay_high_water_seq = items
+                                .last()
+                                .map(MirrorSessionStreamItem::seq)
+                                .unwrap_or(from_seq);
+
+                            let attached_msg = MirrorServerMessage::SessionAttached {
+                                session_id,
+                                from_seq,
+                                has_more_before: false,
+                                items,
+                            };
+                            let payload = serde_json::to_string(&attached_msg)
+                                .map_err(|err| format!("local mirror attach payload encode failed: {err}"))?;
+                            writer
+                                .send(WebSocketMessage::Text(payload.into()))
+                                .await
+                                .map_err(|err| format!("local mirror attach send failed: {err}"))?;
+                            attached_high_water_seq = replay_high_water_seq;
+                            attached = true;
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror ack send failed: {err}"))?;
+                            }
+                        }
+                        MirrorClientMessage::ComposerUpdate {
+                            request_id,
+                            session_id: requested_session,
+                            text,
+                            cursor,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror composer error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror composer error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            composer_rev = composer_rev.saturating_add(1);
+                            composer_text = text;
+                            let bounded_cursor = cursor.min(composer_text.len());
+                            let composer_item = MirrorSessionStreamItem::Composer {
+                                session_id,
+                                seq: mirror_seq.fetch_add(1, Ordering::SeqCst),
+                                rev: composer_rev,
+                                text: composer_text.clone(),
+                                cursor: bounded_cursor,
+                                source_client_id: Some(client_id.clone()),
+                            };
+                            ChatWidget::push_mirror_stream_item(
+                                &mirror_history,
+                                &mirror_stream_tx,
+                                composer_item,
+                            );
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror composer ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror composer ack send failed: {err}"))?;
+                            }
+                        }
+                        MirrorClientMessage::SubmitTurn {
+                            request_id,
+                            session_id: requested_session,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror submit error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror submit error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            let trimmed = composer_text.trim().to_string();
+                            if !trimmed.is_empty() {
+                                submit_tx
+                                    .send(Op::UserInput {
+                                        items: vec![InputItem::Text { text: trimmed }],
+                                        final_output_json_schema: None,
+                                    })
+                                    .map_err(|err| format!("failed to submit mirrored user turn: {err}"))?;
+
+                                composer_rev = composer_rev.saturating_add(1);
+                                composer_text.clear();
+                                let clear_item = MirrorSessionStreamItem::Composer {
+                                    session_id,
+                                    seq: mirror_seq.fetch_add(1, Ordering::SeqCst),
+                                    rev: composer_rev,
+                                    text: String::new(),
+                                    cursor: 0,
+                                    source_client_id: Some(client_id.clone()),
+                                };
+                                ChatWidget::push_mirror_stream_item(
+                                    &mirror_history,
+                                    &mirror_stream_tx,
+                                    clear_item,
+                                );
+                            }
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror submit ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror submit ack send failed: {err}"))?;
+                            }
+                        }
+                        MirrorClientMessage::InterruptTurn {
+                            request_id,
+                            session_id: requested_session,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror interrupt error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror interrupt error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            submit_tx
+                                .send(Op::Interrupt)
+                                .map_err(|err| format!("failed to submit mirrored interrupt: {err}"))?;
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror interrupt ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror interrupt ack send failed: {err}"))?;
+                            }
+                        }
+                        MirrorClientMessage::ExecApproval {
+                            request_id,
+                            session_id: requested_session,
+                            call_id,
+                            turn_id,
+                            decision,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror exec approval error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror exec approval error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            submit_tx
+                                .send(Op::ExecApproval {
+                                    id: call_id,
+                                    turn_id,
+                                    decision: ChatWidget::core_review_decision(decision),
+                                })
+                                .map_err(|err| format!("failed to submit mirrored exec approval: {err}"))?;
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror exec approval ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror exec approval ack send failed: {err}"))?;
+                            }
+                        }
+                        MirrorClientMessage::PatchApproval {
+                            request_id,
+                            session_id: requested_session,
+                            call_id,
+                            decision,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror patch approval error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror patch approval error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            submit_tx
+                                .send(Op::PatchApproval {
+                                    id: call_id,
+                                    decision: ChatWidget::core_review_decision(decision),
+                                })
+                                .map_err(|err| format!("failed to submit mirrored patch approval: {err}"))?;
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror patch approval ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror patch approval ack send failed: {err}"))?;
+                            }
+                        }
+                        MirrorClientMessage::UserInputAnswer {
+                            request_id,
+                            session_id: requested_session,
+                            turn_id,
+                            answers,
+                        } => {
+                            if requested_session != session_id {
+                                let error = MirrorServerMessage::Error {
+                                    request_id,
+                                    message: format!(
+                                        "session {requested_session} is not owned by this runtime"
+                                    ),
+                                };
+                                let payload = serde_json::to_string(&error)
+                                    .map_err(|err| format!("local mirror user input answer error encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror user input answer error send failed: {err}"))?;
+                                continue;
+                            }
+
+                            let mapped_answers = answers
+                                .into_iter()
+                                .map(|(question_id, answer)| {
+                                    (
+                                        question_id,
+                                        code_protocol::request_user_input::RequestUserInputAnswer {
+                                            answers: answer.answers,
+                                        },
+                                    )
+                                })
+                                .collect();
+                            let response = code_protocol::request_user_input::RequestUserInputResponse {
+                                answers: mapped_answers,
+                            };
+
+                            submit_tx
+                                .send(Op::UserInputAnswer {
+                                    id: turn_id,
+                                    response,
+                                })
+                                .map_err(|err| format!("failed to submit mirrored user input answer: {err}"))?;
+
+                            if request_id.is_some() {
+                                let ack = MirrorServerMessage::Ack { request_id };
+                                let payload = serde_json::to_string(&ack)
+                                    .map_err(|err| format!("local mirror user input answer ack encode failed: {err}"))?;
+                                writer
+                                    .send(WebSocketMessage::Text(payload.into()))
+                                    .await
+                                    .map_err(|err| format!("local mirror user input answer ack send failed: {err}"))?;
+                            }
+                        }
+                    }
+                }
+                stream_item = stream_rx.recv(), if attached => {
+                    match stream_item {
+                        Ok(item) => {
+                            if item.seq() <= attached_high_water_seq {
+                                continue;
+                            }
+                            attached_high_water_seq = item.seq();
+                            let payload = serde_json::to_string(&MirrorServerMessage::SessionStream { item })
+                                .map_err(|err| format!("local mirror stream payload encode failed: {err}"))?;
+                            writer
+                                .send(WebSocketMessage::Text(payload.into()))
+                                .await
+                                .map_err(|err| format!("local mirror stream payload send failed: {err}"))?;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            let warning = MirrorServerMessage::Error {
+                                request_id: None,
+                                message: format!(
+                                    "mirror stream lagged and skipped {skipped} items; attach again for full replay"
+                                ),
+                            };
+                            let payload = serde_json::to_string(&warning)
+                                .map_err(|err| format!("local mirror lag warning encode failed: {err}"))?;
+                            writer
+                                .send(WebSocketMessage::Text(payload.into()))
+                                .await
+                                .map_err(|err| format!("local mirror lag warning send failed: {err}"))?;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    }
+                }
+            }
+        }
+    }
+
+    fn core_review_decision(decision: MirrorReviewDecision) -> code_core::protocol::ReviewDecision {
+        match decision {
+            MirrorReviewDecision::Approved => code_core::protocol::ReviewDecision::Approved,
+            MirrorReviewDecision::ApprovedForSession => {
+                code_core::protocol::ReviewDecision::ApprovedForSession
+            }
+            MirrorReviewDecision::Denied => code_core::protocol::ReviewDecision::Denied,
+            MirrorReviewDecision::Abort => code_core::protocol::ReviewDecision::Abort,
+        }
+    }
+
+    async fn run_session_in_use_mirror_runtime(
+        mut code_op_rx: UnboundedReceiver<Op>,
+        app_event_tx: AppEventSender,
+        ticket: BackgroundOrderTicket,
+        session_id: uuid::Uuid,
+        hinted_endpoint: Option<String>,
+    ) -> Result<(), String> {
+        let endpoint = hinted_endpoint.or_else(|| {
+            std::env::var("CODE_TUI_MIRROR_ENDPOINT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_MIRROR_ENDPOINT.to_string());
+
+        let (socket, _) = connect_async(&endpoint)
+            .await
+            .map_err(|err| format!("websocket connect failed: {err}"))?;
+
+        app_event_tx.send_background_event_with_ticket(
+            &ticket,
+            format!("✅ Mirror attached to {endpoint} for session {session_id}"),
+        );
+
+        let (mut writer, mut reader) = socket.split();
+        let attach = MirrorClientMessage::AttachSession {
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            session_id,
+            from_seq: Some(0),
+        };
+        let attach_payload = serde_json::to_string(&attach)
+            .map_err(|err| format!("serialize attach request failed: {err}"))?;
+        writer
+            .send(WebSocketMessage::Text(attach_payload.into()))
+            .await
+            .map_err(|err| format!("send attach request failed: {err}"))?;
+
+        loop {
+            tokio::select! {
+                maybe_op = code_op_rx.recv() => {
+                    let Some(op) = maybe_op else {
+                        break;
+                    };
+
+                    let outbound = match ChatWidget::mirror_client_messages_for_op(session_id, op) {
+                        Ok(messages) => messages,
+                        Err(message) => {
+                            app_event_tx.send_background_event_with_ticket(&ticket, message);
+                            continue;
+                        }
+                    };
+
+                    for message in outbound {
+                        let payload = serde_json::to_string(&message)
+                            .map_err(|err| format!("serialize mirror message failed: {err}"))?;
+                        writer
+                            .send(WebSocketMessage::Text(payload.into()))
+                            .await
+                            .map_err(|err| format!("send mirror message failed: {err}"))?;
+                    }
+                }
+                incoming = reader.next() => {
+                    let Some(incoming) = incoming else {
+                        return Err("mirror connection closed".to_string());
+                    };
+
+                    let incoming = incoming
+                        .map_err(|err| format!("mirror receive failed: {err}"))?;
+
+                    let text = match incoming {
+                        WebSocketMessage::Text(text) => text.to_string(),
+                        WebSocketMessage::Binary(_) => {
+                            app_event_tx.send_background_event_with_ticket(
+                                &ticket,
+                                "⚠️ Ignoring unexpected binary mirror payload".to_string(),
+                            );
+                            continue;
+                        }
+                        WebSocketMessage::Ping(payload) => {
+                            writer
+                                .send(WebSocketMessage::Pong(payload))
+                                .await
+                                .map_err(|err| format!("mirror pong send failed: {err}"))?;
+                            continue;
+                        }
+                        WebSocketMessage::Pong(_) => continue,
+                        WebSocketMessage::Close(frame) => {
+                            let reason = frame
+                                .map(|close| close.reason.to_string())
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or_else(|| "no close reason".to_string());
+                            return Err(format!("mirror closed connection ({reason})"));
+                        }
+                        WebSocketMessage::Frame(_) => continue,
+                    };
+
+                    let parsed = serde_json::from_str::<MirrorServerMessage>(&text)
+                        .map_err(|err| format!("failed to decode mirror payload: {err}"))?;
+
+                    match parsed {
+                        MirrorServerMessage::SessionAttached {
+                            session_id: attached_session_id,
+                            from_seq,
+                            has_more_before,
+                            items,
+                        } => {
+                            if attached_session_id != session_id {
+                                continue;
+                            }
+
+                            if has_more_before {
+                                app_event_tx.send_background_event_with_ticket(
+                                    &ticket,
+                                    format!(
+                                        "ℹ️ Mirror attach replay started from seq {from_seq}; older history remains available"
+                                    ),
+                                );
+                            }
+
+                            for item in items {
+                                ChatWidget::emit_mirror_stream_item(&app_event_tx, &ticket, item)?;
+                            }
+                        }
+                        MirrorServerMessage::SessionStream { item } => {
+                            ChatWidget::emit_mirror_stream_item(&app_event_tx, &ticket, item)?;
+                        }
+                        MirrorServerMessage::Error {
+                            request_id,
+                            message,
+                        } => {
+                            let prefix = request_id
+                                .map(|request_id| format!("request {request_id}: "))
+                                .unwrap_or_default();
+                            app_event_tx.send_background_event_with_ticket(
+                                &ticket,
+                                format!("⚠️ Mirror server error: {prefix}{message}"),
+                            );
+                        }
+                        MirrorServerMessage::SessionDetached { session_id: detached_id } => {
+                            if detached_id == session_id {
+                                return Err("mirror session detached by server".to_string());
+                            }
+                        }
+                        MirrorServerMessage::Hello { client_id } => {
+                            app_event_tx.send_background_event_with_ticket(
+                                &ticket,
+                                format!("ℹ️ Mirror websocket connected as {client_id}"),
+                            );
+                        }
+                        MirrorServerMessage::Ack { request_id } => {
+                            let _ = request_id;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_mirror_stream_item(
+        app_event_tx: &AppEventSender,
+        ticket: &BackgroundOrderTicket,
+        item: MirrorSessionStreamItem,
+    ) -> Result<(), String> {
+        match item {
+            MirrorSessionStreamItem::CoreEvent {
+                session_id,
+                seq,
+                event,
+            } => {
+                let _ = (session_id, seq);
+                let msg: EventMsg = serde_json::from_value(event.payload).map_err(|err| {
+                    format!("failed to decode mirrored core event payload {}: {err}", event.kind)
+                })?;
+                let order = event.order.map(|order| code_core::protocol::OrderMeta {
+                    request_ordinal: order.request_ordinal,
+                    output_index: order.output_index,
+                    sequence_number: order.sequence_number,
+                });
+                app_event_tx.send(AppEvent::CodexEvent(Event {
+                    id: event.id,
+                    event_seq: event.event_seq,
+                    msg,
+                    order,
+                }));
+            }
+            MirrorSessionStreamItem::System {
+                session_id,
+                seq,
+                level,
+                message,
+            } => {
+                let _ = (session_id, seq);
+                app_event_tx.send_background_event_with_ticket(
+                    ticket,
+                    format!("[{level}] {message}"),
+                );
+            }
+            MirrorSessionStreamItem::Composer {
+                session_id,
+                seq,
+                rev,
+                text,
+                cursor,
+                source_client_id,
+            } => {
+                let _ = (session_id, seq, rev, text, cursor, source_client_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn mirror_client_messages_for_op(
+        session_id: uuid::Uuid,
+        op: Op,
+    ) -> Result<Vec<MirrorClientMessage>, String> {
+        match op {
+            Op::UserInput { items, .. } => {
+                let text = ChatWidget::mirror_text_from_input_items(&items);
+                if text.is_empty() {
+                    return Err(
+                        "⚠️ Mirror mode only supports text user messages for submit forwarding"
+                            .to_string(),
+                    );
+                }
+
+                Ok(vec![
+                    MirrorClientMessage::ComposerUpdate {
+                        request_id: Some(uuid::Uuid::new_v4().to_string()),
+                        session_id,
+                        cursor: text.len(),
+                        text,
+                    },
+                    MirrorClientMessage::SubmitTurn {
+                        request_id: Some(uuid::Uuid::new_v4().to_string()),
+                        session_id,
+                    },
+                ])
+            }
+            Op::Interrupt => Ok(vec![MirrorClientMessage::InterruptTurn {
+                request_id: Some(uuid::Uuid::new_v4().to_string()),
+                session_id,
+            }]),
+            Op::ExecApproval {
+                id,
+                turn_id,
+                decision,
+            } => Ok(vec![MirrorClientMessage::ExecApproval {
+                request_id: Some(uuid::Uuid::new_v4().to_string()),
+                session_id,
+                call_id: id,
+                turn_id,
+                decision: ChatWidget::mirror_review_decision(decision),
+            }]),
+            Op::PatchApproval { id, decision } => Ok(vec![MirrorClientMessage::PatchApproval {
+                request_id: Some(uuid::Uuid::new_v4().to_string()),
+                session_id,
+                call_id: id,
+                decision: ChatWidget::mirror_review_decision(decision),
+            }]),
+            Op::UserInputAnswer { id, response } => {
+                let answers = response
+                    .answers
+                    .into_iter()
+                    .map(|(question_id, answer)| {
+                        (
+                            question_id,
+                            MirrorRequestUserInputAnswer {
+                                answers: answer.answers,
+                            },
+                        )
+                    })
+                    .collect();
+                Ok(vec![MirrorClientMessage::UserInputAnswer {
+                    request_id: Some(uuid::Uuid::new_v4().to_string()),
+                    session_id,
+                    turn_id: id,
+                    answers,
+                }])
+            }
+            Op::QueueUserInput { .. } => Err(
+                "⚠️ Mirror mode does not support queued user input yet; submit normally once the owner runtime is active"
+                    .to_string(),
+            ),
+            _ => Err(
+                "⚠️ Mirror mode cannot forward this operation yet. Use the owner runtime for full tool/control support."
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn mirror_text_from_input_items(items: &[InputItem]) -> String {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::Text { text } => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                _ => None,
+            })
+            .collect::<Vec<String>>()
+            .join("\n\n")
+    }
+
+    fn mirror_review_decision(
+        decision: code_core::protocol::ReviewDecision,
+    ) -> MirrorReviewDecision {
+        match decision {
+            code_core::protocol::ReviewDecision::Approved => MirrorReviewDecision::Approved,
+            code_core::protocol::ReviewDecision::ApprovedForSession => {
+                MirrorReviewDecision::ApprovedForSession
+            }
+            code_core::protocol::ReviewDecision::Denied => MirrorReviewDecision::Denied,
+            code_core::protocol::ReviewDecision::Abort => MirrorReviewDecision::Abort,
+        }
     }
 
     fn consume_pending_prompt_for_ui_only_turn(&mut self) {
@@ -29965,6 +31106,7 @@ impl Drop for AutoReviewStubGuard {
         AUTO_RESOLVE_MAX_REVIEW_ATTEMPTS,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use futures::{SinkExt, StreamExt};
     use code_core::config_types::AutoResolveAttemptLimit;
     use code_core::history::state::{
         AssistantStreamDelta,
@@ -30018,6 +31160,358 @@ use code_core::protocol::OrderMeta;
         assert!(!has_findings);
         assert_eq!(findings, 0);
         assert_eq!(summary.as_deref(), Some("looks clean"));
+    }
+
+    #[test]
+    fn mirror_endpoint_from_details_parses_ws_endpoint() {
+        let details = "(pid 1234, session abc, endpoint ws://127.0.0.1:51234/ws)";
+        let parsed = ChatWidget::mirror_endpoint_from_details(Some(details));
+        assert_eq!(parsed.as_deref(), Some("ws://127.0.0.1:51234/ws"));
+    }
+
+    #[test]
+    fn mirror_endpoint_from_details_rejects_non_ws_endpoint() {
+        let details = "(pid 1234, endpoint http://127.0.0.1:51234/ws)";
+        let parsed = ChatWidget::mirror_endpoint_from_details(Some(details));
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn mirror_stream_item_from_event_serializes_core_event_payload() {
+        let session_id = uuid::Uuid::new_v4();
+        let event = Event {
+            id: "event-1".to_string(),
+            event_seq: 42,
+            msg: EventMsg::TaskStarted,
+            order: Some(OrderMeta {
+                request_ordinal: 7,
+                output_index: Some(3),
+                sequence_number: Some(9),
+            }),
+        };
+
+        let item = ChatWidget::mirror_stream_item_from_event(session_id, 11, event)
+            .expect("mirror stream item");
+        match item {
+            MirrorSessionStreamItem::CoreEvent {
+                session_id: item_session,
+                seq,
+                event,
+            } => {
+                assert_eq!(item_session, session_id);
+                assert_eq!(seq, 11);
+                assert_eq!(event.id, "event-1");
+                assert_eq!(event.event_seq, 42);
+                assert_eq!(event.kind, "task_started");
+                let order = event.order.expect("order present");
+                assert_eq!(order.request_ordinal, 7);
+                assert_eq!(order.output_index, Some(3));
+                assert_eq!(order.sequence_number, Some(9));
+            }
+            other => panic!("unexpected mirror item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_owner_mirror_server_forwards_submit_turn() {
+        let _rt = enter_test_runtime_guard();
+        tokio::runtime::Handle::current().block_on(async {
+            let session_id = uuid::Uuid::new_v4();
+            let (submit_tx, mut submit_rx) = unbounded_channel::<Op>();
+            let mirror_history = Arc::new(Mutex::new(Vec::<MirrorSessionStreamItem>::new()));
+            let (mirror_stream_tx, _) = tokio::sync::broadcast::channel::<MirrorSessionStreamItem>(64);
+            let mirror_seq = Arc::new(AtomicU64::new(1));
+
+            let endpoint = ChatWidget::spawn_local_owner_mirror_server(
+                session_id,
+                submit_tx,
+                mirror_history,
+                mirror_stream_tx,
+                mirror_seq,
+            )
+            .await
+            .expect("start local mirror owner");
+
+            let (socket, _) = connect_async(&endpoint)
+                .await
+                .expect("connect local mirror");
+            let (mut writer, mut reader) = socket.split();
+
+            let hello_frame = reader
+                .next()
+                .await
+                .expect("hello frame")
+                .expect("hello payload");
+            match hello_frame {
+                WebSocketMessage::Text(text) => {
+                    let parsed: MirrorServerMessage =
+                        serde_json::from_str(&text).expect("parse hello payload");
+                    assert!(matches!(parsed, MirrorServerMessage::Hello { .. }));
+                }
+                other => panic!("expected hello text frame, got {other:?}"),
+            }
+
+            let attach = MirrorClientMessage::AttachSession {
+                request_id: Some("attach".to_string()),
+                session_id,
+                from_seq: Some(0),
+            };
+            writer
+                .send(WebSocketMessage::Text(
+                    serde_json::to_string(&attach)
+                        .expect("encode attach")
+                        .into(),
+                ))
+                .await
+                .expect("send attach");
+
+            let mut saw_attached = false;
+            let mut saw_attach_ack = false;
+            while !saw_attached || !saw_attach_ack {
+                let frame = reader
+                    .next()
+                    .await
+                    .expect("attach response frame")
+                    .expect("attach response payload");
+                let text = match frame {
+                    WebSocketMessage::Text(text) => text,
+                    other => panic!("expected attach response text frame, got {other:?}"),
+                };
+                let parsed: MirrorServerMessage =
+                    serde_json::from_str(&text).expect("parse attach response");
+                match parsed {
+                    MirrorServerMessage::SessionAttached { session_id: attached_id, .. } => {
+                        assert_eq!(attached_id, session_id);
+                        saw_attached = true;
+                    }
+                    MirrorServerMessage::Ack { request_id } => {
+                        if request_id.as_deref() == Some("attach") {
+                            saw_attach_ack = true;
+                        }
+                    }
+                    other => panic!("unexpected attach response: {other:?}"),
+                }
+            }
+
+            let composer = MirrorClientMessage::ComposerUpdate {
+                request_id: Some("composer".to_string()),
+                session_id,
+                text: "ping from mirror".to_string(),
+                cursor: "ping from mirror".len(),
+            };
+            writer
+                .send(WebSocketMessage::Text(
+                    serde_json::to_string(&composer)
+                        .expect("encode composer")
+                        .into(),
+                ))
+                .await
+                .expect("send composer update");
+
+            loop {
+                let frame = reader
+                    .next()
+                    .await
+                    .expect("composer response frame")
+                    .expect("composer response payload");
+                let text = match frame {
+                    WebSocketMessage::Text(text) => text,
+                    other => panic!("expected composer response text frame, got {other:?}"),
+                };
+                let parsed: MirrorServerMessage =
+                    serde_json::from_str(&text).expect("parse composer response");
+                if matches!(parsed, MirrorServerMessage::Ack { request_id: Some(id) } if id == "composer") {
+                    break;
+                }
+            }
+
+            let submit = MirrorClientMessage::SubmitTurn {
+                request_id: Some("submit".to_string()),
+                session_id,
+            };
+            writer
+                .send(WebSocketMessage::Text(
+                    serde_json::to_string(&submit)
+                        .expect("encode submit")
+                        .into(),
+                ))
+                .await
+                .expect("send submit turn");
+
+            loop {
+                let frame = reader
+                    .next()
+                    .await
+                    .expect("submit response frame")
+                    .expect("submit response payload");
+                let text = match frame {
+                    WebSocketMessage::Text(text) => text,
+                    other => panic!("expected submit response text frame, got {other:?}"),
+                };
+                let parsed: MirrorServerMessage =
+                    serde_json::from_str(&text).expect("parse submit response");
+                if matches!(parsed, MirrorServerMessage::Ack { request_id: Some(id) } if id == "submit") {
+                    break;
+                }
+            }
+
+            let op = tokio::time::timeout(tokio::time::Duration::from_secs(2), submit_rx.recv())
+                .await
+                .expect("submitted op timeout")
+                .expect("submitted op");
+            match op {
+                Op::UserInput {
+                    items,
+                    final_output_json_schema,
+                } => {
+                    assert!(final_output_json_schema.is_none());
+                    assert_eq!(
+                        items,
+                        vec![InputItem::Text {
+                            text: "ping from mirror".to_string(),
+                        }]
+                    );
+                }
+                other => panic!("unexpected mirrored op: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn local_owner_mirror_server_skips_replayed_seq_on_live_stream() {
+        let _rt = enter_test_runtime_guard();
+        tokio::runtime::Handle::current().block_on(async {
+            let session_id = uuid::Uuid::new_v4();
+            let (submit_tx, _submit_rx) = unbounded_channel::<Op>();
+            let replay_items = vec![
+                MirrorSessionStreamItem::System {
+                    session_id,
+                    seq: 1,
+                    level: "info".to_string(),
+                    message: "replay-1".to_string(),
+                },
+                MirrorSessionStreamItem::System {
+                    session_id,
+                    seq: 2,
+                    level: "info".to_string(),
+                    message: "replay-2".to_string(),
+                },
+            ];
+            let mirror_history = Arc::new(Mutex::new(replay_items));
+            let (mirror_stream_tx, _) = tokio::sync::broadcast::channel::<MirrorSessionStreamItem>(64);
+            let mirror_seq = Arc::new(AtomicU64::new(3));
+
+            let endpoint = ChatWidget::spawn_local_owner_mirror_server(
+                session_id,
+                submit_tx,
+                mirror_history,
+                mirror_stream_tx.clone(),
+                mirror_seq,
+            )
+            .await
+            .expect("start local mirror owner");
+
+            let (socket, _) = connect_async(&endpoint)
+                .await
+                .expect("connect local mirror");
+            let (mut writer, mut reader) = socket.split();
+
+            let _hello = reader
+                .next()
+                .await
+                .expect("hello frame")
+                .expect("hello payload");
+
+            let attach = MirrorClientMessage::AttachSession {
+                request_id: Some("attach".to_string()),
+                session_id,
+                from_seq: Some(0),
+            };
+            writer
+                .send(WebSocketMessage::Text(
+                    serde_json::to_string(&attach)
+                        .expect("encode attach")
+                        .into(),
+                ))
+                .await
+                .expect("send attach");
+
+            let mut replay_seq_values: Vec<u64> = Vec::new();
+            let mut saw_attach_ack = false;
+            while !saw_attach_ack {
+                let frame = reader
+                    .next()
+                    .await
+                    .expect("attach response frame")
+                    .expect("attach response payload");
+                let text = match frame {
+                    WebSocketMessage::Text(text) => text,
+                    other => panic!("expected attach response text frame, got {other:?}"),
+                };
+                let parsed: MirrorServerMessage =
+                    serde_json::from_str(&text).expect("parse attach response");
+                match parsed {
+                    MirrorServerMessage::SessionAttached { items, .. } => {
+                        replay_seq_values = items.iter().map(MirrorSessionStreamItem::seq).collect();
+                    }
+                    MirrorServerMessage::Ack { request_id } => {
+                        if request_id.as_deref() == Some("attach") {
+                            saw_attach_ack = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(replay_seq_values, vec![1, 2]);
+
+            let duplicate_item = MirrorSessionStreamItem::System {
+                session_id,
+                seq: 2,
+                level: "info".to_string(),
+                message: "duplicate-live-seq-2".to_string(),
+            };
+            let live_item = MirrorSessionStreamItem::System {
+                session_id,
+                seq: 3,
+                level: "info".to_string(),
+                message: "live-seq-3".to_string(),
+            };
+            let _ = mirror_stream_tx.send(duplicate_item);
+            let _ = mirror_stream_tx.send(live_item.clone());
+
+            let mut saw_live_seq_3 = false;
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+            while tokio::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let maybe_frame = tokio::time::timeout(remaining, reader.next()).await;
+                let Ok(Some(Ok(frame))) = maybe_frame else {
+                    break;
+                };
+                let text = match frame {
+                    WebSocketMessage::Text(text) => text,
+                    _ => continue,
+                };
+                let parsed: MirrorServerMessage =
+                    serde_json::from_str(&text).expect("parse live stream message");
+                if let MirrorServerMessage::SessionStream { item } = parsed {
+                    match item {
+                        MirrorSessionStreamItem::System { seq, message, .. } => {
+                            assert_ne!(
+                                seq, 2,
+                                "duplicate sequence from replay should not be streamed live"
+                            );
+                            if seq == 3 && message == "live-seq-3" {
+                                saw_live_seq_3 = true;
+                                break;
+                            }
+                        }
+                        other => panic!("unexpected live stream item: {other:?}"),
+                    }
+                }
+            }
+
+            assert!(saw_live_seq_3, "expected live seq=3 stream item");
+        });
     }
 
     #[test]
