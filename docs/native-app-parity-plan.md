@@ -414,25 +414,8 @@ Every milestone PR (or milestone batch) must pass all gates:
 4. **Runtime gates**
    - manual reconnect + history stress scenario sanity pass
 
-## Implementation Start Checklist
+## Active Work
 
-Start execution without additional decisions when all are true:
+Only remaining roadmap work in this document:
 
-- [ ] Phase 0 acceptance criteria passed
-- [ ] Matrix priorities confirmed in docs
-- [ ] Benchmark baselines captured
-- [ ] Auto Drive milestone brief selected (`M1` or `M2`)
-
-Current status:
-
-- [x] Phase 0 acceptance criteria passed
-- [x] Matrix priorities confirmed in docs
-- [x] Benchmark baselines captured
-- [x] Auto Drive milestones executed (`M1`, `M2`, `M3`)
-
-Current Milestone 4 status:
-
-- [x] Milestone 4 execution started
-- [x] `M4-A` runtime host hardening complete
-- [x] `M4-B` TUI coexistence and compatibility complete
-- [ ] `M4-C` pairing/auth gateway in progress (token-gated ws + LAN bootstrap)
+- `M4-C` pairing/auth gateway in progress (token-gated ws + LAN bootstrap).

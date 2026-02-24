@@ -5,9 +5,9 @@ repository. Read `AGENTS.md` first, then apply this file as an override.
 
 ## Source Of Truth
 
-- The active native app roadmap lives in `PLAN.md`.
-- Keep implementation aligned with `PLAN.md` phases and acceptance criteria.
-- If scope changes, update `PLAN.md` in the same workstream.
+- The active native app roadmap lives in `docs/native-app-parity-plan.md`.
+- Keep implementation aligned with its active milestone and acceptance criteria.
+- If scope changes, update `docs/native-app-parity-plan.md` in the same workstream.
 
 ## Branching And Git Flow
 
@@ -20,7 +20,7 @@ repository. Read `AGENTS.md` first, then apply this file as an override.
 
 - Treat `origin` as the primary collaboration remote for day-to-day work.
 - Use `upstream` for periodic sync/reference only.
-- Keep fork-specific behavior documented here or in `PLAN.md`.
+- Keep fork-specific behavior documented here or in `docs/native-app-parity-plan.md`.
 - Do not put fork policy in temporary notes.
 
 ## Validation Policy
@@ -49,10 +49,10 @@ repository. Read `AGENTS.md` first, then apply this file as an override.
 - Release through GitHub-based distribution for this line of work.
 - Do not publish this fork's native effort to npm by default.
 - If release automation is added, keep it scoped to GitHub releases.
-- Document release automation changes in this file or `PLAN.md`.
+- Document release automation changes in this file or `docs/native-app-parity-plan.md`.
 
 ## Documentation Hygiene
 
 - Keep this file durable and policy-oriented.
-- Put tactical execution details in `PLAN.md`.
+- Put tactical execution details in `docs/native-app-parity-plan.md`.
 - Do not leave temporary scratch instructions in repo docs.
