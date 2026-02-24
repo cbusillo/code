@@ -29,6 +29,22 @@ The target now bundles a managed backend binary into
 loopback port. If you need an explicit binary, set
 `CODE_NATIVE_BACKEND_BINARY` in the scheme environment.
 
+## Local launcher helper
+
+Use `scripts/run-ecc-local.sh` from repo root to build + launch with a stable
+DerivedData path:
+
+```bash
+scripts/run-ecc-local.sh
+```
+
+By default the script launches with `open` and returns immediately. Use
+`--foreground` when you want the app attached to the terminal process:
+
+```bash
+scripts/run-ecc-local.sh --foreground
+```
+
 ## Optional CLI shims
 
 Install `ecc` (and optionally `code`) wrappers that execute the bundled backend:

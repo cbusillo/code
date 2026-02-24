@@ -10,13 +10,14 @@ DerivedData path so you can verify you're on the latest build.
 
 Options:
   --no-build   Skip build steps and launch existing app bundle.
-  --open       Launch with `open` (returns immediately) instead of foreground.
+  --open       Launch with `open` (default behavior).
+  --foreground Launch app binary in foreground (replaces shell process).
   -h, --help   Show this help message.
 EOF
 }
 
 build=true
-launch_with_open=false
+launch_with_open=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +26,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --open)
       launch_with_open=true
+      ;;
+    --foreground)
+      launch_with_open=false
       ;;
     -h|--help)
       usage

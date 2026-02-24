@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		11906B942A66E7D338A3C368 /* MacAppUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE3CCFCAA46F414E3DB77D51 /* MacAppUpdateChecker.swift */; };
 		3AFA80F6B988C10A3804F92E /* VoiceInteractionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90272EDD4249923ACA647334 /* VoiceInteractionPolicy.swift */; };
 		413236565524A9DDE50D9316 /* DiffRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8691848117699A57ADA132D8 /* DiffRecovery.swift */; };
 		61055957ED949BB0659F2FA0 /* IDEIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE666656EC3A4A4C89D9259 /* IDEIntegration.swift */; };
@@ -41,6 +42,7 @@
 		AE7ACF38D5765A9EE050AA96 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C47885B7901DB3D7B5514098 /* SessionRailLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRailLayout.swift; sourceTree = "<group>"; };
 		E1613FD7351B898CBBF2611E /* SessionMirrorStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMirrorStore.swift; sourceTree = "<group>"; };
+		EE3CCFCAA46F414E3DB77D51 /* MacAppUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAppUpdateChecker.swift; sourceTree = "<group>"; };
 		F34EA9E662521D6CE92A444E /* SessionProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionProtocol.swift; sourceTree = "<group>"; };
 		F79B5F5DDD90A57C9A51E9ED /* VoiceOutputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceOutputController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -80,6 +82,7 @@
 				AE7ACF38D5765A9EE050AA96 /* ContentView.swift */,
 				8691848117699A57ADA132D8 /* DiffRecovery.swift */,
 				AAE666656EC3A4A4C89D9259 /* IDEIntegration.swift */,
+				EE3CCFCAA46F414E3DB77D51 /* MacAppUpdateChecker.swift */,
 				E1613FD7351B898CBBF2611E /* SessionMirrorStore.swift */,
 				F34EA9E662521D6CE92A444E /* SessionProtocol.swift */,
 				C47885B7901DB3D7B5514098 /* SessionRailLayout.swift */,
@@ -188,6 +191,7 @@
 				FC16B3CC8807972856381BC6 /* ContentView.swift in Sources */,
 				413236565524A9DDE50D9316 /* DiffRecovery.swift in Sources */,
 				61055957ED949BB0659F2FA0 /* IDEIntegration.swift in Sources */,
+				11906B942A66E7D338A3C368 /* MacAppUpdateChecker.swift in Sources */,
 				7300652074E069487ACA5E84 /* SessionMirrorStore.swift in Sources */,
 				DB036B775AE7265D18705A18 /* SessionProtocol.swift in Sources */,
 				CA17AFE9552D51C9F42AE5A3 /* SessionRailLayout.swift in Sources */,

@@ -1232,6 +1232,10 @@ struct CodeNativeApp: App {
     @StateObject private var store: SessionMirrorStore
     @StateObject private var runtimeSupervisor: LocalBackendRuntimeSupervisor
     private let benchmarkFixturePath: String?
+    #if os(macOS)
+    @State private var isCheckingForUpdates = false
+    @State private var updateAlert: MacAppUpdateAlert?
+    #endif
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -1308,6 +1312,9 @@ struct CodeNativeApp: App {
 
                     runtimeSupervisor.startIfNeeded()
                     syncStoreFromRuntimeSupervisor()
+                    #if os(macOS)
+                    performAutomaticUpdateCheckIfNeeded()
+                    #endif
                 }
                 .onReceive(runtimeSupervisor.$endpoint) { _ in
                     syncStoreFromRuntimeSupervisor()
@@ -1324,7 +1331,40 @@ struct CodeNativeApp: App {
                 .onOpenURL { url in
                     _ = store.importCompanionPairingCode(url.absoluteString)
                 }
+                #if os(macOS)
+                .alert(item: $updateAlert) { alert in
+                    switch alert {
+                    case .available(let candidate):
+                        let message = "Every Code Companion \(candidate.version) is available. "
+                            + "You are currently running \(MacAppUpdateChecker.currentVersion())."
+                        return Alert(
+                            title: Text("Update Available"),
+                            message: Text(message),
+                            primaryButton: .default(Text("Download")) {
+                                MacAppUpdateChecker.openDownload(for: candidate)
+                            },
+                            secondaryButton: .cancel(Text("Later"))
+                        )
+                    case .info(let title, let message):
+                        return Alert(
+                            title: Text(title),
+                            message: Text(message),
+                            dismissButton: .default(Text("OK"))
+                        )
+                    }
+                }
+                #endif
         }
+        #if os(macOS)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates...") {
+                    performUpdateCheck(userInitiated: true)
+                }
+                .disabled(isCheckingForUpdates)
+            }
+        }
+        #endif
     }
 
     private func syncStoreFromRuntimeSupervisor() {
@@ -1339,6 +1379,64 @@ struct CodeNativeApp: App {
             store.companionLANEndpoint = runtimeSupervisor.lanEndpoint
         }
     }
+
+    #if os(macOS)
+    private func performAutomaticUpdateCheckIfNeeded() {
+        guard MacAppUpdateChecker.shouldPerformAutomaticCheck() else {
+            return
+        }
+
+        performUpdateCheck(userInitiated: false)
+    }
+
+    private func performUpdateCheck(userInitiated: Bool) {
+        guard !isCheckingForUpdates else {
+            return
+        }
+        isCheckingForUpdates = true
+
+        Task {
+            do {
+                let outcome = try await MacAppUpdateChecker.checkForUpdate()
+                await MainActor.run {
+                    MacAppUpdateChecker.markCheckAttempt()
+                    switch outcome {
+                    case .available(let candidate):
+                        updateAlert = .available(candidate)
+                    case .upToDate:
+                        if userInitiated {
+                            updateAlert = .info(
+                                title: "You're Up to Date",
+                                message: "Every Code Companion \(MacAppUpdateChecker.currentVersion()) is the latest available version."
+                            )
+                        }
+                    case .managedByStore:
+                        if userInitiated {
+                            updateAlert = .info(
+                                title: "Managed by Apple",
+                                message: "This build is updated through TestFlight or the App Store."
+                            )
+                        }
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    MacAppUpdateChecker.markCheckAttempt()
+                    if userInitiated {
+                        updateAlert = .info(
+                            title: "Update Check Failed",
+                            message: error.localizedDescription
+                        )
+                    }
+                }
+            }
+
+            await MainActor.run {
+                isCheckingForUpdates = false
+            }
+        }
+    }
+    #endif
 
     private static func resolveBenchmarkFixturePath(
         arguments: [String],
