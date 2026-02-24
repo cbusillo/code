@@ -95,12 +95,14 @@ struct WsAuthQuery {
 }
 
 pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions) -> IoResult<()> {
-    let session_tokens = options
+    let normalized_tokens = options
         .session_tokens
         .iter()
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
-        .collect::<HashSet<_>>();
+        .collect::<Vec<_>>();
+    let preferred_session_token = normalized_tokens.first().cloned();
+    let session_tokens = normalized_tokens.iter().cloned().collect::<HashSet<_>>();
 
     if !host_is_loopback(&options.host) && session_tokens.is_empty() {
         return Err(std::io::Error::new(
@@ -112,13 +114,25 @@ pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions)
         ));
     }
 
+    let address = format!("{}:{}", options.host, options.port);
+    let listener = TcpListener::bind(&address).await?;
+    let listener_addr = listener.local_addr()?;
+    let owner_mirror_endpoint = owner_mirror_endpoint_for_listener(
+        listener_addr,
+        preferred_session_token.as_deref(),
+    );
+
     let auth_manager = AuthManager::shared_with_mode_and_originator(
         base_config.code_home.clone(),
         AuthMode::ApiKey,
         base_config.responses_originator_header.clone(),
     );
     let conversation_manager = Arc::new(ConversationManager::new(auth_manager, SessionSource::Mcp));
-    let hub = Arc::new(SessionHub::new(base_config, conversation_manager));
+    let hub = Arc::new(SessionHub::new(
+        base_config,
+        conversation_manager,
+        owner_mirror_endpoint,
+    ));
     let state = AppState {
         hub,
         session_tokens: Arc::new(session_tokens),
@@ -129,9 +143,6 @@ pub async fn run_web_server(base_config: Arc<Config>, options: WebServerOptions)
         .route("/api/sessions", get(list_sessions))
         .route("/ws", get(ws_handler))
         .with_state(state);
-
-    let address = format!("{}:{}", options.host, options.port);
-    let listener = TcpListener::bind(&address).await?;
 
     let web_url = format!("http://{address}");
     info!("Native mirror server listening on {web_url}");
@@ -564,6 +575,22 @@ fn default_owner_mirror_endpoint() -> String {
         .unwrap_or_else(|| DEFAULT_OWNER_MIRROR_ENDPOINT.to_string())
 }
 
+fn owner_mirror_endpoint_for_listener(
+    listener_addr: std::net::SocketAddr,
+    preferred_session_token: Option<&str>,
+) -> String {
+    let host = if listener_addr.ip().is_unspecified() {
+        "127.0.0.1".to_string()
+    } else {
+        listener_addr.ip().to_string()
+    };
+    let base = format!("ws://{host}:{}/ws", listener_addr.port());
+    let Some(token) = preferred_session_token.map(str::trim).filter(|token| !token.is_empty()) else {
+        return base;
+    };
+    format!("{base}?token={token}")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
@@ -783,14 +810,20 @@ struct WebModelPreset {
 struct SessionHub {
     base_config: Arc<Config>,
     conversation_manager: Arc<ConversationManager>,
+    owner_mirror_endpoint: String,
     sessions: RwLock<HashMap<Uuid, Arc<LiveSession>>>,
 }
 
 impl SessionHub {
-    fn new(base_config: Arc<Config>, conversation_manager: Arc<ConversationManager>) -> Self {
+    fn new(
+        base_config: Arc<Config>,
+        conversation_manager: Arc<ConversationManager>,
+        owner_mirror_endpoint: String,
+    ) -> Self {
         Self {
             base_config,
             conversation_manager,
+            owner_mirror_endpoint,
             sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -874,6 +907,9 @@ impl SessionHub {
             .new_conversation(config)
             .await
             .map_err(|err| format!("Failed to create conversation: {err}"))?;
+        new_conversation
+            .conversation
+            .set_owner_endpoint(Some(&self.owner_mirror_endpoint));
 
         let session = LiveSession::new_local(
             new_conversation,
@@ -1036,6 +1072,9 @@ impl SessionHub {
 
         match resumed {
             Ok(new_conversation) => {
+                new_conversation
+                    .conversation
+                    .set_owner_endpoint(Some(&self.owner_mirror_endpoint));
                 let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
 
                 let session = LiveSession::new_local(
@@ -2825,6 +2864,24 @@ mod tests {
         let details = "(pid 9999, endpoint http://127.0.0.1:45555/ws)";
         let parsed = owner_mirror_endpoint_from_session_details(Some(details));
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn owner_mirror_endpoint_for_listener_uses_loopback_for_unspecified_host() {
+        let listener_addr = "0.0.0.0:4317"
+            .parse::<std::net::SocketAddr>()
+            .expect("listener addr");
+        let endpoint = owner_mirror_endpoint_for_listener(listener_addr, None);
+        assert_eq!(endpoint, "ws://127.0.0.1:4317/ws");
+    }
+
+    #[test]
+    fn owner_mirror_endpoint_for_listener_includes_session_token() {
+        let listener_addr = "127.0.0.1:64438"
+            .parse::<std::net::SocketAddr>()
+            .expect("listener addr");
+        let endpoint = owner_mirror_endpoint_for_listener(listener_addr, Some("token-123"));
+        assert_eq!(endpoint, "ws://127.0.0.1:64438/ws?token=token-123");
     }
 
     #[test]

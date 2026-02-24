@@ -1066,6 +1066,12 @@ struct CachedConnection {
 
 const DEFAULT_MIRROR_ENDPOINT: &str = "ws://127.0.0.1:4317/ws";
 
+#[derive(Debug, Clone, Deserialize)]
+struct MirrorMessageEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MirrorServerMessage {
@@ -3509,6 +3515,27 @@ impl ChatWidget<'_> {
         }
     }
 
+    fn parse_mirror_server_message(text: &str) -> Result<Option<MirrorServerMessage>, String> {
+        let envelope: MirrorMessageEnvelope =
+            serde_json::from_str(text).map_err(|err| format!("failed to decode mirror payload: {err}"))?;
+        let is_known_kind = matches!(
+            envelope.kind.as_str(),
+            "hello"
+                | "session_attached"
+                | "session_stream"
+                | "session_detached"
+                | "ack"
+                | "error"
+        );
+        if !is_known_kind {
+            return Ok(None);
+        }
+
+        serde_json::from_str::<MirrorServerMessage>(text)
+            .map(Some)
+            .map_err(|err| format!("failed to decode mirror payload: {err}"))
+    }
+
     fn mirror_stream_item_from_event(
         session_id: uuid::Uuid,
         seq: u64,
@@ -4154,8 +4181,10 @@ impl ChatWidget<'_> {
                         WebSocketMessage::Frame(_) => continue,
                     };
 
-                    let parsed = serde_json::from_str::<MirrorServerMessage>(&text)
-                        .map_err(|err| format!("failed to decode mirror payload: {err}"))?;
+                    let Some(parsed) = ChatWidget::parse_mirror_server_message(&text)? else {
+                        tracing::debug!("ignoring non-mirror websocket payload while attaching to session {session_id}");
+                        continue;
+                    };
 
                     match parsed {
                         MirrorServerMessage::SessionAttached {
@@ -31174,6 +31203,27 @@ use code_core::protocol::OrderMeta;
         let details = "(pid 1234, endpoint http://127.0.0.1:51234/ws)";
         let parsed = ChatWidget::mirror_endpoint_from_details(Some(details));
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn mirror_server_message_parser_ignores_non_mirror_payloads() {
+        let payload = r#"{"type":"session_list","sessions":[]}"#;
+        let parsed = ChatWidget::parse_mirror_server_message(payload)
+            .expect("non-mirror payload should not hard-fail");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn mirror_server_message_parser_accepts_known_payloads() {
+        let payload = r#"{"type":"hello","client_id":"mirror-client"}"#;
+        let parsed = ChatWidget::parse_mirror_server_message(payload)
+            .expect("known mirror payload should parse");
+        match parsed {
+            Some(MirrorServerMessage::Hello { client_id }) => {
+                assert_eq!(client_id, "mirror-client");
+            }
+            other => panic!("unexpected parsed mirror payload: {other:?}"),
+        }
     }
 
     #[test]
