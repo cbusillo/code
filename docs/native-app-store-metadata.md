@@ -101,6 +101,19 @@ Workflow notes:
 - Workflows install the App Store Connect API key into
   `~/.appstoreconnect/private_keys/` before upload.
 
+## GitHub macOS Release Signing
+
+The GitHub release workflow `.github/workflows/native-macos-artifact.yml`
+builds, signs, notarizes, staples, and publishes the macOS ZIP artifact.
+
+Required repository secrets for signed/notarized GitHub releases:
+
+- `MACOS_DEV_ID_APP_CERT_P12_BASE64`: Base64 Developer ID Application `.p12`.
+- `MACOS_DEV_ID_APP_CERT_PASSWORD`: Password for the Developer ID `.p12`.
+- `APP_STORE_CONNECT_KEY_ID`: App Store Connect API key id.
+- `APP_STORE_CONNECT_ISSUER_ID`: App Store Connect API issuer id.
+- `APP_STORE_CONNECT_PRIVATE_KEY`: Raw `.p8` API private key contents.
+
 ### Deterministic dry-run commands
 
 Use workflow dispatch with upload disabled, then wait for each run:

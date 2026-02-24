@@ -29,6 +29,9 @@ jobs:
       APP_BUNDLE_NAME: EveryCodeCompanion.app
       SCHEME: CodeNativeMac
       XCODE_PROJECT: native/CodeNativeMac/CodeNativeMac.xcodeproj
+      ENTITLEMENTS_PATH: >-
+        native/CodeNativeMac/CodeNativeMac/CodeNativeMac.entitlements
+      SIGNING_IDENTITY_PATH: /tmp/ecc-macos/signing-identity.txt
     steps:
       - name: Resolve checkout ref
         id: resolve_ref
@@ -52,6 +55,61 @@ jobs:
           set -euo pipefail
           ./build-fast.sh
 
+      - name: Validate release-signing secrets
+        env:
+          MACOS_DEV_ID_APP_CERT_P12_BASE64:
+            ${{ secrets.MACOS_DEV_ID_APP_CERT_P12_BASE64 }}
+          MACOS_DEV_ID_APP_CERT_PASSWORD:
+            ${{ secrets.MACOS_DEV_ID_APP_CERT_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID:
+            ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY:
+            ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            MACOS_DEV_ID_APP_CERT_P12_BASE64 \
+            MACOS_DEV_ID_APP_CERT_PASSWORD \
+            APP_STORE_CONNECT_KEY_ID \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_PRIVATE_KEY; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+      - name: Import Developer ID Application certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_DEV_ID_APP_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_DEV_ID_APP_CERT_PASSWORD }}
+          keychain: signing_temp
+          keychain-password: ${{ github.run_id }}
+
+      - name: Resolve Developer ID signing identity
+        run: |
+          set -euo pipefail
+          identity=$(security find-identity -v -p codesigning | \
+            sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | \
+            head -n1)
+          if [ -z "$identity" ]; then
+            echo "Missing Developer ID Application identity in keychain" >&2
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+
+          mkdir -p "$(dirname "$SIGNING_IDENTITY_PATH")"
+          printf '%s' "$identity" > "$SIGNING_IDENTITY_PATH"
+          echo "Using signing identity: $identity"
+
       - name: Build release app
         run: |
           set -euo pipefail
@@ -65,22 +123,93 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
-      - name: Package artifact
+      - name: Sign macOS app bundle
         run: |
           set -euo pipefail
-          mkdir -p "$STAGE_DIR"
-
           app_source="$DERIVED_DATA_PATH/Build/Products/Release/$APP_BUNDLE_NAME"
           if [ ! -d "$app_source" ]; then
             echo "missing app bundle at $app_source" >&2
             exit 1
           fi
 
-          cp -R "$app_source" "$STAGE_DIR/$APP_BUNDLE_NAME"
+          identity="$(cat "$SIGNING_IDENTITY_PATH")"
+          backend_bundle="$app_source/Contents/Resources/backend/CodeBackend.app"
+          if [ -d "$backend_bundle" ]; then
+            if [ -x "$backend_bundle/Contents/MacOS/code" ]; then
+              codesign --force \
+                --sign "$identity" \
+                --timestamp \
+                --options runtime \
+                "$backend_bundle/Contents/MacOS/code"
+            fi
+
+            codesign --force \
+              --sign "$identity" \
+              --timestamp \
+              --options runtime \
+              "$backend_bundle"
+          fi
+
+          codesign --force \
+            --sign "$identity" \
+            --timestamp \
+            --options runtime \
+            --entitlements "$ENTITLEMENTS_PATH" \
+            "$app_source"
+
+          codesign --verify --deep --strict --verbose=2 "$app_source"
+
+      - name: Notarize and staple app
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID:
+            ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY:
+            ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE_DIR"
+          app_source="$DERIVED_DATA_PATH/Build/Products/Release/$APP_BUNDLE_NAME"
+          staged_app="$STAGE_DIR/$APP_BUNDLE_NAME"
+          notarize_zip="$STAGE_DIR/notarize-input.zip"
+          key_path="$STAGE_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+
+          rm -rf "$staged_app" "$notarize_zip"
+          cp -R "$app_source" "$staged_app"
+
+          printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$staged_app" \
+            "$notarize_zip"
+
+          xcrun notarytool submit "$notarize_zip" \
+            --key "$key_path" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --wait
+
+          xcrun stapler staple "$staged_app"
+          xcrun stapler validate "$staged_app"
+          spctl -a -vv "$staged_app"
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE_DIR"
+
+          staged_app="$STAGE_DIR/$APP_BUNDLE_NAME"
+          if [ ! -d "$staged_app" ]; then
+            echo "missing staged app bundle at $staged_app" >&2
+            exit 1
+          fi
+
           arch="$(uname -m)"
           archive="$STAGE_DIR/EveryCodeCompanion-macos-${arch}.zip"
+          rm -f "$archive" "$archive.sha256"
           ditto -c -k --sequesterRsrc --keepParent \
-            "$STAGE_DIR/$APP_BUNDLE_NAME" \
+            "$staged_app" \
             "$archive"
           shasum -a 256 "$archive" > "$archive.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
