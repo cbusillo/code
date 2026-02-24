@@ -95,6 +95,9 @@ pub enum CodexErr {
     #[error("no conversation with id: {0}")]
     ConversationNotFound(Uuid),
 
+    #[error("session {conversation_id} is already active in another Code runtime{details}")]
+    SessionInUse { conversation_id: Uuid, details: String },
+
     #[error("session configured event was not the first event in the stream")]
     SessionConfiguredNotFirstEvent,
 

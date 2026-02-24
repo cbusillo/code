@@ -11,6 +11,9 @@ use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
 use crate::rollout::RolloutRecorder;
+use crate::session_lease::SessionLeaseGuard;
+use crate::session_lease::acquire_session_lease;
+use crate::session_lease::acquire_session_lease_from_rollout_path;
 use code_protocol::ConversationId;
 use code_protocol::protocol::SessionSource;
 use code_protocol::models::ResponseItem;
@@ -69,6 +72,7 @@ impl ConversationManager {
         mut config: Config,
         auth_manager: Arc<AuthManager>,
     ) -> CodexResult<NewConversation> {
+        let code_home = config.code_home.clone();
         // Our core `Codex::spawn_with_auth_manager` handles resume via
         // `config.experimental_resume`. For a fresh conversation we leave it as `None`.
         config.experimental_resume = None;
@@ -78,13 +82,15 @@ impl ConversationManager {
             session_id,
         } = Codex::spawn_with_auth_manager(config, Some(auth_manager.clone())).await?;
         let conversation_id: code_protocol::ConversationId = session_id.into();
-        self.finalize_spawn(codex, conversation_id).await
+        let session_lease = Some(acquire_session_lease(&code_home, conversation_id)?);
+        self.finalize_spawn(codex, conversation_id, session_lease).await
     }
 
     async fn finalize_spawn(
         &self,
         codex: Codex,
         conversation_id: ConversationId,
+        session_lease: Option<SessionLeaseGuard>,
     ) -> CodexResult<NewConversation> {
         // The first event must be `SessionInitialized`. Validate and forward it
         // to the caller so that they can display it in the conversation
@@ -101,7 +107,7 @@ impl ConversationManager {
             }
         };
 
-        let conversation = Arc::new(CodexConversation::new(codex));
+        let conversation = Arc::new(CodexConversation::new(codex, session_lease));
         self.conversations
             .write()
             .await
@@ -131,6 +137,9 @@ impl ConversationManager {
         rollout_path: PathBuf,
         auth_manager: Arc<AuthManager>,
     ) -> CodexResult<NewConversation> {
+        let code_home = config.code_home.clone();
+        let pre_acquired_lease = acquire_session_lease_from_rollout_path(&code_home, &rollout_path)?;
+
         // Point the config at the rollout we want to resume.
         config.experimental_resume = Some(rollout_path);
         let CodexSpawnOk {
@@ -139,7 +148,21 @@ impl ConversationManager {
             session_id,
         } = Codex::spawn_with_auth_manager(config, Some(auth_manager.clone())).await?;
         let conversation_id: code_protocol::ConversationId = session_id.into();
-        self.finalize_spawn(codex, conversation_id).await
+        let session_lease = match pre_acquired_lease {
+            Some(lease) => {
+                if lease.conversation_id() != conversation_id {
+                    tracing::warn!(
+                        "resume lease conversation id {} differs from spawned session {}; keeping rollout lease to preserve single-writer semantics",
+                        lease.conversation_id(),
+                        conversation_id,
+                    );
+                }
+                Some(lease)
+            }
+            None => Some(acquire_session_lease(&code_home, conversation_id)?),
+        };
+        self.finalize_spawn(codex, conversation_id, session_lease)
+            .await
     }
 
     /// Removes the conversation from the manager's internal map, though the
@@ -163,6 +186,7 @@ impl ConversationManager {
         mut config: Config,
         path: PathBuf,
     ) -> CodexResult<NewConversation> {
+        let code_home = config.code_home.clone();
         // Compute the prefix up to the cut point.
         let history = RolloutRecorder::get_rollout_history(&path).await?;
         let history = truncate_after_dropping_last_messages(history, num_messages_to_drop);
@@ -205,7 +229,8 @@ impl ConversationManager {
             session_id,
         } = Codex::spawn_with_auth_manager(config, Some(self.auth_manager.clone())).await?;
         let conversation_id: code_protocol::ConversationId = session_id.into();
-        self.finalize_spawn(codex, conversation_id).await
+        let session_lease = Some(acquire_session_lease(&code_home, conversation_id)?);
+        self.finalize_spawn(codex, conversation_id, session_lease).await
     }
 }
 
