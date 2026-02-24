@@ -582,6 +582,7 @@ fi
 
 # Compute and compare build cache fingerprint to explain incremental behavior
 FPRINT_FILE="./target/${PROFILE}/.env-fingerprint"
+mkdir -p "./target/${PROFILE}"
 # Collect fingerprint inputs (only env/toolchain/settings that affect codegen/caches)
 collect_fingerprint() {
   local cargo_v rustc_v rustc_v_oneline host which_cargo which_rustc uname_srm
