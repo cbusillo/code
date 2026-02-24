@@ -4787,13 +4787,24 @@ struct ContentView: View {
             return
         }
 
-        composerDraft = ""
+        let submittedText = text
         Task {
-            await store.submitComposer(
-                text: text,
+            let didSubmit = await store.submitComposer(
+                text: submittedText,
                 model: selectedModelIdentifier,
                 reasoningEffort: selectedReasoningEffort
             )
+            guard didSubmit else {
+                return
+            }
+
+            await MainActor.run {
+                let currentDraftTrimmed = composerDraft
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if currentDraftTrimmed == submittedText {
+                    composerDraft = ""
+                }
+            }
         }
     }
 
@@ -5858,15 +5869,27 @@ struct ContentView: View {
         )
 
         if shouldAutoSubmit {
-            composerDraft = ""
-            voiceInput.clearTranscript()
-            voiceInteractionNotice = nil
+            let submittedText = finalText
+            let submittedTextTrimmed = normalized
             Task {
-                await store.submitComposer(
-                    text: finalText,
+                let didSubmit = await store.submitComposer(
+                    text: submittedText,
                     model: selectedModelIdentifier,
                     reasoningEffort: selectedReasoningEffort
                 )
+                guard didSubmit else {
+                    return
+                }
+
+                await MainActor.run {
+                    let currentDraftTrimmed = composerDraft
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if currentDraftTrimmed == submittedTextTrimmed {
+                        composerDraft = ""
+                    }
+                    voiceInput.clearTranscript()
+                    voiceInteractionNotice = nil
+                }
             }
             return
         }
@@ -10874,6 +10897,11 @@ private struct TranscriptCard: View {
             return extracted
         }
 
+        if let data = trimmed.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            return ""
+        }
+
         if let fallback = extractOutputFieldFallback(from: trimmed) {
             return fallback
         }
@@ -10956,7 +10984,11 @@ private struct TranscriptCard: View {
             return extracted
         }
 
-        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+        if isMetadataOnlyToolEnvelope(object) {
+            return nil
+        }
+
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
            let pretty = String(data: data, encoding: .utf8) {
             let normalized = normalizeExecOutput(pretty).trimmingCharacters(in: .whitespacesAndNewlines)
             if !normalized.isEmpty {
@@ -10965,6 +10997,22 @@ private struct TranscriptCard: View {
         }
 
         return nil
+    }
+
+    private func isMetadataOnlyToolEnvelope(_ object: [String: Any]) -> Bool {
+        let allowedKeys: Set<String> = ["metadata", "output"]
+        guard Set(object.keys).isSubset(of: allowedKeys) else {
+            return false
+        }
+
+        guard let outputValue = object["output"] else {
+            return true
+        }
+
+        let extracted = extractToolOutputText(from: outputValue, depth: 5)?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return extracted?.isEmpty ?? true
     }
 
     private struct RenderedToolArgument: Hashable {
@@ -11246,7 +11294,7 @@ private struct TranscriptCard: View {
         guard !trimmed.isEmpty,
               let data = trimmed.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data),
-              let prettyData = try? JSONSerialization.data(withJSONObject: parsed, options: [.prettyPrinted]),
+              let prettyData = try? JSONSerialization.data(withJSONObject: parsed, options: [.prettyPrinted, .sortedKeys]),
               let pretty = String(data: prettyData, encoding: .utf8)
         else {
             return nil

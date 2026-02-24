@@ -395,19 +395,19 @@ final class SessionMirrorStore: ObservableObject {
         text explicitText: String? = nil,
         model: String? = nil,
         reasoningEffort: String? = nil
-    ) async {
+    ) async -> Bool {
         guard let selectedSessionID else {
-            return
+            return false
         }
 
         let text = (explicitText ?? composerText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            return
+            return false
         }
 
         let cursor = text.count
 
-        await send(
+        let composerUpdated = await send(
             ComposerUpdateMessage(
                 requestId: nextRequestID(),
                 sessionId: selectedSessionID,
@@ -415,7 +415,11 @@ final class SessionMirrorStore: ObservableObject {
                 cursor: cursor
             )
         )
-        await send(
+        guard composerUpdated else {
+            return false
+        }
+
+        let submitted = await send(
             SubmitTurnMessage(
                 requestId: nextRequestID(),
                 sessionId: selectedSessionID,
@@ -423,7 +427,10 @@ final class SessionMirrorStore: ObservableObject {
                 reasoningEffort: reasoningEffort
             )
         )
-        composerText = ""
+        if submitted {
+            composerText = ""
+        }
+        return submitted
     }
 
     func interruptTurn() async {
@@ -903,53 +910,64 @@ final class SessionMirrorStore: ObservableObject {
         return true
     }
 
-    private func send(_ message: OutboundMessage) async {
+    @discardableResult
+    private func send(_ message: OutboundMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: CreateSessionMessage) async {
+    @discardableResult
+    private func send(_ message: CreateSessionMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: ComposerUpdateMessage) async {
+    @discardableResult
+    private func send(_ message: ComposerUpdateMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: SubmitTurnMessage) async {
+    @discardableResult
+    private func send(_ message: SubmitTurnMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: InterruptTurnMessage) async {
+    @discardableResult
+    private func send(_ message: InterruptTurnMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: ExecApprovalMessage) async {
+    @discardableResult
+    private func send(_ message: ExecApprovalMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: PatchApprovalMessage) async {
+    @discardableResult
+    private func send(_ message: PatchApprovalMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func send(_ message: UserInputAnswerMessage) async {
+    @discardableResult
+    private func send(_ message: UserInputAnswerMessage) async -> Bool {
         await sendEncodable(message)
     }
 
-    private func sendEncodable<T: Encodable>(_ message: T) async {
+    @discardableResult
+    private func sendEncodable<T: Encodable>(_ message: T) async -> Bool {
         guard let webSocket else {
-            return
+            return false
         }
 
         do {
             let data = try encoder.encode(message)
             guard let text = String(data: data, encoding: .utf8) else {
-                return
+                return false
             }
             try await webSocket.send(.string(text))
+            return true
         } catch {
             let description = error.localizedDescription
             lastError = "Failed to send message: \(description)"
             recordTransportFailure(context: "Send failure", details: description)
+            return false
         }
     }
 

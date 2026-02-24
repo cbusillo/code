@@ -623,6 +623,53 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(info.success, true)
     }
 
+    func testToolCallInfoUnwrapsShellOutputEnvelopeWhenMetadataComesFirst() throws {
+        let item = makeCoreEventItem(
+            seq: 28_001_1,
+            payload: .object([
+                "type": .string("tool_call_end"),
+                "call_id": .string("call-shell-2"),
+                "name": .string("shell"),
+                "arguments": .object([
+                    "command": .array([
+                        .string("echo"),
+                        .string("hello")
+                    ])
+                ]),
+                "output": .string("{\"metadata\":{\"exit_code\":0},\"output\":\"hello\\n\"}")
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertEqual(info.callId, "call-shell-2")
+        XCTAssertEqual(info.command, "echo hello")
+        XCTAssertEqual(info.output, "hello")
+        XCTAssertEqual(info.success, true)
+    }
+
+    func testToolCallInfoSuppressesMetadataOnlyOutputEnvelope() throws {
+        let item = makeCoreEventItem(
+            seq: 28_001_2,
+            payload: .object([
+                "type": .string("tool_call_end"),
+                "call_id": .string("call-shell-3"),
+                "name": .string("shell"),
+                "arguments": .object([
+                    "command": .array([
+                        .string("true")
+                    ])
+                ]),
+                "output": .string("{\"metadata\":{\"exit_code\":0},\"output\":\"\"}")
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertEqual(info.callId, "call-shell-3")
+        XCTAssertEqual(info.command, "true")
+        XCTAssertTrue(info.output.isEmpty)
+        XCTAssertEqual(info.success, true)
+    }
+
     func testMcpToolCallInfoUsesReadableTextContent() throws {
         let item = makeCoreEventItem(
             seq: 28_002,

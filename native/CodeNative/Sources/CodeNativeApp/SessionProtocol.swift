@@ -929,9 +929,14 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return ""
         }
 
-        if let parsed = decodeJSONFragment(from: trimmed),
-           let extracted = extractReadableToolOutput(from: parsed, depth: 0) {
-            return extracted
+        if let parsed = decodeJSONFragment(from: trimmed) {
+            if let extracted = extractReadableToolOutput(from: parsed, depth: 0) {
+                return extracted
+            }
+
+            // If we decoded structured JSON but found no user-facing output,
+            // suppress raw envelope fallback (metadata-only cards look noisy).
+            return ""
         }
 
         if let fallback = extractOutputFieldFallback(from: trimmed) {
@@ -1006,7 +1011,11 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return extracted
         }
 
-        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+        if isMetadataOnlyToolEnvelope(object) {
+            return nil
+        }
+
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
            let rendered = String(data: data, encoding: .utf8) {
             let normalized = normalizeStructuredText(rendered)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1016,6 +1025,22 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         }
 
         return nil
+    }
+
+    private func isMetadataOnlyToolEnvelope(_ object: [String: Any]) -> Bool {
+        let allowedKeys: Set<String> = ["metadata", "output"]
+        guard Set(object.keys).isSubset(of: allowedKeys) else {
+            return false
+        }
+
+        guard let outputValue = object["output"] else {
+            return true
+        }
+
+        let extracted = extractReadableToolOutput(from: outputValue, depth: 5)?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return extracted?.isEmpty ?? true
     }
 
     private func decodeJSONFragment(from value: String) -> Any? {
@@ -2607,7 +2632,7 @@ enum JSONValue: Decodable, Hashable {
             guard
                 let object = asJSONObject,
                 JSONSerialization.isValidJSONObject(object),
-                let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+                let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
                 let value = String(data: data, encoding: .utf8)
             else {
                 return "(unprintable JSON)"
