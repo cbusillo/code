@@ -25,6 +25,8 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::DateTime;
 use code_app_server_protocol::AuthMode;
+use code_common::model_presets::builtin_model_presets;
+use code_common::model_presets::clamp_reasoning_effort_for_model;
 use code_core::AuthManager;
 use code_core::CodexConversation;
 use code_core::ConversationManager;
@@ -32,6 +34,8 @@ use code_core::NewConversation;
 use code_core::SessionCatalog;
 use code_core::SessionQuery;
 use code_core::config::Config;
+use code_core::config_types::ReasoningEffort;
+use code_core::error::CodexErr;
 use code_core::protocol::{self, Event, InputItem, Op, ReviewDecision};
 use code_protocol::models::{ContentItem, ResponseItem};
 use code_protocol::protocol::{RolloutItem, RolloutLine, SessionSource};
@@ -43,6 +47,8 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as MirrorWsMessage;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -56,6 +62,7 @@ const HISTORY_PAGE_LIMIT_MAX: usize = 2_000;
 const HISTORY_PAGE_BYTE_LIMIT: usize = NATIVE_WEBSOCKET_FRAME_BUDGET - 100_000;
 const ROLLOUT_TAIL_POLL_INTERVAL_MS: u64 = 350;
 const NO_STORE: &str = "no-store, max-age=0";
+const DEFAULT_OWNER_MIRROR_ENDPOINT: &str = "ws://127.0.0.1:4317/ws";
 
 #[derive(Debug, Clone)]
 pub struct WebServerOptions {
@@ -203,6 +210,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             sessions: state.hub.list_sessions().await,
         })
         .await
+    .is_err()
+    {
+        return;
+    }
+    if out_tx
+        .send(ServerMessage::ModelList {
+            data: state.hub.list_models(),
+        })
+        .await
         .is_err()
     {
         return;
@@ -240,8 +256,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }).await;
                 let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
             }
-            ClientMessage::CreateSession { request_id, cwd } => {
-                match state.hub.create_session(cwd).await {
+            ClientMessage::ListModels { request_id } => {
+                let _ = out_tx
+                    .send(ServerMessage::ModelList {
+                        data: state.hub.list_models(),
+                    })
+                    .await;
+                let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
+            }
+            ClientMessage::CreateSession {
+                request_id,
+                cwd,
+                model,
+                reasoning_effort,
+            } => {
+                match state
+                    .hub
+                    .create_session(cwd, model, reasoning_effort)
+                    .await
+                {
                     Ok(session) => {
                         let _ = out_tx.send(ServerMessage::SessionCreated { session }).await;
                         let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
@@ -504,15 +537,47 @@ fn spawn_session_forwarder(
     })
 }
 
+fn owner_mirror_endpoint_from_session_details(details: Option<&str>) -> Option<String> {
+    let details = details?;
+    let marker = "endpoint ";
+    let start = details.find(marker)?;
+    let tail = &details[start + marker.len()..];
+    let endpoint = tail
+        .split([',', ')'])
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .trim_matches(['\"', '\''])
+        .to_string();
+    if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+        Some(endpoint)
+    } else {
+        None
+    }
+}
+
+fn default_owner_mirror_endpoint() -> String {
+    std::env::var("CODE_APP_SERVER_MIRROR_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_OWNER_MIRROR_ENDPOINT.to_string())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
     ListSessions {
         request_id: Option<String>,
     },
+    ListModels {
+        request_id: Option<String>,
+    },
     CreateSession {
         request_id: Option<String>,
         cwd: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
     },
     AttachSession {
         request_id: Option<String>,
@@ -565,7 +630,7 @@ enum ClientMessage {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WebUserInputAnswer {
     answers: Vec<String>,
 }
@@ -578,6 +643,9 @@ enum ServerMessage {
     },
     SessionList {
         sessions: Vec<SessionSummary>,
+    },
+    ModelList {
+        data: Vec<WebModelPreset>,
     },
     SessionCreated {
         session: SessionSummary,
@@ -610,6 +678,79 @@ enum ServerMessage {
     },
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OwnerMirrorClientMessage {
+    AttachSession {
+        request_id: Option<String>,
+        session_id: Uuid,
+        from_seq: Option<u64>,
+    },
+    ComposerUpdate {
+        request_id: Option<String>,
+        session_id: Uuid,
+        text: String,
+        cursor: usize,
+    },
+    SubmitTurn {
+        request_id: Option<String>,
+        session_id: Uuid,
+    },
+    InterruptTurn {
+        request_id: Option<String>,
+        session_id: Uuid,
+    },
+    ExecApproval {
+        request_id: Option<String>,
+        session_id: Uuid,
+        call_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        decision: WebReviewDecision,
+    },
+    PatchApproval {
+        request_id: Option<String>,
+        session_id: Uuid,
+        call_id: String,
+        decision: WebReviewDecision,
+    },
+    UserInputAnswer {
+        request_id: Option<String>,
+        session_id: Uuid,
+        turn_id: String,
+        answers: HashMap<String, WebUserInputAnswer>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OwnerMirrorServerMessage {
+    Hello {
+        client_id: String,
+    },
+    SessionAttached {
+        session_id: Uuid,
+        from_seq: u64,
+        has_more_before: bool,
+        items: Vec<SessionStreamItem>,
+    },
+    SessionStream {
+        item: SessionStreamItem,
+    },
+    SessionDetached {
+        session_id: Uuid,
+    },
+    Ack {
+        request_id: Option<String>,
+    },
+    Error {
+        request_id: Option<String>,
+        message: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSummary {
     id: Uuid,
@@ -620,6 +761,23 @@ pub struct SessionSummary {
     last_event_at_unix_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebReasoningEffortOption {
+    reasoning_effort: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebModelPreset {
+    id: String,
+    model: String,
+    display_name: String,
+    description: String,
+    default_reasoning_effort: String,
+    supported_reasoning_efforts: Vec<WebReasoningEffortOption>,
+    is_default: bool,
 }
 
 struct SessionHub {
@@ -660,10 +818,56 @@ impl SessionHub {
         values
     }
 
-    async fn create_session(&self, cwd: Option<String>) -> Result<SessionSummary, String> {
+    fn list_models(&self) -> Vec<WebModelPreset> {
+        let auth_manager = self.conversation_manager.auth_manager();
+        let auth_mode = auth_manager.auth().map(|auth| auth.mode);
+        let supports_pro_only_models = auth_manager.supports_pro_only_models();
+
+        builtin_model_presets(auth_mode, supports_pro_only_models)
+            .into_iter()
+            .map(|preset| WebModelPreset {
+                id: preset.id,
+                model: preset.model,
+                display_name: preset.display_name,
+                description: preset.description,
+                default_reasoning_effort: preset.default_reasoning_effort.to_string(),
+                supported_reasoning_efforts: preset
+                    .supported_reasoning_efforts
+                    .into_iter()
+                    .map(|effort| WebReasoningEffortOption {
+                        reasoning_effort: effort.effort.to_string(),
+                        description: effort.description,
+                    })
+                    .collect(),
+                is_default: preset.is_default,
+            })
+            .collect()
+    }
+
+    async fn create_session(
+        &self,
+        cwd: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+    ) -> Result<SessionSummary, String> {
         let cwd = resolve_cwd(self.base_config.cwd.as_path(), cwd)?;
         let mut config = self.base_config.as_ref().clone();
         config.cwd = cwd.clone();
+
+        if let Some(model) = normalize_optional_string(model) {
+            config.model = model;
+        }
+
+        let requested_reasoning_effort = parse_reasoning_effort(reasoning_effort.as_deref())?;
+        if let Some(reasoning_effort) = requested_reasoning_effort {
+            config.preferred_model_reasoning_effort = Some(reasoning_effort);
+            config.model_reasoning_effort =
+                clamp_reasoning_effort_for_model(&config.model, reasoning_effort.into()).into();
+        } else {
+            config.model_reasoning_effort =
+                clamp_reasoning_effort_for_model(&config.model, config.model_reasoning_effort.into())
+                    .into();
+        }
 
         let new_conversation = self
             .conversation_manager
@@ -671,7 +875,7 @@ impl SessionHub {
             .await
             .map_err(|err| format!("Failed to create conversation: {err}"))?;
 
-        let session = LiveSession::new(
+        let session = LiveSession::new_local(
             new_conversation,
             cwd,
             now_unix_ms(),
@@ -741,12 +945,7 @@ impl SessionHub {
 
     async fn interrupt_turn(&self, session_id: Uuid) -> Result<(), String> {
         let session = self.session_for_id(session_id).await?;
-        session
-            .conversation
-            .submit(Op::Interrupt)
-            .await
-            .map_err(|err| format!("Failed to interrupt turn: {err}"))?;
-        Ok(())
+        session.interrupt_turn().await
     }
 
     async fn exec_approval(
@@ -757,17 +956,7 @@ impl SessionHub {
         decision: ReviewDecision,
     ) -> Result<(), String> {
         let session = self.session_for_id(session_id).await?;
-
-        session
-            .conversation
-            .submit(Op::ExecApproval {
-                id: call_id,
-                turn_id,
-                decision,
-            })
-            .await
-            .map_err(|err| format!("Failed to submit exec approval: {err}"))?;
-        Ok(())
+        session.exec_approval(call_id, turn_id, decision).await
     }
 
     async fn patch_approval(
@@ -777,16 +966,7 @@ impl SessionHub {
         decision: ReviewDecision,
     ) -> Result<(), String> {
         let session = self.session_for_id(session_id).await?;
-
-        session
-            .conversation
-            .submit(Op::PatchApproval {
-                id: call_id,
-                decision,
-            })
-            .await
-            .map_err(|err| format!("Failed to submit patch approval: {err}"))?;
-        Ok(())
+        session.patch_approval(call_id, decision).await
     }
 
     async fn user_input_answer(
@@ -797,16 +977,7 @@ impl SessionHub {
     ) -> Result<(), String> {
         let session = self.session_for_id(session_id).await?;
         let response = map_web_user_input_answers(answers);
-
-        session
-            .conversation
-            .submit(Op::UserInputAnswer {
-                id: turn_id,
-                response,
-            })
-            .await
-            .map_err(|err| format!("Failed to submit request_user_input answer: {err}"))?;
-        Ok(())
+        session.user_input_answer(turn_id, response).await
     }
 
     async fn session_for_id(&self, session_id: Uuid) -> Result<Arc<LiveSession>, String> {
@@ -854,29 +1025,74 @@ impl SessionHub {
         let mut config = self.base_config.as_ref().clone();
         config.cwd = entry.cwd_real.clone();
 
-        let new_conversation = self
+        let resumed = self
             .conversation_manager
             .resume_conversation_from_rollout(
                 config,
                 rollout_path.clone(),
                 self.conversation_manager.auth_manager(),
             )
-            .await
-            .map_err(|err| format!("Failed to resume session {session_id}: {err}"))?;
+            .await;
 
-        let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
+        match resumed {
+            Ok(new_conversation) => {
+                let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
 
-        let session = LiveSession::new(
-            new_conversation,
-            entry.cwd_real,
-            parse_rfc3339_millis(&entry.created_at),
-            Some(session_id),
-            seed_history.items,
-        );
+                let session = LiveSession::new_local(
+                    new_conversation,
+                    entry.cwd_real,
+                    parse_rfc3339_millis(&entry.created_at),
+                    Some(session_id),
+                    seed_history.items,
+                );
 
-        session.spawn_rollout_tailer(rollout_path, seed_history.tail_cursor);
+                session.spawn_rollout_tailer(rollout_path, seed_history.tail_cursor);
+                Ok(session)
+            }
+            Err(CodexErr::SessionInUse {
+                conversation_id,
+                details,
+            }) => {
+                let hinted_endpoint = owner_mirror_endpoint_from_session_details(Some(&details));
+                let endpoint = hinted_endpoint
+                    .clone()
+                    .unwrap_or_else(default_owner_mirror_endpoint);
+                info!(
+                    "Session {session_id} is active in owner runtime {conversation_id}{details}; mirroring via {endpoint}"
+                );
 
-        Ok(session)
+                let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
+                let summary = SessionSummary {
+                    id: session_id,
+                    conversation_id: session_id.to_string(),
+                    model: entry
+                        .model_provider
+                        .unwrap_or_else(|| "Unknown model".to_string()),
+                    cwd: entry.cwd_real.display().to_string(),
+                    created_at_unix_ms: parse_rfc3339_millis(&entry.created_at),
+                    last_event_at_unix_ms: parse_rfc3339_millis(&entry.last_event_at),
+                    title: entry
+                        .nickname
+                        .and_then(|value| {
+                            let trimmed = value.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_string())
+                        })
+                        .or_else(|| {
+                            entry.last_user_snippet.and_then(|value| {
+                                let trimmed = value.trim();
+                                (!trimmed.is_empty()).then(|| trimmed.to_string())
+                            })
+                        }),
+                };
+
+                Ok(LiveSession::new_owner_mirror(
+                    summary,
+                    endpoint,
+                    seed_history.items,
+                ))
+            }
+            Err(err) => Err(format!("Failed to resume session {session_id}: {err}")),
+        }
     }
 
     async fn catalog_summaries(&self) -> Vec<SessionSummary> {
@@ -929,9 +1145,45 @@ impl SessionHub {
     }
 }
 
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    let trimmed = value?.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed)
+}
+
+fn parse_reasoning_effort(value: Option<&str>) -> Result<Option<ReasoningEffort>, String> {
+    let Some(raw_value) = value else {
+        return Ok(None);
+    };
+
+    let normalized = raw_value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let effort = match normalized.as_str() {
+        "none" | "minimal" => ReasoningEffort::Minimal,
+        "low" => ReasoningEffort::Low,
+        "medium" => ReasoningEffort::Medium,
+        "high" => ReasoningEffort::High,
+        "xhigh" | "x-high" | "x_high" => ReasoningEffort::XHigh,
+        _ => {
+            return Err(format!(
+                "Unsupported reasoning_effort '{raw_value}' (expected minimal|low|medium|high|xhigh)"
+            ));
+        }
+    };
+
+    Ok(Some(effort))
+}
+
 struct LiveSession {
     summary: SessionSummary,
-    conversation: Arc<CodexConversation>,
+    conversation: Option<Arc<CodexConversation>>,
+    owner_mirror_endpoint: Option<String>,
     stream: broadcast::Sender<SessionStreamItem>,
     history: RwLock<Vec<SessionStreamItem>>,
     next_stream_seq: AtomicU64,
@@ -939,7 +1191,7 @@ struct LiveSession {
 }
 
 impl LiveSession {
-    fn new(
+    fn new_local(
         new_conversation: NewConversation,
         cwd: PathBuf,
         created_at_unix_ms: u64,
@@ -967,7 +1219,8 @@ impl LiveSession {
 
         Arc::new(Self {
             summary,
-            conversation: new_conversation.conversation,
+            conversation: Some(new_conversation.conversation),
+            owner_mirror_endpoint: None,
             stream,
             history: RwLock::new(initial_history),
             next_stream_seq: AtomicU64::new(next_seq),
@@ -979,26 +1232,78 @@ impl LiveSession {
         })
     }
 
+    fn new_owner_mirror(
+        summary: SessionSummary,
+        owner_mirror_endpoint: String,
+        seed_history: Vec<SessionStreamItem>,
+    ) -> Arc<Self> {
+        let next_seq = seed_history
+            .last()
+            .map_or(1, |item| item.seq().saturating_add(1));
+        let (stream, _) = broadcast::channel::<SessionStreamItem>(1024);
+
+        Arc::new(Self {
+            summary,
+            conversation: None,
+            owner_mirror_endpoint: Some(owner_mirror_endpoint),
+            stream,
+            history: RwLock::new(seed_history),
+            next_stream_seq: AtomicU64::new(next_seq),
+            composer: RwLock::new(ComposerState {
+                rev: 0,
+                text: String::new(),
+                cursor: 0,
+            }),
+        })
+    }
+
     fn spawn_dispatcher(self: &Arc<Self>) {
-        let session = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                match session.conversation.next_event().await {
-                    Ok(event) => {
-                        session.push_core_event(event).await;
-                    }
-                    Err(err) => {
-                        session
-                            .push_system_message(
-                                "error".to_string(),
-                                format!("Session event stream ended: {err}"),
-                            )
-                            .await;
-                        break;
+        if let Some(conversation) = self.conversation.clone() {
+            let session = Arc::clone(self);
+            tokio::spawn(async move {
+                loop {
+                    match conversation.next_event().await {
+                        Ok(event) => {
+                            session.push_core_event(event).await;
+                        }
+                        Err(err) => {
+                            session
+                                .push_system_message(
+                                    "error".to_string(),
+                                    format!("Session event stream ended: {err}"),
+                                )
+                                .await;
+                            break;
+                        }
                     }
                 }
-            }
-        });
+            });
+            return;
+        }
+
+        if let Some(endpoint) = self.owner_mirror_endpoint.clone() {
+            let session = Arc::clone(self);
+            tokio::spawn(async move {
+                let mut reconnect_delay = std::time::Duration::from_millis(800);
+                loop {
+                    let result = session.run_owner_mirror_stream_once(&endpoint).await;
+                    match result {
+                        Ok(()) => break,
+                        Err(err) => {
+                            warn!(
+                                "owner mirror stream ended for session {} via {}: {}",
+                                session.summary.id,
+                                endpoint,
+                                err
+                            );
+                            tokio::time::sleep(reconnect_delay).await;
+                            reconnect_delay = (reconnect_delay * 2)
+                                .min(std::time::Duration::from_secs(8));
+                        }
+                    }
+                }
+            });
+        }
     }
 
     fn spawn_rollout_tailer(self: &Arc<Self>, rollout_path: PathBuf, mut cursor: RolloutTailCursor) {
@@ -1036,25 +1341,63 @@ impl LiveSession {
     }
 
     async fn set_composer(&self, text: String, cursor: usize, source_client_id: Option<String>) {
-        let mut composer = self.composer.write().await;
-        composer.rev = composer.rev.saturating_add(1);
-        composer.text = text;
-        composer.cursor = cursor.min(composer.text.len());
+        if self.conversation.is_some() {
+            let mut composer = self.composer.write().await;
+            composer.rev = composer.rev.saturating_add(1);
+            composer.text = text;
+            composer.cursor = cursor.min(composer.text.len());
 
-        let item = SessionStreamItem::Composer {
+            let item = SessionStreamItem::Composer {
+                session_id: self.summary.id,
+                seq: self.next_seq(),
+                rev: composer.rev,
+                text: composer.text.clone(),
+                cursor: composer.cursor,
+                source_client_id,
+            };
+            drop(composer);
+
+            self.push_item(item).await;
+            return;
+        }
+
+        {
+            let mut composer = self.composer.write().await;
+            composer.rev = composer.rev.saturating_add(1);
+            composer.text = text.clone();
+            composer.cursor = cursor.min(composer.text.len());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let message = OwnerMirrorClientMessage::ComposerUpdate {
+            request_id: Some(request_id.clone()),
             session_id: self.summary.id,
-            seq: self.next_seq(),
-            rev: composer.rev,
-            text: composer.text.clone(),
-            cursor: composer.cursor,
-            source_client_id,
+            text,
+            cursor,
         };
-        drop(composer);
-
-        self.push_item(item).await;
+        if let Err(err) = self
+            .send_owner_mirror_message(message, Some(request_id))
+            .await
+        {
+            warn!("failed to forward composer update for {}: {err}", self.summary.id);
+        }
     }
 
     async fn submit_turn(&self) -> Result<(), String> {
+        if self.conversation.is_none() {
+            let request_id = Uuid::new_v4().to_string();
+            let message = OwnerMirrorClientMessage::SubmitTurn {
+                request_id: Some(request_id.clone()),
+                session_id: self.summary.id,
+            };
+            self.send_owner_mirror_message(message, Some(request_id)).await?;
+
+            let mut composer = self.composer.write().await;
+            composer.text.clear();
+            composer.cursor = 0;
+            return Ok(());
+        }
+
         let text = {
             let composer = self.composer.read().await;
             composer.text.trim().to_string()
@@ -1064,16 +1407,124 @@ impl LiveSession {
             return Ok(());
         }
 
-        self.conversation
-            .submit(Op::UserInput {
-                items: vec![InputItem::Text { text }],
-                final_output_json_schema: None,
-            })
-            .await
-            .map_err(|err| format!("Failed to submit turn: {err}"))?;
+        if let Some(conversation) = &self.conversation {
+            conversation
+                .submit(Op::UserInput {
+                    items: vec![InputItem::Text { text }],
+                    final_output_json_schema: None,
+                })
+                .await
+                .map_err(|err| format!("Failed to submit turn: {err}"))?;
+        }
 
         self.set_composer(String::new(), 0, None).await;
         Ok(())
+    }
+
+    async fn interrupt_turn(&self) -> Result<(), String> {
+        if let Some(conversation) = &self.conversation {
+            conversation
+                .submit(Op::Interrupt)
+                .await
+                .map_err(|err| format!("Failed to interrupt turn: {err}"))?;
+            return Ok(());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let message = OwnerMirrorClientMessage::InterruptTurn {
+            request_id: Some(request_id.clone()),
+            session_id: self.summary.id,
+        };
+        self.send_owner_mirror_message(message, Some(request_id)).await
+    }
+
+    async fn exec_approval(
+        &self,
+        call_id: String,
+        turn_id: Option<String>,
+        decision: ReviewDecision,
+    ) -> Result<(), String> {
+        if let Some(conversation) = &self.conversation {
+            conversation
+                .submit(Op::ExecApproval {
+                    id: call_id,
+                    turn_id,
+                    decision,
+                })
+                .await
+                .map_err(|err| format!("Failed to submit exec approval: {err}"))?;
+            return Ok(());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let message = OwnerMirrorClientMessage::ExecApproval {
+            request_id: Some(request_id.clone()),
+            session_id: self.summary.id,
+            call_id,
+            turn_id,
+            decision: decision.into(),
+        };
+        self.send_owner_mirror_message(message, Some(request_id)).await
+    }
+
+    async fn patch_approval(&self, call_id: String, decision: ReviewDecision) -> Result<(), String> {
+        if let Some(conversation) = &self.conversation {
+            conversation
+                .submit(Op::PatchApproval {
+                    id: call_id,
+                    decision,
+                })
+                .await
+                .map_err(|err| format!("Failed to submit patch approval: {err}"))?;
+            return Ok(());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let message = OwnerMirrorClientMessage::PatchApproval {
+            request_id: Some(request_id.clone()),
+            session_id: self.summary.id,
+            call_id,
+            decision: decision.into(),
+        };
+        self.send_owner_mirror_message(message, Some(request_id)).await
+    }
+
+    async fn user_input_answer(
+        &self,
+        turn_id: String,
+        response: RequestUserInputResponse,
+    ) -> Result<(), String> {
+        if let Some(conversation) = &self.conversation {
+            conversation
+                .submit(Op::UserInputAnswer {
+                    id: turn_id,
+                    response,
+                })
+                .await
+                .map_err(|err| format!("Failed to submit request_user_input answer: {err}"))?;
+            return Ok(());
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let answers = response
+            .answers
+            .into_iter()
+            .map(|(question_id, answer)| {
+                (
+                    question_id,
+                    WebUserInputAnswer {
+                        answers: answer.answers,
+                    },
+                )
+            })
+            .collect();
+        let message = OwnerMirrorClientMessage::UserInputAnswer {
+            request_id: Some(request_id.clone()),
+            session_id: self.summary.id,
+            turn_id,
+            answers,
+        };
+        self.send_owner_mirror_message(message, Some(request_id)).await
     }
 
     async fn history_since(&self, from_seq: u64) -> Vec<SessionStreamItem> {
@@ -1142,11 +1593,192 @@ impl LiveSession {
             history.push(item.clone());
         }
 
+        self.next_stream_seq
+            .fetch_max(item.seq().saturating_add(1), Ordering::Relaxed);
+
         let _ = self.stream.send(item);
     }
 
     fn next_seq(&self) -> u64 {
         self.next_stream_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn run_owner_mirror_stream_once(&self, endpoint: &str) -> Result<(), String> {
+        let (socket, _) = connect_async(endpoint)
+            .await
+            .map_err(|err| format!("connect owner mirror websocket failed: {err}"))?;
+        let (mut writer, mut reader) = socket.split();
+        let from_seq = {
+            let history = self.history.read().await;
+            history.last().map_or(0, SessionStreamItem::seq)
+        };
+        let request_id = Uuid::new_v4().to_string();
+        let attach = OwnerMirrorClientMessage::AttachSession {
+            request_id: Some(request_id.clone()),
+            session_id: self.summary.id,
+            from_seq: Some(from_seq),
+        };
+        let attach_payload = serde_json::to_string(&attach)
+            .map_err(|err| format!("serialize owner mirror attach failed: {err}"))?;
+        writer
+            .send(MirrorWsMessage::Text(attach_payload.into()))
+            .await
+            .map_err(|err| format!("send owner mirror attach failed: {err}"))?;
+
+        loop {
+            let incoming = reader
+                .next()
+                .await
+                .ok_or_else(|| "owner mirror connection closed".to_string())?
+                .map_err(|err| format!("receive owner mirror payload failed: {err}"))?;
+            let text = match incoming {
+                MirrorWsMessage::Text(text) => text.to_string(),
+                MirrorWsMessage::Binary(_) => continue,
+                MirrorWsMessage::Ping(payload) => {
+                    writer
+                        .send(MirrorWsMessage::Pong(payload))
+                        .await
+                        .map_err(|err| format!("send owner mirror pong failed: {err}"))?;
+                    continue;
+                }
+                MirrorWsMessage::Pong(_) => continue,
+                MirrorWsMessage::Close(frame) => {
+                    let reason = frame
+                        .map(|close| close.reason.to_string())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "no close reason".to_string());
+                    return Err(format!("owner mirror closed connection ({reason})"));
+                }
+                MirrorWsMessage::Frame(_) => continue,
+            };
+
+            let parsed = serde_json::from_str::<OwnerMirrorServerMessage>(&text)
+                .map_err(|err| format!("decode owner mirror payload failed: {err}"))?;
+            match parsed {
+                OwnerMirrorServerMessage::Hello { client_id } => {
+                    let _ = client_id;
+                }
+                OwnerMirrorServerMessage::SessionAttached {
+                    session_id,
+                    from_seq,
+                    has_more_before,
+                    items,
+                } => {
+                    if session_id != self.summary.id {
+                        continue;
+                    }
+                    let _ = (from_seq, has_more_before);
+                    for item in items {
+                        self.push_item(item).await;
+                    }
+                }
+                OwnerMirrorServerMessage::SessionStream { item } => {
+                    if item.session_id() != self.summary.id {
+                        continue;
+                    }
+                    self.push_item(item).await;
+                }
+                OwnerMirrorServerMessage::SessionDetached { session_id } => {
+                    if session_id == self.summary.id {
+                        return Err("owner mirror detached session".to_string());
+                    }
+                }
+                OwnerMirrorServerMessage::Ack { request_id } => {
+                    let _ = request_id;
+                }
+                OwnerMirrorServerMessage::Error {
+                    request_id,
+                    message,
+                } => {
+                    let _ = request_id;
+                    return Err(format!("owner mirror error: {message}"));
+                }
+                OwnerMirrorServerMessage::Unknown => {}
+            }
+        }
+    }
+
+    async fn send_owner_mirror_message(
+        &self,
+        message: OwnerMirrorClientMessage,
+        expected_request_id: Option<String>,
+    ) -> Result<(), String> {
+        let endpoint = self
+            .owner_mirror_endpoint
+            .as_deref()
+            .ok_or_else(|| "owner mirror endpoint is not configured".to_string())?;
+        let (socket, _) = connect_async(endpoint)
+            .await
+            .map_err(|err| format!("connect owner mirror websocket failed: {err}"))?;
+        let (mut writer, mut reader) = socket.split();
+
+        let payload = serde_json::to_string(&message)
+            .map_err(|err| format!("serialize owner mirror command failed: {err}"))?;
+        writer
+            .send(MirrorWsMessage::Text(payload.into()))
+            .await
+            .map_err(|err| format!("send owner mirror command failed: {err}"))?;
+
+        let Some(expected_request_id) = expected_request_id else {
+            return Ok(());
+        };
+
+        let wait_for_ack = async {
+            loop {
+                let incoming = reader
+                    .next()
+                    .await
+                    .ok_or_else(|| "owner mirror command socket closed".to_string())?
+                    .map_err(|err| format!("receive owner mirror command response failed: {err}"))?;
+                let text = match incoming {
+                    MirrorWsMessage::Text(text) => text.to_string(),
+                    MirrorWsMessage::Binary(_) => continue,
+                    MirrorWsMessage::Ping(payload) => {
+                        writer
+                            .send(MirrorWsMessage::Pong(payload))
+                            .await
+                            .map_err(|err| format!("send owner mirror command pong failed: {err}"))?;
+                        continue;
+                    }
+                    MirrorWsMessage::Pong(_) => continue,
+                    MirrorWsMessage::Close(frame) => {
+                        let reason = frame
+                            .map(|close| close.reason.to_string())
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| "no close reason".to_string());
+                        return Err(format!("owner mirror command socket closed ({reason})"));
+                    }
+                    MirrorWsMessage::Frame(_) => continue,
+                };
+
+                let parsed = serde_json::from_str::<OwnerMirrorServerMessage>(&text)
+                    .map_err(|err| format!("decode owner mirror command payload failed: {err}"))?;
+                match parsed {
+                    OwnerMirrorServerMessage::Ack { request_id } => {
+                        if request_id.as_deref() == Some(expected_request_id.as_str()) {
+                            return Ok(());
+                        }
+                    }
+                    OwnerMirrorServerMessage::Error {
+                        request_id,
+                        message,
+                    } => {
+                        let request_prefix = request_id
+                            .map(|id| format!("request {id}: "))
+                            .unwrap_or_default();
+                        return Err(format!(
+                            "owner mirror command rejected: {request_prefix}{message}"
+                        ));
+                    }
+                    OwnerMirrorServerMessage::Unknown => {}
+                    _ => {}
+                }
+            }
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_ack)
+            .await
+            .map_err(|_| "timed out waiting for owner mirror command ack".to_string())?
     }
 }
 
@@ -1156,7 +1788,7 @@ struct ComposerState {
     cursor: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionStreamItem {
     CoreEvent {
@@ -1222,7 +1854,7 @@ fn is_duplicate_core_event(history: &[SessionStreamItem], candidate: &SessionStr
         })
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreEventPayload {
     id: String,
     event_seq: u64,
@@ -1231,7 +1863,7 @@ pub struct CoreEventPayload {
     payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebOrderMeta {
     request_ordinal: u64,
     output_index: Option<u32>,
@@ -1266,7 +1898,7 @@ fn map_web_user_input_answers(
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WebReviewDecision {
     Approved,
@@ -1286,6 +1918,17 @@ impl From<WebReviewDecision> for ReviewDecision {
     }
 }
 
+impl From<ReviewDecision> for WebReviewDecision {
+    fn from(value: ReviewDecision) -> Self {
+        match value {
+            ReviewDecision::Approved => WebReviewDecision::Approved,
+            ReviewDecision::ApprovedForSession => WebReviewDecision::ApprovedForSession,
+            ReviewDecision::Denied => WebReviewDecision::Denied,
+            ReviewDecision::Abort => WebReviewDecision::Abort,
+        }
+    }
+}
+
 struct RolloutSeedHistory {
     items: Vec<SessionStreamItem>,
     tail_cursor: RolloutTailCursor,
@@ -1295,6 +1938,7 @@ struct RolloutTailCursor {
     file_offset: u64,
     next_seq: u64,
     partial_line: Vec<u8>,
+    pending_tool_calls: HashMap<String, RolloutPendingToolCall>,
 }
 
 impl Default for RolloutTailCursor {
@@ -1303,8 +1947,16 @@ impl Default for RolloutTailCursor {
             file_offset: 0,
             next_seq: 1,
             partial_line: Vec::new(),
+            pending_tool_calls: HashMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct RolloutPendingToolCall {
+    name: String,
+    arguments: Option<serde_json::Value>,
+    arguments_raw: String,
 }
 
 async fn load_rollout_seed_history(session_id: Uuid, rollout_path: &Path) -> RolloutSeedHistory {
@@ -1337,6 +1989,7 @@ async fn read_rollout_tail_items(
         cursor.file_offset = 0;
         cursor.next_seq = 1;
         cursor.partial_line.clear();
+        cursor.pending_tool_calls.clear();
     }
 
     if file_len == cursor.file_offset && cursor.partial_line.is_empty() {
@@ -1400,7 +2053,12 @@ fn parse_rollout_tail_line(
         return;
     };
 
-    if let Some(item) = rollout_line_to_stream_item(session_id, cursor.next_seq, rollout_line) {
+    if let Some(item) = rollout_line_to_stream_item(
+        session_id,
+        cursor.next_seq,
+        rollout_line,
+        &mut cursor.pending_tool_calls,
+    ) {
         items.push(item);
         cursor.next_seq = cursor.next_seq.saturating_add(1);
     }
@@ -1410,6 +2068,7 @@ fn rollout_line_to_stream_item(
     session_id: Uuid,
     seq: u64,
     rollout_line: RolloutLine,
+    pending_tool_calls: &mut HashMap<String, RolloutPendingToolCall>,
 ) -> Option<SessionStreamItem> {
     match rollout_line.item {
         RolloutItem::Event(event) => {
@@ -1447,7 +2106,7 @@ fn rollout_line_to_stream_item(
             })
         }
         RolloutItem::ResponseItem(response_item) => {
-            let payload = response_item_seed_payload(response_item)?;
+            let payload = response_item_seed_payload(response_item, pending_tool_calls)?;
 
             Some(SessionStreamItem::CoreEvent {
                 session_id,
@@ -1465,41 +2124,96 @@ fn rollout_line_to_stream_item(
     }
 }
 
-fn response_item_seed_payload(item: ResponseItem) -> Option<serde_json::Value> {
-    let ResponseItem::Message {
-        role,
-        content,
-        ..
-    } = item
-    else {
-        return None;
-    };
+fn response_item_seed_payload(
+    item: ResponseItem,
+    pending_tool_calls: &mut HashMap<String, RolloutPendingToolCall>,
+) -> Option<serde_json::Value> {
+    match item {
+        ResponseItem::Message { role, content, .. } => {
+            let text = content
+                .into_iter()
+                .filter_map(|content_item| match content_item {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        Some(text)
+                    }
+                    ContentItem::InputImage { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
 
-    let text = content
-        .into_iter()
-        .filter_map(|content_item| match content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
-            ContentItem::InputImage { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
+            if text.is_empty() {
+                return None;
+            }
 
-    if text.is_empty() {
-        return None;
+            let payload_type = if role.eq_ignore_ascii_case("user") {
+                "user_message"
+            } else {
+                "agent_message"
+            };
+
+            Some(serde_json::json!({
+                "type": payload_type,
+                "message": text,
+            }))
+        }
+        ResponseItem::FunctionCall {
+            name,
+            arguments,
+            call_id,
+            ..
+        } => {
+            let parsed_arguments = serde_json::from_str::<serde_json::Value>(&arguments).ok();
+            pending_tool_calls.insert(
+                call_id.clone(),
+                RolloutPendingToolCall {
+                    name: name.clone(),
+                    arguments: parsed_arguments.clone(),
+                    arguments_raw: arguments.clone(),
+                },
+            );
+
+            let mut payload = serde_json::json!({
+                "type": "tool_call_begin",
+                "call_id": call_id,
+                "name": name,
+            });
+
+            if let Some(arguments) = parsed_arguments {
+                payload["arguments"] = arguments;
+            } else if !arguments.trim().is_empty() {
+                payload["arguments_raw"] = serde_json::Value::String(arguments);
+            }
+
+            Some(payload)
+        }
+        ResponseItem::FunctionCallOutput { call_id, output } => {
+            let pending = pending_tool_calls.remove(&call_id);
+            let output_text = output.body.to_text().unwrap_or_default();
+            let mut payload = serde_json::json!({
+                "type": "tool_call_end",
+                "call_id": call_id,
+                "output": output_text,
+            });
+
+            if let Some(success) = output.success {
+                payload["success"] = serde_json::json!(success);
+            }
+
+            if let Some(pending) = pending {
+                payload["name"] = serde_json::Value::String(pending.name);
+                if let Some(arguments) = pending.arguments {
+                    payload["arguments"] = arguments;
+                } else if !pending.arguments_raw.trim().is_empty() {
+                    payload["arguments_raw"] = serde_json::Value::String(pending.arguments_raw);
+                }
+            }
+
+            Some(payload)
+        }
+        _ => None,
     }
-
-    let payload_type = if role.eq_ignore_ascii_case("user") {
-        "user_message"
-    } else {
-        "agent_message"
-    };
-
-    Some(serde_json::json!({
-        "type": payload_type,
-        "message": text,
-    }))
 }
 
 fn parse_rfc3339_millis(value: &str) -> u64 {
@@ -1888,7 +2602,8 @@ fn compact_replay_role_and_message(item: &serde_json::Value) -> Option<(&'static
     }
 
     let response_item = serde_json::from_value::<ResponseItem>(item.clone()).ok()?;
-    let seed_payload = response_item_seed_payload(response_item)?;
+    let mut pending_tool_calls = HashMap::new();
+    let seed_payload = response_item_seed_payload(response_item, &mut pending_tool_calls)?;
     let role = match seed_payload.get("type").and_then(serde_json::Value::as_str) {
         Some("user_message") => "user",
         Some("agent_message") => "assistant",
@@ -2008,10 +2723,13 @@ fn parse_bearer_header(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::Duration;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message as TestWsMessage;
 
     use tokio::time::timeout;
 
@@ -2095,12 +2813,46 @@ mod tests {
         assert_eq!(parse_bearer_header("Bearer    "), None);
     }
 
+    #[test]
+    fn owner_mirror_endpoint_from_session_details_parses_ws_endpoint() {
+        let details = "(pid 9999, session abc, endpoint ws://127.0.0.1:45555/ws)";
+        let parsed = owner_mirror_endpoint_from_session_details(Some(details));
+        assert_eq!(parsed.as_deref(), Some("ws://127.0.0.1:45555/ws"));
+    }
+
+    #[test]
+    fn owner_mirror_endpoint_from_session_details_rejects_non_ws_endpoint() {
+        let details = "(pid 9999, endpoint http://127.0.0.1:45555/ws)";
+        let parsed = owner_mirror_endpoint_from_session_details(Some(details));
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn owner_mirror_server_message_unknown_variant_is_ignored() {
+        let raw = r#"{"type":"session_list","sessions":[]}"#;
+        let parsed: OwnerMirrorServerMessage =
+            serde_json::from_str(raw).expect("decode owner mirror server message");
+        assert!(matches!(parsed, OwnerMirrorServerMessage::Unknown));
+    }
+
     fn make_system_item(seq: u64) -> SessionStreamItem {
         SessionStreamItem::System {
             session_id: Uuid::nil(),
             seq,
             level: "info".to_string(),
             message: format!("payload-{seq}"),
+        }
+    }
+
+    fn make_session_summary(session_id: Uuid) -> SessionSummary {
+        SessionSummary {
+            id: session_id,
+            conversation_id: session_id.to_string(),
+            model: "GPT-5".to_string(),
+            cwd: "/tmp".to_string(),
+            created_at_unix_ms: 0,
+            last_event_at_unix_ms: 0,
+            title: None,
         }
     }
 
@@ -2162,6 +2914,30 @@ mod tests {
                 content,
                 end_turn: None,
                 phase: None,
+            }),
+        }
+    }
+
+    fn function_call_rollout_line(name: &str, call_id: &str, arguments: &str) -> RolloutLine {
+        RolloutLine {
+            timestamp: "2026-02-15T00:00:00Z".to_string(),
+            item: RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                id: None,
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+                call_id: call_id.to_string(),
+            }),
+        }
+    }
+
+    fn function_call_output_rollout_line(call_id: &str, output: &str) -> RolloutLine {
+        RolloutLine {
+            timestamp: "2026-02-15T00:00:01Z".to_string(),
+            item: RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
+                call_id: call_id.to_string(),
+                output: code_protocol::models::FunctionCallOutputPayload::from_text(
+                    output.to_string(),
+                ),
             }),
         }
     }
@@ -2455,6 +3231,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_mirror_stream_replays_and_streams_into_history() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test owner mirror listener");
+        let addr = listener.local_addr().expect("local addr");
+        let endpoint = format!("ws://{addr}");
+        let session_id = Uuid::new_v4();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            let ws = accept_async(stream).await.expect("accept websocket");
+            let (mut writer, mut reader) = ws.split();
+
+            let incoming = reader
+                .next()
+                .await
+                .expect("attach request frame")
+                .expect("attach request payload");
+            let text = match incoming {
+                TestWsMessage::Text(text) => text.to_string(),
+                other => panic!("unexpected attach frame: {other:?}"),
+            };
+            let request: serde_json::Value =
+                serde_json::from_str(&text).expect("decode attach request json");
+            assert_eq!(request["type"], "attach_session");
+            assert_eq!(request["session_id"], session_id.to_string());
+            let request_id = request["request_id"]
+                .as_str()
+                .map(|value| value.to_string())
+                .expect("request id");
+
+            let hello = serde_json::json!({
+                "type": "hello",
+                "client_id": "owner-1"
+            });
+            writer
+                .send(TestWsMessage::Text(hello.to_string().into()))
+                .await
+                .expect("send hello");
+
+            let replay_item = SessionStreamItem::System {
+                session_id,
+                seq: 1,
+                level: "info".to_string(),
+                message: "replay".to_string(),
+            };
+            let attached = serde_json::json!({
+                "type": "session_attached",
+                "session_id": session_id,
+                "from_seq": 0,
+                "has_more_before": false,
+                "items": [replay_item],
+            });
+            writer
+                .send(TestWsMessage::Text(attached.to_string().into()))
+                .await
+                .expect("send session attached");
+
+            let ack = serde_json::json!({
+                "type": "ack",
+                "request_id": request_id,
+            });
+            writer
+                .send(TestWsMessage::Text(ack.to_string().into()))
+                .await
+                .expect("send ack");
+
+            let live_item = SessionStreamItem::System {
+                session_id,
+                seq: 2,
+                level: "info".to_string(),
+                message: "live".to_string(),
+            };
+            let stream_event = serde_json::json!({
+                "type": "session_stream",
+                "item": live_item,
+            });
+            writer
+                .send(TestWsMessage::Text(stream_event.to_string().into()))
+                .await
+                .expect("send stream event");
+
+            let _ = writer.send(TestWsMessage::Close(None)).await;
+        });
+
+        let session = LiveSession::new_owner_mirror(make_session_summary(session_id), endpoint, Vec::new());
+        let stream_result = session.run_owner_mirror_stream_once(
+            session
+                .owner_mirror_endpoint
+                .as_deref()
+                .expect("owner mirror endpoint"),
+        )
+        .await;
+        assert!(stream_result.is_err(), "closing websocket should end stream loop");
+        server.await.expect("join owner mirror server task");
+
+        let history = session.history.read().await;
+        let seqs: Vec<u64> = history.iter().map(SessionStreamItem::seq).collect();
+        assert_eq!(seqs, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn owner_mirror_submit_turn_forwards_command_with_ack() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test owner mirror listener");
+        let addr = listener.local_addr().expect("local addr");
+        let endpoint = format!("ws://{addr}");
+        let session_id = Uuid::new_v4();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            let ws = accept_async(stream).await.expect("accept websocket");
+            let (mut writer, mut reader) = ws.split();
+
+            let incoming = reader
+                .next()
+                .await
+                .expect("submit request frame")
+                .expect("submit request payload");
+            let text = match incoming {
+                TestWsMessage::Text(text) => text.to_string(),
+                other => panic!("unexpected submit frame: {other:?}"),
+            };
+            let request: serde_json::Value =
+                serde_json::from_str(&text).expect("decode submit request json");
+            assert_eq!(request["type"], "submit_turn");
+            assert_eq!(request["session_id"], session_id.to_string());
+
+            let request_id = request["request_id"]
+                .as_str()
+                .map(|value| value.to_string())
+                .expect("submit request id");
+            let ack = serde_json::json!({
+                "type": "ack",
+                "request_id": request_id,
+            });
+            writer
+                .send(TestWsMessage::Text(ack.to_string().into()))
+                .await
+                .expect("send submit ack");
+
+            let _ = writer.send(TestWsMessage::Close(None)).await;
+        });
+
+        let session = LiveSession::new_owner_mirror(make_session_summary(session_id), endpoint, Vec::new());
+        session.submit_turn().await.expect("submit turn forwarded");
+        server.await.expect("join submit owner mirror task");
+    }
+
+    #[tokio::test]
     async fn session_forwarder_uses_from_seq_high_water_when_replay_is_empty() {
         let (stream_tx, stream_rx) = broadcast::channel(16);
         let (out_tx, mut out_rx) = mpsc::channel(16);
@@ -2572,6 +3499,58 @@ mod tests {
             .await
             .expect("empty poll");
         assert!(none.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rollout_tail_parser_maps_function_call_response_items_to_tool_events() {
+        let path = make_temp_rollout_path();
+        let session_id = Uuid::new_v4();
+
+        append_rollout_line(
+            &path,
+            &function_call_rollout_line(
+                "shell",
+                "call_abc",
+                r#"{"command":["echo","hello"]}"#,
+            ),
+        );
+        append_rollout_line(
+            &path,
+            &function_call_output_rollout_line(
+                "call_abc",
+                r#"{"output":"hello\n","metadata":{"exit_code":0}}"#,
+            ),
+        );
+
+        let mut cursor = RolloutTailCursor::default();
+        let items = read_rollout_tail_items(session_id, &path, &mut cursor)
+            .await
+            .expect("load seeded tool events");
+        assert_eq!(items.len(), 2);
+
+        match &items[0] {
+            SessionStreamItem::CoreEvent { event, .. } => {
+                assert_eq!(event.payload["type"], serde_json::json!("tool_call_begin"));
+                assert_eq!(event.payload["name"], serde_json::json!("shell"));
+                assert_eq!(
+                    event.payload["arguments"]["command"][0],
+                    serde_json::json!("echo")
+                );
+            }
+            other => panic!("unexpected first seeded item: {other:?}"),
+        }
+
+        match &items[1] {
+            SessionStreamItem::CoreEvent { event, .. } => {
+                assert_eq!(event.payload["type"], serde_json::json!("tool_call_end"));
+                assert_eq!(event.payload["name"], serde_json::json!("shell"));
+                let output = event.payload["output"].as_str().unwrap_or_default();
+                assert!(output.contains("hello"));
+            }
+            other => panic!("unexpected second seeded item: {other:?}"),
+        }
 
         let _ = std::fs::remove_file(path);
     }
