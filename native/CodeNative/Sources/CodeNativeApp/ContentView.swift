@@ -258,8 +258,8 @@ struct ContentView: View {
     @AppStorage("code_native_auto_submit_voice") private var autoSubmitVoice = true
     @AppStorage("code_native_show_activity_events") private var showActivityEvents = true
     @AppStorage("code_native_ide_context_enabled") private var ideContextEnabled = true
-    @AppStorage("code_native_selected_model") private var selectedModel = "GPT-5.3-Codex"
-    @AppStorage("code_native_reasoning_level") private var selectedReasoningLevel = "High"
+    @AppStorage("code_native_selected_model") private var selectedModel = WorkflowSettings.defaultModelLabel
+    @AppStorage("code_native_reasoning_level") private var selectedReasoningLevel = WorkflowSettings.defaultReasoningLabel
     @AppStorage("code_native_sandbox_mode") private var selectedSandboxMode = "Local"
     @AppStorage("code_native_approval_policy") private var selectedApprovalPolicy = "On request"
     @AppStorage("code_native_default_session_ide") private var defaultSessionIDERaw = SessionIDESelection.systemDefault.rawValue
@@ -278,14 +278,17 @@ struct ContentView: View {
     @State private var taskActivityByStartItemID: [String: [String]] = [:]
     @State private var transcriptCacheBySessionID: [UUID: TranscriptSessionCacheEntry] = [:]
     @State private var transcriptCacheUsageOrder: [UUID] = []
+    @State private var transcriptRefreshTask: Task<Void, Never>?
     @State private var pendingPrependAnchorItemID: String?
     @State private var pendingBottomScrollAfterThreadSwitch = false
+    @State private var pendingBottomPinPassesAfterThreadSwitch = 0
     @State private var transcriptIsNearBottom = true
     @State private var transcriptUserHasScrolled = false
     @State private var composerDraft = ""
     @State private var composerMeasuredHeight: CGFloat = 34
     @State private var showSlashCommandLauncher = false
     @State private var slashCommandQuery = ""
+    @State private var slashLauncherOpenedByTyping = false
     @State private var showContextPicker = false
     @State private var contextPickerQuery = ""
     @State private var selectedInlineContextPath: String?
@@ -298,10 +301,44 @@ struct ContentView: View {
     private let transcriptBottomAnchor = "transcript.bottom"
     private let transcriptScrollCoordinateSpaceName = "transcript.scroll"
     private let transcriptSessionCacheLimit = 6
-    private let modelOptions = WorkflowSettings.modelOptions
-    private let reasoningOptions = WorkflowSettings.reasoningOptions
+    private let transcriptRefreshDebounceNanoseconds: UInt64 = 45_000_000
     private let sandboxOptions = WorkflowSettings.sandboxOptions
     private let approvalPolicyOptions = WorkflowSettings.approvalPolicyOptions
+
+    private struct ModelPickerOption: Hashable {
+        let model: String
+        let label: String
+        let defaultReasoningEffort: String
+        let supportedReasoningEfforts: [String]
+    }
+
+    private struct ReasoningPickerOption: Hashable {
+        let effort: String
+        let label: String
+    }
+
+    private var modelPickerOptions: [ModelPickerOption] {
+        availableModelPickerOptions()
+    }
+
+    private var modelOptions: [String] {
+        modelPickerOptions.map(\.label)
+    }
+
+    private var selectedModelPickerOption: ModelPickerOption? {
+        modelPickerOptions.first(where: {
+            $0.label.caseInsensitiveCompare(selectedModel) == .orderedSame
+                || $0.model.caseInsensitiveCompare(selectedModel) == .orderedSame
+        })
+    }
+
+    private var reasoningPickerOptions: [ReasoningPickerOption] {
+        availableReasoningPickerOptions(for: selectedModelPickerOption)
+    }
+
+    private var reasoningOptions: [String] {
+        reasoningPickerOptions.map(\.label)
+    }
 
     private var selectedMultilineBehavior: MultilineBehavior {
         MultilineBehavior(rawValue: multilineBehaviorRaw) ?? .enter
@@ -530,10 +567,10 @@ struct ContentView: View {
     }
 
     private var compactComposerConfigLabel: String {
-        let compactModel = selectedModel
+        let compactModel = selectedModelDisplayLabel
             .replacingOccurrences(of: "-Codex", with: "")
             .replacingOccurrences(of: "-Mini", with: "")
-        return "\(compactModel) · \(selectedReasoningLevel)"
+        return "\(compactModel) · \(selectedReasoningDisplayLabel)"
     }
 
     private var usesExpandedTopTitle: Bool {
@@ -989,7 +1026,10 @@ struct ContentView: View {
             #endif
         }
         .onChange(of: selectedSessionTranscriptSourceKey) { _, _ in
-            refreshTranscriptCache()
+            scheduleTranscriptCacheRefresh(
+                delayNanoseconds: transcriptRefreshDebounceNanoseconds,
+                preserveBottomPin: true
+            )
             handleAssistantSpeech()
             enforceVoiceCapturePolicy(clearTranscript: true)
             if let activeTranscriptItemID,
@@ -1009,6 +1049,7 @@ struct ContentView: View {
             voiceOutput.stop()
         }
         .onChange(of: store.selectedSessionID) { _, _ in
+            enforceIDEContextEnabled()
             if voiceInput.isRecording {
                 stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
             }
@@ -1017,9 +1058,10 @@ struct ContentView: View {
             transcriptIsNearBottom = true
             transcriptUserHasScrolled = false
             pendingBottomScrollAfterThreadSwitch = true
+            pendingBottomPinPassesAfterThreadSwitch = 3
             composerDraft = store.composerText
-            refreshTranscriptCache()
-            ensureContextIndexLoaded(forceReload: true)
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+            ensureContextIndexLoaded()
             #if os(iOS)
             showThreadPicker = false
             #else
@@ -1036,10 +1078,29 @@ struct ContentView: View {
             }
         }
         .onChange(of: composerDraft) { _, newValue in
-            if ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
+            if ideContextEnabled,
+               ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
                 ensureContextIndexLoaded()
             }
             syncInlineContextSelection()
+            syncSlashCommandLauncher(with: newValue)
+        }
+        .onChange(of: showSlashCommandLauncher) { _, isPresented in
+            if !isPresented {
+                slashLauncherOpenedByTyping = false
+            }
+        }
+        .onChange(of: ideContextEnabled) { _, isEnabled in
+            if isEnabled {
+                return
+            }
+
+            indexedContextRootPath = nil
+            indexedContextFilePaths = []
+            contextIndexLoading = false
+            selectedInlineContextPath = nil
+            contextPickerQuery = ""
+            showContextPicker = false
         }
         .onChange(of: displayedInlineContextPaths) { _, _ in
             syncInlineContextSelection()
@@ -1050,7 +1111,7 @@ struct ContentView: View {
         }
         .onChange(of: showActivityEvents) { _, _ in
             clearTranscriptSessionCaches()
-            refreshTranscriptCache()
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
         }
         .onChange(of: store.connectionState) { _, newState in
             if newState != .connected {
@@ -1066,23 +1127,27 @@ struct ContentView: View {
         }
         #endif
         .onDisappear {
+            transcriptRefreshTask?.cancel()
+            transcriptRefreshTask = nil
             stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
             voiceOutput.stop()
         }
         #if os(macOS)
         .onAppear {
+            enforceIDEContextEnabled()
             composerDraft = store.composerText
-            refreshTranscriptCache()
-            ensureContextIndexLoaded(forceReload: true)
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+            ensureContextIndexLoaded()
             normalizeWorkflowSettings()
             pruneSessionIDEPreferences()
             focusComposerEditor(forceActivateApp: true)
         }
         #else
         .onAppear {
+            enforceIDEContextEnabled()
             composerDraft = store.composerText
-            refreshTranscriptCache()
-            ensureContextIndexLoaded(forceReload: true)
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+            ensureContextIndexLoaded()
             normalizeWorkflowSettings()
             pruneSessionIDEPreferences()
         }
@@ -1118,6 +1183,8 @@ struct ContentView: View {
             multilineBehaviorRaw: $multilineBehaviorRaw,
             showActivityEvents: $showActivityEvents,
             ideContextEnabled: $ideContextEnabled,
+            modelOptions: modelOptions,
+            reasoningOptions: reasoningOptions,
             selectedModel: $selectedModel,
             selectedReasoningLevel: $selectedReasoningLevel,
             selectedSandboxMode: $selectedSandboxMode,
@@ -1145,7 +1212,7 @@ struct ContentView: View {
                     accessibilityID: "rail.new-thread"
                 ) {
                     Task {
-                        await store.createSession(cwd: nil)
+                        await createSessionWithCurrentWorkflowSettings()
                     }
                 }
                 #if os(macOS)
@@ -1216,7 +1283,7 @@ struct ContentView: View {
                             if threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 Button("Create first thread") {
                                     Task {
-                                        await store.createSession(cwd: nil)
+                                        await createSessionWithCurrentWorkflowSettings()
                                     }
                                 }
                                 .buttonStyle(.borderedProminent)
@@ -1698,7 +1765,7 @@ struct ContentView: View {
     private func topBarQuickActionMenuItems(includeNavigationItems: Bool) -> some View {
         Button {
             Task {
-                await store.createSession(cwd: nil)
+                await createSessionWithCurrentWorkflowSettings()
             }
         } label: {
             Label("New thread", systemImage: "square.and.pencil")
@@ -1892,6 +1959,7 @@ struct ContentView: View {
                     DragGesture(minimumDistance: 4)
                         .onChanged { _ in
                             transcriptUserHasScrolled = true
+                            pendingBottomPinPassesAfterThreadSwitch = 0
                         }
                 )
                 .onPreferenceChange(TranscriptBottomOffsetPreferenceKey.self) { bottomOffset in
@@ -1903,6 +1971,7 @@ struct ContentView: View {
                 .onChange(of: store.selectedSessionID) { _, _ in
                     pendingPrependAnchorItemID = nil
                     pendingBottomScrollAfterThreadSwitch = true
+                    pendingBottomPinPassesAfterThreadSwitch = 3
                 }
                 .onChange(of: transcriptTailIdentity) { _, _ in
                     if pendingPrependAnchorItemID != nil {
@@ -1915,11 +1984,20 @@ struct ContentView: View {
 
                     if pendingBottomScrollAfterThreadSwitch {
                         pendingBottomScrollAfterThreadSwitch = false
+                        pendingBottomPinPassesAfterThreadSwitch = max(pendingBottomPinPassesAfterThreadSwitch, 2)
                         scrollTranscriptToBottom(proxy: proxy, animated: false)
                         return
                     }
 
-                    scrollTranscriptToBottom(proxy: proxy, animated: true)
+                    if pendingBottomPinPassesAfterThreadSwitch > 0 {
+                        pendingBottomPinPassesAfterThreadSwitch -= 1
+                        scrollTranscriptToBottom(proxy: proxy, animated: false)
+                        return
+                    }
+
+                    if transcriptIsNearBottom || !transcriptUserHasScrolled {
+                        scrollTranscriptToBottom(proxy: proxy, animated: true)
+                    }
                 }
                 .onChange(of: transcriptItems.first?.id) { _, newFirstID in
                     guard let anchorID = pendingPrependAnchorItemID,
@@ -2056,6 +2134,33 @@ struct ContentView: View {
         return transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID)
     }
 
+    private func scheduleTranscriptCacheRefresh(
+        delayNanoseconds: UInt64,
+        preserveBottomPin: Bool
+    ) {
+        transcriptRefreshTask?.cancel()
+        transcriptRefreshTask = Task { @MainActor in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            refreshTranscriptCache()
+
+            if !preserveBottomPin {
+                pendingBottomPinPassesAfterThreadSwitch = max(
+                    pendingBottomPinPassesAfterThreadSwitch,
+                    pendingBottomScrollAfterThreadSwitch ? 3 : 0
+                )
+            }
+
+            transcriptRefreshTask = nil
+        }
+    }
+
     private func refreshTranscriptCache() {
         guard let sessionID = store.selectedSessionID,
               let sourceKey = transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID)
@@ -2080,11 +2185,19 @@ struct ContentView: View {
         let taskMerged = mergeTaskActivityIntoTaskCards(in: replayPruned)
         let reducedItems = dedupeAssistantMessagesWithinTurn(
             in: collapseConsecutiveReasoningCards(
-                in: collapseStreamingDeltaCards(
-                    in: dedupeObsoleteBackgroundEvents(
-                        in: collapseTokenUsageBursts(
-                            in: removeRedundantPatchSummaries(
-                                from: dedupeObsoletePatchApplyCards(in: dedupeObsoleteDiffs(in: taskMerged.items))
+                in: collapseLegacyExecLifecycleCards(
+                    in: collapseExecOutputDeltaCards(
+                        in: collapseStreamingDeltaCards(
+                            in: dedupeToolCallLifecycleCards(
+                                in: dedupeObsoleteBackgroundEvents(
+                                    in: collapseTokenUsageBursts(
+                                        in: removeRedundantPatchSummaries(
+                                            from: dedupeObsoletePatchApplyCards(
+                                                in: removeTrailingDiffCardsAfterAssistant(in: dedupeObsoleteDiffs(in: taskMerged.items))
+                                            )
+                                        )
+                                    )
+                                )
                             )
                         )
                     )
@@ -2104,12 +2217,302 @@ struct ContentView: View {
         )
     }
 
+    private func dedupeToolCallLifecycleCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return items
+        }
+
+        let completedToolIdentities = Set(
+            items.compactMap { item -> String? in
+                guard let info = item.toolCallInfo,
+                      info.phase == .completed
+                else {
+                    return nil
+                }
+
+                return toolCallIdentity(for: info)
+            }
+        )
+
+        var result: [SessionStreamItem] = []
+        result.reserveCapacity(items.count)
+        var completedIndexByIdentity: [String: Int] = [:]
+
+        for item in items {
+            guard let info = item.toolCallInfo,
+                  let identity = toolCallIdentity(for: info)
+            else {
+                result.append(item)
+                continue
+            }
+
+            if info.phase == .started,
+               completedToolIdentities.contains(identity) {
+                continue
+            }
+
+            if info.phase == .completed,
+               let existingIndex = completedIndexByIdentity[identity],
+               let existingInfo = result[existingIndex].toolCallInfo,
+               existingInfo.phase == .completed {
+                if toolCallInfoQualityScore(info) > toolCallInfoQualityScore(existingInfo) {
+                    result[existingIndex] = item
+                }
+                continue
+            }
+
+            if info.phase == .completed {
+                completedIndexByIdentity[identity] = result.count
+            }
+
+            result.append(item)
+        }
+
+        return result
+    }
+
+    private func collapseExecOutputDeltaCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return items
+        }
+
+        let completedCallIDs = Set(
+            items.compactMap { item -> String? in
+                guard item.corePayloadType == "exec_command_end" else {
+                    return nil
+                }
+                return item.execCommandCallID
+            }
+        )
+
+        var result: [SessionStreamItem] = []
+        result.reserveCapacity(items.count)
+        var latestDeltaIndexByCallID: [String: Int] = [:]
+
+        func removeDeltaCard(for callID: String) {
+            guard let index = latestDeltaIndexByCallID.removeValue(forKey: callID),
+                  result.indices.contains(index) else {
+                return
+            }
+
+            result.remove(at: index)
+            for (existingCallID, existingIndex) in latestDeltaIndexByCallID {
+                if existingIndex > index {
+                    latestDeltaIndexByCallID[existingCallID] = existingIndex - 1
+                }
+            }
+        }
+
+        for item in items {
+            if let delta = item.execCommandOutputDeltaInfo {
+                if completedCallIDs.contains(delta.callId) {
+                    continue
+                }
+
+                if let existingIndex = latestDeltaIndexByCallID[delta.callId],
+                   result.indices.contains(existingIndex) {
+                    result[existingIndex] = item
+                } else {
+                    latestDeltaIndexByCallID[delta.callId] = result.count
+                    result.append(item)
+                }
+                continue
+            }
+
+            if item.corePayloadType == "exec_command_end",
+               let callID = item.execCommandCallID {
+                removeDeltaCard(for: callID)
+            }
+
+            result.append(item)
+        }
+
+        return result
+    }
+
+    private func collapseLegacyExecLifecycleCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        guard !items.isEmpty else {
+            return items
+        }
+
+        var result: [SessionStreamItem] = []
+        result.reserveCapacity(items.count)
+        var pendingBeginIndexesBySignature: [String: [Int]] = [:]
+        var pendingBeginIndexesInOrder: [Int] = []
+
+        func shiftPendingIndexes(afterRemovedAt removedIndex: Int) {
+            for (signature, indexes) in pendingBeginIndexesBySignature {
+                let shifted = indexes.compactMap { index -> Int? in
+                    if index == removedIndex {
+                        return nil
+                    }
+                    return index > removedIndex ? index - 1 : index
+                }
+                if shifted.isEmpty {
+                    pendingBeginIndexesBySignature.removeValue(forKey: signature)
+                } else {
+                    pendingBeginIndexesBySignature[signature] = shifted
+                }
+            }
+
+            pendingBeginIndexesInOrder = pendingBeginIndexesInOrder.compactMap { index -> Int? in
+                if index == removedIndex {
+                    return nil
+                }
+                return index > removedIndex ? index - 1 : index
+            }
+        }
+
+        for item in items {
+            if item.corePayloadType == "exec_command_begin",
+               item.execCommandCallID == nil {
+                let beginIndex = result.count
+                if let signature = execCommandSignatureWithoutCallID(for: item) {
+                    pendingBeginIndexesBySignature[signature, default: []].append(beginIndex)
+                }
+                pendingBeginIndexesInOrder.append(beginIndex)
+                result.append(item)
+                continue
+            }
+
+            if item.corePayloadType == "exec_command_end",
+               item.execCommandCallID == nil {
+                var beginIndex: Int?
+
+                if let signature = execCommandSignatureWithoutCallID(for: item),
+                   var pendingIndexes = pendingBeginIndexesBySignature[signature],
+                   let signatureIndex = pendingIndexes.popLast() {
+                    beginIndex = signatureIndex
+                    if pendingIndexes.isEmpty {
+                        pendingBeginIndexesBySignature.removeValue(forKey: signature)
+                    } else {
+                        pendingBeginIndexesBySignature[signature] = pendingIndexes
+                    }
+                }
+
+                if beginIndex == nil {
+                    beginIndex = pendingBeginIndexesInOrder.popLast()
+                }
+
+                if let beginIndex {
+                    pendingBeginIndexesInOrder.removeAll(where: { $0 == beginIndex })
+
+                    if result.indices.contains(beginIndex) {
+                        result.remove(at: beginIndex)
+                        shiftPendingIndexes(afterRemovedAt: beginIndex)
+                    }
+
+                    result.append(item)
+                    continue
+                }
+            }
+
+            result.append(item)
+        }
+
+        return result
+    }
+
+    private func execCommandSignatureWithoutCallID(for item: SessionStreamItem) -> String? {
+        guard let payloadObject = item.event?.payload?.objectValue,
+              let commandValue = payloadObject["command"]
+        else {
+            return nil
+        }
+
+        switch commandValue {
+        case .array(let values):
+            let parts = values
+                .compactMap { $0.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !parts.isEmpty else {
+                return nil
+            }
+            return parts.joined(separator: " ")
+        case .string(let command):
+            let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        default:
+            return nil
+        }
+    }
+
+    private func toolCallInfoQualityScore(_ info: ToolCallInfo) -> Int {
+        var score = 0
+        if !info.command.isEmpty {
+            score += 4
+        }
+        let normalizedName = info.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedName != "tool" && normalizedName != "." && !normalizedName.isEmpty {
+            score += 3
+        }
+        if !info.arguments.isEmpty {
+            score += 2
+        }
+        if !info.output.isEmpty {
+            score += 1
+        }
+        if info.success != nil {
+            score += 1
+        }
+        return score
+    }
+
+    private func toolCallIdentity(for info: ToolCallInfo) -> String? {
+        if let callId = info.callId,
+           !callId.isEmpty {
+            return "call:\(callId)"
+        }
+
+        let normalizedName = info.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedName == "shell" {
+            // Legacy exec begin/end records can be missing call_id. Avoid
+            // command-only identities here so repeated shell commands do not
+            // collapse into one card across a turn.
+            return nil
+        }
+
+        let normalizedCommand = info.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedCommand.isEmpty {
+            return "cmd:\(info.name.lowercased())|\(normalizedCommand)"
+        }
+
+        guard !info.arguments.isEmpty else {
+            return nil
+        }
+
+        let argumentSignature = info.arguments
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "|")
+        if argumentSignature.isEmpty {
+            return nil
+        }
+
+        return "args:\(info.name.lowercased())|\(argumentSignature)"
+    }
+
     private func shouldIncludeInTranscript(_ item: SessionStreamItem) -> Bool {
+        if !showActivityEvents {
+            // "Activity off" should feel like chat-only mode: keep only real
+            // conversation turns and hide tool/system chatter.
+            if item.assistantMessageText != nil || item.isAssistantDeltaEvent {
+                return true
+            }
+
+            if let userText = item.userMessageText,
+               !userText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !item.isImagePlaceholderUserMessage {
+                return true
+            }
+
+            return false
+        }
+
         if !item.shouldHideFromTranscript {
             return true
         }
 
-        return showActivityEvents && item.isOptionalActivityEvent
+        return item.isOptionalActivityEvent
     }
 
     private func pruneReplayHistoryCardsWhenRedundant(in items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -2165,34 +2568,7 @@ struct ContentView: View {
     }
 
     private func dedupeAssistantMessagesWithinTurn(in items: [SessionStreamItem]) -> [SessionStreamItem] {
-        guard !items.isEmpty else {
-            return items
-        }
-
-        var seenAssistantBodies: Set<String> = []
-        var keptReversed: [SessionStreamItem] = []
-        keptReversed.reserveCapacity(items.count)
-
-        for item in items.reversed() {
-            if item.userMessageText != nil {
-                seenAssistantBodies.removeAll(keepingCapacity: true)
-                keptReversed.append(item)
-                continue
-            }
-
-            if let currentSignature = assistantMessageSignature(for: item),
-               seenAssistantBodies.contains(currentSignature) {
-                continue
-            }
-
-            if let currentSignature = assistantMessageSignature(for: item) {
-                seenAssistantBodies.insert(currentSignature)
-            }
-
-            keptReversed.append(item)
-        }
-
-        return keptReversed.reversed()
+        dedupeAssistantMessagesWithinTurnItems(items)
     }
 
     private func collapseStreamingDeltaCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -2299,19 +2675,6 @@ struct ContentView: View {
             level: base.level,
             message: base.message
         )
-    }
-
-    private func assistantMessageSignature(for item: SessionStreamItem) -> String? {
-        guard item.cardStyle == .assistant else {
-            return nil
-        }
-
-        let normalized = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else {
-            return nil
-        }
-
-        return normalized
     }
 
     private func removeRedundantPatchSummaries(from items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -2546,6 +2909,52 @@ struct ContentView: View {
         return keptReversed.reversed()
     }
 
+    private func removeTrailingDiffCardsAfterAssistant(in items: [SessionStreamItem]) -> [SessionStreamItem] {
+        func trimmedSegment(_ segment: [SessionStreamItem]) -> [SessionStreamItem] {
+            guard !segment.isEmpty else {
+                return segment
+            }
+
+            var trailingDiffStart = segment.count
+            while trailingDiffStart > 0,
+                  segment[trailingDiffStart - 1].turnDiffText != nil {
+                trailingDiffStart -= 1
+            }
+
+            guard trailingDiffStart < segment.count else {
+                return segment
+            }
+
+            let hasAssistantBeforeTrailingDiff = segment[..<trailingDiffStart]
+                .contains(where: { $0.assistantMessageText != nil })
+            if hasAssistantBeforeTrailingDiff {
+                return Array(segment[..<trailingDiffStart])
+            }
+
+            return segment
+        }
+
+        var result: [SessionStreamItem] = []
+        result.reserveCapacity(items.count)
+
+        var segment: [SessionStreamItem] = []
+        segment.reserveCapacity(64)
+
+        for item in items {
+            if item.isConversationBoundaryEvent {
+                result.append(contentsOf: trimmedSegment(segment))
+                segment.removeAll(keepingCapacity: true)
+                result.append(item)
+                continue
+            }
+
+            segment.append(item)
+        }
+
+        result.append(contentsOf: trimmedSegment(segment))
+        return result
+    }
+
     private func normalizedDiffSignature(_ diff: String) -> String {
         let lines = diff.components(separatedBy: "\n")
         var payloadLines: [String] = []
@@ -2671,7 +3080,7 @@ struct ContentView: View {
 
             Button("Start a new thread") {
                 Task {
-                    await store.createSession(cwd: nil)
+                    await createSessionWithCurrentWorkflowSettings()
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -2947,6 +3356,7 @@ struct ContentView: View {
                             ForEach(modelOptions, id: \.self) { option in
                                 Button(option) {
                                     selectedModel = option
+                                    selectedReasoningLevel = normalizedReasoningSelection(current: selectedReasoningLevel)
                                 }
                             }
                         }
@@ -2967,10 +3377,11 @@ struct ContentView: View {
                         ForEach(modelOptions, id: \.self) { option in
                             Button(option) {
                                 selectedModel = option
+                                selectedReasoningLevel = normalizedReasoningSelection(current: selectedReasoningLevel)
                             }
                         }
                     } label: {
-                        Label(selectedModel, systemImage: "chevron.down")
+                        Label(selectedModelDisplayLabel, systemImage: "chevron.down")
                     }
                     .menuStyle(.borderlessButton)
 
@@ -2981,16 +3392,18 @@ struct ContentView: View {
                             }
                         }
                     } label: {
-                        Label("Reasoning: \(selectedReasoningLevel)", systemImage: "chevron.down")
+                        Label("Reasoning: \(selectedReasoningDisplayLabel)", systemImage: "chevron.down")
                     }
                     .menuStyle(.borderlessButton)
                 }
 
                 if isCompactPhoneLayout {
                     Button {
+                        slashLauncherOpenedByTyping = false
+                        slashCommandQuery = ""
                         showSlashCommandLauncher = true
                     } label: {
-                        Image(systemName: "command")
+                        Image(systemName: "slash")
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.plain)
@@ -3001,6 +3414,9 @@ struct ContentView: View {
                     .accessibilityLabel("Slash commands")
 
                     Button {
+                        guard ideContextEnabled else {
+                            return
+                        }
                         ensureContextIndexLoaded()
                         showContextPicker = true
                     } label: {
@@ -3013,6 +3429,7 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.05), in: Circle())
                     .accessibilityIdentifier("composer.context")
                     .accessibilityLabel("Insert context reference")
+                    .disabled(!ideContextEnabled)
 
                     Spacer(minLength: 6)
 
@@ -3092,19 +3509,31 @@ struct ContentView: View {
                     .accessibilityLabel("Send message")
                 } else {
                     Button {
+                        slashLauncherOpenedByTyping = false
+                        slashCommandQuery = ""
                         showSlashCommandLauncher = true
                     } label: {
-                        Label("Slash", systemImage: "command")
+                        Label("Slash", systemImage: "slash")
                     }
                     .buttonStyle(.plain)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                    .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
                     .accessibilityIdentifier("composer.slash")
+                    #if os(macOS)
+                    .keyboardShortcut("k", modifiers: [.command])
+                    #endif
 
                     Button {
+                        guard ideContextEnabled else {
+                            return
+                        }
                         ensureContextIndexLoaded()
                         showContextPicker = true
                     } label: {
@@ -3115,8 +3544,16 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                    .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
                     .accessibilityIdentifier("composer.context")
+                    .disabled(!ideContextEnabled)
+                    #if os(macOS)
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    #endif
 
                     Spacer(minLength: 10)
                 }
@@ -3280,10 +3717,11 @@ struct ContentView: View {
                     ForEach(modelOptions, id: \.self) { option in
                         Button(option) {
                             selectedModel = option
+                            selectedReasoningLevel = normalizedReasoningSelection(current: selectedReasoningLevel)
                         }
                     }
                 } label: {
-                    Label(selectedModel, systemImage: "chevron.down")
+                    Label(selectedModelDisplayLabel, systemImage: "chevron.down")
                 }
                 .menuStyle(.borderlessButton)
 
@@ -3294,42 +3732,55 @@ struct ContentView: View {
                         }
                     }
                 } label: {
-                    Label(selectedReasoningLevel, systemImage: "chevron.down")
+                    Label(selectedReasoningDisplayLabel, systemImage: "chevron.down")
                 }
                 .menuStyle(.borderlessButton)
 
                 Button {
+                    slashLauncherOpenedByTyping = false
+                    slashCommandQuery = ""
                     showSlashCommandLauncher = true
                 } label: {
-                    Label("Slash", systemImage: "command")
+                    Label("Slash", systemImage: "slash")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.78))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
                 .accessibilityIdentifier("composer.slash")
                 #if os(macOS)
                 .keyboardShortcut("k", modifiers: [.command])
                 #endif
 
                 Button {
+                    guard ideContextEnabled else {
+                        return
+                    }
                     ensureContextIndexLoaded()
                     showContextPicker = true
                 } label: {
                     Label("Context", systemImage: "at")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.78))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.white.opacity(0.08), in: Capsule(style: .continuous))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
                 .accessibilityIdentifier("composer.context")
+                .disabled(!ideContextEnabled)
                 #if os(macOS)
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-                #endif
-
-                #if os(macOS)
-                Toggle(isOn: $ideContextEnabled) {
-                    Text("IDE context")
-                }
-                .toggleStyle(.checkbox)
-                #else
-                Toggle(isOn: $ideContextEnabled) {
-                    Text("IDE context")
-                }
                 #endif
 
                 Button {
@@ -3628,7 +4079,7 @@ struct ContentView: View {
     private func emptyStatePrimaryAction() {
         Task {
             if store.connectionState == .connected {
-                await store.createSession(cwd: nil)
+                await createSessionWithCurrentWorkflowSettings()
             } else {
                 #if os(iOS)
                 presentCompanionConnectAssistant()
@@ -3647,6 +4098,58 @@ struct ContentView: View {
         ComposerSlashCommandCatalog.filteredCoreSet(query: slashCommandQuery)
     }
 
+    private func slashCommandQueryFromComposerDraft(_ draft: String) -> String? {
+        guard !showContextPicker
+        else {
+            return nil
+        }
+
+        let line = draft
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+            .last ?? draft
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("/") else {
+            return nil
+        }
+
+        let remainder = String(trimmed.dropFirst())
+        if remainder.isEmpty {
+            return ""
+        }
+
+        if remainder.contains("/") {
+            return nil
+        }
+
+        let token = remainder
+            .split(whereSeparator: { $0.isWhitespace })
+            .first
+            .map(String.init) ?? ""
+
+        if token.range(of: "^[A-Za-z0-9_-]*$", options: .regularExpression) == nil {
+            return nil
+        }
+
+        return token.lowercased()
+    }
+
+    private func syncSlashCommandLauncher(with draft: String) {
+        guard let query = slashCommandQueryFromComposerDraft(draft) else {
+            if slashLauncherOpenedByTyping,
+               showSlashCommandLauncher {
+                showSlashCommandLauncher = false
+            }
+            return
+        }
+
+        slashCommandQuery = query
+        if !showSlashCommandLauncher {
+            slashLauncherOpenedByTyping = true
+            showSlashCommandLauncher = true
+        }
+    }
+
     private var selectedSessionRootPath: String? {
         store.selectedSession?.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -3660,7 +4163,9 @@ struct ContentView: View {
     }
 
     private var filteredInlineContextPaths: [String] {
-        guard trailingMentionMatch != nil else {
+        guard ideContextEnabled,
+              trailingMentionMatch != nil
+        else {
             return []
         }
 
@@ -3672,11 +4177,15 @@ struct ContentView: View {
     }
 
     private var filteredContextPickerPaths: [String] {
-        filteredContextPaths(query: contextPickerQuery)
+        guard ideContextEnabled else {
+            return []
+        }
+
+        return filteredContextPaths(query: contextPickerQuery)
     }
 
     private var showsInlineContextSuggestions: Bool {
-        composerIsFocused
+        ideContextEnabled
             && trailingMentionMatch != nil
             && !showContextPicker
             && !displayedInlineContextPaths.isEmpty
@@ -3855,22 +4364,61 @@ struct ContentView: View {
             )
         }
 
-        if payloadType == "mcp_tool_call_begin" {
+        if payloadType == "tool_call_begin"
+            || payloadType == "mcp_tool_call_begin"
+            || payloadType == "custom_tool_call_begin"
+            || payloadType == "custom_tool_call_update"
+        {
+            let detail = {
+                guard let info = item.toolCallInfo else {
+                    return condensedToolUsageDetail(item.body)
+                }
+                if !info.command.isEmpty {
+                    return condensedToolUsageDetail(info.command)
+                }
+                if let firstArg = info.arguments.first {
+                    return condensedToolUsageDetail("\(firstArg.key): \(firstArg.value)")
+                }
+                return condensedToolUsageDetail(item.body)
+            }()
+
             return ToolUsageBannerState(
                 phase: .active,
                 title: "Running tool",
-                detail: condensedToolUsageDetail(item.body),
+                detail: detail,
                 icon: "wrench.and.screwdriver",
                 tint: Color.cyan.opacity(0.9)
             )
         }
 
-        if payloadType == "mcp_tool_call_end" {
-            let failed = item.body.lowercased().contains("fail") || item.body.lowercased().contains("error")
+        if payloadType == "tool_call_end"
+            || payloadType == "mcp_tool_call_end"
+            || payloadType == "custom_tool_call_end"
+        {
+            let info = item.toolCallInfo
+            let failed: Bool = {
+                if let success = info?.success {
+                    return !success
+                }
+                let normalized = item.body.lowercased()
+                return normalized.contains("failed") || normalized.contains("error")
+            }()
+            let detail = {
+                if let info {
+                    if !info.command.isEmpty {
+                        return condensedToolUsageDetail(info.command)
+                    }
+                    if !info.output.isEmpty {
+                        return condensedToolUsageDetail(info.output)
+                    }
+                }
+                return condensedToolUsageDetail(item.body)
+            }()
+
             return ToolUsageBannerState(
                 phase: .collapsed,
                 title: failed ? "Tool failed" : "Tool finished",
-                detail: condensedToolUsageDetail(item.body),
+                detail: detail,
                 icon: failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
                 tint: failed ? Color.red.opacity(0.9) : Color.green.opacity(0.9)
             )
@@ -3935,6 +4483,10 @@ struct ContentView: View {
                 return ComposerActivityBadge(label: "Executing…", icon: "terminal", tint: Color.green.opacity(0.9))
             }
 
+            if payloadType == "tool_call_begin" {
+                return ComposerActivityBadge(label: "Using tools…", icon: "wrench.and.screwdriver", tint: Color.cyan.opacity(0.9))
+            }
+
             if payloadType == "web_search_begin" {
                 return ComposerActivityBadge(label: "Browsing…", icon: "globe", tint: Color.blue.opacity(0.9))
             }
@@ -3944,7 +4496,7 @@ struct ContentView: View {
                 return ComposerActivityBadge(label: "Browsing…", icon: "globe", tint: Color.blue.opacity(0.9))
             }
 
-            if payloadType == "web_search_end" {
+            if payloadType == "web_search_end" || payloadType == "web_search_complete" {
                 return nil
             }
 
@@ -3987,6 +4539,13 @@ struct ContentView: View {
     }
 
     private func ensureContextIndexLoaded(forceReload: Bool = false) {
+        guard ideContextEnabled else {
+            indexedContextRootPath = nil
+            indexedContextFilePaths = []
+            contextIndexLoading = false
+            return
+        }
+
         guard let rootPath = selectedSessionRootPath,
               !rootPath.isEmpty
         else {
@@ -4029,6 +4588,10 @@ struct ContentView: View {
     }
 
     private func insertContextReference(path: String) {
+        guard ideContextEnabled else {
+            return
+        }
+
         composerDraft = ComposerContextReferenceFormatter.insertReference(
             into: composerDraft,
             path: path,
@@ -4093,6 +4656,7 @@ struct ContentView: View {
 
     private func handleSlashCommandSelection(_ command: ComposerSlashCommand) {
         showSlashCommandLauncher = false
+        slashLauncherOpenedByTyping = false
         slashCommandQuery = ""
 
         switch command.actionID {
@@ -4100,7 +4664,7 @@ struct ContentView: View {
             appendComposerCommand(commandText)
         case .newThread:
             Task {
-                await store.createSession(cwd: nil)
+                await createSessionWithCurrentWorkflowSettings()
             }
         case .refreshThreads:
             Task {
@@ -4109,6 +4673,9 @@ struct ContentView: View {
         case .openSettings:
             presentSettings(.general)
         case .openContextPicker:
+            guard ideContextEnabled else {
+                return
+            }
             ensureContextIndexLoaded()
             showContextPicker = true
         }
@@ -4178,7 +4745,7 @@ struct ContentView: View {
             }
 
             if store.selectedSession == nil {
-                await store.createSession(cwd: nil)
+                await createSessionWithCurrentWorkflowSettings()
             }
 
             #if os(macOS)
@@ -4222,8 +4789,20 @@ struct ContentView: View {
 
         composerDraft = ""
         Task {
-            await store.submitComposer(text: text)
+            await store.submitComposer(
+                text: text,
+                model: selectedModelIdentifier,
+                reasoningEffort: selectedReasoningEffort
+            )
         }
+    }
+
+    private func createSessionWithCurrentWorkflowSettings() async {
+        await store.createSession(
+            cwd: nil,
+            model: selectedModelIdentifier,
+            reasoningEffort: selectedReasoningEffort
+        )
     }
 
     private func interruptTurnAction() {
@@ -4724,17 +5303,196 @@ struct ContentView: View {
         ideOpenFailureMessage = message
     }
 
+    private var selectedModelDisplayLabel: String {
+        normalizedModelSelection(current: selectedModel)
+    }
+
+    private var selectedReasoningDisplayLabel: String {
+        normalizedReasoningSelection(current: selectedReasoningLevel)
+    }
+
+    private var selectedModelIdentifier: String {
+        let normalizedLabel = normalizedModelSelection(current: selectedModel)
+        if let option = modelPickerOptions.first(where: {
+            $0.label.caseInsensitiveCompare(normalizedLabel) == .orderedSame
+        }) {
+            return option.model
+        }
+
+        if let canonical = WorkflowSettings.canonicalModelIdentifier(from: normalizedLabel) {
+            return canonical
+        }
+
+        return WorkflowSettings.defaultModelIdentifier
+    }
+
+    private var selectedReasoningEffort: String {
+        let normalizedLabel = normalizedReasoningSelection(current: selectedReasoningLevel)
+        if let matched = reasoningPickerOptions.first(where: {
+            $0.label.caseInsensitiveCompare(normalizedLabel) == .orderedSame
+                || $0.effort.caseInsensitiveCompare(normalizedLabel) == .orderedSame
+        }) {
+            return matched.effort
+        }
+
+        if let canonical = WorkflowSettings.canonicalReasoningEffort(from: normalizedLabel) {
+            return canonical
+        }
+
+        return selectedModelPickerOption?.defaultReasoningEffort ?? WorkflowSettings.defaultReasoningEffort
+    }
+
+    private func availableModelPickerOptions() -> [ModelPickerOption] {
+        if !store.availableModelOptions.isEmpty {
+            var options: [ModelPickerOption] = []
+            options.reserveCapacity(store.availableModelOptions.count)
+            var seenModels: Set<String> = []
+
+            for option in store.availableModelOptions {
+                let model = option.model.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !model.isEmpty else {
+                    continue
+                }
+
+                let modelKey = model.lowercased()
+                if seenModels.contains(modelKey) {
+                    continue
+                }
+                seenModels.insert(modelKey)
+
+                let defaultReasoningEffort = WorkflowSettings.canonicalReasoningEffort(
+                    from: option.defaultReasoningEffort
+                ) ?? WorkflowSettings.defaultReasoningEffort
+                let reasoningEfforts = option.supportedReasoningEfforts
+                    .compactMap { WorkflowSettings.canonicalReasoningEffort(from: $0.reasoningEffort) }
+
+                let displayName = option.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = displayName.isEmpty ? formatModelName(model) : displayName
+
+                options.append(
+                    ModelPickerOption(
+                        model: model,
+                        label: label,
+                        defaultReasoningEffort: defaultReasoningEffort,
+                        supportedReasoningEfforts: reasoningEfforts
+                    )
+                )
+            }
+
+            if !options.isEmpty {
+                return options
+            }
+        }
+
+        var fallbackOptions: [ModelPickerOption] = []
+        var seenModels: Set<String> = []
+
+        func appendFallbackOption(model: String, label: String) {
+            let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedModel.isEmpty else {
+                return
+            }
+
+            let modelKey = trimmedModel.lowercased()
+            guard seenModels.insert(modelKey).inserted else {
+                return
+            }
+
+            let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedLabel = trimmedLabel.isEmpty ? formatModelName(trimmedModel) : trimmedLabel
+
+            fallbackOptions.append(
+                ModelPickerOption(
+                    model: trimmedModel,
+                    label: normalizedLabel,
+                    defaultReasoningEffort: WorkflowSettings.defaultReasoningEffort,
+                    supportedReasoningEfforts: WorkflowSettings.fallbackReasoningEfforts
+                )
+            )
+        }
+
+        let selectedValue = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !selectedValue.isEmpty,
+           let selectedIdentifier = WorkflowSettings.canonicalModelIdentifier(from: selectedValue) {
+            appendFallbackOption(model: selectedIdentifier, label: selectedValue)
+        }
+
+        appendFallbackOption(
+            model: WorkflowSettings.defaultModelIdentifier,
+            label: WorkflowSettings.defaultModelLabel
+        )
+
+        return fallbackOptions
+    }
+
+    private func availableReasoningPickerOptions(
+        for selectedModelOption: ModelPickerOption?
+    ) -> [ReasoningPickerOption] {
+        let efforts = selectedModelOption?.supportedReasoningEfforts.isEmpty == false
+            ? (selectedModelOption?.supportedReasoningEfforts ?? WorkflowSettings.fallbackReasoningEfforts)
+            : WorkflowSettings.fallbackReasoningEfforts
+
+        var options: [ReasoningPickerOption] = []
+        options.reserveCapacity(efforts.count)
+        var seenEfforts: Set<String> = []
+
+        for effort in efforts {
+            let normalizedEffort = WorkflowSettings.canonicalReasoningEffort(from: effort) ?? effort
+            let effortKey = normalizedEffort.lowercased()
+            if seenEfforts.contains(effortKey) {
+                continue
+            }
+            seenEfforts.insert(effortKey)
+
+            options.append(
+                ReasoningPickerOption(
+                    effort: normalizedEffort,
+                    label: WorkflowSettings.displayReasoningEffort(normalizedEffort)
+                )
+            )
+        }
+
+        return options
+    }
+
+    private func normalizedModelSelection(current: String) -> String {
+        if let matched = modelPickerOptions.first(where: {
+            $0.label.caseInsensitiveCompare(current) == .orderedSame
+                || $0.model.caseInsensitiveCompare(current) == .orderedSame
+        }) {
+            return matched.label
+        }
+
+        if let preferred = modelPickerOptions.first(where: {
+            $0.model.caseInsensitiveCompare(WorkflowSettings.defaultModelIdentifier) == .orderedSame
+        }) {
+            return preferred.label
+        }
+
+        return modelOptions.first ?? WorkflowSettings.defaultModelLabel
+    }
+
+    private func normalizedReasoningSelection(current: String) -> String {
+        if let matched = reasoningPickerOptions.first(where: {
+            $0.label.caseInsensitiveCompare(current) == .orderedSame
+                || $0.effort.caseInsensitiveCompare(current) == .orderedSame
+        }) {
+            return matched.label
+        }
+
+        if let defaultEffort = selectedModelPickerOption?.defaultReasoningEffort,
+           let matchedDefault = reasoningPickerOptions.first(where: {
+               $0.effort.caseInsensitiveCompare(defaultEffort) == .orderedSame
+           }) {
+            return matchedDefault.label
+        }
+
+        return reasoningOptions.first ?? WorkflowSettings.defaultReasoningLabel
+    }
+
     private func normalizeWorkflowSettings() {
-        selectedModel = WorkflowSettings.normalizedSelection(
-            current: selectedModel,
-            options: modelOptions,
-            fallback: "GPT-5.3-Codex"
-        )
-        selectedReasoningLevel = WorkflowSettings.normalizedSelection(
-            current: selectedReasoningLevel,
-            options: reasoningOptions,
-            fallback: "High"
-        )
+        selectedModel = normalizedModelSelection(current: selectedModel)
+        selectedReasoningLevel = normalizedReasoningSelection(current: selectedReasoningLevel)
         selectedSandboxMode = WorkflowSettings.normalizedSelection(
             current: selectedSandboxMode,
             options: sandboxOptions,
@@ -4747,17 +5505,31 @@ struct ContentView: View {
         )
     }
 
+    private func enforceIDEContextEnabled() {
+        if !ideContextEnabled {
+            ideContextEnabled = true
+        }
+    }
+
     private func scrollTranscriptToBottom(proxy: ScrollViewProxy, animated: Bool) {
         let action = {
             proxy.scrollTo(transcriptBottomAnchor, anchor: .bottom)
+        }
+
+        let followUpAction = {
+            DispatchQueue.main.async {
+                action()
+            }
         }
 
         if animated {
             withAnimation(.easeOut(duration: 0.2)) {
                 action()
             }
+            followUpAction()
         } else {
             action()
+            followUpAction()
         }
     }
 
@@ -5090,7 +5862,11 @@ struct ContentView: View {
             voiceInput.clearTranscript()
             voiceInteractionNotice = nil
             Task {
-                await store.submitComposer(text: finalText)
+                await store.submitComposer(
+                    text: finalText,
+                    model: selectedModelIdentifier,
+                    reasoningEffort: selectedReasoningEffort
+                )
             }
             return
         }
@@ -6403,7 +7179,6 @@ private struct IOSComposerTextView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: IOSComposerTextView
-        private var pendingSync: DispatchWorkItem?
 
         init(parent: IOSComposerTextView) {
             self.parent = parent
@@ -6413,18 +7188,9 @@ private struct IOSComposerTextView: UIViewRepresentable {
             let updated = textView.text ?? ""
             parent.measuredHeight = IOSComposerTextView.measuredEditorHeight(for: textView)
 
-            pendingSync?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else {
-                    return
-                }
-
-                if self.parent.text != updated {
-                    self.parent.text = updated
-                }
+            if parent.text != updated {
+                parent.text = updated
             }
-            pendingSync = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -6463,13 +7229,11 @@ private struct IOSComposerTextView: UIViewRepresentable {
         }
 
         func cancelPendingSync() {
-            pendingSync?.cancel()
-            pendingSync = nil
+            // Intentionally empty: sync is immediate during textViewDidChange.
         }
 
         func commitPendingTextImmediately() {
-            pendingSync?.cancel()
-            pendingSync = nil
+            // Intentionally empty: sync is immediate during textViewDidChange.
         }
     }
 
@@ -6586,7 +7350,6 @@ private struct MacComposerTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MacComposerTextView
-        private var pendingSync: DispatchWorkItem?
 
         init(parent: MacComposerTextView) {
             self.parent = parent
@@ -6600,24 +7363,13 @@ private struct MacComposerTextView: NSViewRepresentable {
             let updated = textView.string
             parent.measuredHeight = MacComposerTextView.measuredEditorHeight(for: textView)
 
-            pendingSync?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else {
-                    return
-                }
-
-                if self.parent.text != updated {
-                    self.parent.text = updated
-                }
+            if parent.text != updated {
+                parent.text = updated
             }
-
-            pendingSync = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
         }
 
         func cancelPendingSync() {
-            pendingSync?.cancel()
-            pendingSync = nil
+            // Intentionally empty: sync is immediate during textDidChange.
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -7015,6 +7767,12 @@ private struct AssistantTranscriptLine: View {
                 continue
             }
 
+            if isLikelyShellCommandLine(trimmed) {
+                flushParagraph()
+                blocks.append(.code(language: "shell", text: trimmed))
+                continue
+            }
+
             paragraphBuffer.append(raw)
         }
 
@@ -7070,6 +7828,97 @@ private struct AssistantTranscriptLine: View {
         return (digits, content)
     }
 
+    private static func isLikelyShellCommandLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.hasPrefix("`")
+        else {
+            return false
+        }
+
+        let normalizedLine = normalizedShellCandidate(trimmed)
+        guard !normalizedLine.isEmpty else {
+            return false
+        }
+
+        if normalizedLine.hasPrefix("#") ||
+            normalizedLine.hasPrefix(">") ||
+            normalizedLine.hasPrefix("-") ||
+            normalizedLine.hasPrefix("*") {
+            return false
+        }
+
+        if normalizedLine.hasSuffix(":") {
+            return false
+        }
+
+        let tokens = normalizedLine.split(separator: " ")
+        guard let firstToken = tokens.first,
+              tokens.count >= 2
+        else {
+            return false
+        }
+
+        let commandToken = String(firstToken)
+        guard commandToken.range(of: "^[A-Za-z0-9._~/-]+$", options: .regularExpression) != nil else {
+            return false
+        }
+
+        let lowercasedLine = normalizedLine.lowercased()
+        if lowercasedLine.hasPrefix("if ") ||
+            lowercasedLine.hasPrefix("when ") ||
+            lowercasedLine.hasPrefix("the ") ||
+            lowercasedLine.hasPrefix("this ") ||
+            lowercasedLine.hasPrefix("that ") {
+            return false
+        }
+
+        let executable = commandToken
+            .split(separator: "/")
+            .last
+            .map { String($0).lowercased() } ?? commandToken.lowercased()
+        let knownCommands: Set<String> = [
+            "bash", "bun", "cargo", "cat", "cd", "chmod", "code", "cp", "curl",
+            "docker", "find", "gh", "git", "go", "jq", "ls", "make", "mv", "node",
+            "npm", "open", "pnpm", "python", "python3", "rg", "rustup", "sed", "sh",
+            "swift", "tar", "touch", "uv", "xcodebuild", "yarn", "zsh"
+        ]
+
+        let hasFlagToken = tokens.dropFirst().contains { token in
+            token.hasPrefix("-") && token.count > 1
+        }
+        let hasPipeOrRedirect = normalizedLine.contains(" | ") ||
+            normalizedLine.contains(" > ") ||
+            normalizedLine.contains(" < ")
+        let pathLikeCommand = commandToken.hasPrefix("./") ||
+            commandToken.hasPrefix("/") ||
+            commandToken.hasPrefix("~/")
+        let commandLooksValid = knownCommands.contains(executable) || pathLikeCommand
+
+        guard commandLooksValid else {
+            return false
+        }
+
+        return hasFlagToken || hasPipeOrRedirect || pathLikeCommand
+    }
+
+    private static func normalizedShellCandidate(_ line: String) -> String {
+        var candidate = line
+
+        if let linkRegex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^\)]+)\)"#) {
+            let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+            candidate = linkRegex.stringByReplacingMatches(
+                in: candidate,
+                options: [],
+                range: range,
+                withTemplate: "$1"
+            )
+        }
+
+        candidate = candidate.replacingOccurrences(of: "`", with: "")
+        return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func unorderedMarker(for level: Int) -> String {
         if level == 0 {
             return "-"
@@ -7097,14 +7946,39 @@ private struct AssistantTranscriptLine: View {
 
 private struct AssistantInlineMarkdownText: View {
     private let attributed: AttributedString
+    private let containsLinks: Bool
 
     init(text: String, baseColor: Color = Color.white.opacity(0.93), sessionID: UUID?) {
-        self.attributed = Self.makeStyledAttributedString(from: text, baseColor: baseColor, sessionID: sessionID)
+        let styled = Self.makeStyledAttributedString(from: text, baseColor: baseColor, sessionID: sessionID)
+        self.attributed = styled
+        self.containsLinks = styled.runs.contains(where: { $0.link != nil })
     }
 
     var body: some View {
-        Text(attributed)
+        Group {
+            if containsLinks {
+                Text(attributed)
+                    .textSelection(.disabled)
+            } else {
+                Text(attributed)
+                    .textSelection(.enabled)
+            }
+        }
             .frame(maxWidth: .infinity, alignment: .leading)
+            #if os(macOS)
+            .onContinuousHover { phase in
+                guard containsLinks else {
+                    return
+                }
+
+                switch phase {
+                case .active:
+                    NSCursor.pointingHand.set()
+                case .ended:
+                    NSCursor.arrow.set()
+                }
+            }
+            #endif
     }
 
     private struct FileReferenceToken {
@@ -7134,8 +8008,8 @@ private struct AssistantInlineMarkdownText: View {
             let intent = run.inlinePresentationIntent
 
             if run.link != nil {
-                attributed[range].foregroundColor = Color.blue.opacity(0.92)
-                attributed[range].underlineStyle = .single
+                attributed[range].foregroundColor = Color.cyan.opacity(0.95)
+                attributed[range].underlineStyle = nil
                 continue
             }
 
@@ -7332,19 +8206,38 @@ private struct AssistantInlineMarkdownText: View {
             return false
         }
 
+        let knownFileNames = [
+            "cargo.toml", "cargo.lock", "package.json", "package-lock.json",
+            "pnpm-lock.yaml", "yarn.lock", "readme.md"
+        ]
+
         if value.hasPrefix("~/") || value.hasPrefix("/") {
             return true
         }
 
         if value.contains("/") {
-            return true
+            let components = value
+                .split(separator: "/", omittingEmptySubsequences: true)
+                .map(String.init)
+            guard components.count >= 2 else {
+                return false
+            }
+
+            let hasDotComponent = components.contains { $0.contains(".") }
+            let hasKnownFileName = components.contains { knownFileNames.contains($0.lowercased()) }
+            let hasPathPrefix = value.hasPrefix("./") ||
+                value.hasPrefix("../") ||
+                value.hasPrefix("a/") ||
+                value.hasPrefix("b/")
+
+            if hasDotComponent || hasKnownFileName || hasPathPrefix || components.count >= 3 {
+                return true
+            }
+
+            return false
         }
 
         let lowercase = value.lowercased()
-        let knownFileNames = [
-            "cargo.toml", "cargo.lock", "package.json", "package-lock.json",
-            "pnpm-lock.yaml", "yarn.lock", "readme.md"
-        ]
         if knownFileNames.contains(lowercase) {
             return true
         }
@@ -7568,6 +8461,17 @@ private struct BeautifulDiffPreview: View {
         }
 
         if line.hasPrefix("new file mode ") || line.hasPrefix("deleted file mode ") || line.hasPrefix("rename from ") || line.hasPrefix("rename to ") {
+            return true
+        }
+
+        if line.hasPrefix("*** Begin Patch")
+            || line.hasPrefix("*** End Patch")
+            || line.hasPrefix("*** Update File: ")
+            || line.hasPrefix("*** Add File: ")
+            || line.hasPrefix("*** Delete File: ")
+            || line.hasPrefix("*** Move to: ")
+            || line.hasPrefix("*** End of File")
+        {
             return true
         }
 
@@ -7827,6 +8731,9 @@ private struct BeautifulDiffPreview: View {
 
     private static func extractPathFromDiffHeader(_ line: String) -> String? {
         guard line.hasPrefix("diff --git ") else {
+            if let applyPatchPath = extractPathFromApplyPatchHeader(line) {
+                return applyPatchPath
+            }
             return nil
         }
 
@@ -7840,6 +8747,25 @@ private struct BeautifulDiffPreview: View {
             path.removeFirst(2)
         }
         return path
+    }
+
+    private static func extractPathFromApplyPatchHeader(_ line: String) -> String? {
+        let prefixes = [
+            "*** Update File: ",
+            "*** Add File: ",
+            "*** Delete File: ",
+        ]
+
+        for prefix in prefixes {
+            guard line.hasPrefix(prefix) else {
+                continue
+            }
+
+            let path = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
+            return path.isEmpty ? nil : path
+        }
+
+        return nil
     }
 
 }
@@ -8063,6 +8989,13 @@ private enum DiffLineKind: Hashable {
             self = .fileHeader
             return
         }
+        if text.hasPrefix("*** Update File: ")
+            || text.hasPrefix("*** Add File: ")
+            || text.hasPrefix("*** Delete File: ")
+        {
+            self = .fileHeader
+            return
+        }
         if text.hasPrefix("@@") {
             self = .hunk
             return
@@ -8076,6 +9009,14 @@ private enum DiffLineKind: Hashable {
             return
         }
         if text.hasPrefix("index ") || text.hasPrefix("---") || text.hasPrefix("+++") {
+            self = .meta
+            return
+        }
+        if text.hasPrefix("*** Begin Patch")
+            || text.hasPrefix("*** End Patch")
+            || text.hasPrefix("*** Move to: ")
+            || text.hasPrefix("*** End of File")
+        {
             self = .meta
             return
         }
@@ -8204,6 +9145,14 @@ private struct TranscriptCard: View {
 
     private var browserWorkflow: BrowserWorkflowEvent? {
         item.browserWorkflowEvent
+    }
+
+    private var toolCallInfo: ToolCallInfo? {
+        item.toolCallInfo
+    }
+
+    private var execOutputDeltaInfo: ExecCommandOutputDeltaInfo? {
+        item.execCommandOutputDeltaInfo
     }
 
     private var effectiveLineSpacing: CGFloat {
@@ -8353,6 +9302,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if toolCallInfo != nil {
+            return false
+        }
+
         switch item.cardStyle {
         case .tool, .system:
             return true
@@ -8411,6 +9364,10 @@ private struct TranscriptCard: View {
             return false
         }
 
+        if toolCallInfo != nil {
+            return false
+        }
+
         switch item.cardStyle {
         case .assistant, .user, .defaultStyle:
             return false
@@ -8442,6 +9399,10 @@ private struct TranscriptCard: View {
         }
 
         if browserWorkflow != nil {
+            return true
+        }
+
+        if toolCallInfo != nil {
             return true
         }
 
@@ -8594,9 +9555,9 @@ private struct TranscriptCard: View {
 
     private var baseDiffLineLimit: Int {
         if usesCompactPhoneLayout {
-            return isActive ? 9 : 5
+            return isActive ? 12 : 7
         }
-        return isActive ? 12 : 7
+        return isActive ? 18 : 10
     }
 
     private var diffExpandChunkSize: Int {
@@ -8609,7 +9570,7 @@ private struct TranscriptCard: View {
         }
 
         guard isActive else {
-            return min(totalDiffLines, 6)
+            return min(totalDiffLines, usesCompactPhoneLayout ? 8 : 11)
         }
 
         let expanded = baseDiffLineLimit + diffExpansionSteps * diffExpandChunkSize
@@ -8792,6 +9753,10 @@ private struct TranscriptCard: View {
                 browserWorkflowContent(browserWorkflow)
             } else if item.isTaskLifecycleEvent || item.isBackgroundEvent {
                 taskActivityContent
+            } else if let execDelta = execOutputDeltaInfo {
+                execOutputDeltaContent(execDelta)
+            } else if let toolCallInfo {
+                toolCallContent(toolCallInfo)
             } else if let exec = item.execCommandInfo {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
@@ -9842,6 +10807,591 @@ private struct TranscriptCard: View {
         }
     }
 
+    private func toolCallStatusText(for info: ToolCallInfo) -> String {
+        switch info.phase {
+        case .started:
+            return "Running"
+        case .completed:
+            if let success = info.success {
+                return success ? "Success" : "Failed"
+            }
+            return "Completed"
+        }
+    }
+
+    private func toolCallStatusColor(for info: ToolCallInfo) -> Color {
+        switch info.phase {
+        case .started:
+            return Color.cyan.opacity(0.92)
+        case .completed:
+            if let success = info.success {
+                return success ? Color.green.opacity(0.92) : Color.red.opacity(0.92)
+            }
+            return Color.white.opacity(0.75)
+        }
+    }
+
+    private func displayToolName(_ rawValue: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "Tool"
+        }
+
+        return trimmed
+            .split(separator: " ")
+            .map { token in
+                guard let first = token.first else {
+                    return String(token)
+                }
+                return "\(first.uppercased())\(token.dropFirst())"
+            }
+            .joined(separator: " ")
+    }
+
+    private func previewToolOutput(_ value: String) -> String {
+        let normalized = normalizeToolOutputPreview(value)
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+
+        let lines = trimmed.components(separatedBy: "\n")
+        let head = lines.prefix(6)
+        var preview = head.joined(separator: "\n")
+        if lines.count > head.count {
+            preview += "\n…"
+        }
+        return preview
+    }
+
+    private func normalizeToolOutputPreview(_ value: String) -> String {
+        let trimmed = normalizeExecOutput(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+
+        if let extracted = extractToolOutputText(from: trimmed, depth: 0) {
+            return extracted
+        }
+
+        if let fallback = extractOutputFieldFallback(from: trimmed) {
+            return fallback
+        }
+
+        return trimmed
+    }
+
+    private func extractOutputFieldFallback(from value: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #""output"\s*:\s*"((?:\\.|[^"\\])*)""#,
+            options: []
+        ) else {
+            return nil
+        }
+
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, options: [], range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: value)
+        else {
+            return nil
+        }
+
+        let rawCapture = String(value[captureRange])
+        let normalized = normalizeExecOutput(rawCapture)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func extractToolOutputText(from value: String, depth: Int) -> String? {
+        guard depth < 5,
+              let data = value.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return nil
+        }
+
+        return extractToolOutputText(from: parsed, depth: depth + 1)
+    }
+
+    private func extractToolOutputText(from value: Any, depth: Int) -> String? {
+        guard depth < 6 else {
+            return nil
+        }
+
+        if let text = value as? String {
+            let normalized = normalizeExecOutput(text).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                return nil
+            }
+
+            if let nested = extractToolOutputText(from: normalized, depth: depth + 1) {
+                return nested
+            }
+
+            return normalized
+        }
+
+        if let array = value as? [Any] {
+            let pieces = array.compactMap { extractToolOutputText(from: $0, depth: depth + 1) }
+                .filter { !$0.isEmpty }
+            guard !pieces.isEmpty else {
+                return nil
+            }
+            return pieces.joined(separator: "\n")
+        }
+
+        guard let object = value as? [String: Any] else {
+            return nil
+        }
+
+        let orderedKeys = ["output", "stdout", "stderr", "text", "message", "content", "result", "data", "Ok", "Err"]
+        for key in orderedKeys {
+            guard let candidate = object[key],
+                  let extracted = extractToolOutputText(from: candidate, depth: depth + 1),
+                  !extracted.isEmpty
+            else {
+                continue
+            }
+            return extracted
+        }
+
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+           let pretty = String(data: data, encoding: .utf8) {
+            let normalized = normalizeExecOutput(pretty).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+
+        return nil
+    }
+
+    private struct RenderedToolArgument: Hashable {
+        let key: String
+        let value: String
+        let codeLanguage: String?
+    }
+
+    private func truncateToolField(_ value: String, maxCharacters: Int) -> String {
+        if value.count <= maxCharacters {
+            return value
+        }
+
+        let endIndex = value.index(value.startIndex, offsetBy: maxCharacters)
+        return "\(value[..<endIndex])…"
+    }
+
+    private func renderedToolArguments(
+        from value: JSONValue,
+        fallbackKey: String
+    ) -> [RenderedToolArgument] {
+        switch value {
+        case .object(let fields):
+            return fields
+                .keys
+                .sorted()
+                .filter { $0 != "command" }
+                .compactMap { key in
+                    guard let nested = fields[key] else {
+                        return nil
+                    }
+                    return renderedToolArgument(key: key, value: nested)
+                }
+        case .null:
+            return []
+        default:
+            return [renderedToolArgument(key: fallbackKey, value: value)]
+        }
+    }
+
+    private func renderedToolArguments(for info: ToolCallInfo) -> [RenderedToolArgument] {
+        guard let payloadObject = item.event?.payload?.objectValue else {
+            return info.arguments.map { argument in
+                RenderedToolArgument(key: argument.key, value: argument.value, codeLanguage: nil)
+            }
+        }
+
+        if let invocationObject = payloadObject["invocation"]?.objectValue,
+           let invocationArguments = invocationObject["arguments"] {
+            return renderedToolArguments(from: invocationArguments, fallbackKey: "args")
+        }
+
+        if let parameters = payloadObject["parameters"] {
+            return renderedToolArguments(from: parameters, fallbackKey: "params")
+        }
+
+        if let argumentsObject = payloadObject["arguments"]?.objectValue {
+            return argumentsObject
+                .keys
+                .sorted()
+                .filter { $0 != "command" }
+                .compactMap { key in
+                    guard let value = argumentsObject[key] else {
+                        return nil
+                    }
+                    return renderedToolArgument(key: key, value: value)
+                }
+        }
+
+        if let rawArguments = payloadObject["arguments_raw"]?.stringValue {
+            let normalized = normalizeExecOutput(rawArguments).trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.isEmpty {
+                return []
+            }
+
+            if let pretty = prettifiedJSONText(from: normalized) {
+                return [RenderedToolArgument(key: "args", value: pretty, codeLanguage: "json")]
+            }
+
+            return [RenderedToolArgument(key: "args", value: truncateToolField(normalized, maxCharacters: 360), codeLanguage: nil)]
+        }
+
+        return info.arguments.map { argument in
+            RenderedToolArgument(key: argument.key, value: argument.value, codeLanguage: nil)
+        }
+    }
+
+    private func toolCallPatchDiffText(for info: ToolCallInfo) -> String? {
+        let normalizedName = info.name
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "_")
+
+        let candidateTexts = toolCallPatchCandidateTexts(info)
+        for candidate in candidateTexts {
+            guard let patch = extractApplyPatchBlock(from: candidate) else {
+                continue
+            }
+
+            if normalizedName == "apply_patch" || patch.contains("*** Update File:") || patch.contains("*** Add File:") || patch.contains("*** Delete File:") {
+                return patch
+            }
+        }
+
+        return nil
+    }
+
+    private func toolCallPatchCandidateTexts(_ info: ToolCallInfo) -> [String] {
+        var candidates: [String] = []
+
+        if !info.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            candidates.append(info.command)
+        }
+
+        if let payloadObject = item.event?.payload?.objectValue {
+            if let invocationObject = payloadObject["invocation"]?.objectValue,
+               let invocationArguments = invocationObject["arguments"] {
+                switch invocationArguments {
+                case .object(let fields):
+                    if let input = fields["input"]?.stringValue {
+                        candidates.append(input)
+                    }
+                    if let patch = fields["patch"]?.stringValue {
+                        candidates.append(patch)
+                    }
+                    if let commandValue = fields["command"],
+                       let commandText = flattenedToolCommandText(from: commandValue) {
+                        candidates.append(commandText)
+                    }
+                default:
+                    candidates.append(invocationArguments.pretty)
+                }
+            }
+
+            if let parameters = payloadObject["parameters"] {
+                switch parameters {
+                case .object(let fields):
+                    if let input = fields["input"]?.stringValue {
+                        candidates.append(input)
+                    }
+                    if let patch = fields["patch"]?.stringValue {
+                        candidates.append(patch)
+                    }
+                    if let commandValue = fields["command"],
+                       let commandText = flattenedToolCommandText(from: commandValue) {
+                        candidates.append(commandText)
+                    }
+                default:
+                    candidates.append(parameters.pretty)
+                }
+            }
+
+            if let arguments = payloadObject["arguments"]?.objectValue {
+                if let input = arguments["input"]?.stringValue {
+                    candidates.append(input)
+                }
+                if let patch = arguments["patch"]?.stringValue {
+                    candidates.append(patch)
+                }
+                if let commandValue = arguments["command"],
+                   let commandText = flattenedToolCommandText(from: commandValue) {
+                    candidates.append(commandText)
+                }
+            }
+
+            if let rawArguments = payloadObject["arguments_raw"]?.stringValue {
+                candidates.append(rawArguments)
+            }
+        }
+
+        return candidates
+    }
+
+    private func flattenedToolCommandText(from value: JSONValue) -> String? {
+        switch value {
+        case .string(let command):
+            let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+
+        case .array(let values):
+            let parts = values.compactMap(\.stringValue)
+            guard !parts.isEmpty else {
+                return nil
+            }
+            return parts.joined(separator: "\n")
+
+        default:
+            return nil
+        }
+    }
+
+    private func extractApplyPatchBlock(from text: String) -> String? {
+        let normalized = normalizeExecOutput(text)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        if let beginRange = normalized.range(of: "*** Begin Patch"),
+           let endRange = normalized.range(of: "*** End Patch", range: beginRange.lowerBound..<normalized.endIndex) {
+            let patch = String(normalized[beginRange.lowerBound..<endRange.upperBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return patch.isEmpty ? nil : patch
+        }
+
+        let markers = ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+        if markers.contains(where: normalized.contains) {
+            return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return nil
+    }
+
+    private func toolCommandPreview(_ command: String, forPatchDiff patchDiffText: String?) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+
+        guard patchDiffText != nil else {
+            return trimmed
+        }
+
+        let normalized = normalizeExecOutput(trimmed)
+        guard let beginRange = normalized.range(of: "*** Begin Patch"),
+              let endRange = normalized.range(of: "*** End Patch", range: beginRange.lowerBound..<normalized.endIndex)
+        else {
+            return trimmed
+        }
+
+        var compact = normalized
+        compact.replaceSubrange(beginRange.lowerBound..<endRange.upperBound, with: "[patch content shown below]")
+        return compact.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func shouldHideToolArgument(_ argument: RenderedToolArgument, forPatchDiff patchDiffText: String?) -> Bool {
+        guard patchDiffText != nil else {
+            return false
+        }
+
+        let normalizedKey = argument.key.lowercased()
+        if normalizedKey == "input" || normalizedKey == "patch" {
+            return true
+        }
+
+        return argument.value.contains("*** Begin Patch")
+    }
+
+    private func renderedToolArgument(key: String, value: JSONValue) -> RenderedToolArgument {
+        switch value {
+        case .object, .array:
+            return RenderedToolArgument(
+                key: key,
+                value: truncateToolField(value.pretty, maxCharacters: 700),
+                codeLanguage: "json"
+            )
+        case .string(let raw):
+            let normalized = normalizeExecOutput(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pretty = prettifiedJSONText(from: normalized) {
+                return RenderedToolArgument(key: key, value: truncateToolField(pretty, maxCharacters: 700), codeLanguage: "json")
+            }
+
+            return RenderedToolArgument(
+                key: key,
+                value: truncateToolField(normalized, maxCharacters: 260),
+                codeLanguage: normalized.contains("\n") ? "text" : nil
+            )
+        case .number(let number):
+            return RenderedToolArgument(key: key, value: String(number), codeLanguage: nil)
+        case .bool(let flag):
+            return RenderedToolArgument(key: key, value: flag ? "true" : "false", codeLanguage: nil)
+        case .null:
+            return RenderedToolArgument(key: key, value: "null", codeLanguage: nil)
+        }
+    }
+
+    private func prettifiedJSONText(from value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data),
+              let prettyData = try? JSONSerialization.data(withJSONObject: parsed, options: [.prettyPrinted]),
+              let pretty = String(data: prettyData, encoding: .utf8)
+        else {
+            return nil
+        }
+
+        return pretty
+    }
+
+    @ViewBuilder
+    private func execOutputDeltaContent(_ info: ExecCommandOutputDeltaInfo) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Tool output")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                Text(info.stream?.uppercased() ?? "STREAM")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.9))
+
+                Text("Streaming")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.9))
+            }
+
+            AssistantCodeBlock(
+                language: (info.stream ?? "output"),
+                code: info.chunk.isEmpty ? "(waiting for output...)" : previewExecOutput(info.chunk)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func toolCallContent(_ info: ToolCallInfo) -> some View {
+        let statusColor = toolCallStatusColor(for: info)
+        let patchDiffText = toolCallPatchDiffText(for: info)
+        let arguments = renderedToolArguments(for: info)
+        let visibleArguments = arguments.filter { argument in
+            !shouldHideToolArgument(argument, forPatchDiff: patchDiffText)
+        }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Tool")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                if let callId = info.callId,
+                   !callId.isEmpty {
+                    Text(callId)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.white.opacity(0.06), in: Capsule(style: .continuous))
+                }
+
+                Text(toolCallStatusText(for: info))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(statusColor)
+            }
+
+            Text(displayToolName(info.name))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.93))
+
+            let commandPreview = toolCommandPreview(info.command, forPatchDiff: patchDiffText)
+            if !commandPreview.isEmpty {
+                AssistantCodeBlock(language: "shell", code: commandPreview)
+            }
+
+            if let patchDiffText {
+                let preview = BeautifulDiffPreview(
+                    diffText: patchDiffText,
+                    visibleLineLimit: isActive ? 22 : 12
+                )
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Patch preview")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 0)
+
+                        DiffSummaryPill(
+                            fileText: preview.fileSummaryText,
+                            extraFileCount: preview.extraFileCount,
+                            additions: preview.additionsCount,
+                            removals: preview.removalsCount
+                        )
+                    }
+
+                    preview
+                }
+            }
+
+            if !visibleArguments.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(visibleArguments.prefix(6).enumerated()), id: \.offset) { _, argument in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(argument.key)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+
+                            if let codeLanguage = argument.codeLanguage {
+                                AssistantCodeBlock(language: codeLanguage, code: argument.value)
+                            } else {
+                                Text(argument.value)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.white.opacity(0.84))
+                                    .lineSpacing(2)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if info.phase == .completed {
+                let outputPreview = previewToolOutput(info.output)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(outputPreview.isEmpty ? "Output · none" : "Output preview")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    if outputPreview.isEmpty {
+                        Text("No output captured")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.white.opacity(0.62))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(Color.black.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else {
+                        AssistantCodeBlock(language: "output", code: outputPreview)
+                    }
+                }
+            }
+        }
+    }
+
     private func execStatusText(for info: ExecCommandInfo) -> String {
         guard let code = info.exitCode else {
             return "Completed"
@@ -9871,6 +11421,62 @@ private struct TranscriptCard: View {
             return "Message"
         }
     }
+}
+
+func dedupeAssistantMessagesWithinTurnItems(_ items: [SessionStreamItem]) -> [SessionStreamItem] {
+    guard !items.isEmpty else {
+        return items
+    }
+
+    func assistantMessageSignature(for item: SessionStreamItem) -> String? {
+        guard item.cardStyle == .assistant else {
+            return nil
+        }
+
+        let normalized = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return nil
+        }
+
+        return normalized
+    }
+
+    var seenAssistantBodies: Set<String> = []
+    var sawCompletedAssistantMessageInTurn = false
+    var keptReversed: [SessionStreamItem] = []
+    keptReversed.reserveCapacity(items.count)
+
+    for item in items.reversed() {
+        if item.userMessageText != nil {
+            seenAssistantBodies.removeAll(keepingCapacity: true)
+            sawCompletedAssistantMessageInTurn = false
+            keptReversed.append(item)
+            continue
+        }
+
+        if item.cardStyle == .assistant,
+           !item.isAssistantDeltaEvent {
+            sawCompletedAssistantMessageInTurn = true
+        }
+
+        if item.isAssistantDeltaEvent,
+           sawCompletedAssistantMessageInTurn {
+            continue
+        }
+
+        if let currentSignature = assistantMessageSignature(for: item),
+           seenAssistantBodies.contains(currentSignature) {
+            continue
+        }
+
+        if let currentSignature = assistantMessageSignature(for: item) {
+            seenAssistantBodies.insert(currentSignature)
+        }
+
+        keptReversed.append(item)
+    }
+
+    return keptReversed.reversed()
 }
 
 private struct SlashCommandLauncherView: View {
@@ -10386,6 +11992,8 @@ private struct NativeSettingsView: View {
     @Binding var multilineBehaviorRaw: String
     @Binding var showActivityEvents: Bool
     @Binding var ideContextEnabled: Bool
+    let modelOptions: [String]
+    let reasoningOptions: [String]
     @Binding var selectedModel: String
     @Binding var selectedReasoningLevel: String
     @Binding var selectedSandboxMode: String
@@ -10489,8 +12097,6 @@ private struct NativeSettingsView: View {
         String(format: "%.2f", voicePlaybackRate)
     }
 
-    private let modelOptions = WorkflowSettings.modelOptions
-    private let reasoningOptions = WorkflowSettings.reasoningOptions
     private let sandboxOptions = WorkflowSettings.sandboxOptions
     private let approvalPolicyOptions = WorkflowSettings.approvalPolicyOptions
 
@@ -10788,7 +12394,7 @@ private struct NativeSettingsView: View {
                         Text(option).tag(option)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .frame(width: isCompactSettingsLayout ? nil : 220)
                 .accessibilityIdentifier("settings.default-reasoning")
             }
@@ -10873,10 +12479,10 @@ private struct NativeSettingsView: View {
                     .accessibilityIdentifier("settings.show-activity-events")
             }
 
-            SettingsRow(title: "IDE context", description: "Allow IDE context hints in the composer when building prompts.") {
-                Toggle("", isOn: $ideContextEnabled)
-                    .labelsHidden()
-                    .accessibilityIdentifier("settings.ide-context")
+            SettingsRow(title: "IDE context", description: "IDE context hints are always enabled in the composer.") {
+                Text("Always on")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
 
             SettingsRow(title: "Prevent sleep while running", description: "Keep your Mac awake while work is active.") {
@@ -11253,12 +12859,12 @@ private struct NativeSettingsView: View {
             selectedModel = WorkflowSettings.normalizedSelection(
                 current: selectedModel,
                 options: modelOptions,
-                fallback: "GPT-5.3-Codex"
+                fallback: WorkflowSettings.defaultModelLabel
             )
             selectedReasoningLevel = WorkflowSettings.normalizedSelection(
                 current: selectedReasoningLevel,
                 options: reasoningOptions,
-                fallback: "High"
+                fallback: WorkflowSettings.defaultReasoningLabel
             )
             selectedSandboxMode = WorkflowSettings.normalizedSelection(
                 current: selectedSandboxMode,

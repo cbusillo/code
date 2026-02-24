@@ -5,7 +5,7 @@ final class WorkflowSettingsTests: XCTestCase {
     func testNormalizedSelectionKeepsKnownOptionCaseInsensitively() {
         let normalized = WorkflowSettings.normalizedSelection(
             current: "gpt-5.2",
-            options: WorkflowSettings.modelOptions,
+            options: ["GPT-5.3-Codex", "GPT-5.2", "Claude Sonnet 4.5"],
             fallback: "GPT-5.3-Codex"
         )
 
@@ -15,7 +15,7 @@ final class WorkflowSettingsTests: XCTestCase {
     func testNormalizedSelectionFallsBackWhenCurrentUnknown() {
         let normalized = WorkflowSettings.normalizedSelection(
             current: "Experimental",
-            options: WorkflowSettings.reasoningOptions,
+            options: ["Low", "Medium", "High"],
             fallback: "High"
         )
 
@@ -30,5 +30,28 @@ final class WorkflowSettingsTests: XCTestCase {
         )
 
         XCTAssertEqual(normalized, "A")
+    }
+
+    func testCanonicalModelIdentifierMapsDisplayNameToSlug() {
+        XCTAssertEqual(
+            WorkflowSettings.canonicalModelIdentifier(from: "GPT-5.3-Codex"),
+            "gpt-5.3-codex"
+        )
+        XCTAssertEqual(
+            WorkflowSettings.canonicalModelIdentifier(from: "claude-sonnet-4.5"),
+            "claude-sonnet-4.5"
+        )
+    }
+
+    func testCanonicalReasoningEffortNormalizesVariants() {
+        XCTAssertEqual(WorkflowSettings.canonicalReasoningEffort(from: "X-High"), "xhigh")
+        XCTAssertEqual(WorkflowSettings.canonicalReasoningEffort(from: "none"), "minimal")
+    }
+
+    func testFallbackReasoningEffortsIncludeFullSupportedRange() {
+        XCTAssertEqual(
+            WorkflowSettings.fallbackReasoningEfforts,
+            ["minimal", "low", "medium", "high", "xhigh"]
+        )
     }
 }

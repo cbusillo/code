@@ -342,12 +342,55 @@ private func click(_ element: AXUIElement) throws {
     throw AutomationError.actionFailed("Failed to click element.")
 }
 
-private func typeText(_ text: String, into element: AXUIElement) throws {
-    setFocus(on: element)
-    let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
-    guard result == .success else {
-        throw AutomationError.actionFailed("Failed to set text value on target element.")
+private func postKeyboardShortcut(
+    virtualKey: CGKeyCode,
+    flags: CGEventFlags,
+    appPid: pid_t
+) throws {
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let keyDown = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+          let keyUp = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
+    else {
+        throw AutomationError.actionFailed("Failed to create keyboard events for shortcut input.")
     }
+
+    keyDown.flags = flags
+    keyUp.flags = flags
+    keyDown.postToPid(appPid)
+    keyUp.postToPid(appPid)
+}
+
+private func postUnicodeText(_ text: String, appPid: pid_t) throws {
+    guard !text.isEmpty else {
+        return
+    }
+
+    guard let source = CGEventSource(stateID: .hidSystemState) else {
+        throw AutomationError.actionFailed("Failed to create keyboard event source for typing.")
+    }
+
+    let utf16 = Array(text.utf16)
+    guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+          let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+    else {
+        throw AutomationError.actionFailed("Failed to create keyboard events for typing.")
+    }
+
+    keyDown.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+    keyUp.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+    keyDown.postToPid(appPid)
+    keyUp.postToPid(appPid)
+}
+
+private func typeText(_ text: String, into element: AXUIElement, appPid: pid_t) throws {
+    setFocus(on: element)
+    Thread.sleep(forTimeInterval: 0.05)
+
+    // Clear existing text via Cmd+A then Delete to keep scenarios deterministic.
+    try postKeyboardShortcut(virtualKey: 0x00, flags: .maskCommand, appPid: appPid)
+    try postKeyboardShortcut(virtualKey: 0x33, flags: [], appPid: appPid)
+    Thread.sleep(forTimeInterval: 0.03)
+    try postUnicodeText(text, appPid: appPid)
 }
 
 private func focusedWindow(for appElement: AXUIElement) -> AXUIElement? {
@@ -540,7 +583,7 @@ private func runScenario(
                 }
                 throw AutomationError.elementNotFound(step.title ?? "")
             }
-            try typeText(text, into: element)
+            try typeText(text, into: element, appPid: app.processIdentifier)
 
         case "screenshot":
             guard let path = step.path else {

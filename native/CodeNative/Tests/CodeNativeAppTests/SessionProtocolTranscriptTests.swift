@@ -171,6 +171,24 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(end.cardStyle, .tool)
     }
 
+    func testExecCommandEndWithoutCallIDStillBuildsToolInfo() throws {
+        let end = makeCoreEventItem(
+            seq: 9_005,
+            payload: .object([
+                "type": .string("exec_command_end"),
+                "exit_code": .number(0),
+                "duration": .string("0.3s"),
+                "stdout": .string("build complete")
+            ])
+        )
+
+        let info = try XCTUnwrap(end.toolCallInfo)
+        XCTAssertNil(info.callId)
+        XCTAssertEqual(info.name, "shell")
+        XCTAssertEqual(info.output, "build complete")
+        XCTAssertEqual(info.phase, .completed)
+    }
+
     func testTurnAbortedBodyShowsReason() {
         let item = makeCoreEventItem(
             seq: 10,
@@ -579,6 +597,214 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertFalse(item.shouldHideFromTranscript)
     }
 
+    func testToolCallInfoUnwrapsShellOutputEnvelope() throws {
+        let item = makeCoreEventItem(
+            seq: 28_001,
+            payload: .object([
+                "type": .string("tool_call_end"),
+                "call_id": .string("call-shell-1"),
+                "name": .string("shell"),
+                "arguments": .object([
+                    "command": .array([
+                        .string("git"),
+                        .string("status")
+                    ])
+                ]),
+                "output": .string("{\"output\":\"line one\\nline two\\n\",\"metadata\":{\"exit_code\":0}}")
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertEqual(info.phase, .completed)
+        XCTAssertEqual(info.name, "shell")
+        XCTAssertEqual(info.callId, "call-shell-1")
+        XCTAssertEqual(info.command, "git status")
+        XCTAssertEqual(info.output, "line one\nline two")
+        XCTAssertEqual(info.success, true)
+    }
+
+    func testMcpToolCallInfoUsesReadableTextContent() throws {
+        let item = makeCoreEventItem(
+            seq: 28_002,
+            payload: .object([
+                "type": .string("mcp_tool_call_end"),
+                "call_id": .string("call-mcp-1"),
+                "invocation": .object([
+                    "server": .string("inspection-pycharm"),
+                    "tool": .string("inspection_wait"),
+                    "arguments": .object([
+                        "project": .string("odoo-ai")
+                    ])
+                ]),
+                "result": .object([
+                    "Ok": .object([
+                        "content": .array([
+                            .object([
+                                "type": .string("text"),
+                                "text": .string("{\n  \"status\": \"results_available\"\n}\n\nSTATUS: Inspection complete")
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertEqual(info.phase, .completed)
+        XCTAssertEqual(info.name, "inspection-pycharm.inspection wait")
+        XCTAssertEqual(info.callId, "call-mcp-1")
+        XCTAssertTrue(info.output.contains("STATUS: Inspection complete") || info.output.contains("results_available"))
+        XCTAssertFalse(info.output.contains("\"content\""))
+    }
+
+    func testMcpToolCallBeginBodyUsesReadableSummary() {
+        let item = makeCoreEventItem(
+            seq: 28_002_1,
+            payload: .object([
+                "type": .string("mcp_tool_call_begin"),
+                "call_id": .string("call-mcp-begin-1"),
+                "invocation": .object([
+                    "server": .string("filesystem"),
+                    "tool": .string("read_file"),
+                    "arguments": .object([
+                        "path": .string("README.md")
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertTrue(item.body.contains("Running"))
+        XCTAssertTrue(item.body.contains("filesystem.read file"))
+        XCTAssertFalse(item.body.contains("\"invocation\""))
+    }
+
+    func testCustomToolCallInfoUnwrapsStructuredContent() throws {
+        let item = makeCoreEventItem(
+            seq: 28_003,
+            payload: .object([
+                "type": .string("custom_tool_call_end"),
+                "call_id": .string("call-custom-1"),
+                "tool_name": .string("agent"),
+                "parameters": .object([
+                    "command": .array([
+                        .string("echo"),
+                        .string("hello")
+                    ]),
+                    "batch_id": .string("batch-123")
+                ]),
+                "result": .object([
+                    "Ok": .object([
+                        "content": .array([
+                            .object([
+                                "type": .string("text"),
+                                "text": .string("{\"ok\":true,\"completed\":3}")
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertEqual(info.phase, .completed)
+        XCTAssertEqual(info.name, "agent")
+        XCTAssertEqual(info.callId, "call-custom-1")
+        XCTAssertEqual(info.command, "echo hello")
+        XCTAssertTrue(info.arguments.contains(where: { $0.key == "batch_id" && $0.value == "batch-123" }))
+        XCTAssertTrue(info.output.contains("ok"))
+        XCTAssertFalse(info.output.contains("\\\"ok\\\""))
+        XCTAssertEqual(info.success, true)
+    }
+
+    func testCustomToolCallUpdateBodyUsesReadableSummary() throws {
+        let item = makeCoreEventItem(
+            seq: 28_003_1,
+            payload: .object([
+                "type": .string("custom_tool_call_update"),
+                "call_id": .string("call-custom-update-1"),
+                "tool_name": .string("agent"),
+                "parameters": .object([
+                    "batch_id": .string("batch-321")
+                ])
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertEqual(info.phase, .started)
+        XCTAssertTrue(item.body.contains("Running"))
+        XCTAssertTrue(item.body.contains("agent"))
+        XCTAssertFalse(item.body.contains("\"parameters\""))
+    }
+
+    func testMcpToolCallWithoutCallIDStillParsesToolInfo() throws {
+        let item = makeCoreEventItem(
+            seq: 28_004,
+            payload: .object([
+                "type": .string("mcp_tool_call_end"),
+                "invocation": .object([
+                    "server": .string("filesystem"),
+                    "tool": .string("read_file"),
+                    "arguments": .object([
+                        "path": .string("README.md")
+                    ])
+                ]),
+                "result": .object([
+                    "Ok": .object([
+                        "content": .array([
+                            .object([
+                                "type": .string("text"),
+                                "text": .string("# Project README")
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertNil(info.callId)
+        XCTAssertEqual(info.name, "filesystem.read file")
+        XCTAssertTrue(item.body.contains("filesystem.read file"))
+        XCTAssertFalse(item.body.contains("\"invocation\""))
+    }
+
+    func testCustomToolCallWithoutCallIDStillParsesToolInfo() throws {
+        let item = makeCoreEventItem(
+            seq: 28_005,
+            payload: .object([
+                "type": .string("custom_tool_call_end"),
+                "tool_name": .string("agent"),
+                "parameters": .object([
+                    "batch_id": .string("batch-xyz")
+                ]),
+                "result": .object([
+                    "Ok": .string("{\"status\":\"done\"}")
+                ])
+            ])
+        )
+
+        let info = try XCTUnwrap(item.toolCallInfo)
+        XCTAssertNil(info.callId)
+        XCTAssertEqual(info.name, "agent")
+        XCTAssertTrue(item.body.contains("agent"))
+        XCTAssertFalse(item.body.contains("\"parameters\""))
+    }
+
+    func testWebSearchCompleteIsHandledAsSearchEndAlias() {
+        let item = makeCoreEventItem(
+            seq: 28_006,
+            payload: .object([
+                "type": .string("web_search_complete"),
+                "call_id": .string("web-search-9"),
+                "query": .string("swift concurrency tips")
+            ])
+        )
+
+        XCTAssertEqual(item.cardStyle, .tool)
+        XCTAssertEqual(item.browserWorkflowEvent?.status, .succeeded)
+        XCTAssertTrue(item.body.contains("Search results ready"))
+    }
+
     func testCollabSpawnBeginProducesCoordinatorProgressCard() {
         let item = makeCoreEventItem(
             seq: 29,
@@ -671,4 +897,3 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         )
     }
 }
-

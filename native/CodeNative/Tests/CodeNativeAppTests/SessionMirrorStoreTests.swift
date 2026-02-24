@@ -206,6 +206,43 @@ final class SessionMirrorStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testModelListEnvelopeUpdatesAvailableModelOptions() throws {
+        let store = SessionMirrorStore()
+
+        try applyServerEnvelope(
+            """
+            {
+              "type": "model_list",
+              "data": [
+                {
+                  "id": "gpt-5.2",
+                  "model": "gpt-5.2",
+                  "display_name": "gpt-5.2",
+                  "description": "General frontier model",
+                  "default_reasoning_effort": "medium",
+                  "supported_reasoning_efforts": [
+                    { "reasoning_effort": "low", "description": "Fast" },
+                    { "reasoning_effort": "medium", "description": "Balanced" },
+                    { "reasoning_effort": "high", "description": "Deep" },
+                    { "reasoning_effort": "xhigh", "description": "Extra deep" }
+                  ],
+                  "is_default": true
+                }
+              ]
+            }
+            """,
+            to: store
+        )
+
+        XCTAssertEqual(store.availableModelOptions.count, 1)
+        XCTAssertEqual(store.availableModelOptions.first?.model, "gpt-5.2")
+        XCTAssertEqual(
+            store.availableModelOptions.first?.supportedReasoningEfforts.map(\.reasoningEffort),
+            ["low", "medium", "high", "xhigh"]
+        )
+    }
+
+    @MainActor
     func testStorePrependsHistoryPagesAndTracksHasMoreFlag() throws {
         let store = SessionMirrorStore()
         let sessionId = UUID(uuidString: "00000000-0000-0000-0000-000000000119")!
@@ -1147,6 +1184,20 @@ final class SessionMirrorStoreTests: XCTestCase {
           "connection_state": "connected",
           "status_line": "Connected as fixture",
           "client_id": "fixture-client",
+          "model_options": [
+            {
+              "id": "gpt-5.3-codex",
+              "model": "gpt-5.3-codex",
+              "display_name": "GPT-5.3 Codex",
+              "description": "Default coding model",
+              "default_reasoning_effort": "high",
+              "supported_reasoning_efforts": [
+                { "reasoning_effort": "minimal", "description": "Faster responses" },
+                { "reasoning_effort": "high", "description": "Best quality" }
+              ],
+              "is_default": true
+            }
+          ],
           "companion_session_token": "fixture-companion-token",
           "companion_lan_endpoint": "ws://192.168.1.77:4317/ws",
           "selected_session_id": "\(sessionId.uuidString)",
@@ -1191,6 +1242,12 @@ final class SessionMirrorStoreTests: XCTestCase {
         XCTAssertEqual(store.statusLine, "Connected as fixture")
         XCTAssertEqual(store.companionSessionToken, "fixture-companion-token")
         XCTAssertEqual(store.companionLANEndpoint, "ws://192.168.1.77:4317/ws")
+        XCTAssertEqual(store.availableModelOptions.count, 1)
+        XCTAssertEqual(store.availableModelOptions.first?.model, "gpt-5.3-codex")
+        XCTAssertEqual(
+            store.availableModelOptions.first?.supportedReasoningEfforts.map(\.reasoningEffort),
+            ["minimal", "high"]
+        )
         XCTAssertEqual(store.selectedSessionID, sessionId)
         XCTAssertEqual(store.selectedSession?.title, "Fixture session")
         XCTAssertEqual(store.selectedSessionItems.map(\.seq), [1, 2])

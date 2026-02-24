@@ -95,6 +95,7 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var statusLine: String = "Disconnected"
     @Published private(set) var sessions: [SessionSummary] = []
+    @Published private(set) var availableModelOptions: [WorkflowModelOption] = []
     @Published private(set) var itemsBySession: [UUID: [SessionStreamItem]] = [:]
     @Published private(set) var unavailableSessionErrors: [UUID: String] = [:]
     @Published private(set) var historyPageLoadInFlightSessionIDs: Set<UUID> = []
@@ -373,13 +374,28 @@ final class SessionMirrorStore: ObservableObject {
         await send(OutboundMessage.listSessions(requestId: requestId))
     }
 
-    func createSession(cwd: String?) async {
+    func createSession(
+        cwd: String?,
+        model: String? = nil,
+        reasoningEffort: String? = nil
+    ) async {
         let normalized = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = normalized?.isEmpty == true ? nil : normalized
-        await send(CreateSessionMessage(requestId: nextRequestID(), cwd: value))
+        await send(
+            CreateSessionMessage(
+                requestId: nextRequestID(),
+                cwd: value,
+                model: model,
+                reasoningEffort: reasoningEffort
+            )
+        )
     }
 
-    func submitComposer(text explicitText: String? = nil) async {
+    func submitComposer(
+        text explicitText: String? = nil,
+        model: String? = nil,
+        reasoningEffort: String? = nil
+    ) async {
         guard let selectedSessionID else {
             return
         }
@@ -399,7 +415,14 @@ final class SessionMirrorStore: ObservableObject {
                 cursor: cursor
             )
         )
-        await send(SubmitTurnMessage(requestId: nextRequestID(), sessionId: selectedSessionID))
+        await send(
+            SubmitTurnMessage(
+                requestId: nextRequestID(),
+                sessionId: selectedSessionID,
+                model: model,
+                reasoningEffort: reasoningEffort
+            )
+        )
         composerText = ""
     }
 
@@ -630,6 +653,7 @@ final class SessionMirrorStore: ObservableObject {
             startCatalogRefreshLoopIfNeeded()
             Task { @MainActor in
                 await self.refreshSessions()
+                await self.send(OutboundMessage.listModels(requestId: self.nextRequestID()))
             }
 
         case .sessionList(let message):
@@ -652,6 +676,9 @@ final class SessionMirrorStore: ObservableObject {
         case .sessionCreated(let message):
             upsertSession(message.session)
             selectedSessionID = message.session.id
+
+        case .modelList(let message):
+            availableModelOptions = message.data
 
         case .sessionAttached(let message):
             let existing = itemsBySession[message.sessionId] ?? []
@@ -1249,6 +1276,7 @@ final class SessionMirrorStore: ObservableObject {
            !endpoint.isEmpty {
             self.endpoint = endpoint
         }
+        availableModelOptions = fixture.modelOptions ?? []
 
         userInitiatedDisconnect = true
         expectedAttachedSessionID = nil
@@ -1334,7 +1362,7 @@ final class SessionMirrorStore: ObservableObject {
     }
 
     private func markSessionUnavailable(_ sessionID: UUID, message: String) {
-        unavailableSessionErrors[sessionID] = message
+        unavailableSessionErrors[sessionID] = normalizedUnavailableSessionMessage(message)
         if let session = sessions.first(where: { $0.id == sessionID }) {
             unavailableSessionActivitySnapshot[sessionID] = sessionActivityUnixMs(session)
         } else {
@@ -1345,6 +1373,20 @@ final class SessionMirrorStore: ObservableObject {
     private func clearSessionUnavailable(_ sessionID: UUID) {
         unavailableSessionErrors.removeValue(forKey: sessionID)
         unavailableSessionActivitySnapshot.removeValue(forKey: sessionID)
+    }
+
+    private func normalizedUnavailableSessionMessage(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return message
+        }
+
+        let normalized = trimmed.lowercased()
+        if normalized.contains("already active in another code runtime") {
+            return "This thread is active in another Code runtime. Close the other runtime for this thread, then retry attach."
+        }
+
+        return trimmed
     }
 
     private func preferredAutoSelectedSession(
@@ -1408,6 +1450,7 @@ final class SessionMirrorStore: ObservableObject {
 
 private struct BenchmarkFixture: Decodable {
     let endpoint: String?
+    let modelOptions: [WorkflowModelOption]?
     let connectionState: SessionMirrorStore.ConnectionState
     let statusLine: String?
     let lastError: String?

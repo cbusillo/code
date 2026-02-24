@@ -90,6 +90,25 @@ struct ErrorMessage: Decodable {
     let message: String
 }
 
+struct WorkflowReasoningEffortOption: Decodable, Hashable {
+    let reasoningEffort: String
+    let description: String
+}
+
+struct WorkflowModelOption: Decodable, Hashable, Identifiable {
+    let id: String
+    let model: String
+    let displayName: String
+    let description: String
+    let defaultReasoningEffort: String
+    let supportedReasoningEfforts: [WorkflowReasoningEffortOption]
+    let isDefault: Bool
+}
+
+struct ModelListMessage: Decodable {
+    let data: [WorkflowModelOption]
+}
+
 struct SessionStreamItem: Decodable, Hashable, Identifiable {
     private static let tokenNumberFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -201,6 +220,12 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return normalizeStructuredText(delta)
         }
 
+        if payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta" {
+            // Some streaming deltas only carry whitespace/newline keepalives.
+            // Avoid falling through to raw JSON rendering for those frames.
+            return ""
+        }
+
         if payloadType == "agent_reasoning_delta"
             || payloadType == "agent_reasoning_raw_content_delta"
             || payloadType == "reasoning_content_delta"
@@ -208,6 +233,14 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             let delta = extractStreamingDeltaText(from: object)
         {
             return truncate(normalizeReasoningText(delta), maxCharacters: 3_000)
+        }
+
+        if payloadType == "agent_reasoning_delta"
+            || payloadType == "agent_reasoning_raw_content_delta"
+            || payloadType == "reasoning_content_delta"
+            || payloadType == "reasoning_raw_content_delta"
+        {
+            return ""
         }
 
         if payloadType == "user_message",
@@ -253,8 +286,46 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             return summarizeExecCommandBegin(object)
         }
 
+        if payloadType == "exec_command_output_delta" {
+            let stream = object["stream"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let chunk = object["chunk"]?.stringValue
+                ?? object["delta"]?.stringValue
+                ?? ""
+            let normalizedChunk = normalizeStructuredText(chunk).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if normalizedChunk.isEmpty {
+                if let stream,
+                   !stream.isEmpty {
+                    return "Streaming \(stream)"
+                }
+                return "Streaming output"
+            }
+
+            if let stream,
+               !stream.isEmpty {
+                return "\(stream): \(normalizedChunk)"
+            }
+
+            return normalizedChunk
+        }
+
         if payloadType == "exec_command_end" {
             return summarizeExecCommandEnd(object)
+        }
+
+        if payloadType == "tool_call_begin"
+            || payloadType == "mcp_tool_call_begin"
+            || payloadType == "custom_tool_call_begin"
+            || payloadType == "custom_tool_call_update"
+        {
+            return summarizeToolCallBegin(payloadType: payloadType, object: object)
+        }
+
+        if payloadType == "tool_call_end"
+            || payloadType == "mcp_tool_call_end"
+            || payloadType == "custom_tool_call_end"
+        {
+            return summarizeToolCallEnd(payloadType: payloadType, object: object)
         }
 
         if payloadType == "patch_apply_end" {
@@ -403,6 +474,616 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
             .joined(separator: "\n")
 
         return "\(headlineParts.joined(separator: " · "))\n\(truncate(preview, maxCharacters: 380))"
+    }
+
+    private func summarizeToolCallBegin(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> String {
+        guard let info = parseToolCallInfo(payloadType: payloadType, object: object) else {
+            return "Running tool"
+        }
+
+        if !info.command.isEmpty {
+            return "Running `\(info.command)`"
+        }
+
+        var lines: [String] = ["Running \(info.name)"]
+        if !info.arguments.isEmpty {
+            let details = info.arguments
+                .prefix(4)
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: " · ")
+            lines.append(details)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func summarizeToolCallEnd(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> String {
+        guard let info = parseToolCallInfo(payloadType: payloadType, object: object) else {
+            return "Tool finished"
+        }
+
+        let success = info.success ?? inferToolCallSuccess(from: info.output)
+        var headlineParts: [String] = [success ? "Completed" : "Failed"]
+        if !info.command.isEmpty {
+            headlineParts.append("`\(info.command)`")
+        } else {
+            headlineParts.append(info.name)
+        }
+
+        let preview = summarizedToolOutputPreview(info.output)
+        if preview.isEmpty {
+            return headlineParts.joined(separator: " · ")
+        }
+
+        return "\(headlineParts.joined(separator: " · "))\n\(preview)"
+    }
+
+    private func parseToolCallInfo(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> ToolCallInfo? {
+        if payloadType == "mcp_tool_call_begin" || payloadType == "mcp_tool_call_end" {
+            return parseMcpToolCallInfo(payloadType: payloadType, object: object)
+        }
+
+        if payloadType == "custom_tool_call_begin"
+            || payloadType == "custom_tool_call_update"
+            || payloadType == "custom_tool_call_end"
+        {
+            return parseCustomToolCallInfo(payloadType: payloadType, object: object)
+        }
+
+        let phase: ToolCallPhase
+        if payloadType == "tool_call_begin" {
+            phase = .started
+        } else if payloadType == "tool_call_end" {
+            phase = .completed
+        } else {
+            return nil
+        }
+
+        let name = normalizedToolName(object["name"]?.stringValue)
+        let callId = normalizedOptionalIdentifier(object["call_id"]?.stringValue)
+        let argumentsObject = object["arguments"]?.objectValue
+        let command = toolCommand(from: argumentsObject)
+
+        var arguments: [ToolCallArgument] = []
+        if let argumentsObject {
+            for key in argumentsObject.keys.sorted() {
+                if key == "command" {
+                    continue
+                }
+
+                guard let value = argumentsObject[key] else {
+                    continue
+                }
+
+                let renderedValue = summarizeToolArgumentValue(value)
+                if !renderedValue.isEmpty {
+                    arguments.append(ToolCallArgument(key: key, value: renderedValue))
+                }
+            }
+        } else if let raw = object["arguments_raw"]?.stringValue {
+            let normalized = normalizeStructuredText(raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                arguments.append(
+                    ToolCallArgument(
+                        key: "args",
+                        value: truncateSingleLine(normalized.replacingOccurrences(of: "\n", with: " "), maxCharacters: 140)
+                    )
+                )
+            }
+        }
+
+        let rawOutput = normalizeStructuredText(rawStringValue(from: object["output"]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = normalizeToolCallOutputPreview(rawOutput)
+
+        let success: Bool?
+        if phase == .completed {
+            if let explicit = object["success"]?.boolValue {
+                success = explicit
+            } else if !rawOutput.isEmpty {
+                success = inferToolCallSuccess(from: rawOutput)
+            } else {
+                success = nil
+            }
+        } else {
+            success = nil
+        }
+
+        return ToolCallInfo(
+            phase: phase,
+            name: name,
+            callId: callId,
+            command: command,
+            arguments: arguments,
+            output: output,
+            success: success
+        )
+    }
+
+    private func parseMcpToolCallInfo(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> ToolCallInfo? {
+        let phase: ToolCallPhase
+        if payloadType == "mcp_tool_call_begin" {
+            phase = .started
+        } else if payloadType == "mcp_tool_call_end" {
+            phase = .completed
+        } else {
+            return nil
+        }
+
+        let callId = normalizedOptionalIdentifier(object["call_id"]?.stringValue)
+        let invocation = object["invocation"]?.objectValue
+        let server = invocation?["server"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let tool = invocation?["tool"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let resolvedName: String = {
+            let normalizedServer = (server?.isEmpty == false) ? server! : ""
+            let normalizedTool = (tool?.isEmpty == false) ? tool! : ""
+            if !normalizedServer.isEmpty && !normalizedTool.isEmpty {
+                return "\(normalizedServer).\(normalizedTool)"
+            }
+            if !normalizedTool.isEmpty {
+                return normalizedTool
+            }
+            if !normalizedServer.isEmpty {
+                return normalizedServer
+            }
+            return "mcp_tool"
+        }()
+
+        let invocationArguments = invocation?["arguments"]
+        let command = toolCommand(from: invocationArguments?.objectValue)
+
+        var arguments: [ToolCallArgument] = []
+        if let server,
+           !server.isEmpty {
+            arguments.append(ToolCallArgument(key: "server", value: server))
+        }
+
+        if let tool,
+           !tool.isEmpty {
+            arguments.append(ToolCallArgument(key: "tool", value: tool))
+        }
+
+        if let invocationArguments {
+            switch invocationArguments {
+            case .object(let fields):
+                for key in fields.keys.sorted() {
+                    if key == "command" {
+                        continue
+                    }
+
+                    if let value = fields[key] {
+                        let rendered = summarizeToolArgumentValue(value)
+                        if !rendered.isEmpty {
+                            arguments.append(ToolCallArgument(key: key, value: rendered))
+                        }
+                    }
+                }
+            default:
+                let rendered = summarizeToolArgumentValue(invocationArguments)
+                if !rendered.isEmpty {
+                    arguments.append(ToolCallArgument(key: "args", value: rendered))
+                }
+            }
+        }
+
+        var output = ""
+        var success: Bool? = nil
+        if phase == .completed,
+           let result = object["result"]?.objectValue {
+            if let errValue = result["Err"] {
+                output = normalizeStructuredText(rawStringValue(from: errValue))
+                success = false
+            } else if let okValue = result["Ok"] {
+                success = true
+                if let okObject = okValue.objectValue {
+                    if let isError = okObject["is_error"]?.boolValue,
+                       isError {
+                        success = false
+                    }
+
+                    if let content = okObject["content"]?.arrayValue {
+                        let textParts = content.compactMap { item -> String? in
+                            guard let itemObject = item.objectValue,
+                                  let text = itemObject["text"]?.stringValue
+                            else {
+                                return nil
+                            }
+                            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                        .filter { !$0.isEmpty }
+
+                        if !textParts.isEmpty {
+                            output = textParts.joined(separator: "\n\n")
+                        }
+                    }
+
+                    if output.isEmpty,
+                       let structured = okObject["structured_content"] {
+                        output = normalizeStructuredText(rawStringValue(from: structured))
+                    }
+                }
+
+                if output.isEmpty {
+                    output = normalizeStructuredText(rawStringValue(from: okValue))
+                }
+            }
+        }
+
+        let normalizedOutput = normalizeToolCallOutputPreview(
+            output.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+
+        return ToolCallInfo(
+            phase: phase,
+            name: normalizedToolName(resolvedName),
+            callId: callId,
+            command: command,
+            arguments: arguments,
+            output: normalizedOutput,
+            success: success
+        )
+    }
+
+    private func parseCustomToolCallInfo(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> ToolCallInfo? {
+        let phase: ToolCallPhase
+        if payloadType == "custom_tool_call_begin" || payloadType == "custom_tool_call_update" {
+            phase = .started
+        } else if payloadType == "custom_tool_call_end" {
+            phase = .completed
+        } else {
+            return nil
+        }
+
+        let callId = normalizedOptionalIdentifier(object["call_id"]?.stringValue)
+        let name = normalizedToolName(object["tool_name"]?.stringValue ?? object["name"]?.stringValue)
+
+        let parameters = object["parameters"]
+        let command = toolCommand(from: parameters?.objectValue)
+
+        var arguments: [ToolCallArgument] = []
+        if let parameters {
+            switch parameters {
+            case .object(let fields):
+                for key in fields.keys.sorted() {
+                    if key == "command" {
+                        continue
+                    }
+
+                    if let value = fields[key] {
+                        let rendered = summarizeToolArgumentValue(value)
+                        if !rendered.isEmpty {
+                            arguments.append(ToolCallArgument(key: key, value: rendered))
+                        }
+                    }
+                }
+            default:
+                let rendered = summarizeToolArgumentValue(parameters)
+                if !rendered.isEmpty {
+                    arguments.append(ToolCallArgument(key: "params", value: rendered))
+                }
+            }
+        }
+
+        var output = ""
+        var success: Bool? = nil
+        if phase == .completed,
+           let result = object["result"]?.objectValue {
+            if let ok = result["Ok"] {
+                success = true
+                output = normalizeStructuredText(rawStringValue(from: ok))
+            } else if let err = result["Err"] {
+                success = false
+                output = normalizeStructuredText(rawStringValue(from: err))
+            }
+        }
+
+        let normalizedOutput = normalizeToolCallOutputPreview(
+            output.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+
+        return ToolCallInfo(
+            phase: phase,
+            name: name,
+            callId: callId,
+            command: command,
+            arguments: arguments,
+            output: normalizedOutput,
+            success: success
+        )
+    }
+
+    private func normalizedToolName(_ rawValue: String?) -> String {
+        let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            return "tool"
+        }
+
+        if trimmed == "shell" {
+            return "shell"
+        }
+
+        return trimmed.replacingOccurrences(of: "_", with: " ")
+    }
+
+    private func normalizedOptionalIdentifier(_ rawValue: String?) -> String? {
+        let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func toolCommand(from arguments: [String: JSONValue]?) -> String {
+        guard let arguments else {
+            return ""
+        }
+
+        let fromArray = joinedCommand(from: arguments["command"])
+        if !fromArray.isEmpty {
+            return fromArray
+        }
+
+        if let command = arguments["command"]?.stringValue {
+            let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return ""
+    }
+
+    private func summarizeToolArgumentValue(_ value: JSONValue) -> String {
+        switch value {
+        case .string(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return truncateSingleLine(trimmed, maxCharacters: 120)
+        case .number(let number):
+            return String(number)
+        case .bool(let flag):
+            return flag ? "true" : "false"
+        case .array(let values):
+            if values.isEmpty {
+                return "[]"
+            }
+            return truncateSingleLine(value.pretty.replacingOccurrences(of: "\n", with: " "), maxCharacters: 120)
+        case .object(let fields):
+            if fields.isEmpty {
+                return "{}"
+            }
+            return truncateSingleLine(value.pretty.replacingOccurrences(of: "\n", with: " "), maxCharacters: 120)
+        case .null:
+            return ""
+        }
+    }
+
+    private func rawStringValue(from value: JSONValue?) -> String {
+        guard let value else {
+            return ""
+        }
+
+        switch value {
+        case .string(let text):
+            return text
+        case .number(let number):
+            return String(number)
+        case .bool(let flag):
+            return flag ? "true" : "false"
+        case .null:
+            return ""
+        case .array, .object:
+            return value.pretty
+        }
+    }
+
+    private func truncateSingleLine(_ value: String, maxCharacters: Int) -> String {
+        if value.count <= maxCharacters {
+            return value
+        }
+
+        let endIndex = value.index(value.startIndex, offsetBy: maxCharacters)
+        return "\(value[..<endIndex])…"
+    }
+
+    private func inferToolCallSuccess(from output: String) -> Bool {
+        if let parsed = decodeJSONFragment(from: output) as? [String: Any],
+           let metadata = parsed["metadata"] as? [String: Any],
+           let exitCode = metadata["exit_code"] as? Int {
+            return exitCode == 0
+        }
+
+        let normalized = output.lowercased()
+        if normalized.contains("\"ok\"") {
+            return true
+        }
+        if normalized.contains("\"error\"") || normalized.contains(" failed") {
+            return false
+        }
+
+        return true
+    }
+
+    private func summarizedToolOutputPreview(_ output: String) -> String {
+        truncate(normalizeToolCallOutputPreview(output), maxCharacters: 380)
+    }
+
+    private func normalizeToolCallOutputPreview(_ output: String) -> String {
+        let trimmed = stripCodeFenceWrapper(from: output.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+
+        if let parsed = decodeJSONFragment(from: trimmed),
+           let extracted = extractReadableToolOutput(from: parsed, depth: 0) {
+            return extracted
+        }
+
+        if let fallback = extractOutputFieldFallback(from: trimmed) {
+            return fallback
+        }
+
+        return trimmed
+    }
+
+    private func extractOutputFieldFallback(from value: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #""output"\s*:\s*"((?:\\.|[^"\\])*)""#,
+            options: []
+        ) else {
+            return nil
+        }
+
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, options: [], range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: value)
+        else {
+            return nil
+        }
+
+        let raw = String(value[captureRange])
+        let normalized = normalizeStructuredText(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func extractReadableToolOutput(from value: Any, depth: Int) -> String? {
+        guard depth < 6 else {
+            return nil
+        }
+
+        if let text = value as? String {
+            let normalized = normalizeStructuredText(text).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                return nil
+            }
+
+            if let nested = decodeJSONFragment(from: normalized),
+               let nestedText = extractReadableToolOutput(from: nested, depth: depth + 1) {
+                return nestedText
+            }
+
+            return normalized
+        }
+
+        if let array = value as? [Any] {
+            let pieces = array
+                .compactMap { extractReadableToolOutput(from: $0, depth: depth + 1) }
+                .filter { !$0.isEmpty }
+            guard !pieces.isEmpty else {
+                return nil
+            }
+            return pieces.joined(separator: "\n")
+        }
+
+        guard let object = value as? [String: Any] else {
+            return nil
+        }
+
+        let orderedKeys = ["output", "stdout", "stderr", "text", "message", "content", "result", "data", "Ok", "Err"]
+        for key in orderedKeys {
+            guard let candidate = object[key],
+                  let extracted = extractReadableToolOutput(from: candidate, depth: depth + 1),
+                  !extracted.isEmpty
+            else {
+                continue
+            }
+            return extracted
+        }
+
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+           let rendered = String(data: data, encoding: .utf8) {
+            let normalized = normalizeStructuredText(rendered)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+
+        return nil
+    }
+
+    private func decodeJSONFragment(from value: String) -> Any? {
+        if let parsed = decodeJSONText(value) {
+            return parsed
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.hasPrefix("\"") && trimmed.hasSuffix("\""),
+           let unescaped = decodeJSONStringLiteral(trimmed),
+           let parsed = decodeJSONText(unescaped)
+        {
+            return parsed
+        }
+
+        if let firstBrace = trimmed.firstIndex(where: { $0 == "{" || $0 == "[" }),
+           let lastBrace = trimmed.lastIndex(where: { $0 == "}" || $0 == "]" }),
+           firstBrace <= lastBrace
+        {
+            let slice = String(trimmed[firstBrace...lastBrace])
+            if let parsed = decodeJSONText(slice) {
+                return parsed
+            }
+        }
+
+        return nil
+    }
+
+    private func decodeJSONText(_ value: String) -> Any? {
+        guard let data = value.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return nil
+        }
+
+        return parsed
+    }
+
+    private func decodeJSONStringLiteral(_ value: String) -> String? {
+        guard let data = value.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? String
+        else {
+            return nil
+        }
+
+        return parsed
+    }
+
+    private func stripCodeFenceWrapper(from value: String) -> String {
+        guard value.hasPrefix("```") else {
+            return value
+        }
+
+        var lines = value.components(separatedBy: "\n")
+        guard lines.count >= 2 else {
+            return value
+        }
+
+        if lines.first?.hasPrefix("```") == true {
+            lines.removeFirst()
+        }
+
+        if lines.last?.trimmingCharacters(in: .whitespacesAndNewlines) == "```" {
+            lines.removeLast()
+        }
+
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func summarizeTurnAborted(_ object: [String: JSONValue]) -> String {
@@ -806,7 +1487,7 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
                 callId: callId
             )
 
-        case "web_search_end":
+        case "web_search_end", "web_search_complete":
             let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
             let query = normalizedBrowserValue(object["query"]?.stringValue)
             var details: [String] = []
@@ -1512,6 +2193,7 @@ struct CoreEventPayload: Decodable, Hashable {
 enum ServerEnvelope: Decodable {
     case hello(HelloMessage)
     case sessionList(SessionListMessage)
+    case modelList(ModelListMessage)
     case sessionCreated(SessionCreatedMessage)
     case sessionAttached(SessionAttachedMessage)
     case sessionHistoryPage(SessionHistoryPageMessage)
@@ -1534,6 +2216,8 @@ enum ServerEnvelope: Decodable {
             self = .hello(try HelloMessage(from: decoder))
         case "session_list":
             self = .sessionList(try SessionListMessage(from: decoder))
+        case "model_list":
+            self = .modelList(try ModelListMessage(from: decoder))
         case "session_created":
             self = .sessionCreated(try SessionCreatedMessage(from: decoder))
         case "session_attached":
@@ -1565,6 +2249,17 @@ struct OutboundMessage: Encodable {
     static func listSessions(requestId: String) -> Self {
         Self(
             type: "list_sessions",
+            requestId: requestId,
+            sessionId: nil,
+            fromSeq: nil,
+            beforeSeq: nil,
+            limit: nil
+        )
+    }
+
+    static func listModels(requestId: String) -> Self {
+        Self(
+            type: "list_models",
             requestId: requestId,
             sessionId: nil,
             fromSeq: nil,
@@ -1611,6 +2306,8 @@ struct CreateSessionMessage: Encodable {
     let type: String = "create_session"
     let requestId: String
     let cwd: String?
+    let model: String?
+    let reasoningEffort: String?
 }
 
 struct ComposerUpdateMessage: Encodable {
@@ -1625,6 +2322,8 @@ struct SubmitTurnMessage: Encodable {
     let type: String = "submit_turn"
     let requestId: String
     let sessionId: UUID
+    let model: String?
+    let reasoningEffort: String?
 }
 
 struct InterruptTurnMessage: Encodable {
@@ -1758,6 +2457,32 @@ struct ExecCommandInfo {
     let output: String
     let exitCode: Int?
     let duration: String?
+}
+
+struct ExecCommandOutputDeltaInfo: Hashable {
+    let callId: String
+    let stream: String?
+    let chunk: String
+}
+
+enum ToolCallPhase: Hashable {
+    case started
+    case completed
+}
+
+struct ToolCallArgument: Hashable {
+    let key: String
+    let value: String
+}
+
+struct ToolCallInfo: Hashable {
+    let phase: ToolCallPhase
+    let name: String
+    let callId: String?
+    let command: String
+    let arguments: [ToolCallArgument]
+    let output: String
+    let success: Bool?
 }
 
 enum BrowserWorkflowStatus: Hashable {
@@ -2355,6 +3080,139 @@ extension SessionStreamItem {
         )
     }
 
+    var execCommandCallID: String? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              let payloadType = payload.typeHint,
+              payloadType == "exec_command_begin"
+                || payloadType == "exec_command_output_delta"
+                || payloadType == "exec_command_end",
+              let object = payload.objectValue,
+              let callId = object["call_id"]?.stringValue
+        else {
+            return nil
+        }
+
+        let trimmed = callId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var execCommandOutputDeltaInfo: ExecCommandOutputDeltaInfo? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "exec_command_output_delta",
+              let object = payload.objectValue,
+              let callId = object["call_id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !callId.isEmpty
+        else {
+            return nil
+        }
+
+        let stream = object["stream"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let chunk = object["chunk"]?.stringValue
+            ?? object["delta"]?.stringValue
+            ?? ""
+        let normalizedChunk = normalizeStructuredText(chunk).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ExecCommandOutputDeltaInfo(
+            callId: callId,
+            stream: stream?.isEmpty == false ? stream : nil,
+            chunk: normalizedChunk
+        )
+    }
+
+    var toolCallInfo: ToolCallInfo? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              let payloadType = payload.typeHint,
+              let object = payload.objectValue
+        else {
+            return nil
+        }
+
+        if payloadType == "tool_call_begin"
+            || payloadType == "tool_call_end"
+            || payloadType == "mcp_tool_call_begin"
+            || payloadType == "mcp_tool_call_end"
+            || payloadType == "custom_tool_call_begin"
+            || payloadType == "custom_tool_call_update"
+            || payloadType == "custom_tool_call_end"
+        {
+            return parseToolCallInfo(payloadType: payloadType, object: object)
+        }
+
+        if payloadType == "exec_command_begin" || payloadType == "exec_command_end" {
+            return parseExecCommandToolCallInfo(payloadType: payloadType, object: object)
+        }
+
+        return nil
+    }
+
+    private func parseExecCommandToolCallInfo(
+        payloadType: String,
+        object: [String: JSONValue]
+    ) -> ToolCallInfo? {
+        let phase: ToolCallPhase
+        if payloadType == "exec_command_begin" {
+            phase = .started
+        } else if payloadType == "exec_command_end" {
+            phase = .completed
+        } else {
+            return nil
+        }
+
+        let callId = normalizedOptionalIdentifier(object["call_id"]?.stringValue)
+
+        let command = joinedCommand(from: object["command"])
+
+        var arguments: [ToolCallArgument] = []
+        if let cwd = object["cwd"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !cwd.isEmpty {
+            arguments.append(ToolCallArgument(key: "cwd", value: cwd))
+        }
+
+        if let source = object["source"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !source.isEmpty {
+            arguments.append(ToolCallArgument(key: "source", value: source))
+        }
+
+        let rawOutput = normalizeStructuredText(
+            object["formatted_output"]?.stringValue
+                ?? object["aggregated_output"]?.stringValue
+                ?? object["stdout"]?.stringValue
+                ?? object["stderr"]?.stringValue
+                ?? ""
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = normalizeToolCallOutputPreview(rawOutput)
+
+        let success: Bool?
+        if phase == .completed {
+            if let exitCode = object["exit_code"]?.numberValue {
+                success = Int(exitCode) == 0
+            } else if !rawOutput.isEmpty {
+                success = inferToolCallSuccess(from: rawOutput)
+            } else {
+                success = nil
+            }
+        } else {
+            success = nil
+        }
+
+        return ToolCallInfo(
+            phase: phase,
+            name: "shell",
+            callId: callId,
+            command: command,
+            arguments: arguments,
+            output: output,
+            success: success
+        )
+    }
+
     var isConversationBoundaryEvent: Bool {
         guard type == "core_event" else {
             return false
@@ -2595,6 +3453,10 @@ extension SessionStreamItem {
             return true
         }
 
+        if payloadType == "agent_message_delta" || payloadType == "agent_message_content_delta" {
+            return assistantDeltaText == nil
+        }
+
         if payloadType == "task_started" {
             return true
         }
@@ -2670,6 +3532,7 @@ extension SessionStreamItem {
             || payloadType == "task_started"
             || payloadType == "task_complete"
             || payloadType == "exec_command_begin"
+            || payloadType == "exec_command_output_delta"
             || payloadType == "background_event"
         {
             return true
@@ -2817,7 +3680,10 @@ extension SessionStreamItem {
             if payloadType == "turn_diff" {
                 return .tool
             }
-            if payloadType == "web_search_begin" || payloadType == "web_search_end" {
+            if payloadType == "web_search_begin"
+                || payloadType == "web_search_end"
+                || payloadType == "web_search_complete"
+            {
                 return .tool
             }
             if payloadType.contains("exec") || payloadType.contains("tool") {
