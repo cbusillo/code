@@ -231,9 +231,11 @@ jobs:
             -c "Delete :com.apple.developer.ubiquity-kvstore-identifier" \
             "$entitlements_for_signing" \
             >/dev/null 2>&1 || true
+          kvstore_id="$team_id.$bundle_id"
+          add_kvstore_cmd="Add :com.apple.developer.ubiquity-kvstore-identifier"
+          add_kvstore_cmd+=" string $kvstore_id"
           /usr/libexec/PlistBuddy \
-            -c "Add :com.apple.developer.ubiquity-kvstore-identifier" \
-            "string $team_id.$bundle_id" \
+            -c "$add_kvstore_cmd" \
             "$entitlements_for_signing"
 
           backend_bundle="$app_source/Contents/Resources/backend/CodeBackend.app"
