@@ -1148,13 +1148,6 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         }
     }
 
-    nonisolated static func hasTailscaleIPv4Address() -> Bool {
-        !allIPv4Addresses { interfaceName, ipAddress in
-            let lowerInterfaceName = interfaceName.lowercased()
-            return isTailscaleInterface(lowerInterfaceName) && ipAddress.hasPrefix("100.")
-        }.isEmpty
-    }
-
     nonisolated private static func primaryLANIPv4Address() -> String? {
         allIPv4Addresses { interfaceName, ipAddress in
             let lowerInterfaceName = interfaceName.lowercased()
@@ -1511,6 +1504,7 @@ private enum CompanionSyncPreferences {
 struct CodeNativeApp: App {
     private static let companionPairingsDefaultsKey = "code_native_companion_pairings"
 
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store: SessionMirrorStore
     @StateObject private var runtimeSupervisor: LocalBackendRuntimeSupervisor
     @State private var sharedCompanionBackends: [SharedCompanionBackend] = []
@@ -1623,6 +1617,14 @@ struct CodeNativeApp: App {
                     refreshSharedCompanionBackends()
                     syncStoreFromRuntimeSupervisor()
                 }
+                .onChange(of: scenePhase) { _, newPhase in
+                    guard newPhase == .active else {
+                        return
+                    }
+
+                    refreshSharedCompanionBackends()
+                    syncStoreFromRuntimeSupervisor()
+                }
                 .onOpenURL { url in
                     _ = store.importCompanionPairingCode(url.absoluteString)
                 }
@@ -1687,6 +1689,7 @@ struct CodeNativeApp: App {
     }
 
     private func refreshSharedCompanionBackends(nowUnixMs: UInt64 = LocalBackendRuntimeSupervisor.nowUnixMs()) {
+        NSUbiquitousKeyValueStore.default.synchronize()
         sharedCompanionBackends = SharedCompanionRegistry.sharedBackends(nowUnixMs: nowUnixMs)
     }
 
@@ -1782,17 +1785,23 @@ struct CodeNativeApp: App {
             return lanEndpoint
         }
 
-        if let tailscaleEndpoint = record.tailscaleEndpoint,
-           LocalBackendRuntimeSupervisor.hasTailscaleIPv4Address() {
-            return tailscaleEndpoint
-        }
-
-        if let lanEndpoint = record.lanEndpoint {
-            return lanEndpoint
+        let trimmedPrimaryEndpoint = record.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPrimaryEndpoint.isEmpty {
+            return trimmedPrimaryEndpoint
         }
 
         if let tailscaleEndpoint = record.tailscaleEndpoint {
-            return tailscaleEndpoint
+            let trimmedTailscaleEndpoint = tailscaleEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedTailscaleEndpoint.isEmpty {
+                return trimmedTailscaleEndpoint
+            }
+        }
+
+        if let lanEndpoint = record.lanEndpoint {
+            let trimmedLANEndpoint = lanEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLANEndpoint.isEmpty {
+                return trimmedLANEndpoint
+            }
         }
 
         return record.endpoint
