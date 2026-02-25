@@ -287,8 +287,11 @@ enum MacAppUpdateChecker {
         }
 
         let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(GitHubRelease.self, from: data)
+        do {
+            return try decoder.decode(GitHubRelease.self, from: data)
+        } catch {
+            throw MacAppUpdateCheckError.invalidResponse
+        }
     }
 
     private static func configuredRepository() -> (owner: String, name: String) {
@@ -306,10 +309,21 @@ private struct GitHubRelease: Decodable {
     let tagName: String
     let htmlURL: URL
     let assets: [GitHubReleaseAsset]
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case htmlURL = "html_url"
+        case assets
+    }
 }
 
 private struct GitHubReleaseAsset: Decodable {
     let name: String
     let downloadURL: URL
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case downloadURL = "browser_download_url"
+    }
 }
 #endif
