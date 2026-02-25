@@ -44,6 +44,34 @@ jobs:
           fi
           echo "value=$ref" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve marketing version
+        id: marketing_version
+        run: |
+          set -euo pipefail
+          candidate="${{ steps.resolve_ref.outputs.value }}"
+          case "$candidate" in
+            refs/tags/*)
+              candidate="${candidate#refs/tags/}"
+              ;;
+          esac
+
+          version=""
+          if [[ "$candidate" =~ ^macos-v(.+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            echo "Resolved MARKETING_VERSION=$version"
+            echo "value=$version" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${{ github.ref }}" =~ ^refs/tags/macos-v.+$ ]]; then
+            echo "Failed to resolve MARKETING_VERSION from tag:" >&2
+            echo "${{ github.ref }}" >&2
+            exit 1
+          fi
+
+          echo "No macOS release tag detected;"
+          echo "using project MARKETING_VERSION"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -111,17 +139,29 @@ jobs:
           echo "Using signing identity: $identity"
 
       - name: Build release app
+        env:
+          MARKETING_VERSION_OVERRIDE: >-
+            ${{ steps.marketing_version.outputs.value }}
         run: |
           set -euo pipefail
-          xcodebuild \
-            -project "$XCODE_PROJECT" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -destination "generic/platform=macOS" \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            build
+
+          build_cmd=(
+            xcodebuild
+            -project "$XCODE_PROJECT"
+            -scheme "$SCHEME"
+            -configuration Release
+            -destination "generic/platform=macOS"
+            -derivedDataPath "$DERIVED_DATA_PATH"
+            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_REQUIRED=NO
+          )
+
+          if [ -n "${MARKETING_VERSION_OVERRIDE:-}" ]; then
+            build_cmd+=("MARKETING_VERSION=$MARKETING_VERSION_OVERRIDE")
+          fi
+
+          build_cmd+=(build)
+          "${build_cmd[@]}"
 
       - name: Sign macOS app bundle
         run: |
