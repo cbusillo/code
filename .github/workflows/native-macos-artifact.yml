@@ -211,32 +211,12 @@ jobs:
           entitlements_for_signing="$STAGE_DIR/signing-entitlements.plist"
           cp "$ENTITLEMENTS_PATH" "$entitlements_for_signing"
 
-          # Resolve Team ID + bundle ID explicitly.
-          # codesign does not expand Xcode
-          # placeholders like $(TeamIdentifierPrefix) in raw entitlements files.
-          team_id=$(printf '%s' "$identity" |
-            sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')
-          bundle_id=$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleIdentifier' \
-              "$app_source/Contents/Info.plist"
-          )
-          if [ -z "$team_id" ] || [ -z "$bundle_id" ]; then
-            echo "Failed to resolve Team ID or bundle identifier" >&2
-            echo "for entitlements" >&2
-            exit 1
-          fi
-
+          # GitHub Developer ID builds cannot launch if this iCloud
+          # entitlement is embedded without a matching provisioning profile.
           /usr/libexec/PlistBuddy \
             -c "Delete :com.apple.developer.ubiquity-kvstore-identifier" \
             "$entitlements_for_signing" \
             >/dev/null 2>&1 || true
-          kvstore_id="$team_id.$bundle_id"
-          add_kvstore_cmd="Add :com.apple.developer.ubiquity-kvstore-identifier"
-          add_kvstore_cmd+=" string $kvstore_id"
-          /usr/libexec/PlistBuddy \
-            -c "$add_kvstore_cmd" \
-            "$entitlements_for_signing"
 
           backend_bundle="$app_source/Contents/Resources/backend/CodeBackend.app"
           if [ -d "$backend_bundle" ]; then
