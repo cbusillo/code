@@ -73,6 +73,8 @@ jobs:
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
           IOS_APPSTORE_PROFILE_BASE64:
             ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          IOS_APPSTORE_PROFILE_NAME:
+            ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID:
             ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -85,6 +87,7 @@ jobs:
             IOS_DIST_CERT_P12_BASE64 \
             IOS_DIST_CERT_PASSWORD \
             IOS_APPSTORE_PROFILE_BASE64 \
+            IOS_APPSTORE_PROFILE_NAME \
             APP_STORE_CONNECT_KEY_ID \
             APP_STORE_CONNECT_ISSUER_ID \
             APP_STORE_CONNECT_PRIVATE_KEY; do
@@ -106,6 +109,7 @@ jobs:
           p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
 
       - name: Install App Store provisioning profile
+        id: ios_profile
         env:
           IOS_APPSTORE_PROFILE_BASE64:
             ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
@@ -119,8 +123,13 @@ jobs:
             /usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin \
               <<<"$profile_plist"
           )
+          profile_name=$(
+            /usr/libexec/PlistBuddy -c 'Print Name' /dev/stdin \
+              <<<"$profile_plist"
+          )
           profiles_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
           cp "$PROFILE_PATH" "$profiles_dir/$profile_uuid.mobileprovision"
+          echo "name=$profile_name" >> "$GITHUB_OUTPUT"
 
       - name: Write export options
         run: |
@@ -146,6 +155,9 @@ jobs:
           EOF
 
       - name: Archive iOS app
+        env:
+          IOS_APPSTORE_PROFILE_NAME:
+            ${{ steps.ios_profile.outputs.name }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -156,6 +168,9 @@ jobs:
             -archivePath "$ARCHIVE_PATH" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$IOS_APPSTORE_PROFILE_NAME" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             clean archive
 
