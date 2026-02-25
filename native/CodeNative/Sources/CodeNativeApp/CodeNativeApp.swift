@@ -1,4 +1,5 @@
 import Darwin
+import Combine
 import Foundation
 import OSLog
 import SwiftUI
@@ -362,6 +363,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         let localSessionToken: String
         let sessionTokens: [String]
         let lanEndpoint: String?
+        let tailscaleEndpoint: String?
 
         var endpoint: String {
             "ws://\(LocalBackendRuntimeSupervisor.managedBackendConnectHost):\(port)/ws"
@@ -390,6 +392,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     @Published private(set) var endpoint: String?
     @Published private(set) var sessionToken: String?
     @Published private(set) var lanEndpoint: String?
+    @Published private(set) var tailscaleEndpoint: String?
     @Published private(set) var companionPairingEntries: [CompanionPairingEntry] = []
     @Published private(set) var canRotateCompanionSessionToken: Bool
     @Published private(set) var launchState: LaunchState = .idle
@@ -436,6 +439,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
         guard Self.shouldManageBackend(arguments: arguments, environment: environment) else {
             lanEndpoint = nil
+            tailscaleEndpoint = nil
             sessionToken = nil
             #if os(iOS)
             launchState = .disabled("iOS companion mode uses external endpoints.")
@@ -507,6 +511,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             self.process = process
             endpoint = launchPlan.endpoint
             lanEndpoint = launchPlan.lanEndpoint
+            tailscaleEndpoint = launchPlan.tailscaleEndpoint
             sessionToken = launchPlan.localSessionToken
             lastAppliedSessionTokens = Set(launchPlan.sessionTokens)
             launchState = .running
@@ -517,6 +522,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             self.process = nil
             endpoint = SessionMirrorStore.defaultEndpoint
             lanEndpoint = nil
+            tailscaleEndpoint = nil
             sessionToken = nil
             lastAppliedSessionTokens = []
             launchState = .failed("Failed to start managed backend: \(error.localizedDescription)")
@@ -785,6 +791,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
             lanEndpoint = nil
+            tailscaleEndpoint = nil
             sessionToken = nil
             launchState = .failed(
                 "Managed runtime unavailable: no launchable code binary found. Set CODE_NATIVE_BACKEND_BINARY to override."
@@ -797,6 +804,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             launchPlan = nil
             endpoint = SessionMirrorStore.defaultEndpoint
             lanEndpoint = nil
+            tailscaleEndpoint = nil
             sessionToken = nil
             launchState = .failed("Managed runtime unavailable: failed to reserve local port.")
             Self.logger.error("Managed runtime unavailable: failed to reserve local port")
@@ -808,11 +816,13 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
             port: port,
             localSessionToken: managedSessionToken,
             sessionTokens: activeCompanionSessionTokens(),
-            lanEndpoint: Self.resolveLANEndpoint(port: port)
+            lanEndpoint: Self.resolveLANEndpoint(port: port),
+            tailscaleEndpoint: Self.resolveTailscaleEndpoint(port: port)
         )
         self.launchPlan = launchPlan
         endpoint = launchPlan.endpoint
         lanEndpoint = launchPlan.lanEndpoint
+        tailscaleEndpoint = launchPlan.tailscaleEndpoint
         sessionToken = launchPlan.localSessionToken
         if case .failed = launchState {
             launchState = .idle
@@ -844,6 +854,7 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         if unexpectedTerminationDates.count >= Self.crashLoopFailureLimit {
             endpoint = SessionMirrorStore.defaultEndpoint
             lanEndpoint = nil
+            tailscaleEndpoint = nil
             sessionToken = nil
             launchState = .failed("Managed backend stopped repeatedly; restart suppressed.")
             return
@@ -1119,23 +1130,75 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         return "ws://\(ipAddress):\(port)/ws"
     }
 
+    nonisolated static func resolveTailscaleEndpoint(port: UInt16) -> String? {
+        guard let ipAddress = primaryTailscaleIPv4Address() else {
+            return nil
+        }
+        return "ws://\(ipAddress):\(port)/ws"
+    }
+
+    nonisolated static func localPrivateLANIPv4Addresses() -> [String] {
+        allIPv4Addresses { interfaceName, ipAddress in
+            let lowerInterfaceName = interfaceName.lowercased()
+            if isTailscaleInterface(lowerInterfaceName) {
+                return false
+            }
+
+            return isPrivateLANIPv4Address(ipAddress)
+        }
+    }
+
+    nonisolated static func hasTailscaleIPv4Address() -> Bool {
+        !allIPv4Addresses { interfaceName, ipAddress in
+            let lowerInterfaceName = interfaceName.lowercased()
+            return isTailscaleInterface(lowerInterfaceName) && ipAddress.hasPrefix("100.")
+        }.isEmpty
+    }
+
     nonisolated private static func primaryLANIPv4Address() -> String? {
+        allIPv4Addresses { interfaceName, ipAddress in
+            let lowerInterfaceName = interfaceName.lowercased()
+            if isTailscaleInterface(lowerInterfaceName) {
+                return false
+            }
+
+            return isPrivateLANIPv4Address(ipAddress)
+        }.first
+    }
+
+    nonisolated private static func primaryTailscaleIPv4Address() -> String? {
+        allIPv4Addresses { interfaceName, ipAddress in
+            let lowerInterfaceName = interfaceName.lowercased()
+            return isTailscaleInterface(lowerInterfaceName) && ipAddress.hasPrefix("100.")
+        }.first
+    }
+
+    nonisolated private static func isTailscaleInterface(_ lowerInterfaceName: String) -> Bool {
+        lowerInterfaceName.hasPrefix("utun") || lowerInterfaceName.contains("tailscale")
+    }
+
+    nonisolated private static func allIPv4Addresses(
+        where predicate: (String, String) -> Bool
+    ) -> [String] {
         var interfaces: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&interfaces) == 0,
               let firstInterface = interfaces
         else {
-            return nil
+            return []
         }
         defer {
             freeifaddrs(interfaces)
         }
 
+        var resolvedAddresses: [String] = []
+        var seenAddresses: Set<String> = []
         var pointer: UnsafeMutablePointer<ifaddrs>? = firstInterface
         while let interface = pointer {
             defer {
                 pointer = interface.pointee.ifa_next
             }
 
+            let interfaceName = String(cString: interface.pointee.ifa_name)
             let flags = Int32(interface.pointee.ifa_flags)
             guard (flags & IFF_UP) != 0,
                   (flags & IFF_LOOPBACK) == 0,
@@ -1162,12 +1225,36 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
 
             let hostBytes = hostBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
             let ipAddress = String(decoding: hostBytes, as: UTF8.self)
-            if ipAddress.isEmpty == false {
-                return ipAddress
+            if !ipAddress.isEmpty,
+               predicate(interfaceName, ipAddress),
+               !seenAddresses.contains(ipAddress) {
+                seenAddresses.insert(ipAddress)
+                resolvedAddresses.append(ipAddress)
             }
         }
 
-        return nil
+        return resolvedAddresses
+    }
+
+    nonisolated private static func isPrivateLANIPv4Address(_ address: String) -> Bool {
+        let components = address.split(separator: ".")
+        guard components.count == 4,
+              let firstOctet = Int(components[0]),
+              let secondOctet = Int(components[1])
+        else {
+            return false
+        }
+
+        if firstOctet == 10 || firstOctet == 192 && secondOctet == 168 {
+            return true
+        }
+
+        if firstOctet == 172,
+           (16...31).contains(secondOctet) {
+            return true
+        }
+
+        return false
     }
 
     nonisolated private static func parseDisabledFlag(_ value: String?) -> Bool {
@@ -1225,12 +1312,208 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
     }
 }
 
+private struct SharedCompanionBackendRecord: Codable, Equatable {
+    let id: String
+    let displayName: String
+    let endpoint: String
+    let lanEndpoint: String?
+    let tailscaleEndpoint: String?
+    let sessionToken: String
+    let updatedAtUnixMs: UInt64
+}
+
+private enum SharedCompanionRegistry {
+    private static let logger = Logger(subsystem: "com.every.code.native", category: "shared-companion-registry")
+    private static let storageKey = "code_native_shared_companion_backends_v1"
+    private static let staleWindowMs: UInt64 = 7 * 24 * 60 * 60 * 1_000
+
+    static func loadRecords(
+        store: NSUbiquitousKeyValueStore = .default
+    ) -> [SharedCompanionBackendRecord] {
+        guard let raw = store.string(forKey: storageKey),
+              let data = raw.data(using: .utf8),
+              let records = try? JSONDecoder().decode([SharedCompanionBackendRecord].self, from: data)
+        else {
+            if let raw = store.string(forKey: storageKey),
+               !raw.isEmpty {
+                logger.warning("Failed to decode shared companion registry payload")
+            }
+            return []
+        }
+
+        return records
+    }
+
+    static func saveRecords(
+        _ records: [SharedCompanionBackendRecord],
+        store: NSUbiquitousKeyValueStore = .default
+    ) {
+        guard let data = try? JSONEncoder().encode(records),
+              let raw = String(data: data, encoding: .utf8)
+        else {
+            logger.error("Failed to encode shared companion registry payload")
+            return
+        }
+
+        store.set(raw, forKey: storageKey)
+        store.synchronize()
+        logger.debug("Saved \(records.count, privacy: .public) shared companion registry records")
+    }
+
+    static func synchronizedRecords(
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) -> [SharedCompanionBackendRecord] {
+        let records = loadRecords(store: store)
+        let staleCutoff = nowUnixMs > staleWindowMs ? nowUnixMs - staleWindowMs : 0
+        let freshRecords = records
+            .filter { $0.updatedAtUnixMs >= staleCutoff }
+            .sorted(by: { $0.updatedAtUnixMs > $1.updatedAtUnixMs })
+
+        if freshRecords != records {
+            saveRecords(freshRecords, store: store)
+        }
+
+        return freshRecords
+    }
+
+    static func upsert(
+        _ record: SharedCompanionBackendRecord,
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) {
+        var records = synchronizedRecords(nowUnixMs: nowUnixMs, store: store)
+        records.removeAll(where: { $0.id == record.id })
+        records.append(record)
+        records.sort(by: { $0.updatedAtUnixMs > $1.updatedAtUnixMs })
+        saveRecords(records, store: store)
+        logger.info("Upserted shared companion backend \(record.id, privacy: .public)")
+    }
+
+    static func remove(
+        id: String,
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) {
+        var records = synchronizedRecords(nowUnixMs: nowUnixMs, store: store)
+        let beforeCount = records.count
+        records.removeAll(where: { $0.id == id })
+        guard records.count != beforeCount else {
+            return
+        }
+        saveRecords(records, store: store)
+        logger.info("Removed shared companion backend \(id, privacy: .public)")
+    }
+
+    static func sharedBackends(
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) -> [SharedCompanionBackend] {
+        synchronizedRecords(nowUnixMs: nowUnixMs, store: store).map { record in
+            SharedCompanionBackend(
+                id: record.id,
+                displayName: record.displayName,
+                endpoint: record.endpoint,
+                updatedAtUnixMs: record.updatedAtUnixMs
+            )
+        }
+    }
+
+    static func preferredRecord(
+        preferredBackendID: String?,
+        excludingBackendID: String? = nil,
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) -> SharedCompanionBackendRecord? {
+        let records = synchronizedRecords(nowUnixMs: nowUnixMs, store: store)
+        if let preferredBackendID,
+           !preferredBackendID.isEmpty,
+           let match = records.first(where: { $0.id == preferredBackendID }) {
+            return match
+        }
+        if let excludingBackendID,
+           !excludingBackendID.isEmpty,
+           let nonLocal = records.first(where: { $0.id != excludingBackendID }) {
+            return nonLocal
+        }
+
+        return records.first
+    }
+
+    static func record(
+        id: String,
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) -> SharedCompanionBackendRecord? {
+        synchronizedRecords(nowUnixMs: nowUnixMs, store: store).first(where: { $0.id == id })
+    }
+}
+
+private enum CompanionSyncPreferences {
+    static let autoConnectSharedBackendKey = "code_native_auto_connect_shared_companion"
+    static let shareLocalBackendKey = "code_native_share_local_companion_backend"
+    static let useSharedBackendOnMacKey = "code_native_use_shared_companion_backend"
+    static let preferredSharedBackendIDKey = "code_native_preferred_shared_companion_id"
+    static let localBackendIDKey = "code_native_local_backend_id"
+
+    static func autoConnectSharedBackendEnabled(
+        userDefaults: UserDefaults = .standard
+    ) -> Bool {
+        if userDefaults.object(forKey: autoConnectSharedBackendKey) == nil {
+            return true
+        }
+        return userDefaults.bool(forKey: autoConnectSharedBackendKey)
+    }
+
+    static func shareLocalBackendEnabled(
+        userDefaults: UserDefaults = .standard
+    ) -> Bool {
+        if userDefaults.object(forKey: shareLocalBackendKey) == nil {
+            return true
+        }
+        return userDefaults.bool(forKey: shareLocalBackendKey)
+    }
+
+    static func useSharedBackendOnMac(
+        userDefaults: UserDefaults = .standard
+    ) -> Bool {
+        if userDefaults.object(forKey: useSharedBackendOnMacKey) == nil {
+            return false
+        }
+        return userDefaults.bool(forKey: useSharedBackendOnMacKey)
+    }
+
+    static func preferredSharedBackendID(
+        userDefaults: UserDefaults = .standard
+    ) -> String? {
+        guard let value = userDefaults.string(forKey: preferredSharedBackendIDKey) else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func localBackendID(
+        userDefaults: UserDefaults = .standard
+    ) -> String {
+        if let existing = userDefaults.string(forKey: localBackendIDKey),
+           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return existing
+        }
+
+        let generated = UUID().uuidString.lowercased()
+        userDefaults.set(generated, forKey: localBackendIDKey)
+        return generated
+    }
+}
+
 @main
 struct CodeNativeApp: App {
     private static let companionPairingsDefaultsKey = "code_native_companion_pairings"
 
     @StateObject private var store: SessionMirrorStore
     @StateObject private var runtimeSupervisor: LocalBackendRuntimeSupervisor
+    @State private var sharedCompanionBackends: [SharedCompanionBackend] = []
     private let benchmarkFixturePath: String?
     #if os(macOS)
     @State private var isCheckingForUpdates = false
@@ -1251,11 +1534,7 @@ struct CodeNativeApp: App {
         )
         runtimeSupervisor.setCompanionPairingEntries(Self.loadCompanionPairingEntries())
         _runtimeSupervisor = StateObject(wrappedValue: runtimeSupervisor)
-        #if os(iOS)
         let endpointAccessPolicy: SessionMirrorStore.EndpointAccessPolicy = .anyHost
-        #else
-        let endpointAccessPolicy: SessionMirrorStore.EndpointAccessPolicy = .loopbackOnly
-        #endif
         _store = StateObject(
             wrappedValue: SessionMirrorStore(
                 initialEndpoint: runtimeSupervisor.endpoint ?? SessionMirrorStore.defaultEndpoint,
@@ -1301,6 +1580,13 @@ struct CodeNativeApp: App {
                 clearImportedCLIProfile: {
                     runtimeSupervisor.clearImportedCLIProfile()
                     syncStoreFromRuntimeSupervisor()
+                },
+                sharedCompanionBackends: sharedCompanionBackends,
+                refreshSharedCompanionBackends: {
+                    refreshSharedCompanionBackends()
+                },
+                onSharedCompanionPreferencesChanged: {
+                    handleSharedCompanionPreferencesChanged()
                 }
             )
                 .frame(minWidth: 1080, minHeight: 720)
@@ -1310,6 +1596,8 @@ struct CodeNativeApp: App {
                         return
                     }
 
+                    NSUbiquitousKeyValueStore.default.synchronize()
+                    refreshSharedCompanionBackends()
                     runtimeSupervisor.startIfNeeded()
                     syncStoreFromRuntimeSupervisor()
                     #if os(macOS)
@@ -1325,8 +1613,15 @@ struct CodeNativeApp: App {
                 .onReceive(runtimeSupervisor.$lanEndpoint) { _ in
                     syncStoreFromRuntimeSupervisor()
                 }
+                .onReceive(runtimeSupervisor.$tailscaleEndpoint) { _ in
+                    syncStoreFromRuntimeSupervisor()
+                }
                 .onReceive(runtimeSupervisor.$companionPairingEntries) { entries in
                     Self.saveCompanionPairingEntries(entries)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSUbiquitousKeyValueStore.didChangeExternallyNotification)) { _ in
+                    refreshSharedCompanionBackends()
+                    syncStoreFromRuntimeSupervisor()
                 }
                 .onOpenURL { url in
                     _ = store.importCompanionPairingCode(url.absoluteString)
@@ -1375,18 +1670,231 @@ struct CodeNativeApp: App {
     }
 
     private func syncStoreFromRuntimeSupervisor() {
-        if let endpoint = runtimeSupervisor.endpoint,
-           store.endpoint != endpoint {
-            store.endpoint = endpoint
+        let nowUnixMs = LocalBackendRuntimeSupervisor.nowUnixMs()
+        publishLocalBackendRecordIfNeeded(nowUnixMs: nowUnixMs)
+        refreshSharedCompanionBackends(nowUnixMs: nowUnixMs)
+
+        if let sharedRecord = selectedSharedBackendRecord(nowUnixMs: nowUnixMs) {
+            applySharedBackendRecord(sharedRecord)
+            return
         }
-        if store.companionSessionToken != runtimeSupervisor.sessionToken {
-            store.companionSessionToken = runtimeSupervisor.sessionToken
+
+        applyLocalRuntimeConfiguration()
+    }
+
+    private func handleSharedCompanionPreferencesChanged() {
+        syncStoreFromRuntimeSupervisor()
+    }
+
+    private func refreshSharedCompanionBackends(nowUnixMs: UInt64 = LocalBackendRuntimeSupervisor.nowUnixMs()) {
+        sharedCompanionBackends = SharedCompanionRegistry.sharedBackends(nowUnixMs: nowUnixMs)
+    }
+
+    private func selectedSharedBackendRecord(nowUnixMs: UInt64) -> SharedCompanionBackendRecord? {
+        guard CompanionSyncPreferences.autoConnectSharedBackendEnabled() else {
+            return nil
         }
-        if store.companionLANEndpoint != runtimeSupervisor.lanEndpoint {
-            store.companionLANEndpoint = runtimeSupervisor.lanEndpoint
+
+        let preferredBackendID = CompanionSyncPreferences.preferredSharedBackendID()
+
+        #if os(macOS)
+        guard CompanionSyncPreferences.useSharedBackendOnMac() else {
+            return nil
+        }
+
+        let localBackendID = CompanionSyncPreferences.localBackendID()
+        return SharedCompanionRegistry.preferredRecord(
+            preferredBackendID: preferredBackendID,
+            excludingBackendID: localBackendID,
+            nowUnixMs: nowUnixMs
+        )
+        #else
+        return SharedCompanionRegistry.preferredRecord(
+            preferredBackendID: preferredBackendID,
+            nowUnixMs: nowUnixMs
+        )
+        #endif
+    }
+
+    private func applySharedBackendRecord(_ record: SharedCompanionBackendRecord) {
+        let endpoint = preferredEndpoint(for: record)
+        updateStoreConnection(
+            endpoint: endpoint,
+            sessionToken: record.sessionToken,
+            lanEndpoint: record.lanEndpoint
+        )
+    }
+
+    private func applyLocalRuntimeConfiguration() {
+        updateStoreConnection(
+            endpoint: runtimeSupervisor.endpoint ?? SessionMirrorStore.defaultEndpoint,
+            sessionToken: runtimeSupervisor.sessionToken,
+            lanEndpoint: runtimeSupervisor.lanEndpoint
+        )
+    }
+
+    private func updateStoreConnection(
+        endpoint: String,
+        sessionToken: String?,
+        lanEndpoint: String?
+    ) {
+        let trimmedEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEndpoint = trimmedEndpoint.isEmpty ? SessionMirrorStore.defaultEndpoint : trimmedEndpoint
+        let normalizedToken = sessionToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSessionToken = normalizedToken?.isEmpty == true ? nil : normalizedToken
+        let normalizedLANEndpoint: String?
+        if let lanEndpoint {
+            let trimmedLANEndpoint = lanEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            normalizedLANEndpoint = trimmedLANEndpoint.isEmpty ? nil : trimmedLANEndpoint
+        } else {
+            normalizedLANEndpoint = nil
+        }
+
+        let endpointChanged = store.endpoint != normalizedEndpoint
+        let tokenChanged = store.companionSessionToken != normalizedSessionToken
+        let lanEndpointChanged = store.companionLANEndpoint != normalizedLANEndpoint
+        guard endpointChanged || tokenChanged || lanEndpointChanged else {
+            return
+        }
+
+        let shouldReconnect = store.connectionState == .connected || store.connectionState == .connecting
+        if shouldReconnect {
+            store.disconnect()
+        }
+
+        store.endpoint = normalizedEndpoint
+        store.companionSessionToken = normalizedSessionToken
+        store.companionLANEndpoint = normalizedLANEndpoint
+
+        guard normalizedSessionToken != nil else {
+            return
+        }
+
+        Task {
+            await store.connect()
         }
     }
 
+    private func preferredEndpoint(for record: SharedCompanionBackendRecord) -> String {
+        let localLANAddresses = LocalBackendRuntimeSupervisor.localPrivateLANIPv4Addresses()
+        if let lanEndpoint = record.lanEndpoint,
+           Self.endpointIsOnSamePrivateLANSubnet(lanEndpoint, localLANAddresses: localLANAddresses) {
+            return lanEndpoint
+        }
+
+        if let tailscaleEndpoint = record.tailscaleEndpoint,
+           LocalBackendRuntimeSupervisor.hasTailscaleIPv4Address() {
+            return tailscaleEndpoint
+        }
+
+        if let lanEndpoint = record.lanEndpoint {
+            return lanEndpoint
+        }
+
+        if let tailscaleEndpoint = record.tailscaleEndpoint {
+            return tailscaleEndpoint
+        }
+
+        return record.endpoint
+    }
+
+    private func publishLocalBackendRecordIfNeeded(nowUnixMs: UInt64) {
+        #if os(macOS)
+        let localBackendID = CompanionSyncPreferences.localBackendID()
+        guard CompanionSyncPreferences.shareLocalBackendEnabled() else {
+            SharedCompanionRegistry.remove(id: localBackendID, nowUnixMs: nowUnixMs)
+            return
+        }
+
+        let publishedEndpoint = runtimeSupervisor.tailscaleEndpoint
+            ?? runtimeSupervisor.lanEndpoint
+        guard let publishedEndpoint,
+              let sessionToken = runtimeSupervisor.sessionToken,
+              !sessionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            SharedCompanionRegistry.remove(id: localBackendID, nowUnixMs: nowUnixMs)
+            return
+        }
+
+        let hostName = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName: String
+        if let hostName,
+           !hostName.isEmpty {
+            displayName = hostName
+        } else {
+            displayName = "This Mac"
+        }
+        let record = SharedCompanionBackendRecord(
+            id: localBackendID,
+            displayName: displayName,
+            endpoint: publishedEndpoint,
+            lanEndpoint: runtimeSupervisor.lanEndpoint,
+            tailscaleEndpoint: runtimeSupervisor.tailscaleEndpoint,
+            sessionToken: sessionToken,
+            updatedAtUnixMs: nowUnixMs
+        )
+
+        if let existingRecord = SharedCompanionRegistry.record(id: localBackendID, nowUnixMs: nowUnixMs),
+           existingRecord.displayName == record.displayName,
+           existingRecord.endpoint == record.endpoint,
+           existingRecord.lanEndpoint == record.lanEndpoint,
+           existingRecord.tailscaleEndpoint == record.tailscaleEndpoint,
+           existingRecord.sessionToken == record.sessionToken {
+            let refreshElapsedMs: UInt64
+            if nowUnixMs >= existingRecord.updatedAtUnixMs {
+                refreshElapsedMs = nowUnixMs - existingRecord.updatedAtUnixMs
+            } else {
+                refreshElapsedMs = 0
+            }
+            if refreshElapsedMs < 60_000 {
+                return
+            }
+        }
+
+        SharedCompanionRegistry.upsert(record, nowUnixMs: nowUnixMs)
+        #endif
+    }
+
+    private static func endpointIsOnSamePrivateLANSubnet(
+        _ endpoint: String,
+        localLANAddresses: [String]
+    ) -> Bool {
+        guard let endpointURL = URL(string: endpoint),
+              let endpointHost = endpointURL.host,
+              let endpointOctets = ipv4Octets(from: endpointHost)
+        else {
+            return false
+        }
+
+        return localLANAddresses.contains { localAddress in
+            guard let localOctets = ipv4Octets(from: localAddress) else {
+                return false
+            }
+
+            return endpointOctets.0 == localOctets.0
+                && endpointOctets.1 == localOctets.1
+                && endpointOctets.2 == localOctets.2
+        }
+    }
+
+    private static func ipv4Octets(from address: String) -> (Int, Int, Int, Int)? {
+        let components = address.split(separator: ".")
+        guard components.count == 4,
+              let octet0 = Int(components[0]),
+              let octet1 = Int(components[1]),
+              let octet2 = Int(components[2]),
+              let octet3 = Int(components[3]),
+              (0...255).contains(octet0),
+              (0...255).contains(octet1),
+              (0...255).contains(octet2),
+              (0...255).contains(octet3)
+        else {
+            return nil
+        }
+
+        return (octet0, octet1, octet2, octet3)
+    }
+    
     #if os(macOS)
     private func performAutomaticUpdateCheckIfNeeded() {
         guard MacAppUpdateChecker.shouldPerformAutomaticCheck() else {

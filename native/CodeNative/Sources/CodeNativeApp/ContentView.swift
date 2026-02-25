@@ -140,6 +140,21 @@ private func currentUnixTimeMilliseconds() -> UInt64 {
     UInt64(Date().timeIntervalSince1970 * 1_000)
 }
 
+struct SharedCompanionBackend: Equatable, Identifiable {
+    let id: String
+    let displayName: String
+    let endpoint: String
+    let updatedAtUnixMs: UInt64
+
+    var idLabel: String {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "unknown"
+        }
+        return String(trimmed.prefix(8))
+    }
+}
+
 private func formatCompactTokenCount(_ value: Int) -> String {
     let absolute = Double(abs(value))
     let sign = value < 0 ? "-" : ""
@@ -179,6 +194,9 @@ struct ContentView: View {
     let importedProfileState: ImportedProfileState?
     let importCLIProfile: ((URL) throws -> ImportedProfileState)?
     let clearImportedCLIProfile: (() -> Void)?
+    let sharedCompanionBackends: [SharedCompanionBackend]
+    let refreshSharedCompanionBackends: (() -> Void)?
+    let onSharedCompanionPreferencesChanged: (() -> Void)?
     @Environment(\.openURL) private var openURL
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -195,7 +213,10 @@ struct ContentView: View {
         deleteCompanionPairing: ((String) -> Void)? = nil,
         importedProfileState: ImportedProfileState? = nil,
         importCLIProfile: ((URL) throws -> ImportedProfileState)? = nil,
-        clearImportedCLIProfile: (() -> Void)? = nil
+        clearImportedCLIProfile: (() -> Void)? = nil,
+        sharedCompanionBackends: [SharedCompanionBackend] = [],
+        refreshSharedCompanionBackends: (() -> Void)? = nil,
+        onSharedCompanionPreferencesChanged: (() -> Void)? = nil
     ) {
         self.store = store
         self.companionPairingEntries = companionPairingEntries
@@ -208,6 +229,9 @@ struct ContentView: View {
         self.importedProfileState = importedProfileState
         self.importCLIProfile = importCLIProfile
         self.clearImportedCLIProfile = clearImportedCLIProfile
+        self.sharedCompanionBackends = sharedCompanionBackends
+        self.refreshSharedCompanionBackends = refreshSharedCompanionBackends
+        self.onSharedCompanionPreferencesChanged = onSharedCompanionPreferencesChanged
     }
 
     private static let shortDateFormatter: DateFormatter = {
@@ -1180,6 +1204,9 @@ struct ContentView: View {
             importedProfileState: importedProfileState,
             importCLIProfile: importCLIProfile,
             clearImportedCLIProfile: clearImportedCLIProfile,
+            sharedCompanionBackends: sharedCompanionBackends,
+            refreshSharedCompanionBackends: refreshSharedCompanionBackends,
+            onSharedCompanionPreferencesChanged: onSharedCompanionPreferencesChanged,
             autoSpeakAssistant: $autoSpeakAssistant,
             preferredVoiceIdentifier: $preferredVoiceIdentifier,
             voicePlaybackRate: $voicePlaybackRate,
@@ -12068,6 +12095,9 @@ private struct NativeSettingsView: View {
     let importedProfileState: ImportedProfileState?
     let importCLIProfile: ((URL) throws -> ImportedProfileState)?
     let clearImportedCLIProfile: (() -> Void)?
+    let sharedCompanionBackends: [SharedCompanionBackend]
+    let refreshSharedCompanionBackends: (() -> Void)?
+    let onSharedCompanionPreferencesChanged: (() -> Void)?
     @Binding var autoSpeakAssistant: Bool
     @Binding var preferredVoiceIdentifier: String
     @Binding var voicePlaybackRate: Double
@@ -12102,6 +12132,15 @@ private struct NativeSettingsView: View {
     @State private var newPairingLabel = ""
     @State private var profileImportMessage: String?
     @State private var profileImportError: String?
+    @AppStorage("code_native_auto_connect_shared_companion")
+    private var autoConnectSharedCompanion = true
+    @AppStorage("code_native_share_local_companion_backend")
+    private var shareLocalCompanionBackend = true
+    @AppStorage("code_native_use_shared_companion_backend")
+    private var useSharedCompanionBackend = false
+    @AppStorage("code_native_preferred_shared_companion_id")
+    private var preferredSharedCompanionBackendID = ""
+    @State private var showAdvancedConnectionSettings = false
     #if os(macOS)
     @State private var updateMetadataRevision = 0
     #endif
@@ -12353,6 +12392,33 @@ private struct NativeSettingsView: View {
 
         let importedAtText = Self.profileImportFormatter.string(from: importedProfileState.importedAt)
         return "Imported from \(importedProfileState.sourcePath) at \(importedAtText)."
+    }
+
+    private var normalizedPreferredSharedCompanionBackendID: String {
+        preferredSharedCompanionBackendID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var selectedSharedCompanionBackend: SharedCompanionBackend? {
+        if !normalizedPreferredSharedCompanionBackendID.isEmpty,
+           let matched = sharedCompanionBackends.first(where: { $0.id == normalizedPreferredSharedCompanionBackendID }) {
+            return matched
+        }
+        return sharedCompanionBackends.max(by: { $0.updatedAtUnixMs < $1.updatedAtUnixMs })
+    }
+
+    private var selectedSharedCompanionBackendDescription: String {
+        guard let selectedSharedCompanionBackend else {
+            return "No shared backend selected"
+        }
+        return "\(selectedSharedCompanionBackend.displayName) (\(selectedSharedCompanionBackend.idLabel))"
+    }
+
+    private var selectedSharedCompanionUpdatedAtText: String {
+        guard let selectedSharedCompanionBackend else {
+            return ""
+        }
+        let date = Date(timeIntervalSince1970: Double(selectedSharedCompanionBackend.updatedAtUnixMs) / 1_000)
+        return Self.profileImportFormatter.string(from: date)
     }
 
     private func importSelectedCLIProfile(from selectedDirectoryURL: URL) {
@@ -12662,221 +12728,308 @@ private struct NativeSettingsView: View {
             SettingsInfoCard(text: publicAppBinaryPathText)
 
         case .configuration:
-            SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {
-                TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: isCompactSettingsLayout ? nil : 320)
+            SettingsRow(
+                title: "Auto-connect shared backend",
+                description: "Automatically use your iCloud-synced companion backend so new devices connect without manual token approval."
+            ) {
+                Toggle("", isOn: $autoConnectSharedCompanion)
+                    .labelsHidden()
             }
 
-            SettingsRow(title: "Companion token", description: "Bearer token required by managed companion runtime.") {
-                TextField(
-                    "Bearer token",
-                    text: Binding(
-                        get: { store.companionSessionToken ?? "" },
-                        set: { value in
-                            let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                            store.companionSessionToken = trimmedValue.isEmpty ? nil : trimmedValue
-                        }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
-                .font(.caption.monospaced())
-                .frame(width: isCompactSettingsLayout ? nil : 320)
+            #if os(macOS)
+            SettingsRow(
+                title: "Use shared backend on this Mac",
+                description: "Enable this on a client MacBook to connect to your remote companion backend instead of local loopback."
+            ) {
+                Toggle("", isOn: $useSharedCompanionBackend)
+                    .labelsHidden()
             }
 
-            SettingsRow(title: "Rotate token", description: "Reissue the companion token and restart runtime to revoke prior pairings.") {
-                HStack(spacing: 8) {
-                    Button("Rotate now") {
-                        rotateCompanionToken?()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(canRotateCompanionToken == false || rotateCompanionToken == nil)
-
-                    if canRotateCompanionToken == false {
-                        Text("Managed by CODE_NATIVE_COMPANION_TOKEN")
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            SettingsRow(
+                title: "Share this Mac backend",
+                description: "Publish this Mac companion endpoint and token through iCloud for automatic trust on your own devices."
+            ) {
+                Toggle("", isOn: $shareLocalCompanionBackend)
+                    .labelsHidden()
             }
+            #endif
 
-            SettingsRow(title: "Create pairing", description: "Mint a device-specific token and pairing code.") {
-                HStack(spacing: 8) {
-                    TextField("Device label (optional)", text: $newPairingLabel)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: isCompactSettingsLayout ? nil : 260)
-
-                    Button("Create") {
-                        createCompanionPairing?(newPairingLabel)
-                        newPairingLabel = ""
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(createCompanionPairing == nil)
-                }
-            }
-
-            SettingsRow(title: "Paired devices", description: "Revoke or delete individual devices without rotating every token.") {
-                if companionPairingEntries.isEmpty {
-                    Text("No device-specific pairings yet.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(companionPairingEntries) { pairing in
-                            VStack(alignment: .leading, spacing: 6) {
-                                let status = pairingStatus(for: pairing)
-                                HStack(spacing: 8) {
-                                    Text(pairing.displayLabel)
-                                        .font(.subheadline.weight(.semibold))
-
-                                    Text(status.label)
-                                        .font(.caption2.monospaced())
-                                        .foregroundStyle(status.color)
-                                }
-
-                                Text(pairingExpiryCaption(for: pairing))
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-
-                                let isActive = status == .active
-
-                                HStack(spacing: 8) {
-                                    if status == .revoked || status == .expired {
-                                        Button("Restore") {
-                                            restoreCompanionPairing?(pairing.id)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .disabled(restoreCompanionPairing == nil)
-                                    } else if isActive {
-                                        Button("Revoke") {
-                                            revokeCompanionPairing?(pairing.id)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .disabled(revokeCompanionPairing == nil)
-                                    }
-
-                                    Button("Delete") {
-                                        deleteCompanionPairing?(pairing.id)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .disabled(deleteCompanionPairing == nil)
-                                }
-
-                                if isActive,
-                                   let pairingCode = pairingCode(for: pairing) {
-                                    HStack(alignment: .top, spacing: 10) {
-                                        Text(pairingCode)
-                                            .font(.caption.monospaced())
-                                            .textSelection(.enabled)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                                        PairingQRCodeView(payload: pairingCode, sideLength: 92)
-                                    }
-                                }
-                            }
-                            .padding(10)
-                            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                    }
-                }
-            }
-
-            SettingsRow(title: "Local pairing code", description: "Fallback pairing code tied to the local companion token.") {
-                Group {
-                    if let companionPairingCode = store.companionPairingCode {
-                        HStack(alignment: .top, spacing: 12) {
-                            Text(companionPairingCode)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-
-                            PairingQRCodeView(payload: companionPairingCode, sideLength: 104)
-                        }
-                    } else {
-                        Text("Pairing code unavailable until endpoint and token are set.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-
-            SettingsRow(title: "Import pairing code", description: "Paste a pairing code to set endpoint and token together.") {
-                HStack(spacing: 8) {
-                    TextField("ecccompanion://pair?...", text: $pairingCodeImportText)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption.monospaced())
-                        .frame(width: isCompactSettingsLayout ? nil : 320)
-
-                    Button("Import") {
-                        let imported = store.importCompanionPairingCode(pairingCodeImportText)
-                        if imported {
-                            pairingCodeImportText = ""
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(pairingCodeImportText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-
-            SettingsRow(title: "CLI profile", description: "Import ~/.code and ~/.codex into the app sandbox so auth, config, and sessions match your local CLI.") {
+            SettingsRow(title: "Preferred shared backend", description: "Choose which iCloud backend this device should auto-connect to.") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(importedProfileStatusText)
+                    if sharedCompanionBackends.isEmpty {
+                        Text("No shared backends discovered yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker(
+                            "",
+                            selection: Binding(
+                                get: { normalizedPreferredSharedCompanionBackendID },
+                                set: { value in
+                                    preferredSharedCompanionBackendID = value
+                                }
+                            )
+                        ) {
+                            Text("Most recent backend").tag("")
+                            ForEach(sharedCompanionBackends) { backend in
+                                Text("\(backend.displayName) (\(backend.idLabel))").tag(backend.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: isCompactSettingsLayout ? nil : 320)
+                    }
+
+                    Text(selectedSharedCompanionBackendDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    #if os(macOS)
+                    if !selectedSharedCompanionUpdatedAtText.isEmpty {
+                        Text("Last published: \(selectedSharedCompanionUpdatedAtText)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
                     HStack(spacing: 8) {
-                        Button("Import from folder…") {
-                            profileImportMessage = "Opening folder picker..."
-                            profileImportError = nil
-                            importCLIProfileFromPanel()
+                        Button("Refresh") {
+                            refreshSharedCompanionBackends?()
+                            onSharedCompanionPreferencesChanged?()
                         }
                         .buttonStyle(.bordered)
 
-                        Button("Import from home (~)") {
-                            importCLIProfileFromHomeDirectory()
+                        if let selectedSharedCompanionBackend {
+                            Text(selectedSharedCompanionBackend.endpoint)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
-                        .buttonStyle(.bordered)
-
-                        Button("Clear imported copy") {
-                            clearImportedCLIProfile?()
-                            profileImportMessage = "Cleared imported CLI profile."
-                            profileImportError = nil
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(clearImportedCLIProfile == nil || importedProfileState == nil)
-                    }
-                    #else
-                    Text("Profile import is available on macOS.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    #endif
-
-                    if let profileImportMessage {
-                        Text(profileImportMessage)
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                    }
-
-                    if let profileImportError {
-                        Text(profileImportError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if let lanEndpoint = store.companionLANEndpoint,
-               !lanEndpoint.isEmpty {
-                SettingsRow(title: "LAN endpoint", description: "Share this endpoint with iOS/iPadOS clients on your local network.") {
-                    Text(lanEndpoint)
+            DisclosureGroup(isExpanded: $showAdvancedConnectionSettings) {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsRow(title: "Mirror endpoint", description: "WebSocket endpoint used by native clients.") {
+                        TextField("ws://127.0.0.1:4317/ws", text: $store.endpoint)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: isCompactSettingsLayout ? nil : 320)
+                    }
+
+                    SettingsRow(title: "Companion token", description: "Bearer token required by managed companion runtime.") {
+                        TextField(
+                            "Bearer token",
+                            text: Binding(
+                                get: { store.companionSessionToken ?? "" },
+                                set: { value in
+                                    let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    store.companionSessionToken = trimmedValue.isEmpty ? nil : trimmedValue
+                                }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
                         .font(.caption.monospaced())
-                        .textSelection(.enabled)
+                        .frame(width: isCompactSettingsLayout ? nil : 320)
+                    }
+
+                    SettingsRow(title: "Rotate token", description: "Reissue the companion token and restart runtime to revoke prior pairings.") {
+                        HStack(spacing: 8) {
+                            Button("Rotate now") {
+                                rotateCompanionToken?()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(canRotateCompanionToken == false || rotateCompanionToken == nil)
+
+                            if canRotateCompanionToken == false {
+                                Text("Managed by CODE_NATIVE_COMPANION_TOKEN")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    SettingsRow(title: "Create pairing", description: "Mint a device-specific token and pairing code.") {
+                        HStack(spacing: 8) {
+                            TextField("Device label (optional)", text: $newPairingLabel)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: isCompactSettingsLayout ? nil : 260)
+
+                            Button("Create") {
+                                createCompanionPairing?(newPairingLabel)
+                                newPairingLabel = ""
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(createCompanionPairing == nil)
+                        }
+                    }
+
+                    SettingsRow(title: "Paired devices", description: "Revoke or delete individual devices without rotating every token.") {
+                        if companionPairingEntries.isEmpty {
+                            Text("No device-specific pairings yet.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            VStack(alignment: .leading, spacing: 12) {
+                                ForEach(companionPairingEntries) { pairing in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        let status = pairingStatus(for: pairing)
+                                        HStack(spacing: 8) {
+                                            Text(pairing.displayLabel)
+                                                .font(.subheadline.weight(.semibold))
+
+                                            Text(status.label)
+                                                .font(.caption2.monospaced())
+                                                .foregroundStyle(status.color)
+                                        }
+
+                                        Text(pairingExpiryCaption(for: pairing))
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.secondary)
+
+                                        let isActive = status == .active
+
+                                        HStack(spacing: 8) {
+                                            if status == .revoked || status == .expired {
+                                                Button("Restore") {
+                                                    restoreCompanionPairing?(pairing.id)
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .disabled(restoreCompanionPairing == nil)
+                                            } else if isActive {
+                                                Button("Revoke") {
+                                                    revokeCompanionPairing?(pairing.id)
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .disabled(revokeCompanionPairing == nil)
+                                            }
+
+                                            Button("Delete") {
+                                                deleteCompanionPairing?(pairing.id)
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .disabled(deleteCompanionPairing == nil)
+                                        }
+
+                                        if isActive,
+                                           let pairingCode = pairingCode(for: pairing) {
+                                            HStack(alignment: .top, spacing: 10) {
+                                                Text(pairingCode)
+                                                    .font(.caption.monospaced())
+                                                    .textSelection(.enabled)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                                PairingQRCodeView(payload: pairingCode, sideLength: 92)
+                                            }
+                                        }
+                                    }
+                                    .padding(10)
+                                    .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsRow(title: "Local pairing code", description: "Fallback pairing code tied to the local companion token.") {
+                        Group {
+                            if let companionPairingCode = store.companionPairingCode {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Text(companionPairingCode)
+                                        .font(.caption.monospaced())
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    PairingQRCodeView(payload: companionPairingCode, sideLength: 104)
+                                }
+                            } else {
+                                Text("Pairing code unavailable until endpoint and token are set.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+
+                    SettingsRow(title: "Import pairing code", description: "Paste a pairing code to set endpoint and token together.") {
+                        HStack(spacing: 8) {
+                            TextField("ecccompanion://pair?...", text: $pairingCodeImportText)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.caption.monospaced())
+                                .frame(width: isCompactSettingsLayout ? nil : 320)
+
+                            Button("Import") {
+                                let imported = store.importCompanionPairingCode(pairingCodeImportText)
+                                if imported {
+                                    pairingCodeImportText = ""
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(pairingCodeImportText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+
+                    SettingsRow(title: "CLI profile", description: "Import ~/.code and ~/.codex into the app sandbox so auth, config, and sessions match your local CLI.") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(importedProfileStatusText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            #if os(macOS)
+                            HStack(spacing: 8) {
+                                Button("Import from folder…") {
+                                    profileImportMessage = "Opening folder picker..."
+                                    profileImportError = nil
+                                    importCLIProfileFromPanel()
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Import from home (~)") {
+                                    importCLIProfileFromHomeDirectory()
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Clear imported copy") {
+                                    clearImportedCLIProfile?()
+                                    profileImportMessage = "Cleared imported CLI profile."
+                                    profileImportError = nil
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(clearImportedCLIProfile == nil || importedProfileState == nil)
+                            }
+                            #else
+                            Text("Profile import is available on macOS.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            #endif
+
+                            if let profileImportMessage {
+                                Text(profileImportMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                            }
+
+                            if let profileImportError {
+                                Text(profileImportError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    if let lanEndpoint = store.companionLANEndpoint,
+                       !lanEndpoint.isEmpty {
+                        SettingsRow(title: "LAN endpoint", description: "Share this endpoint with iOS/iPadOS clients on your local network.") {
+                            Text(lanEndpoint)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                 }
+            } label: {
+                Text("Advanced connection settings")
+                    .font(.headline)
             }
 
             SettingsRow(title: "Connection status", description: "Current server status for this workspace.") {
@@ -13029,6 +13182,19 @@ private struct NativeSettingsView: View {
                 rawDefaultIDE: defaultSessionIDERaw,
                 available: availableIDEs
             )
+        }
+        .onChange(of: autoConnectSharedCompanion) { _, _ in
+            onSharedCompanionPreferencesChanged?()
+        }
+        .onChange(of: shareLocalCompanionBackend) { _, _ in
+            onSharedCompanionPreferencesChanged?()
+            refreshSharedCompanionBackends?()
+        }
+        .onChange(of: useSharedCompanionBackend) { _, _ in
+            onSharedCompanionPreferencesChanged?()
+        }
+        .onChange(of: preferredSharedCompanionBackendID) { _, _ in
+            onSharedCompanionPreferencesChanged?()
         }
     }
 }

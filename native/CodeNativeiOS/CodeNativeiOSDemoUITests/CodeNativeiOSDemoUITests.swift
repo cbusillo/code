@@ -111,4 +111,31 @@ final class CodeNativeiOSDemoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["connection.assistant.connect-now"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Close"].exists)
     }
+
+    @MainActor
+    func testSharedBackendAutoConnectState() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let connectionStatusButton = app.buttons["top.connection"]
+        XCTAssertTrue(connectionStatusButton.waitForExistence(timeout: 10))
+        connectionStatusButton.tap()
+
+        let connectedStatus = app.staticTexts["Connected"]
+        if connectedStatus.waitForExistence(timeout: 30) {
+            return
+        }
+
+        if app.staticTexts["Pair required"].exists {
+            XCTFail("Expected auto-connect via shared backend, but app still reports Pair required.")
+            return
+        }
+
+        if app.staticTexts["Offline"].exists {
+            XCTFail("Expected auto-connect via shared backend, but app reports Offline.")
+            return
+        }
+
+        XCTFail("Expected Connected status but did not reach it within timeout.")
+    }
 }
