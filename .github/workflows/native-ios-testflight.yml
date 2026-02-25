@@ -73,7 +73,6 @@ jobs:
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
           IOS_APPSTORE_PROFILE_BASE64:
             ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
-          IOS_APPSTORE_PROFILE_NAME: ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID:
             ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -86,7 +85,6 @@ jobs:
             IOS_DIST_CERT_P12_BASE64 \
             IOS_DIST_CERT_PASSWORD \
             IOS_APPSTORE_PROFILE_BASE64 \
-            IOS_APPSTORE_PROFILE_NAME \
             APP_STORE_CONNECT_KEY_ID \
             APP_STORE_CONNECT_ISSUER_ID \
             APP_STORE_CONNECT_PRIVATE_KEY; do
@@ -125,8 +123,6 @@ jobs:
           cp "$PROFILE_PATH" "$profiles_dir/$profile_uuid.mobileprovision"
 
       - name: Write export options
-        env:
-          IOS_APPSTORE_PROFILE_NAME: ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
         run: |
           set -euo pipefail
           cat > "$EXPORT_OPTIONS_PATH" <<EOF
@@ -140,23 +136,16 @@ jobs:
             <key>method</key>
             <string>app-store-connect</string>
             <key>signingStyle</key>
-            <string>manual</string>
+            <string>automatic</string>
             <key>stripSwiftSymbols</key>
             <true/>
             <key>teamID</key>
             <string>${APPLE_TEAM_ID}</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${BUNDLE_ID}</key>
-              <string>${IOS_APPSTORE_PROFILE_NAME}</string>
-            </dict>
           </dict>
           </plist>
           EOF
 
       - name: Archive iOS app
-        env:
-          IOS_APPSTORE_PROFILE_NAME: ${{ secrets.IOS_APPSTORE_PROFILE_NAME }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -167,10 +156,8 @@ jobs:
             -archivePath "$ARCHIVE_PATH" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
+            CODE_SIGN_STYLE=Automatic \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-            PROVISIONING_PROFILE_SPECIFIER="$IOS_APPSTORE_PROFILE_NAME" \
             clean archive
 
       - name: Export IPA
