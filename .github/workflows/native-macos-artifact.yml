@@ -157,6 +157,7 @@ jobs:
           )
 
           if [ -n "${MARKETING_VERSION_OVERRIDE:-}" ]; then
+            echo "Building with MARKETING_VERSION=$MARKETING_VERSION_OVERRIDE"
             build_cmd+=("MARKETING_VERSION=$MARKETING_VERSION_OVERRIDE")
           fi
 
@@ -164,15 +165,77 @@ jobs:
           "${build_cmd[@]}"
 
       - name: Sign macOS app bundle
+        env:
+          MARKETING_VERSION_OVERRIDE: >-
+            ${{ steps.marketing_version.outputs.value }}
         run: |
           set -euo pipefail
+
+          set_plist_string() {
+            local plist_path="$1"
+            local key="$2"
+            local value="$3"
+            /usr/libexec/PlistBuddy \
+              -c "Set :$key $value" \
+              "$plist_path" \
+              >/dev/null 2>&1 || \
+              /usr/libexec/PlistBuddy \
+                -c "Add :$key string $value" \
+                "$plist_path"
+          }
+
           app_source="$DERIVED_DATA_PATH/Build/Products/Release/$APP_BUNDLE_NAME"
           if [ ! -d "$app_source" ]; then
             echo "missing app bundle at $app_source" >&2
             exit 1
           fi
 
+          if [ -n "${MARKETING_VERSION_OVERRIDE:-}" ]; then
+            app_info_plist="$app_source/Contents/Info.plist"
+            set_plist_string \
+              "$app_info_plist" \
+              "CFBundleShortVersionString" \
+              "$MARKETING_VERSION_OVERRIDE"
+            backend_info_plist="$app_source/Contents/Resources/backend/"
+            backend_info_plist+="CodeBackend.app/Contents/Info.plist"
+            if [ -f "$backend_info_plist" ]; then
+              set_plist_string \
+                "$backend_info_plist" \
+                "CFBundleShortVersionString" \
+                "$MARKETING_VERSION_OVERRIDE"
+            fi
+          fi
+
           identity="$(cat "$SIGNING_IDENTITY_PATH")"
+          mkdir -p "$STAGE_DIR"
+          entitlements_for_signing="$STAGE_DIR/signing-entitlements.plist"
+          cp "$ENTITLEMENTS_PATH" "$entitlements_for_signing"
+
+          # Resolve Team ID + bundle ID explicitly.
+          # codesign does not expand Xcode
+          # placeholders like $(TeamIdentifierPrefix) in raw entitlements files.
+          team_id=$(printf '%s' "$identity" |
+            sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')
+          bundle_id=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleIdentifier' \
+              "$app_source/Contents/Info.plist"
+          )
+          if [ -z "$team_id" ] || [ -z "$bundle_id" ]; then
+            echo "Failed to resolve Team ID or bundle identifier" >&2
+            echo "for entitlements" >&2
+            exit 1
+          fi
+
+          /usr/libexec/PlistBuddy \
+            -c "Delete :com.apple.developer.ubiquity-kvstore-identifier" \
+            "$entitlements_for_signing" \
+            >/dev/null 2>&1 || true
+          /usr/libexec/PlistBuddy \
+            -c "Add :com.apple.developer.ubiquity-kvstore-identifier" \
+            "string $team_id.$bundle_id" \
+            "$entitlements_for_signing"
+
           backend_bundle="$app_source/Contents/Resources/backend/CodeBackend.app"
           if [ -d "$backend_bundle" ]; then
             if [ -x "$backend_bundle/Contents/MacOS/code" ]; then
@@ -194,7 +257,7 @@ jobs:
             --sign "$identity" \
             --timestamp \
             --options runtime \
-            --entitlements "$ENTITLEMENTS_PATH" \
+            --entitlements "$entitlements_for_signing" \
             "$app_source"
 
           codesign --verify --deep --strict --verbose=2 "$app_source"
