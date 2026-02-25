@@ -89,6 +89,8 @@ jobs:
             ${{ secrets.MACOS_DEV_ID_APP_CERT_P12_BASE64 }}
           MACOS_DEV_ID_APP_CERT_PASSWORD:
             ${{ secrets.MACOS_DEV_ID_APP_CERT_PASSWORD }}
+          MACOS_APPSTORE_PROFILE_BASE64:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_BASE64 }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID:
             ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -100,6 +102,7 @@ jobs:
           for name in \
             MACOS_DEV_ID_APP_CERT_P12_BASE64 \
             MACOS_DEV_ID_APP_CERT_PASSWORD \
+            MACOS_APPSTORE_PROFILE_BASE64 \
             APP_STORE_CONNECT_KEY_ID \
             APP_STORE_CONNECT_ISSUER_ID \
             APP_STORE_CONNECT_PRIVATE_KEY; do
@@ -168,6 +171,8 @@ jobs:
         env:
           MARKETING_VERSION_OVERRIDE: >-
             ${{ steps.marketing_version.outputs.value }}
+          MACOS_APPSTORE_PROFILE_BASE64:
+            ${{ secrets.MACOS_APPSTORE_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
 
@@ -208,15 +213,41 @@ jobs:
 
           identity="$(cat "$SIGNING_IDENTITY_PATH")"
           mkdir -p "$STAGE_DIR"
+
+          embedded_profile_path="$STAGE_DIR/embedded.provisionprofile"
+          echo "$MACOS_APPSTORE_PROFILE_BASE64" | base64 --decode \
+            > "$embedded_profile_path"
+          cp "$embedded_profile_path" \
+            "$app_source/Contents/embedded.provisionprofile"
+
           entitlements_for_signing="$STAGE_DIR/signing-entitlements.plist"
           cp "$ENTITLEMENTS_PATH" "$entitlements_for_signing"
 
-          # GitHub Developer ID builds cannot launch if this iCloud
-          # entitlement is embedded without a matching provisioning profile.
+          # Resolve Team ID + bundle ID explicitly.
+          # codesign does not expand Xcode placeholders in raw entitlements.
+          team_id=$(printf '%s' "$identity" |
+            sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')
+          bundle_id=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleIdentifier' \
+              "$app_source/Contents/Info.plist"
+          )
+          if [ -z "$team_id" ] || [ -z "$bundle_id" ]; then
+            echo "Failed to resolve Team ID or bundle identifier" >&2
+            echo "for entitlements" >&2
+            exit 1
+          fi
+
           /usr/libexec/PlistBuddy \
             -c "Delete :com.apple.developer.ubiquity-kvstore-identifier" \
             "$entitlements_for_signing" \
             >/dev/null 2>&1 || true
+          kvstore_id="$team_id.$bundle_id"
+          add_kvstore_cmd="Add :com.apple.developer.ubiquity-kvstore-identifier"
+          add_kvstore_cmd+=" string $kvstore_id"
+          /usr/libexec/PlistBuddy \
+            -c "$add_kvstore_cmd" \
+            "$entitlements_for_signing"
 
           backend_bundle="$app_source/Contents/Resources/backend/CodeBackend.app"
           if [ -d "$backend_bundle" ]; then
