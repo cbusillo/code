@@ -1511,6 +1511,7 @@ struct CodeNativeApp: App {
     private let benchmarkFixturePath: String?
     #if os(macOS)
     @State private var isCheckingForUpdates = false
+    @State private var isInstallingUpdate = false
     @State private var updateAlert: MacAppUpdateAlert?
     #endif
 
@@ -1637,9 +1638,8 @@ struct CodeNativeApp: App {
                         return Alert(
                             title: Text("Update Available"),
                             message: Text(message),
-                            primaryButton: .default(Text("Download")) {
-                                MacAppUpdateChecker.clearSkippedVersion()
-                                MacAppUpdateChecker.openDownload(for: candidate)
+                            primaryButton: .default(Text("Install Update")) {
+                                startUpdateInstall(candidate)
                             },
                             secondaryButton: .default(Text("Skip This Version")) {
                                 MacAppUpdateChecker.skipVersion(candidate.version)
@@ -1665,7 +1665,7 @@ struct CodeNativeApp: App {
                 Button("Check for Updates...") {
                     performUpdateCheck(userInitiated: true)
                 }
-                .disabled(isCheckingForUpdates)
+                .disabled(isCheckingForUpdates || isInstallingUpdate)
             }
         }
         #endif
@@ -1964,6 +1964,32 @@ struct CodeNativeApp: App {
 
             await MainActor.run {
                 isCheckingForUpdates = false
+            }
+        }
+    }
+
+    private func startUpdateInstall(_ candidate: MacAppUpdateCandidate) {
+        guard !isInstallingUpdate else {
+            return
+        }
+
+        isInstallingUpdate = true
+        MacAppUpdateChecker.clearSkippedVersion()
+
+        Task {
+            do {
+                try await MacAppUpdateChecker.launchBackgroundInstall(for: candidate)
+                await MainActor.run {
+                    NSApplication.shared.terminate(nil)
+                }
+            } catch {
+                await MainActor.run {
+                    isInstallingUpdate = false
+                    updateAlert = .info(
+                        title: "Install Failed",
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
     }

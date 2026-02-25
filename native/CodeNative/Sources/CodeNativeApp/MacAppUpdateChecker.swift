@@ -59,6 +59,32 @@ enum MacAppUpdateCheckError: LocalizedError {
     }
 }
 
+enum MacAppUpdateInstallError: LocalizedError {
+    case invalidDownloadResponse
+    case downloadFailed(status: Int)
+    case extractionFailed(String)
+    case missingAppBundle
+    case stageFailed(String)
+    case installerLaunchFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidDownloadResponse:
+            return "Update download returned an invalid response."
+        case .downloadFailed(let status):
+            return "Update download failed with HTTP status \(status)."
+        case .extractionFailed(let details):
+            return "Unable to unpack the update archive: \(details)"
+        case .missingAppBundle:
+            return "Downloaded update archive did not contain an app bundle."
+        case .stageFailed(let details):
+            return "Unable to stage the update for installation: \(details)"
+        case .installerLaunchFailed(let details):
+            return "Unable to start the background installer: \(details)"
+        }
+    }
+}
+
 enum MacAppUpdateChecker {
     private static let defaultRepoOwner = "cbusillo"
     private static let defaultRepoName = "code"
@@ -191,6 +217,74 @@ enum MacAppUpdateChecker {
         NSWorkspace.shared.open(candidate.downloadURL)
     }
 
+    static func launchBackgroundInstall(for candidate: MacAppUpdateCandidate) async throws {
+        let fileManager = FileManager.default
+        let workRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("ecc-update-\(UUID().uuidString)", isDirectory: true)
+        let archiveURL = workRoot.appendingPathComponent("update.zip")
+        let unpackedURL = workRoot.appendingPathComponent("unpacked", isDirectory: true)
+        let stagedAppURL = workRoot.appendingPathComponent("EveryCodeCompanion.app", isDirectory: true)
+        let installerScriptURL = workRoot.appendingPathComponent("install-update.sh")
+
+        try fileManager.createDirectory(at: workRoot, withIntermediateDirectories: true)
+
+        let (downloadedArchiveURL, response) = try await URLSession.shared.download(from: candidate.downloadURL)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MacAppUpdateInstallError.invalidDownloadResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw MacAppUpdateInstallError.downloadFailed(status: httpResponse.statusCode)
+        }
+
+        try? fileManager.removeItem(at: archiveURL)
+        try fileManager.moveItem(at: downloadedArchiveURL, to: archiveURL)
+
+        try fileManager.createDirectory(at: unpackedURL, withIntermediateDirectories: true)
+        do {
+            try runProcess(
+                executablePath: "/usr/bin/ditto",
+                arguments: ["-x", "-k", archiveURL.path, unpackedURL.path]
+            )
+        } catch {
+            throw MacAppUpdateInstallError.extractionFailed(error.localizedDescription)
+        }
+
+        guard let extractedAppURL = firstAppBundle(in: unpackedURL, fileManager: fileManager) else {
+            throw MacAppUpdateInstallError.missingAppBundle
+        }
+
+        do {
+            try? fileManager.removeItem(at: stagedAppURL)
+            try runProcess(
+                executablePath: "/usr/bin/ditto",
+                arguments: [extractedAppURL.path, stagedAppURL.path]
+            )
+        } catch {
+            throw MacAppUpdateInstallError.stageFailed(error.localizedDescription)
+        }
+
+        let destinationAppURL = Bundle.main.bundleURL.standardizedFileURL
+        let destinationParentURL = destinationAppURL.deletingLastPathComponent()
+        guard fileManager.isWritableFile(atPath: destinationParentURL.path) else {
+            throw MacAppUpdateInstallError.stageFailed(
+                "No write permission for \(destinationParentURL.path)."
+            )
+        }
+
+        do {
+            try writeInstallerScript(
+                at: installerScriptURL,
+                destinationAppPath: destinationAppURL.path,
+                stagedAppPath: stagedAppURL.path,
+                currentPID: ProcessInfo.processInfo.processIdentifier
+            )
+            try launchInstallerScript(at: installerScriptURL)
+        } catch {
+            throw MacAppUpdateInstallError.installerLaunchFailed(error.localizedDescription)
+        }
+    }
+
     static func parseReleaseVersion(fromTag tag: String) -> String? {
         versionString(from: tag)
     }
@@ -302,6 +396,118 @@ enum MacAppUpdateChecker {
         let resolvedName = name.flatMap { $0.isEmpty ? nil : $0 } ?? defaultRepoName
 
         return (owner: resolvedOwner, name: resolvedName)
+    }
+
+    private static func runProcess(executablePath: String, arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            throw NSError(
+                domain: "MacAppUpdateChecker",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: "\(executablePath) exited with status \(process.terminationStatus)."
+                ]
+            )
+        }
+    }
+
+    private static func firstAppBundle(
+        in rootURL: URL,
+        fileManager: FileManager
+    ) -> URL? {
+        guard let enumerator = fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        for case let url as URL in enumerator {
+            if url.pathExtension == "app" {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private static func writeInstallerScript(
+        at scriptURL: URL,
+        destinationAppPath: String,
+        stagedAppPath: String,
+        currentPID: Int32
+    ) throws {
+        let quotedDestination = shellQuoted(destinationAppPath)
+        let quotedStaged = shellQuoted(stagedAppPath)
+        let script = """
+        #!/bin/zsh
+        set -euo pipefail
+
+        dest=\(quotedDestination)
+        staged=\(quotedStaged)
+        pid=\(currentPID)
+
+        for _ in {1..90}; do
+          if ! kill -0 "$pid" >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+
+        parent_dir="$(dirname "$dest")"
+        tmp_dir="$parent_dir/.ecc-update-$RANDOM"
+        old_dir="$parent_dir/.ecc-old-$RANDOM"
+
+        finish() {
+          if [ -d "$old_dir" ] && [ ! -d "$dest" ]; then
+            mv "$old_dir" "$dest" || true
+          fi
+          if [ -d "$dest" ]; then
+            open "$dest" >/dev/null 2>&1 || true
+          fi
+        }
+
+        trap finish EXIT
+
+        rm -rf "$tmp_dir" "$old_dir"
+        mkdir -p "$tmp_dir"
+        ditto "$staged" "$tmp_dir/EveryCodeCompanion.app"
+
+        if [ -d "$dest" ]; then
+          mv "$dest" "$old_dir"
+        fi
+
+        mv "$tmp_dir/EveryCodeCompanion.app" "$dest"
+        rm -rf "$tmp_dir" "$old_dir"
+        trap - EXIT
+        open "$dest"
+        """
+
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o755)],
+            ofItemAtPath: scriptURL.path
+        )
+    }
+
+    private static func launchInstallerScript(at scriptURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [scriptURL.path]
+        process.standardInput = nil
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+    }
+
+    private static func shellQuoted(_ raw: String) -> String {
+        "'" + raw.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 }
 

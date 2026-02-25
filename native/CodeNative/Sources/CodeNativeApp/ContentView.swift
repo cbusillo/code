@@ -1045,7 +1045,12 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showCompanionConnectAssistant) {
-            CompanionConnectAssistantSheet(store: store)
+            CompanionConnectAssistantSheet(
+                store: store,
+                sharedCompanionBackends: sharedCompanionBackends,
+                refreshSharedCompanionBackends: refreshSharedCompanionBackends,
+                onSharedCompanionPreferencesChanged: onSharedCompanionPreferencesChanged
+            )
         }
         #endif
         .task {
@@ -6854,6 +6859,9 @@ private struct ConnectionPopover: View {
 #if os(iOS)
 private struct CompanionConnectAssistantSheet: View {
     @ObservedObject var store: SessionMirrorStore
+    let sharedCompanionBackends: [SharedCompanionBackend]
+    let refreshSharedCompanionBackends: (() -> Void)?
+    let onSharedCompanionPreferencesChanged: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
@@ -6863,6 +6871,16 @@ private struct CompanionConnectAssistantSheet: View {
     @State private var manualToken = ""
     @State private var isApplying = false
     @State private var localError: String?
+    @AppStorage("code_native_auto_connect_shared_companion")
+    private var autoConnectSharedCompanion = true
+    @AppStorage("code_native_preferred_shared_companion_id")
+    private var preferredSharedCompanionBackendID = ""
+
+    private static let sharedBackendDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, h:mm a"
+        return formatter
+    }()
 
     private enum ConnectionMethod: String, CaseIterable, Identifiable {
         case scanQR = "Scan QR"
@@ -6872,6 +6890,36 @@ private struct CompanionConnectAssistantSheet: View {
         var id: String { rawValue }
     }
 
+    private var normalizedPreferredSharedCompanionBackendID: String {
+        preferredSharedCompanionBackendID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var selectedSharedCompanionBackend: SharedCompanionBackend? {
+        if !normalizedPreferredSharedCompanionBackendID.isEmpty,
+           let matched = sharedCompanionBackends.first(where: { $0.id == normalizedPreferredSharedCompanionBackendID }) {
+            return matched
+        }
+
+        return sharedCompanionBackends.max(by: { $0.updatedAtUnixMs < $1.updatedAtUnixMs })
+    }
+
+    private var selectedSharedCompanionUpdatedAtText: String {
+        guard let selectedSharedCompanionBackend else {
+            return ""
+        }
+
+        let date = Date(timeIntervalSince1970: Double(selectedSharedCompanionBackend.updatedAtUnixMs) / 1_000)
+        return Self.sharedBackendDateFormatter.string(from: date)
+    }
+
+    private var selectedSharedCompanionDescription: String {
+        guard let selectedSharedCompanionBackend else {
+            return "No iCloud backend discovered yet"
+        }
+
+        return "\(selectedSharedCompanionBackend.displayName) (\(selectedSharedCompanionBackend.idLabel))"
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -6879,6 +6927,54 @@ private struct CompanionConnectAssistantSheet: View {
                     Text("Connect this iPhone/iPad to your Mac companion. The iOS app does not run a local backend.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Automatic iCloud backend") {
+                    Toggle("Auto-connect shared backend", isOn: $autoConnectSharedCompanion)
+
+                    if sharedCompanionBackends.isEmpty {
+                        Text("No shared backends found yet. Keep the Mac app open, confirm both devices use the same iCloud account, then refresh.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker(
+                            "Preferred backend",
+                            selection: Binding(
+                                get: { normalizedPreferredSharedCompanionBackendID },
+                                set: { preferredSharedCompanionBackendID = $0 }
+                            )
+                        ) {
+                            Text("Most recent backend").tag("")
+                            ForEach(sharedCompanionBackends) { backend in
+                                Text("\(backend.displayName) (\(backend.idLabel))").tag(backend.id)
+                            }
+                        }
+                    }
+
+                    Text(selectedSharedCompanionDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !selectedSharedCompanionUpdatedAtText.isEmpty {
+                        Text("Last published: \(selectedSharedCompanionUpdatedAtText)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Refresh iCloud backends") {
+                            refreshSharedCompanionBackends?()
+                            onSharedCompanionPreferencesChanged?()
+                        }
+
+                        if let selectedSharedCompanionBackend {
+                            Text(selectedSharedCompanionBackend.endpoint)
+                                .font(.caption2.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Section {
@@ -6978,6 +7074,14 @@ private struct CompanionConnectAssistantSheet: View {
             .onAppear {
                 manualEndpoint = store.endpoint
                 manualToken = store.companionSessionToken ?? ""
+                refreshSharedCompanionBackends?()
+                onSharedCompanionPreferencesChanged?()
+            }
+            .onChange(of: autoConnectSharedCompanion) { _, _ in
+                onSharedCompanionPreferencesChanged?()
+            }
+            .onChange(of: preferredSharedCompanionBackendID) { _, _ in
+                onSharedCompanionPreferencesChanged?()
             }
         }
         .presentationDetents([.large])
