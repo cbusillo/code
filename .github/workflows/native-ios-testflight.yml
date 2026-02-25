@@ -132,6 +132,8 @@ jobs:
           echo "name=$profile_name" >> "$GITHUB_OUTPUT"
 
       - name: Write export options
+        env:
+          IOS_APPSTORE_PROFILE_NAME: ${{ steps.ios_profile.outputs.name }}
         run: |
           set -euo pipefail
           cat > "$EXPORT_OPTIONS_PATH" <<EOF
@@ -145,7 +147,14 @@ jobs:
             <key>method</key>
             <string>app-store-connect</string>
             <key>signingStyle</key>
-            <string>automatic</string>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${IOS_APPSTORE_PROFILE_NAME}</string>
+            </dict>
             <key>stripSwiftSymbols</key>
             <true/>
             <key>teamID</key>
