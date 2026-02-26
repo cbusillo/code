@@ -736,6 +736,36 @@ final class LocalBackendRuntimeSupervisor: ObservableObject {
         refreshLaunchPlan()
     }
 
+    func handleNetworkPathChange() {
+        guard !isDisabled else {
+            return
+        }
+
+        guard let currentLaunchPlan = launchPlan else {
+            return
+        }
+
+        let refreshedLANEndpoint = Self.resolveLANEndpoint(port: currentLaunchPlan.port)
+        let refreshedTailscaleEndpoint = Self.resolveTailscaleEndpoint(port: currentLaunchPlan.port)
+        guard refreshedLANEndpoint != currentLaunchPlan.lanEndpoint
+            || refreshedTailscaleEndpoint != currentLaunchPlan.tailscaleEndpoint
+        else {
+            return
+        }
+
+        launchPlan = LaunchPlan(
+            binaryURL: currentLaunchPlan.binaryURL,
+            port: currentLaunchPlan.port,
+            localSessionToken: currentLaunchPlan.localSessionToken,
+            sessionTokens: currentLaunchPlan.sessionTokens,
+            lanEndpoint: refreshedLANEndpoint,
+            tailscaleEndpoint: refreshedTailscaleEndpoint
+        )
+
+        lanEndpoint = refreshedLANEndpoint
+        tailscaleEndpoint = refreshedTailscaleEndpoint
+    }
+
     private func scheduleCompanionPairingExpiryRefresh() {
         pairingExpiryTask?.cancel()
         pairingExpiryTask = nil
@@ -1311,6 +1341,8 @@ private struct SharedCompanionBackendRecord: Codable, Equatable {
     let endpoint: String
     let lanEndpoint: String?
     let tailscaleEndpoint: String?
+    let backendVersion: String?
+    let minimumSupportedClientVersion: String?
     let sessionToken: String
     let updatedAtUnixMs: UInt64
 }
@@ -1370,6 +1402,13 @@ private enum SharedCompanionRegistry {
         return freshRecords
     }
 
+    static func records(
+        nowUnixMs: UInt64,
+        store: NSUbiquitousKeyValueStore = .default
+    ) -> [SharedCompanionBackendRecord] {
+        synchronizedRecords(nowUnixMs: nowUnixMs, store: store)
+    }
+
     static func upsert(
         _ record: SharedCompanionBackendRecord,
         nowUnixMs: UInt64,
@@ -1407,6 +1446,8 @@ private enum SharedCompanionRegistry {
                 id: record.id,
                 displayName: record.displayName,
                 endpoint: record.endpoint,
+                backendVersion: record.backendVersion,
+                minimumSupportedClientVersion: record.minimumSupportedClientVersion,
                 updatedAtUnixMs: record.updatedAtUnixMs
             )
         }
@@ -1507,6 +1548,7 @@ struct CodeNativeApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store: SessionMirrorStore
     @StateObject private var runtimeSupervisor: LocalBackendRuntimeSupervisor
+    @StateObject private var networkPathChangeMonitor = NetworkPathChangeMonitor()
     @State private var sharedCompanionBackends: [SharedCompanionBackend] = []
     private let benchmarkFixturePath: String?
     #if os(macOS)
@@ -1611,6 +1653,10 @@ struct CodeNativeApp: App {
                 .onReceive(runtimeSupervisor.$tailscaleEndpoint) { _ in
                     syncStoreFromRuntimeSupervisor()
                 }
+                .onReceive(networkPathChangeMonitor.$changeCount.dropFirst()) { _ in
+                    runtimeSupervisor.handleNetworkPathChange()
+                    syncStoreFromRuntimeSupervisor()
+                }
                 .onReceive(runtimeSupervisor.$companionPairingEntries) { entries in
                     Self.saveCompanionPairingEntries(entries)
                 }
@@ -1698,6 +1744,19 @@ struct CodeNativeApp: App {
             return nil
         }
 
+        let clientVersion = AppVersion.currentComparableVersion()
+        let records = SharedCompanionRegistry.records(nowUnixMs: nowUnixMs)
+        let compatibleRecords = records.filter { record in
+            guard let minimumVersion = VersionComparator.normalizedVersionString(record.minimumSupportedClientVersion) else {
+                return true
+            }
+
+            return VersionComparator.isAtLeast(clientVersion, minimum: minimumVersion)
+        }
+        guard !compatibleRecords.isEmpty else {
+            return nil
+        }
+
         let preferredBackendID = CompanionSyncPreferences.preferredSharedBackendID()
 
         #if os(macOS)
@@ -1706,16 +1765,25 @@ struct CodeNativeApp: App {
         }
 
         let localBackendID = CompanionSyncPreferences.localBackendID()
-        return SharedCompanionRegistry.preferredRecord(
-            preferredBackendID: preferredBackendID,
-            excludingBackendID: localBackendID,
-            nowUnixMs: nowUnixMs
-        )
+        if let preferredBackendID,
+           !preferredBackendID.isEmpty,
+           let match = compatibleRecords.first(where: { $0.id == preferredBackendID }) {
+            return match
+        }
+
+        if let nonLocal = compatibleRecords.first(where: { $0.id != localBackendID }) {
+            return nonLocal
+        }
+
+        return compatibleRecords.first
         #else
-        return SharedCompanionRegistry.preferredRecord(
-            preferredBackendID: preferredBackendID,
-            nowUnixMs: nowUnixMs
-        )
+        if let preferredBackendID,
+           !preferredBackendID.isEmpty,
+           let match = compatibleRecords.first(where: { $0.id == preferredBackendID }) {
+            return match
+        }
+
+        return compatibleRecords.first
         #endif
     }
 
@@ -1868,6 +1936,8 @@ struct CodeNativeApp: App {
             endpoint: publishedEndpoint,
             lanEndpoint: runtimeSupervisor.lanEndpoint,
             tailscaleEndpoint: runtimeSupervisor.tailscaleEndpoint,
+            backendVersion: AppVersion.currentDisplayVersion(),
+            minimumSupportedClientVersion: AppVersion.minimumSupportedClientVersion(),
             sessionToken: sessionToken,
             updatedAtUnixMs: nowUnixMs
         )
@@ -1877,6 +1947,8 @@ struct CodeNativeApp: App {
            existingRecord.endpoint == record.endpoint,
            existingRecord.lanEndpoint == record.lanEndpoint,
            existingRecord.tailscaleEndpoint == record.tailscaleEndpoint,
+           existingRecord.backendVersion == record.backendVersion,
+           existingRecord.minimumSupportedClientVersion == record.minimumSupportedClientVersion,
            existingRecord.sessionToken == record.sessionToken {
             let refreshElapsedMs: UInt64
             if nowUnixMs >= existingRecord.updatedAtUnixMs {

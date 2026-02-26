@@ -7,6 +7,7 @@ import AppKit
 #endif
 
 #if os(iOS)
+import Darwin
 import UIKit
 import VisionKit
 #endif
@@ -144,6 +145,8 @@ struct SharedCompanionBackend: Equatable, Identifiable {
     let id: String
     let displayName: String
     let endpoint: String
+    let backendVersion: String?
+    let minimumSupportedClientVersion: String?
     let updatedAtUnixMs: UInt64
 
     var idLabel: String {
@@ -6864,6 +6867,7 @@ private struct CompanionConnectAssistantSheet: View {
     let onSharedCompanionPreferencesChanged: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     @State private var selectedMethod: ConnectionMethod = .scanQR
     @State private var pairingCodeInput = ""
@@ -6912,12 +6916,47 @@ private struct CompanionConnectAssistantSheet: View {
         return Self.sharedBackendDateFormatter.string(from: date)
     }
 
+    private var selectedSharedCompanionVersionText: String {
+        guard let selectedSharedCompanionBackend else {
+            return ""
+        }
+
+        let backendVersion = selectedSharedCompanionBackend.backendVersion?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let minimumClientVersion = selectedSharedCompanionBackend.minimumSupportedClientVersion?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if backendVersion.isEmpty,
+           minimumClientVersion.isEmpty {
+            return ""
+        }
+
+        if backendVersion.isEmpty {
+            return "Requires app version \(minimumClientVersion) or newer"
+        }
+
+        if minimumClientVersion.isEmpty {
+            return "Backend version \(backendVersion)"
+        }
+
+        return "Backend \(backendVersion) • requires app \(minimumClientVersion)+"
+    }
+
     private var selectedSharedCompanionDescription: String {
         guard let selectedSharedCompanionBackend else {
             return "No iCloud backend discovered yet"
         }
 
         return "\(selectedSharedCompanionBackend.displayName) (\(selectedSharedCompanionBackend.idLabel))"
+    }
+
+    private var shouldSuggestTailscale: Bool {
+        guard let selectedSharedCompanionBackend else {
+            return false
+        }
+
+        return endpointLooksTailscale(selectedSharedCompanionBackend.endpoint)
+            && !tailscaleTunnelLikelyActive()
     }
 
     var body: some View {
@@ -6961,6 +7000,12 @@ private struct CompanionConnectAssistantSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    if !selectedSharedCompanionVersionText.isEmpty {
+                        Text(selectedSharedCompanionVersionText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
                     HStack(spacing: 8) {
                         Button("Refresh iCloud backends") {
                             refreshSharedCompanionBackends?()
@@ -6973,6 +7018,20 @@ private struct CompanionConnectAssistantSheet: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if shouldSuggestTailscale {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Remote backend detected. Turn on Tailscale to keep this connection reliable when away from your local network.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+
+                            Button("Open Tailscale") {
+                                openTailscaleOrAppStore()
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityIdentifier("connection.assistant.open-tailscale")
                         }
                     }
                 }
@@ -7147,6 +7206,135 @@ private struct CompanionConnectAssistantSheet: View {
            !error.isEmpty {
             localError = error
         }
+    }
+
+    private func openTailscaleOrAppStore() {
+        guard let tailscaleURL = URL(string: "tailscale://") else {
+            return
+        }
+
+        openURL(tailscaleURL) { accepted in
+            guard !accepted,
+                  let appStoreURL = URL(string: "https://apps.apple.com/app/tailscale/id1475387142")
+            else {
+                return
+            }
+
+            openURL(appStoreURL)
+        }
+    }
+
+    private func endpointLooksTailscale(_ endpoint: String) -> Bool {
+        guard let endpointURL = URL(string: endpoint),
+              let host = endpointURL.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty
+        else {
+            return false
+        }
+
+        let lowercasedHost = host.lowercased()
+        if lowercasedHost.hasSuffix(".ts.net") || lowercasedHost.contains("tailscale") {
+            return true
+        }
+
+        if let octets = ipv4Octets(from: host) {
+            // Tailscale IPv4 range.
+            if octets.0 == 100,
+               (64...127).contains(octets.1) {
+                return true
+            }
+
+            return false
+        }
+
+        return false
+    }
+
+    private func tailscaleTunnelLikelyActive() -> Bool {
+        !allIPv4Addresses { interfaceName, ipAddress in
+            let lowerInterfaceName = interfaceName.lowercased()
+            return isTailscaleInterface(lowerInterfaceName)
+                && ipAddress.hasPrefix("100.")
+        }.isEmpty
+    }
+
+    private func isTailscaleInterface(_ lowerInterfaceName: String) -> Bool {
+        lowerInterfaceName.hasPrefix("utun") || lowerInterfaceName.contains("tailscale")
+    }
+
+    private func allIPv4Addresses(where predicate: (String, String) -> Bool) -> [String] {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0,
+              let firstInterface = interfaces
+        else {
+            return []
+        }
+        defer {
+            freeifaddrs(interfaces)
+        }
+
+        var addresses: [String] = []
+        var seenAddresses: Set<String> = []
+        var pointer: UnsafeMutablePointer<ifaddrs>? = firstInterface
+        while let interface = pointer {
+            defer {
+                pointer = interface.pointee.ifa_next
+            }
+
+            let interfaceName = String(cString: interface.pointee.ifa_name)
+            let flags = Int32(interface.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0,
+                  (flags & IFF_LOOPBACK) == 0,
+                  let addressPointer = interface.pointee.ifa_addr,
+                  addressPointer.pointee.sa_family == UInt8(AF_INET)
+            else {
+                continue
+            }
+
+            var socketAddress = addressPointer.pointee
+            var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let conversionResult = getnameinfo(
+                &socketAddress,
+                socklen_t(addressPointer.pointee.sa_len),
+                &hostBuffer,
+                socklen_t(hostBuffer.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            guard conversionResult == 0 else {
+                continue
+            }
+
+            let hostBytes = hostBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+            let ipAddress = String(decoding: hostBytes, as: UTF8.self)
+            if !ipAddress.isEmpty,
+               predicate(interfaceName, ipAddress),
+               !seenAddresses.contains(ipAddress) {
+                seenAddresses.insert(ipAddress)
+                addresses.append(ipAddress)
+            }
+        }
+
+        return addresses
+    }
+
+    private func ipv4Octets(from address: String) -> (Int, Int, Int, Int)? {
+        let components = address.split(separator: ".")
+        guard components.count == 4,
+              let octet0 = Int(components[0]),
+              let octet1 = Int(components[1]),
+              let octet2 = Int(components[2]),
+              let octet3 = Int(components[3]),
+              (0...255).contains(octet0),
+              (0...255).contains(octet1),
+              (0...255).contains(octet2),
+              (0...255).contains(octet3)
+        else {
+            return nil
+        }
+
+        return (octet0, octet1, octet2, octet3)
     }
 }
 

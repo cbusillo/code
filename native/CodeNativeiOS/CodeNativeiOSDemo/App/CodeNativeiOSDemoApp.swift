@@ -10,6 +10,7 @@ struct CodeNativeiOSDemoApp: App {
     private static let sharedCompanionSyncIntervalNs: UInt64 = 5_000_000_000
 
     @StateObject private var store = SessionMirrorStore(endpointAccessPolicy: .anyHost)
+    @StateObject private var networkPathChangeMonitor = NetworkPathChangeMonitor()
     @State private var sharedCompanionRecords: [SharedCompanionBackendRecord] = []
     @State private var sharedCompanionSyncTask: Task<Void, Never>?
     @AppStorage("code_native_auto_connect_shared_companion")
@@ -25,6 +26,8 @@ struct CodeNativeiOSDemoApp: App {
                 id: record.id,
                 displayName: record.displayName,
                 endpoint: record.endpoint,
+                backendVersion: record.backendVersion,
+                minimumSupportedClientVersion: record.minimumSupportedClientVersion,
                 updatedAtUnixMs: record.updatedAtUnixMs
             )
         }
@@ -56,6 +59,9 @@ struct CodeNativeiOSDemoApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSUbiquitousKeyValueStore.didChangeExternallyNotification)) { _ in
                     refreshSharedCompanionBackends()
+                    applySharedCompanionSelection()
+                }
+                .onReceive(networkPathChangeMonitor.$changeCount.dropFirst()) { _ in
                     applySharedCompanionSelection()
                 }
                 .onOpenURL { url in
@@ -152,33 +158,54 @@ struct CodeNativeiOSDemoApp: App {
     }
 
     private func selectedSharedCompanionRecord() -> SharedCompanionBackendRecord? {
+        let clientVersion = AppVersion.currentComparableVersion()
+        let compatibleRecords = sharedCompanionRecords.filter { record in
+            guard let minimumVersion = VersionComparator.normalizedVersionString(record.minimumSupportedClientVersion) else {
+                return true
+            }
+
+            return VersionComparator.isAtLeast(clientVersion, minimum: minimumVersion)
+        }
+
         let trimmedPreferredID = preferredSharedCompanionBackendID.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedPreferredID.isEmpty,
-           let preferred = sharedCompanionRecords.first(where: { $0.id == trimmedPreferredID }) {
+           let preferred = compatibleRecords.first(where: { $0.id == trimmedPreferredID }) {
             return preferred
         }
 
-        return sharedCompanionRecords.first
+        return compatibleRecords.first
     }
 
     private func preferredEndpoint(for record: SharedCompanionBackendRecord) -> String {
+        let trimmedPrimaryEndpoint = record.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let primaryEndpointPrefersLAN =
+            !trimmedPrimaryEndpoint.isEmpty
+                && endpointHostIsPrivateLANIPv4(trimmedPrimaryEndpoint)
+
         let localLANAddresses = localPrivateLANIPv4Addresses()
-        if let lanEndpoint = record.lanEndpoint,
+        if primaryEndpointPrefersLAN,
+           let lanEndpoint = record.lanEndpoint,
            endpointIsOnSamePrivateLANSubnet(lanEndpoint, localLANAddresses: localLANAddresses) {
             return lanEndpoint
         }
 
-        if let tailscaleEndpoint = record.tailscaleEndpoint,
-           hasTailscaleIPv4Address() {
-            return tailscaleEndpoint
-        }
-
-        if let lanEndpoint = record.lanEndpoint {
-            return lanEndpoint
+        if !trimmedPrimaryEndpoint.isEmpty {
+            return trimmedPrimaryEndpoint
         }
 
         if let tailscaleEndpoint = record.tailscaleEndpoint {
-            return tailscaleEndpoint
+            let trimmedTailscaleEndpoint = tailscaleEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedTailscaleEndpoint.isEmpty {
+                return trimmedTailscaleEndpoint
+            }
+        }
+
+        if let lanEndpoint = record.lanEndpoint {
+            let trimmedLANEndpoint = lanEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLANEndpoint.isEmpty {
+                return trimmedLANEndpoint
+            }
         }
 
         return record.endpoint
@@ -194,11 +221,24 @@ struct CodeNativeiOSDemoApp: App {
         }
     }
 
-    private func hasTailscaleIPv4Address() -> Bool {
-        !allIPv4Addresses { interfaceName, ipAddress in
-            let lowerInterfaceName = interfaceName.lowercased()
-            return isTailscaleInterface(lowerInterfaceName) && ipAddress.hasPrefix("100.")
-        }.isEmpty
+    private func endpointHostIsPrivateLANIPv4(_ endpoint: String) -> Bool {
+        guard let endpointURL = URL(string: endpoint),
+              let endpointHost = endpointURL.host,
+              let octets = ipv4Octets(from: endpointHost)
+        else {
+            return false
+        }
+
+        if octets.0 == 10 || octets.0 == 192 && octets.1 == 168 {
+            return true
+        }
+
+        if octets.0 == 172,
+           (16...31).contains(octets.1) {
+            return true
+        }
+
+        return false
     }
 
     private func isTailscaleInterface(_ lowerInterfaceName: String) -> Bool {
@@ -334,6 +374,8 @@ private struct SharedCompanionBackendRecord: Codable, Equatable {
     let endpoint: String
     let lanEndpoint: String?
     let tailscaleEndpoint: String?
+    let backendVersion: String?
+    let minimumSupportedClientVersion: String?
     let sessionToken: String
     let updatedAtUnixMs: UInt64
 }

@@ -163,13 +163,13 @@ enum MacAppUpdateChecker {
         releaseVersion: String,
         skippedVersion: String?
     ) -> MacAppUpdateAvailability {
-        let comparison = compareVersionStrings(installedVersion, releaseVersion)
+        let comparison = VersionComparator.compare(installedVersion, releaseVersion)
         if comparison != .orderedAscending {
             return .upToDate
         }
 
         if let skippedVersion,
-           compareVersionStrings(skippedVersion, releaseVersion) == .orderedSame {
+           VersionComparator.compare(skippedVersion, releaseVersion) == .orderedSame {
             return .skipped
         }
 
@@ -315,29 +315,6 @@ enum MacAppUpdateChecker {
         }
 
         return fileManager.fileExists(atPath: receiptURL.path)
-    }
-
-    private static func compareVersionStrings(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        let lhsParts = numericVersionComponents(from: lhs)
-        let rhsParts = numericVersionComponents(from: rhs)
-        let count = max(lhsParts.count, rhsParts.count)
-
-        for index in 0..<count {
-            let lhsPart = index < lhsParts.count ? lhsParts[index] : 0
-            let rhsPart = index < rhsParts.count ? rhsParts[index] : 0
-            if lhsPart < rhsPart {
-                return .orderedAscending
-            }
-            if lhsPart > rhsPart {
-                return .orderedDescending
-            }
-        }
-
-        return .orderedSame
-    }
-
-    private static func numericVersionComponents(from raw: String) -> [Int] {
-        raw.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
     }
 
     private static func versionString(from tag: String) -> String? {

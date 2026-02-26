@@ -72,6 +72,16 @@ final class MacAppUpdateCheckerTests: XCTestCase {
         XCTAssertEqual(result, .upToDate)
     }
 
+    func testClassifyUpdateAvailabilityRejectsOlderCalendarRelease() {
+        let result = MacAppUpdateChecker.classifyUpdateAvailability(
+            installedVersion: "2026.2.25",
+            releaseVersion: "2026.2.15",
+            skippedVersion: nil
+        )
+
+        XCTAssertEqual(result, .upToDate)
+    }
+
     func testSkipVersionRoundTripPersistsPreference() {
         let suiteName = "MacAppUpdateCheckerTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
