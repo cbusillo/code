@@ -1,6 +1,8 @@
 import SwiftUI
+import Combine
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import Network
 
 #if os(macOS)
 import AppKit
@@ -139,6 +141,110 @@ enum CompanionConnectionState: Equatable {
 
 private func currentUnixTimeMilliseconds() -> UInt64 {
     UInt64(Date().timeIntervalSince1970 * 1_000)
+}
+
+enum VersionComparator {
+    static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let lhsParts = numericVersionComponents(from: lhs)
+        let rhsParts = numericVersionComponents(from: rhs)
+        let count = max(lhsParts.count, rhsParts.count)
+
+        for index in 0..<count {
+            let lhsPart = index < lhsParts.count ? lhsParts[index] : 0
+            let rhsPart = index < rhsParts.count ? rhsParts[index] : 0
+            if lhsPart < rhsPart {
+                return .orderedAscending
+            }
+            if lhsPart > rhsPart {
+                return .orderedDescending
+            }
+        }
+
+        return .orderedSame
+    }
+
+    static func isAtLeast(_ lhs: String, minimum rhs: String) -> Bool {
+        compare(lhs, rhs) != .orderedAscending
+    }
+
+    static func normalizedVersionString(_ raw: String?) -> String? {
+        guard let raw else {
+            return nil
+        }
+
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func numericVersionComponents(from raw: String) -> [Int] {
+        raw.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+    }
+}
+
+enum AppVersion {
+    private static let minimumSupportedClientVersionInfoKey = "CodeNativeMinSupportedClientVersion"
+
+    static func currentDisplayVersion(bundle: Bundle = .main) -> String? {
+        let shortVersion = normalizedVersionString(bundle.infoDictionary?["CFBundleShortVersionString"] as? String)
+        let buildVersion = normalizedVersionString(bundle.infoDictionary?["CFBundleVersion"] as? String)
+
+        if let shortVersion,
+           let buildVersion {
+            return "\(shortVersion)+\(buildVersion)"
+        }
+
+        return shortVersion ?? buildVersion
+    }
+
+    static func currentComparableVersion(bundle: Bundle = .main) -> String {
+        if let shortVersion = normalizedVersionString(bundle.infoDictionary?["CFBundleShortVersionString"] as? String) {
+            return shortVersion
+        }
+
+        if let buildVersion = normalizedVersionString(bundle.infoDictionary?["CFBundleVersion"] as? String) {
+            return buildVersion
+        }
+
+        return "0.0.0"
+    }
+
+    static func minimumSupportedClientVersion(bundle: Bundle = .main) -> String? {
+        normalizedVersionString(bundle.infoDictionary?[minimumSupportedClientVersionInfoKey] as? String)
+    }
+
+    private static func normalizedVersionString(_ raw: String?) -> String? {
+        VersionComparator.normalizedVersionString(raw)
+    }
+}
+
+@MainActor
+final class NetworkPathChangeMonitor: ObservableObject {
+    @Published private(set) var changeCount: UInt64 = 0
+
+    private let monitor: NWPathMonitor
+    private let queue: DispatchQueue
+
+    init() {
+        monitor = NWPathMonitor()
+        queue = DispatchQueue(label: "com.every.code.native.network-path")
+
+        monitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+
+                if changeCount < UInt64.max {
+                    changeCount += 1
+                }
+            }
+        }
+        monitor.start(queue: queue)
+    }
+
+    deinit {
+        monitor.cancel()
+    }
 }
 
 struct SharedCompanionBackend: Equatable, Identifiable {
