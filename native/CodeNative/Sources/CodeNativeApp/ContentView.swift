@@ -234,8 +234,8 @@ final class NetworkPathChangeMonitor: ObservableObject {
                     return
                 }
 
-                if changeCount < UInt64.max {
-                    changeCount += 1
+                if self.changeCount < UInt64.max {
+                    self.changeCount += 1
                 }
             }
         }
