@@ -4396,7 +4396,8 @@ struct ContentView: View {
     }
 
     private var canSubmit: Bool {
-        canSendTurns && !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        store.connectionState == .connected
+            && !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var filteredSlashCommands: [ComposerSlashCommand] {
@@ -5166,6 +5167,11 @@ struct ContentView: View {
 
         let submittedText = text
         Task {
+            let readyToSubmit = await ensureSessionReadyForSubmit()
+            guard readyToSubmit else {
+                return
+            }
+
             let didSubmit = await store.submitComposer(
                 text: submittedText,
                 model: selectedModelIdentifier,
@@ -5183,6 +5189,40 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func ensureSessionReadyForSubmit() async -> Bool {
+        if store.connectionState != .connected {
+            #if os(iOS)
+            await MainActor.run {
+                presentCompanionConnectAssistant()
+            }
+            return false
+            #else
+            await store.connect()
+            #endif
+        }
+
+        guard store.connectionState == .connected else {
+            return false
+        }
+
+        if store.selectedSession == nil {
+            await createSessionWithCurrentWorkflowSettings()
+
+            for _ in 0..<30 {
+                if store.selectedSession != nil {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+
+        #if os(macOS)
+        focusComposerEditor(forceActivateApp: true)
+        #endif
+
+        return store.selectedSession != nil
     }
 
     private func createSessionWithCurrentWorkflowSettings() async {
@@ -8037,8 +8077,8 @@ private struct MacComposerTextView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        textView.textColor = NSColor.labelColor
-        textView.insertionPointColor = NSColor.labelColor
+        textView.textColor = NSColor.white.withAlphaComponent(0.90)
+        textView.insertionPointColor = NSColor.white.withAlphaComponent(0.95)
         textView.isRichText = false
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -8085,8 +8125,8 @@ private struct MacComposerTextView: NSViewRepresentable {
             onSubmit(textView?.string ?? "")
         }
         textView.onEditorKeyCommand = onEditorKeyCommand
-        textView.textColor = NSColor.labelColor
-        textView.insertionPointColor = NSColor.labelColor
+        textView.textColor = NSColor.white.withAlphaComponent(0.90)
+        textView.insertionPointColor = NSColor.white.withAlphaComponent(0.95)
 
         if isFocused,
            let window = nsView.window,

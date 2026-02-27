@@ -72,17 +72,15 @@ enum SessionVisibility {
             return false
         }
 
-        if normalizedTitle.contains("every code harness") {
-            return true
-        }
-
-        if normalizedTitle.contains("[running in read-only mode") {
+        if normalizedTitle.contains("every code harness")
+            && normalizedTitle.contains("[running in read-only mode") {
             return true
         }
 
         if normalizedTitle.hasPrefix("review "),
            normalizedTitle.contains("files to consider:"),
-           normalizedTitle.contains("output:") {
+           normalizedTitle.contains("output:"),
+           normalizedTitle.contains("[running in read-only mode") {
             return true
         }
 
