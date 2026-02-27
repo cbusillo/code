@@ -1573,16 +1573,16 @@ struct ContentView: View {
                                         HStack(spacing: 6) {
                                             Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                                                 .font(.caption2.weight(.semibold))
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(.white.opacity(0.72))
                                             Text(group.title)
                                                 .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(.white.opacity(0.78))
 
                                             Spacer()
 
                                             Text("\(group.sessions.count)/\(group.totalCount)")
                                                 .font(.caption2)
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(.white.opacity(0.72))
 
                                             if group.hiddenCount > 0 {
                                                 Text("+\(group.hiddenCount)")
@@ -1603,7 +1603,7 @@ struct ContentView: View {
                                 } else if group.sessions.isEmpty {
                                     Text("No threads")
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(.white.opacity(0.72))
                                 } else {
                                     ForEach(group.sessions) { session in
                                         ThreadPill(
@@ -2139,11 +2139,17 @@ struct ContentView: View {
                 .id("transcript.session.\(session.id)")
                 .defaultScrollAnchor(.bottom)
                 .coordinateSpace(name: transcriptScrollCoordinateSpaceName)
+                #if os(iOS)
+                .scrollDismissesKeyboard(.interactively)
+                #endif
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4)
                         .onChanged { _ in
                             transcriptUserHasScrolled = true
                             pendingBottomPinPassesAfterThreadSwitch = 0
+                            #if os(iOS)
+                            composerIsFocused = false
+                            #endif
                         }
                 )
                 .onPreferenceChange(TranscriptBottomOffsetPreferenceKey.self) { bottomOffset in
@@ -2202,6 +2208,33 @@ struct ContentView: View {
                     transaction.disablesAnimations = true
                     withTransaction(transaction) {
                         proxy.scrollTo(anchorID, anchor: .top)
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !transcriptItems.isEmpty,
+                       !transcriptIsNearBottom,
+                       transcriptUserHasScrolled,
+                       !pendingBottomScrollAfterThreadSwitch {
+                        Button {
+                            transcriptUserHasScrolled = false
+                            scrollTranscriptToBottom(proxy: proxy, animated: true)
+                        } label: {
+                            Label("Jump to latest", systemImage: "arrow.down")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.black.opacity(0.58), in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white.opacity(0.94))
+                        .padding(.trailing, isCompactPhoneLayout ? 14 : 18)
+                        .padding(.bottom, usesBottomInsetComposer ? 78 : 20)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .accessibilityIdentifier("transcript.jump-to-latest")
                     }
                 }
             }
