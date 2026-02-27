@@ -81,7 +81,8 @@ Interrupt a running turn: `interruptConversation`.
 
 List/resume/archive: `listConversations`, `resumeConversation`, `archiveConversation`.
 
-For v2 threads, use `thread/list` with filters such as `archived: true` or `cwd: "/path"` to
+For v2 threads, use `thread/list` with filters such as `archived: true`, `cwd: "/path"`, or
+`searchTerm: "needle"` to
 narrow results, and `thread/unarchive` to restore archived rollouts to the active sessions
 directory (it returns the restored thread summary).
 
@@ -146,7 +147,7 @@ Example:
 When Codex needs approval to apply changes or run commands, the server issues JSON‑RPC requests to the client:
 
 - `applyPatchApproval { conversationId, callId, fileChanges, reason?, grantRoot? }`
-- `execCommandApproval { conversationId, callId, command, cwd, reason? }`
+- `execCommandApproval { conversationId, callId, approvalId?, command, cwd, reason? }`
 
 The client must reply with `{ decision: "allow" | "deny" }` for each request.
 

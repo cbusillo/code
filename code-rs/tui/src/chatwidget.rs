@@ -6405,9 +6405,8 @@ impl ChatWidget<'_> {
     }
     /// Handle exec approval request immediately
     fn handle_exec_approval_now(&mut self, _id: String, ev: ExecApprovalRequestEvent) {
-        // Use call_id as the approval correlation id so responses map to the
-        // exact pending approval in core (supports multiple approvals per turn).
-        let approval_id = ev.call_id.clone();
+        // Use approval_id when present, otherwise fall back to call_id.
+        let approval_id = ev.effective_approval_id();
         let ticket = self.make_background_before_next_output_ticket();
         self.bottom_pane
             .push_approval_request(ApprovalRequest::Exec {
@@ -31676,6 +31675,44 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn parse_agent_review_result_prefers_embedded_json_over_log_dump() {
+        let text = r#"
+            [auto-review] launching worker...
+            [auto-review] streaming tool output...
+            {
+                "findings": [
+                    {"title": "bug", "body": "fix", "confidence_score": 0.5, "priority": 1, "code_location": {"absolute_file_path": "foo", "line_range": {"start":1,"end":1}}}
+                ],
+                "overall_correctness": "incorrect",
+                "overall_explanation": "needs work",
+                "overall_confidence_score": 0.6
+            }
+            [auto-review] done
+        "#;
+
+        let (has_findings, findings, summary) = ChatWidget::parse_agent_review_result(Some(text));
+        assert!(has_findings);
+        assert_eq!(findings, 1);
+        let summary_text = summary.expect("summary should be present");
+        assert!(summary_text.contains("needs work"));
+        assert!(summary_text.contains("Findings: bug"));
+        assert!(!summary_text.contains("streaming tool output"));
+    }
+
+    #[test]
+    fn parse_agent_review_result_truncates_plain_text_log_fallback() {
+        let text = format!("review found issues: {}", "x".repeat(1000));
+        let (has_findings, findings, summary) = ChatWidget::parse_agent_review_result(Some(&text));
+
+        assert!(has_findings);
+        assert_eq!(findings, 0);
+        let summary_text = summary.expect("summary should be present");
+        assert!(summary_text.starts_with("review found issues:"));
+        assert!(summary_text.ends_with('…'));
+        assert!(summary_text.chars().count() <= 280);
+    }
+
+    #[test]
     fn format_model_name_capitalizes_codex_mini() {
         let mut harness = ChatWidgetHarness::new();
         let formatted = harness.chat().format_model_name("gpt-5.1-codex-mini");
@@ -31860,7 +31897,110 @@ use code_core::protocol::OrderMeta;
                     .any(|span| span.content.contains("[developer] Background auto-review"))
             })
         });
-        assert!(developer_seen, "developer note should be rendered as a background notice");
+        assert!(
+            !developer_seen,
+            "auto review should rely on the Auto Review notice instead of a [developer] history message"
+        );
+    }
+
+    #[test]
+    fn background_review_findings_are_forwarded_to_coordinator_resume() {
+        let _rt = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.set_phase(AutoRunPhase::AwaitingReview {
+            diagnostics_pending: false,
+        });
+
+        chat.auto_history.replace_all(vec![code_protocol::models::ResponseItem::Message {
+            id: Some("seed-item".to_string()),
+            role: "user".to_string(),
+            content: vec![code_protocol::models::ContentItem::InputText {
+                text: "seed transcript".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }]);
+
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-123".to_string()),
+            snapshot: Some("ghost123".to_string()),
+            base: None,
+            last_seen: std::time::Instant::now(),
+        });
+
+        chat.on_background_review_finished(
+            PathBuf::from("/tmp/wt"),
+            "auto-review-branch".to_string(),
+            true,
+            1,
+            Some("needs work".to_string()),
+            None,
+            Some("agent-123".to_string()),
+            Some("ghost123".to_string()),
+        );
+
+        let mut transcript = String::new();
+        for item in chat.auto_history.raw_snapshot().iter() {
+            if let code_protocol::models::ResponseItem::Message { content, .. } = item {
+                for content_item in content {
+                    match content_item {
+                        code_protocol::models::ContentItem::InputText { text }
+                        | code_protocol::models::ContentItem::OutputText { text } => {
+                            transcript.push_str(text);
+                            transcript.push('\n');
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        assert!(
+            transcript.contains("Auto Review: 1 issue(s) found"),
+            "auto review notice should be present when auto drive resumes"
+        );
+        assert!(
+            transcript.contains("needs work"),
+            "auto review summary should be forwarded to the coordinator"
+        );
+    }
+
+    #[test]
+    fn background_review_idle_dispatches_developer_followup_turn() {
+        let _rt = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-123".to_string()),
+            snapshot: Some("ghost123".to_string()),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished(
+            PathBuf::from("/tmp/wt"),
+            "auto-review-branch".to_string(),
+            true,
+            1,
+            Some("needs work".to_string()),
+            None,
+            Some("agent-123".to_string()),
+            Some("ghost123".to_string()),
+        );
+
+        assert!(
+            chat.pending_dispatched_user_messages
+                .iter()
+                .any(|msg| msg.contains("Background auto-review completed and reported 1 issue(s)")),
+            "auto review developer note should be dispatched to the model when idle"
+        );
     }
 
     #[test]
@@ -31913,7 +32053,10 @@ use code_core::protocol::OrderMeta;
                 })
             })
         });
-        assert!(developer_seen, "developer merge-hint note should be visible even while busy");
+        assert!(
+            !developer_seen,
+            "busy path should not render a [developer] merge-hint message"
+        );
     }
 
     #[test]
@@ -31958,7 +32101,12 @@ use code_core::protocol::OrderMeta;
         chat.observe_auto_review_status(&[agent]);
 
         assert!(chat.pending_agent_notes.is_empty());
-        assert!(chat.pending_dispatched_user_messages.is_empty());
+        assert!(
+            chat.pending_dispatched_user_messages
+                .iter()
+                .any(|msg| msg.contains("Background auto-review completed and reported 1 issue(s)")),
+            "idle auto-review findings should be dispatched back to the model"
+        );
         let developer_seen = chat.history_cells.iter().any(|cell| {
             cell.display_lines_trimmed().iter().any(|line| {
                 line.spans.iter().any(|span| {
@@ -31968,7 +32116,10 @@ use code_core::protocol::OrderMeta;
                 })
             })
         });
-        assert!(developer_seen, "developer merge-hint note should be visible when idle");
+        assert!(
+            !developer_seen,
+            "idle path should not render a [developer] merge-hint message"
+        );
     }
 
     #[test]
@@ -32024,7 +32175,10 @@ use code_core::protocol::OrderMeta;
                 })
             })
         });
-        assert!(developer_seen, "developer merge-hint note should be visible when busy");
+        assert!(
+            !developer_seen,
+            "busy observe path should not render a [developer] merge-hint message"
+        );
     }
 
     #[test]
@@ -32063,10 +32217,15 @@ use code_core::protocol::OrderMeta;
         );
 
         let pending_after_review = chat.pending_dispatched_user_messages.len();
-        assert_eq!(
-            pending_after_review,
-            pending_before_review,
-            "background review completion must not inject hidden foreground turns"
+        assert!(
+            pending_after_review > pending_before_review,
+            "idle background review completion should dispatch findings to the model"
+        );
+        assert!(
+            chat.pending_dispatched_user_messages
+                .iter()
+                .any(|msg| msg.contains("Background auto-review completed and reported 1 issue(s)")),
+            "the dispatched message should include the auto-review findings summary"
         );
         assert!(!chat.is_task_running(), "background review should not hold task-running state");
 
@@ -32185,10 +32344,15 @@ use code_core::protocol::OrderMeta;
             Some("agent-auto-review".to_string()),
             Some("ghost-long".to_string()),
         );
-        assert_eq!(
-            chat.pending_dispatched_user_messages.len(),
-            pending_before_review,
-            "background review completion must stay out-of-band"
+        assert!(
+            chat.pending_dispatched_user_messages.len() > pending_before_review,
+            "idle background review completion should inject a follow-up developer turn"
+        );
+        assert!(
+            chat.pending_dispatched_user_messages
+                .iter()
+                .any(|msg| msg.contains("Background auto-review completed and reported 1 issue(s)")),
+            "churn path should still forward auto-review findings"
         );
 
         chat.submit_text_message("typing after churn".to_string());
@@ -36685,6 +36849,8 @@ impl ChatWidget<'_> {
     /// Parse the auto-review agent result to derive findings count and a concise summary.
     /// Tries to deserialize `ReviewOutputEvent` JSON (direct or fenced). Falls back to heuristics.
     fn parse_agent_review_result(raw: Option<&str>) -> (bool, usize, Option<String>) {
+        const MAX_AUTO_REVIEW_FALLBACK_SUMMARY_CHARS: usize = 280;
+
         let Some(text) = raw else { return (false, 0, None); };
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -36713,6 +36879,14 @@ impl ChatWidget<'_> {
             return Self::review_result_from_output(&output);
         }
 
+        // Some runners prepend logs before printing JSON. Scan for embedded JSON
+        // objects and prefer the latest parseable review payload.
+        if let Some((has_findings, findings, summary)) =
+            Self::extract_review_from_mixed_text(trimmed)
+        {
+            return (has_findings, findings, summary);
+        }
+
         // Try to extract JSON from fenced code blocks.
         if let Some(start) = trimmed.find("```") {
             if let Some((body, _)) = trimmed[start + 3..].split_once("```") {
@@ -36731,15 +36905,122 @@ impl ChatWidget<'_> {
         let issue_markers = ["issue", "issues", "finding", "findings", "bug", "bugs", "problem", "problems", "error", "errors"]; // keep broad but guarded
 
         if skip_phrases.iter().any(|p| lowered.contains(p)) {
-            return (false, 0, Some(trimmed.to_string()));
+            return (
+                false,
+                0,
+                Some(Self::summarize_plain_review_text(
+                    trimmed,
+                    MAX_AUTO_REVIEW_FALLBACK_SUMMARY_CHARS,
+                )),
+            );
         }
 
         if clean_phrases.iter().any(|p| lowered.contains(p)) {
-            return (false, 0, Some(trimmed.to_string()));
+            return (
+                false,
+                0,
+                Some(Self::summarize_plain_review_text(
+                    trimmed,
+                    MAX_AUTO_REVIEW_FALLBACK_SUMMARY_CHARS,
+                )),
+            );
         }
 
         let has_findings = issue_markers.iter().any(|p| lowered.contains(p));
-        (has_findings, 0, Some(trimmed.to_string()))
+        (
+            has_findings,
+            0,
+            Some(Self::summarize_plain_review_text(
+                trimmed,
+                MAX_AUTO_REVIEW_FALLBACK_SUMMARY_CHARS,
+            )),
+        )
+    }
+
+    fn extract_review_from_mixed_text(text: &str) -> Option<(bool, usize, Option<String>)> {
+        #[derive(serde::Deserialize)]
+        struct MultiRunReview {
+            #[serde(flatten)]
+            latest: ReviewOutputEvent,
+            #[serde(default)]
+            runs: Vec<ReviewOutputEvent>,
+        }
+
+        let mut brace_depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut object_start = None;
+        let mut best_match: Option<(bool, usize, Option<String>)> = None;
+
+        for (idx, ch) in text.char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => {
+                    if brace_depth == 0 {
+                        object_start = Some(idx);
+                    }
+                    brace_depth = brace_depth.saturating_add(1);
+                }
+                '}' => {
+                    if brace_depth == 0 {
+                        continue;
+                    }
+                    brace_depth -= 1;
+                    if brace_depth == 0
+                        && let Some(start) = object_start.take()
+                    {
+                        let candidate = &text[start..=idx];
+                        if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(candidate) {
+                            let mut runs = wrapper.runs;
+                            if runs.is_empty() {
+                                runs.push(wrapper.latest);
+                            }
+                            best_match = Some(Self::review_result_from_runs(&runs));
+                            continue;
+                        }
+                        if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
+                            best_match = Some(Self::review_result_from_output(&output));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        best_match
+    }
+
+    fn summarize_plain_review_text(text: &str, max_chars: usize) -> String {
+        let mut line = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(text)
+            .replace('\n', " ")
+            .replace('\r', " ");
+
+        line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.chars().count() <= max_chars {
+            return line;
+        }
+
+        let truncated: String = line.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 
     fn review_result_from_runs(outputs: &[ReviewOutputEvent]) -> (bool, usize, Option<String>) {
@@ -37095,6 +37376,8 @@ impl ChatWidget<'_> {
             has_findings = false;
         }
 
+        let was_task_running = self.is_task_running();
+
         let inflight_base = self
             .background_review
             .as_ref()
@@ -37169,7 +37452,7 @@ impl ChatWidget<'_> {
         }
 
         if let Some(note) = developer_note {
-            self.record_background_review_note(note);
+            self.record_background_review_note(note, !was_task_running);
         }
 
         // Auto review completion should never leave the composer spinner active.
@@ -37182,25 +37465,39 @@ impl ChatWidget<'_> {
             inflight_base,
             inflight_snapshot,
         );
+
+        // Auto review findings are inserted as history notices, but Auto Drive
+        // resumes from cached conversation state. Rebuild before resuming so
+        // the coordinator receives the latest background review context.
+        if self.auto_state.is_active() {
+            self.rebuild_auto_history();
+        }
+
         self.maybe_resume_auto_after_review();
         self.request_redraw();
     }
 
-    fn record_background_review_note(&mut self, note: String) {
+    fn record_background_review_note(&mut self, note: String, allow_immediate_dispatch: bool) {
         let trimmed = note.trim();
         if trimmed.is_empty() {
             return;
         }
 
-        self.history_push_plain_paragraphs(PlainMessageKind::Notice, [trimmed.to_string()]);
+        // The Auto Review notice cell is now the user-facing UI. Keep this
+        // note out of history and only use it as hidden coordinator context.
 
-        if let Err(err) = self
-            .code_op_tx
-            .send(Op::AddToHistory {
-                text: trimmed.to_string(),
-            })
+        // Outside Auto Drive, immediately hand the note back to the model so
+        // the main agent can act on review findings without manual copy/paste.
+        if allow_immediate_dispatch
+            && !self.auto_state.is_active()
+            && !self.wait_running()
+            && self.queued_user_messages.is_empty()
         {
-            tracing::error!("failed to persist background review note: {err}");
+            self.submit_hidden_text_message_with_preface_and_notice(
+                trimmed.to_string(),
+                String::new(),
+                false,
+            );
         }
     }
 

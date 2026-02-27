@@ -1,17 +1,17 @@
-## @just-every/code v0.6.70
+## @just-every/code v0.6.74
 
-This release improves search persistence, Auto Drive routing control, and sandbox GPU access.
+This release sharpens Auto Review messaging so results stay clear without extra transcript noise.
 
 ### Changes
-- Core/Search: persist and restore tool selection after search.
-- Core/Search: warn when falling back to default metadata and keep selection.
-- Auto Drive: add configurable CLI routing entries.
-- Linux Sandbox: allow GPU device paths in landlock.
+
+- TUI/Auto Review: stop duplicating background review notes as `[developer]` history messages to keep transcript noise down.
+- TUI/Auto Review: keep review findings routed through the dedicated Auto Review notice while still forwarding hidden context to the coordinator.
 
 ### Install
+
 ```bash
 npm install -g @just-every/code@latest
 code
 ```
 
-Compare: https://github.com/just-every/code/compare/v0.6.69...v0.6.70
+Compare: https://github.com/just-every/code/compare/v0.6.73...v0.6.74

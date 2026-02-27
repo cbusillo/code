@@ -5,6 +5,8 @@ use crate::protocol::common::AuthMode;
 use code_experimental_api_macros::ExperimentalApi;
 use code_protocol::account::PlanType;
 use code_protocol::approvals::ExecPolicyAmendment as CoreExecPolicyAmendment;
+use code_protocol::approvals::NetworkApprovalContext as CoreNetworkApprovalContext;
+use code_protocol::approvals::NetworkApprovalProtocol as CoreNetworkApprovalProtocol;
 use code_protocol::config_types::CollaborationMode;
 use code_protocol::config_types::CollaborationModeMask;
 use code_protocol::config_types::ForcedLoginMethod;
@@ -18,6 +20,11 @@ use code_protocol::items::TurnItem as CoreTurnItem;
 use code_protocol::mcp::Resource as McpResource;
 use code_protocol::mcp::ResourceTemplate as McpResourceTemplate;
 use code_protocol::mcp::Tool as McpTool;
+use code_protocol::models::FileSystemPermissions as CoreFileSystemPermissions;
+use code_protocol::models::MacOsAutomationValue as CoreMacOsAutomationValue;
+use code_protocol::models::MacOsPermissions as CoreMacOsPermissions;
+use code_protocol::models::MacOsPreferencesValue as CoreMacOsPreferencesValue;
+use code_protocol::models::PermissionProfile as CorePermissionProfile;
 use code_protocol::models::ResponseItem;
 use code_protocol::openai_models::InputModality;
 use code_protocol::openai_models::ReasoningEffort;
@@ -27,6 +34,7 @@ use code_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use code_protocol::plan_tool::StepStatus as CorePlanStepStatus;
 use code_protocol::protocol::AgentStatus as CoreAgentStatus;
 use code_protocol::protocol::AskForApproval as CoreAskForApproval;
+use code_protocol::protocol::RejectConfig as CoreRejectConfig;
 use code_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use code_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
 use code_protocol::protocol::NetworkAccess as CoreNetworkAccess;
@@ -166,6 +174,11 @@ pub enum AskForApproval {
     UnlessTrusted,
     OnFailure,
     OnRequest,
+    Reject {
+        sandbox_approval: bool,
+        rules: bool,
+        mcp_elicitations: bool,
+    },
     Never,
 }
 
@@ -175,6 +188,15 @@ impl AskForApproval {
             AskForApproval::UnlessTrusted => CoreAskForApproval::UnlessTrusted,
             AskForApproval::OnFailure => CoreAskForApproval::OnFailure,
             AskForApproval::OnRequest => CoreAskForApproval::OnRequest,
+            AskForApproval::Reject {
+                sandbox_approval,
+                rules,
+                mcp_elicitations,
+            } => CoreAskForApproval::Reject(CoreRejectConfig {
+                sandbox_approval,
+                rules,
+                mcp_elicitations,
+            }),
             AskForApproval::Never => CoreAskForApproval::Never,
         }
     }
@@ -186,6 +208,11 @@ impl From<CoreAskForApproval> for AskForApproval {
             CoreAskForApproval::UnlessTrusted => AskForApproval::UnlessTrusted,
             CoreAskForApproval::OnFailure => AskForApproval::OnFailure,
             CoreAskForApproval::OnRequest => AskForApproval::OnRequest,
+            CoreAskForApproval::Reject(reject_config) => AskForApproval::Reject {
+                sandbox_approval: reject_config.sandbox_approval,
+                rules: reject_config.rules,
+                mcp_elicitations: reject_config.mcp_elicitations,
+            },
             CoreAskForApproval::Never => AskForApproval::Never,
         }
     }
@@ -570,6 +597,64 @@ pub struct ConfigRequirementsReadResponse {
     pub requirements: Option<ConfigRequirements>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, TS)]
+#[ts(export_to = "v2/")]
+pub enum ExternalAgentConfigMigrationItemType {
+    #[serde(rename = "AGENTS_MD")]
+    #[ts(rename = "AGENTS_MD")]
+    AgentsMd,
+    #[serde(rename = "CONFIG")]
+    #[ts(rename = "CONFIG")]
+    Config,
+    #[serde(rename = "SKILLS")]
+    #[ts(rename = "SKILLS")]
+    Skills,
+    #[serde(rename = "MCP_SERVER_CONFIG")]
+    #[ts(rename = "MCP_SERVER_CONFIG")]
+    McpServerConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ExternalAgentConfigMigrationItem {
+    pub item_type: ExternalAgentConfigMigrationItemType,
+    pub description: String,
+    /// Null or empty means home-scoped migration; non-empty means repo-scoped migration.
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ExternalAgentConfigDetectResponse {
+    pub items: Vec<ExternalAgentConfigMigrationItem>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ExternalAgentConfigDetectParams {
+    /// If true, include detection under the user's home (~/.claude, ~/.codex, etc.).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_home: bool,
+    /// Zero or more working directories to include for repo-scoped detection.
+    #[ts(optional = nullable)]
+    pub cwds: Option<Vec<PathBuf>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ExternalAgentConfigImportParams {
+    pub migration_items: Vec<ExternalAgentConfigMigrationItem>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ExternalAgentConfigImportResponse {}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -622,6 +707,89 @@ pub enum CommandExecutionApprovalDecision {
     Decline,
     /// User denied the command. The turn will also be immediately interrupted.
     Cancel,
+}
+
+v2_enum_from_core! {
+    pub enum NetworkApprovalProtocol from CoreNetworkApprovalProtocol {
+        Http,
+        Https,
+        Socks5Tcp,
+        Socks5Udp,
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct NetworkApprovalContext {
+    pub host: String,
+    pub protocol: NetworkApprovalProtocol,
+}
+
+impl From<CoreNetworkApprovalContext> for NetworkApprovalContext {
+    fn from(value: CoreNetworkApprovalContext) -> Self {
+        Self {
+            host: value.host,
+            protocol: value.protocol.into(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AdditionalFileSystemPermissions {
+    pub read: Option<Vec<PathBuf>>,
+    pub write: Option<Vec<PathBuf>>,
+}
+
+impl From<CoreFileSystemPermissions> for AdditionalFileSystemPermissions {
+    fn from(value: CoreFileSystemPermissions) -> Self {
+        Self {
+            read: value.read,
+            write: value.write,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AdditionalMacOsPermissions {
+    pub preferences: Option<CoreMacOsPreferencesValue>,
+    pub automations: Option<CoreMacOsAutomationValue>,
+    pub accessibility: Option<bool>,
+    pub calendar: Option<bool>,
+}
+
+impl From<CoreMacOsPermissions> for AdditionalMacOsPermissions {
+    fn from(value: CoreMacOsPermissions) -> Self {
+        Self {
+            preferences: value.preferences,
+            automations: value.automations,
+            accessibility: value.accessibility,
+            calendar: value.calendar,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AdditionalPermissionProfile {
+    pub network: Option<bool>,
+    pub file_system: Option<AdditionalFileSystemPermissions>,
+    pub macos: Option<AdditionalMacOsPermissions>,
+}
+
+impl From<CorePermissionProfile> for AdditionalPermissionProfile {
+    fn from(value: CorePermissionProfile) -> Self {
+        Self {
+            network: value.network,
+            file_system: value.file_system.map(AdditionalFileSystemPermissions::from),
+            macos: value.macos.map(AdditionalMacOsPermissions::from),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -2971,16 +3139,25 @@ pub struct ContextCompactedNotification {
     pub turn_id: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct CommandExecutionRequestApprovalParams {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    /// Identifier for this specific approval callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub approval_id: Option<String>,
     /// Optional explanatory reason (e.g. request for network access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub reason: Option<String>,
+    /// Optional context for a managed-network approval prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub network_approval_context: Option<NetworkApprovalContext>,
     /// The command to be executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
@@ -2993,9 +3170,21 @@ pub struct CommandExecutionRequestApprovalParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub command_actions: Option<Vec<CommandAction>>,
+    /// Optional additional permissions requested for this command.
+    #[experimental("item/commandExecution/requestApproval.additionalPermissions")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub additional_permissions: Option<AdditionalPermissionProfile>,
     /// Optional proposed execpolicy amendment to allow similar commands without prompting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
+}
+
+impl CommandExecutionRequestApprovalParams {
+    pub fn strip_experimental_fields(&mut self) {
+        self.additional_permissions = None;
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -7,6 +7,7 @@ use crate::config_types::ReasoningSummary;
 use crate::config_types::SandboxMode;
 use crate::config_types::Verbosity;
 use crate::dynamic_tools::DynamicToolSpec;
+use crate::models::PermissionProfile;
 use crate::protocol::AskForApproval;
 use crate::protocol::EventMsg;
 use crate::protocol::FileChange;
@@ -748,10 +749,15 @@ pub struct ExecCommandApprovalParams {
     /// Use to correlate this with [code_core::protocol::ExecCommandBeginEvent]
     /// and [code_core::protocol::ExecCommandEndEvent].
     pub call_id: String,
+    /// Identifier for this specific approval callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
     pub command: Vec<String>,
     pub cwd: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_permissions: Option<PermissionProfile>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]

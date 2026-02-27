@@ -7,6 +7,28 @@
 
 - (none)
 
+## [0.6.74] - 2026-02-27
+
+- TUI/Auto Review: stop duplicating background review notes as `[developer]` history messages to keep transcript noise down. (114e4003)
+- TUI/Auto Review: keep review findings routed through the dedicated Auto Review notice while still forwarding hidden context to the coordinator. (114e4003)
+
+## [0.6.73] - 2026-02-27
+
+- TUI/Auto Review: parse embedded JSON review results from mixed runner output so summaries stay focused on findings. (8cc2ba18)
+- TUI/Auto Review: truncate plain-text fallback summaries to prevent raw log dumps in chat history. (8cc2ba18)
+
+## [0.6.72] - 2026-02-27
+
+- Agents/App Server: add external agent config migration API with import depth guards to safely bring configs forward. (1a8bd1ac)
+- TUI/Auto Review: dispatch idle review findings back to the model so automated review cycles continue reliably. (e57a1e0f)
+
+## [0.6.71] - 2026-02-26
+
+- Core/Realtime: prefer websocket v2, add fallback behavior, and improve timeout handling for more resilient sessions. (7e53c578, d5909f3b, 4fedef88, 9d7013ea)
+- TUI: add `/copy`, improve clear controls (`/clear` and Ctrl-L), and expand multi-agent progress and picker UX. (ee1520e7, ca556fa3, a606e858, dcab4012, 5a30cd3f)
+- Security/Approvals: persist network approval policy and tighten zsh-fork approval and sandbox enforcement paths. (c3048ff9, 14116ade, a6a5976c, 648a420c, 59398125)
+- JS REPL: lower Node minimum requirement, gate incompatible runtimes at startup, and improve error recovery in nested tool calls. (7326c097, 40ab71a9, 125fbec3, 63c2ac96)
+
 ## [0.6.70] - 2026-02-16
 
 - Core/Search: persist and restore tool selection after search. (02abd9a8)
