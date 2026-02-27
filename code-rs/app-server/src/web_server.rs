@@ -10,7 +10,7 @@ use std::io::SeekFrom;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -242,6 +242,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     let mut subscriptions: HashMap<Uuid, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut context_searches: HashMap<Uuid, InFlightContextSearch> = HashMap::new();
 
     while let Some(incoming) = receiver.next().await {
         let text = match incoming {
@@ -407,36 +408,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 query,
                 limit,
             } => {
-                match state
-                    .hub
-                    .context_search(
-                        session_id,
-                        query.unwrap_or_default(),
-                        limit.unwrap_or(CONTEXT_SEARCH_DEFAULT_LIMIT),
-                    )
-                    .await
-                {
-                    Ok(results) => {
-                        let _ = out_tx
-                            .send(ServerMessage::ContextSearchResults {
-                                request_id: request_id.clone(),
-                                session_id,
-                                root_path: results.root_path,
-                                paths: results.paths,
-                                truncated: results.truncated,
-                            })
-                            .await;
-                        let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
-                    }
-                    Err(message) => {
-                        let _ = out_tx
-                            .send(ServerMessage::Error {
-                                request_id,
-                                message,
-                            })
-                            .await;
-                    }
+                if let Some(previous) = context_searches.remove(&session_id) {
+                    previous.cancel();
                 }
+
+                let cancel_signal = Arc::new(AtomicBool::new(false));
+                let handle = spawn_context_search_forwarder(
+                    out_tx.clone(),
+                    state.hub.clone(),
+                    request_id,
+                    session_id,
+                    query.unwrap_or_default(),
+                    limit.unwrap_or(CONTEXT_SEARCH_DEFAULT_LIMIT),
+                    cancel_signal.clone(),
+                );
+                context_searches.insert(
+                    session_id,
+                    InFlightContextSearch {
+                        cancel_signal,
+                        handle,
+                    },
+                );
             }
             ClientMessage::DetachSession {
                 request_id,
@@ -571,8 +563,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     for (_, handle) in subscriptions {
         handle.abort();
     }
+    for (_, search) in context_searches {
+        search.cancel();
+    }
     writer.abort();
     info!("Websocket client disconnected: {client_id}");
+}
+
+struct InFlightContextSearch {
+    cancel_signal: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl InFlightContextSearch {
+    fn cancel(self) {
+        self.cancel_signal.store(true, Ordering::Relaxed);
+        self.handle.abort();
+    }
 }
 
 fn spawn_session_forwarder(
@@ -607,6 +614,50 @@ fn spawn_session_forwarder(
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+fn spawn_context_search_forwarder(
+    out_tx: mpsc::Sender<ServerMessage>,
+    hub: Arc<SessionHub>,
+    request_id: Option<String>,
+    session_id: Uuid,
+    query: String,
+    limit: usize,
+    cancel_signal: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let result = hub
+            .context_search(session_id, query, limit, cancel_signal.clone())
+            .await;
+
+        if cancel_signal.load(Ordering::Relaxed) {
+            return;
+        }
+
+        match result {
+            Ok(Some(results)) => {
+                let _ = out_tx
+                    .send(ServerMessage::ContextSearchResults {
+                        request_id: request_id.clone(),
+                        session_id,
+                        root_path: results.root_path,
+                        paths: results.paths,
+                        truncated: results.truncated,
+                    })
+                    .await;
+                let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
+            }
+            Ok(None) => {}
+            Err(message) => {
+                let _ = out_tx
+                    .send(ServerMessage::Error {
+                        request_id,
+                        message,
+                    })
+                    .await;
             }
         }
     })
@@ -1091,7 +1142,12 @@ impl SessionHub {
         session_id: Uuid,
         query: String,
         limit: usize,
-    ) -> Result<ContextSearchResults, String> {
+        cancel_signal: Arc<AtomicBool>,
+    ) -> Result<Option<ContextSearchResults>, String> {
+        if cancel_signal.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+
         let session = self.session_for_id(session_id).await?;
         let root = PathBuf::from(session.summary.cwd.as_str());
         if !root.exists() {
@@ -1100,22 +1156,27 @@ impl SessionHub {
 
         let clamped_limit = limit.clamp(1, CONTEXT_SEARCH_LIMIT_MAX);
         let search_root = root.clone();
-        let (paths, truncated) = tokio::task::spawn_blocking(move || {
+        let (paths, truncated, cancelled) = tokio::task::spawn_blocking(move || {
             search_context_paths(
                 search_root.as_path(),
                 query.as_str(),
                 clamped_limit,
                 CONTEXT_SEARCH_MAX_FILES,
+                cancel_signal.as_ref(),
             )
         })
         .await
         .map_err(|err| format!("Context search task failed: {err}"))?;
 
-        Ok(ContextSearchResults {
+        if cancelled {
+            return Ok(None);
+        }
+
+        Ok(Some(ContextSearchResults {
             root_path: root.display().to_string(),
             paths,
             truncated,
-        })
+        }))
     }
 
     async fn set_composer(
@@ -1510,7 +1571,8 @@ fn search_context_paths(
     query: &str,
     limit: usize,
     max_files: usize,
-) -> (Vec<String>, bool) {
+    cancel_signal: &AtomicBool,
+) -> (Vec<String>, bool, bool) {
     let normalized_query = query.trim().to_ascii_lowercase();
     let skipped_directory_names = [
         ".git",
@@ -1531,11 +1593,19 @@ fn search_context_paths(
     let mut truncated = false;
 
     'walk: while let Some(directory) = directories.pop_front() {
+        if cancel_signal.load(Ordering::Relaxed) {
+            return (Vec::new(), false, true);
+        }
+
         let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
         };
 
         for entry in entries.flatten() {
+            if cancel_signal.load(Ordering::Relaxed) {
+                return (Vec::new(), false, true);
+            }
+
             let file_name = entry.file_name().to_string_lossy().to_string();
             if file_name.starts_with('.') {
                 continue;
@@ -1638,7 +1708,7 @@ fn search_context_paths(
         truncated = true;
     }
 
-    (paths, truncated)
+    (paths, truncated, false)
 }
 
 fn parse_reasoning_effort(value: Option<&str>) -> Result<Option<ReasoningEffort>, String> {

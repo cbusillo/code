@@ -720,7 +720,15 @@ struct ContentView: View {
 
     private var assistantTranscriptMaxWidth: CGFloat {
         #if os(iOS)
-        return isCompactPhoneLayout ? 336 : 560
+        if isCompactPhoneLayout {
+            return 336
+        }
+
+        if showsIPadSplitLayout {
+            return 760
+        }
+
+        return 620
         #else
         return 760
         #endif
@@ -1772,12 +1780,21 @@ struct ContentView: View {
                 composerPanel
             }
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 20)
-                .onEnded { value in
-                    maybeOpenThreadPicker(with: value)
-                }
-        )
+        .overlay(alignment: .leading) {
+            if isCompactPhoneLayout,
+               !showsIPadSplitLayout,
+               !showThreadPicker {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .frame(width: 22)
+                    .gesture(
+                        DragGesture(minimumDistance: 20)
+                            .onEnded { value in
+                                maybeOpenThreadPicker(with: value)
+                            }
+                    )
+            }
+        }
         #endif
     }
 
@@ -2175,7 +2192,7 @@ struct ContentView: View {
                     }
                     .padding(.horizontal, transcriptHorizontalPadding)
                     .padding(.vertical, 24)
-                    .frame(maxWidth: 920)
+                    .frame(maxWidth: transcriptContentMaxWidth)
                     .frame(maxWidth: .infinity)
                     .frame(minHeight: geometry.size.height, alignment: transcriptContentAlignment)
                 }
@@ -2185,18 +2202,21 @@ struct ContentView: View {
                 #if os(iOS)
                 .scrollDismissesKeyboard(.interactively)
                 #endif
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 4)
-                        .onChanged { _ in
-                            transcriptUserHasScrolled = true
-                            pendingBottomPinPassesAfterThreadSwitch = 0
-                            #if os(iOS)
-                            composerIsFocused = false
-                            #endif
-                        }
-                )
                 .onPreferenceChange(TranscriptBottomOffsetPreferenceKey.self) { bottomOffset in
-                    transcriptIsNearBottom = bottomOffset <= geometry.size.height + 32
+                    let isNearBottom = bottomOffset <= geometry.size.height + 32
+                    transcriptIsNearBottom = isNearBottom
+
+                    guard !isNearBottom else {
+                        return
+                    }
+
+                    transcriptUserHasScrolled = true
+                    pendingBottomPinPassesAfterThreadSwitch = 0
+                    #if os(iOS)
+                    if composerIsFocused {
+                        composerIsFocused = false
+                    }
+                    #endif
                 }
                 .onAppear {
                     scrollTranscriptToBottom(proxy: proxy, animated: false)
@@ -2206,7 +2226,10 @@ struct ContentView: View {
                     pendingBottomScrollAfterThreadSwitch = true
                     pendingBottomPinPassesAfterThreadSwitch = 3
                 }
-                .onChange(of: transcriptTailIdentity) { _, _ in
+                .onChange(of: transcriptTailIdentity) { oldTail, newTail in
+                    let appendedItem = newTail.itemCount > oldTail.itemCount
+                        || newTail.lastItemID != oldTail.lastItemID
+
                     if pendingPrependAnchorItemID != nil {
                         if transcriptIsNearBottom {
                             pendingPrependAnchorItemID = nil
@@ -2229,7 +2252,8 @@ struct ContentView: View {
                     }
 
                     if transcriptIsNearBottom || !transcriptUserHasScrolled {
-                        scrollTranscriptToBottom(proxy: proxy, animated: true)
+                        let shouldAnimateBottomPin = appendedItem && !isCompactPhoneLayout
+                        scrollTranscriptToBottom(proxy: proxy, animated: shouldAnimateBottomPin)
                     }
                 }
                 .onChange(of: transcriptItems.first?.id) { _, newFirstID in
@@ -2352,10 +2376,22 @@ struct ContentView: View {
         #endif
     }
 
+    private var transcriptContentMaxWidth: CGFloat {
+        #if os(iOS)
+        if showsIPadSplitLayout {
+            return 1_220
+        }
+
+        return isCompactPhoneLayout ? 920 : 1_000
+        #else
+        return 920
+        #endif
+    }
+
     private var transcriptBubbleGutter: CGFloat {
         #if os(iOS)
         if showsIPadSplitLayout {
-            return selectedTranscriptDensity.bubbleGutter + 20
+            return selectedTranscriptDensity.bubbleGutter + 10
         }
         return isCompactPhoneLayout
             ? max(6, selectedTranscriptDensity.bubbleGutter - 2)
@@ -2377,13 +2413,22 @@ struct ContentView: View {
         cachedTranscriptItems
     }
 
-    private var transcriptTailIdentity: String {
-        let sessionID = store.selectedSessionID?.uuidString ?? "none"
+    private var transcriptTailIdentity: TranscriptTailIdentity {
         guard let last = transcriptItems.last else {
-            return "\(sessionID):empty:\(transcriptItems.count)"
+            return TranscriptTailIdentity(
+                sessionID: store.selectedSessionID,
+                lastItemID: nil,
+                lastBodyCount: 0,
+                itemCount: transcriptItems.count
+            )
         }
 
-        return "\(sessionID):\(last.id):\(last.body.count):\(transcriptItems.count)"
+        return TranscriptTailIdentity(
+            sessionID: store.selectedSessionID,
+            lastItemID: last.id,
+            lastBodyCount: last.body.count,
+            itemCount: transcriptItems.count
+        )
     }
 
     private var selectedSessionTranscriptSourceKey: TranscriptSessionSourceKey? {
@@ -4506,6 +4551,13 @@ struct ContentView: View {
         let lastRev: UInt64?
     }
 
+    private struct TranscriptTailIdentity: Equatable {
+        let sessionID: UUID?
+        let lastItemID: String?
+        let lastBodyCount: Int
+        let itemCount: Int
+    }
+
     private struct TranscriptSessionCacheEntry {
         let sourceKey: TranscriptSessionSourceKey
         let items: [SessionStreamItem]
@@ -5477,16 +5529,49 @@ struct ContentView: View {
     private func transcriptWidthCap(for item: SessionStreamItem) -> CGFloat {
         let widthDelta = selectedTranscriptDensity.widthDelta
         #if os(iOS)
-        let compactCap: CGFloat = (isCompactPhoneLayout ? 318 : 350) + widthDelta
-        let toolCap: CGFloat = (isCompactPhoneLayout ? 330 : 360) + widthDelta
+        let compactCap: CGFloat = {
+            if isCompactPhoneLayout {
+                return 318 + widthDelta
+            }
+
+            if showsIPadSplitLayout {
+                return 640 + widthDelta
+            }
+
+            return 420 + widthDelta
+        }()
+
+        let toolCap: CGFloat = {
+            if isCompactPhoneLayout {
+                return 330 + widthDelta
+            }
+
+            if showsIPadSplitLayout {
+                return 760 + widthDelta
+            }
+
+            return 460 + widthDelta
+        }()
 
         if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent || item.isCollaborationProgressEvent {
             return toolCap
         }
 
         if item.prefersTrailingBubble {
-            let estimated = CGFloat(item.body.count) * 5.4 + 64
-            return min(isCompactPhoneLayout ? 252 : 280, max(120, estimated))
+            let estimatedCharWidth: CGFloat = showsIPadSplitLayout ? 6.1 : 5.4
+            let estimated = CGFloat(item.body.count) * estimatedCharWidth + 64
+            let trailingMaxWidth: CGFloat = {
+                if isCompactPhoneLayout {
+                    return 252
+                }
+
+                if showsIPadSplitLayout {
+                    return 460
+                }
+
+                return 320
+            }()
+            return min(trailingMaxWidth, max(120, estimated))
         }
 
         switch item.cardStyle {
