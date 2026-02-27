@@ -65,6 +65,14 @@ struct SessionHistoryPageMessage: Decodable {
     let items: [SessionStreamItem]
 }
 
+struct ContextSearchResultsMessage: Decodable {
+    let requestId: String?
+    let sessionId: UUID
+    let rootPath: String
+    let paths: [String]
+    let truncated: Bool
+}
+
 struct SessionStreamMessage: Decodable {
     let item: SessionStreamItem
 }
@@ -107,6 +115,29 @@ struct WorkflowModelOption: Decodable, Hashable, Identifiable {
 
 struct ModelListMessage: Decodable {
     let data: [WorkflowModelOption]
+}
+
+struct AccountRateLimitWindow: Decodable {
+    let usedPercent: Double
+    let windowMinutes: UInt64
+    let resetsAtUnixMs: UInt64?
+}
+
+struct AccountRateLimitSnapshot: Decodable, Identifiable {
+    let accountId: String
+    let label: String?
+    let plan: String?
+    let observedAtUnixMs: UInt64?
+    let lastUsageLimitHitAtUnixMs: UInt64?
+    let primary: AccountRateLimitWindow?
+    let secondary: AccountRateLimitWindow?
+
+    var id: String { accountId }
+}
+
+struct AccountRateLimitsMessage: Decodable {
+    let activeAccountId: String?
+    let snapshots: [AccountRateLimitSnapshot]
 }
 
 struct SessionStreamItem: Decodable, Hashable, Identifiable {
@@ -2219,9 +2250,11 @@ enum ServerEnvelope: Decodable {
     case hello(HelloMessage)
     case sessionList(SessionListMessage)
     case modelList(ModelListMessage)
+    case accountRateLimits(AccountRateLimitsMessage)
     case sessionCreated(SessionCreatedMessage)
     case sessionAttached(SessionAttachedMessage)
     case sessionHistoryPage(SessionHistoryPageMessage)
+    case contextSearchResults(ContextSearchResultsMessage)
     case sessionDetached(SessionDetachedMessage)
     case sessionStream(SessionStreamMessage)
     case error(ErrorMessage)
@@ -2243,12 +2276,16 @@ enum ServerEnvelope: Decodable {
             self = .sessionList(try SessionListMessage(from: decoder))
         case "model_list":
             self = .modelList(try ModelListMessage(from: decoder))
+        case "account_rate_limits":
+            self = .accountRateLimits(try AccountRateLimitsMessage(from: decoder))
         case "session_created":
             self = .sessionCreated(try SessionCreatedMessage(from: decoder))
         case "session_attached":
             self = .sessionAttached(try SessionAttachedMessage(from: decoder))
         case "session_history_page":
             self = .sessionHistoryPage(try SessionHistoryPageMessage(from: decoder))
+        case "context_search_results":
+            self = .contextSearchResults(try ContextSearchResultsMessage(from: decoder))
         case "session_detached":
             self = .sessionDetached(try SessionDetachedMessage(from: decoder))
         case "session_stream":
@@ -2335,6 +2372,11 @@ struct CreateSessionMessage: Encodable {
     let reasoningEffort: String?
 }
 
+struct AccountRateLimitsRequestMessage: Encodable {
+    let type: String = "account_rate_limits"
+    let requestId: String
+}
+
 struct ComposerUpdateMessage: Encodable {
     let type: String = "composer_update"
     let requestId: String
@@ -2349,6 +2391,14 @@ struct SubmitTurnMessage: Encodable {
     let sessionId: UUID
     let model: String?
     let reasoningEffort: String?
+}
+
+struct ContextSearchMessage: Encodable {
+    let type: String = "context_search"
+    let requestId: String
+    let sessionId: UUID
+    let query: String
+    let limit: Int
 }
 
 struct InterruptTurnMessage: Encodable {
@@ -2837,6 +2887,35 @@ extension SessionStreamItem {
         }
 
         return TokenUsageBreakdown(total: total, input: input, output: output, reasoning: reasoning)
+    }
+
+    var tokenCountTotalTokens: Int? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "token_count",
+              let object = payload.objectValue,
+              let info = object["info"]?.objectValue,
+              let totalUsage = info["total_token_usage"]?.objectValue,
+              let total = totalUsage["total_tokens"]?.numberValue
+        else {
+            return nil
+        }
+
+        return Int(total)
+    }
+
+    var tokenCountModelContextWindow: Int? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "token_count",
+              let object = payload.objectValue,
+              let info = object["info"]?.objectValue,
+              let contextWindow = info["model_context_window"]?.numberValue
+        else {
+            return nil
+        }
+
+        return Int(contextWindow)
     }
 
     var assistantMessageText: String? {

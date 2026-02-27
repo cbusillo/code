@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::io::BufRead;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
@@ -33,6 +34,8 @@ use code_core::ConversationManager;
 use code_core::NewConversation;
 use code_core::SessionCatalog;
 use code_core::SessionQuery;
+use code_core::account_usage::StoredRateLimitSnapshot;
+use code_core::auth_accounts::StoredAccount;
 use code_core::config::Config;
 use code_core::config_types::ReasoningEffort;
 use code_core::error::CodexErr;
@@ -60,6 +63,9 @@ const COMPACT_REPLAY_ITEM_MAX_CHARS: usize = 1_200;
 const HISTORY_PAGE_LIMIT: usize = 600;
 const HISTORY_PAGE_LIMIT_MAX: usize = 2_000;
 const HISTORY_PAGE_BYTE_LIMIT: usize = NATIVE_WEBSOCKET_FRAME_BUDGET - 100_000;
+const CONTEXT_SEARCH_DEFAULT_LIMIT: usize = 30;
+const CONTEXT_SEARCH_LIMIT_MAX: usize = 100;
+const CONTEXT_SEARCH_MAX_FILES: usize = 5_000;
 const ROLLOUT_TAIL_POLL_INTERVAL_MS: u64 = 350;
 const NO_STORE: &str = "no-store, max-age=0";
 const DEFAULT_OWNER_MIRROR_ENDPOINT: &str = "ws://127.0.0.1:4317/ws";
@@ -275,6 +281,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     .await;
                 let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
             }
+            ClientMessage::AccountRateLimits { request_id } => {
+                match state.hub.list_account_rate_limits().await {
+                    Ok((active_account_id, snapshots)) => {
+                        let _ = out_tx
+                            .send(ServerMessage::AccountRateLimits {
+                                active_account_id,
+                                snapshots,
+                            })
+                            .await;
+                        let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
+                    }
+                    Err(message) => {
+                        let _ = out_tx
+                            .send(ServerMessage::Error {
+                                request_id,
+                                message,
+                            })
+                            .await;
+                    }
+                }
+            }
             ClientMessage::CreateSession {
                 request_id,
                 cwd,
@@ -360,6 +387,43 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 before_seq,
                                 has_more_before: history_batch.has_more_before,
                                 items: history_batch.items,
+                            })
+                            .await;
+                        let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
+                    }
+                    Err(message) => {
+                        let _ = out_tx
+                            .send(ServerMessage::Error {
+                                request_id,
+                                message,
+                            })
+                            .await;
+                    }
+                }
+            }
+            ClientMessage::ContextSearch {
+                request_id,
+                session_id,
+                query,
+                limit,
+            } => {
+                match state
+                    .hub
+                    .context_search(
+                        session_id,
+                        query.unwrap_or_default(),
+                        limit.unwrap_or(CONTEXT_SEARCH_DEFAULT_LIMIT),
+                    )
+                    .await
+                {
+                    Ok(results) => {
+                        let _ = out_tx
+                            .send(ServerMessage::ContextSearchResults {
+                                request_id: request_id.clone(),
+                                session_id,
+                                root_path: results.root_path,
+                                paths: results.paths,
+                                truncated: results.truncated,
                             })
                             .await;
                         let _ = out_tx.send(ServerMessage::Ack { request_id }).await;
@@ -600,6 +664,9 @@ enum ClientMessage {
     ListModels {
         request_id: Option<String>,
     },
+    AccountRateLimits {
+        request_id: Option<String>,
+    },
     CreateSession {
         request_id: Option<String>,
         cwd: Option<String>,
@@ -615,6 +682,12 @@ enum ClientMessage {
         request_id: Option<String>,
         session_id: Uuid,
         before_seq: u64,
+        limit: Option<usize>,
+    },
+    ContextSearch {
+        request_id: Option<String>,
+        session_id: Uuid,
+        query: Option<String>,
         limit: Option<usize>,
     },
     DetachSession {
@@ -674,6 +747,10 @@ enum ServerMessage {
     ModelList {
         data: Vec<WebModelPreset>,
     },
+    AccountRateLimits {
+        active_account_id: Option<String>,
+        snapshots: Vec<WebAccountRateLimitSnapshot>,
+    },
     SessionCreated {
         session: SessionSummary,
     },
@@ -689,6 +766,13 @@ enum ServerMessage {
         before_seq: u64,
         has_more_before: bool,
         items: Vec<SessionStreamItem>,
+    },
+    ContextSearchResults {
+        request_id: Option<String>,
+        session_id: Uuid,
+        root_path: String,
+        paths: Vec<String>,
+        truncated: bool,
     },
     SessionDetached {
         session_id: Uuid,
@@ -807,6 +891,31 @@ struct WebModelPreset {
     is_default: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WebRateLimitWindow {
+    used_percent: f64,
+    window_minutes: u64,
+    resets_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebAccountRateLimitSnapshot {
+    account_id: String,
+    label: Option<String>,
+    plan: Option<String>,
+    observed_at_unix_ms: Option<u64>,
+    last_usage_limit_hit_at_unix_ms: Option<u64>,
+    primary: Option<WebRateLimitWindow>,
+    secondary: Option<WebRateLimitWindow>,
+}
+
+#[derive(Debug, Clone)]
+struct ContextSearchResults {
+    root_path: String,
+    paths: Vec<String>,
+    truncated: bool,
+}
+
 struct SessionHub {
     base_config: Arc<Config>,
     conversation_manager: Arc<ConversationManager>,
@@ -875,6 +984,23 @@ impl SessionHub {
                 is_default: preset.is_default,
             })
             .collect()
+    }
+
+    async fn list_account_rate_limits(
+        &self,
+    ) -> Result<(Option<String>, Vec<WebAccountRateLimitSnapshot>), String> {
+        let code_home = self.base_config.code_home.clone();
+        let accounts = code_core::auth_accounts::list_accounts(code_home.as_path())
+            .map_err(|err| format!("Failed to read accounts: {err}"))?;
+        let active_account_id = code_core::auth_accounts::get_active_account_id(code_home.as_path())
+            .map_err(|err| format!("Failed to read active account: {err}"))?;
+        let snapshots = code_core::account_usage::list_rate_limit_snapshots(code_home.as_path())
+            .map_err(|err| format!("Failed to read account usage snapshots: {err}"))?;
+
+        Ok((
+            active_account_id.clone(),
+            merge_rate_limit_accounts(active_account_id, accounts, snapshots),
+        ))
     }
 
     async fn create_session(
@@ -958,6 +1084,38 @@ impl SessionHub {
             .unwrap_or(HISTORY_PAGE_LIMIT)
             .clamp(1, HISTORY_PAGE_LIMIT_MAX);
         Ok(truncate_history_before_page(history, before_seq, page_limit))
+    }
+
+    async fn context_search(
+        &self,
+        session_id: Uuid,
+        query: String,
+        limit: usize,
+    ) -> Result<ContextSearchResults, String> {
+        let session = self.session_for_id(session_id).await?;
+        let root = PathBuf::from(session.summary.cwd.as_str());
+        if !root.exists() {
+            return Err(format!("Session root does not exist: {}", root.display()));
+        }
+
+        let clamped_limit = limit.clamp(1, CONTEXT_SEARCH_LIMIT_MAX);
+        let search_root = root.clone();
+        let (paths, truncated) = tokio::task::spawn_blocking(move || {
+            search_context_paths(
+                search_root.as_path(),
+                query.as_str(),
+                clamped_limit,
+                CONTEXT_SEARCH_MAX_FILES,
+            )
+        })
+        .await
+        .map_err(|err| format!("Context search task failed: {err}"))?;
+
+        Ok(ContextSearchResults {
+            root_path: root.display().to_string(),
+            paths,
+            truncated,
+        })
     }
 
     async fn set_composer(
@@ -1050,7 +1208,12 @@ impl SessionHub {
         }
 
         let catalog_rollout_path = catalog.entry_rollout_path(&entry);
-        let rollout_path = select_best_rollout_path_for_session(&catalog_rollout_path, session_id);
+        let rollout_path = tokio::task::spawn_blocking({
+            let catalog_rollout_path = catalog_rollout_path.clone();
+            move || select_best_rollout_path_for_session(&catalog_rollout_path, session_id)
+        })
+        .await
+        .map_err(|err| format!("Selecting rollout path task failed: {err}"))?;
         if rollout_path != catalog_rollout_path {
             info!(
                 "Using more active rollout path for session {session_id}: {} (catalog: {})",
@@ -1191,6 +1354,291 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     }
 
     Some(trimmed)
+}
+
+fn merge_rate_limit_accounts(
+    active_account_id: Option<String>,
+    accounts: Vec<StoredAccount>,
+    snapshots: Vec<StoredRateLimitSnapshot>,
+) -> Vec<WebAccountRateLimitSnapshot> {
+    let mut snapshot_by_account_id: HashMap<String, StoredRateLimitSnapshot> = snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.account_id.clone(), snapshot))
+        .collect();
+
+    let mut merged = accounts
+        .into_iter()
+        .map(|account| {
+            let snapshot = snapshot_by_account_id.remove(account.id.as_str());
+            build_rate_limit_snapshot_entry(&account, snapshot)
+        })
+        .collect::<Vec<_>>();
+
+    merged.extend(
+        snapshot_by_account_id
+            .into_values()
+            .map(build_rate_limit_snapshot_entry_without_account),
+    );
+
+    merged.sort_by(|lhs, rhs| {
+        let lhs_is_active = active_account_id.as_deref() == Some(lhs.account_id.as_str());
+        let rhs_is_active = active_account_id.as_deref() == Some(rhs.account_id.as_str());
+
+        rhs_is_active
+            .cmp(&lhs_is_active)
+            .then(
+                rhs.observed_at_unix_ms
+                    .cmp(&lhs.observed_at_unix_ms)
+                    .then(lhs.account_id.cmp(&rhs.account_id)),
+            )
+    });
+
+    merged
+}
+
+fn build_rate_limit_snapshot_entry(
+    account: &StoredAccount,
+    snapshot: Option<StoredRateLimitSnapshot>,
+) -> WebAccountRateLimitSnapshot {
+    match snapshot {
+        Some(snapshot) => build_rate_limit_snapshot(
+            snapshot.account_id,
+            account_display_label(account),
+            snapshot.plan,
+            snapshot.observed_at,
+            snapshot.last_usage_limit_hit_at,
+            snapshot.snapshot,
+            snapshot.primary_next_reset_at,
+            snapshot.secondary_next_reset_at,
+        ),
+        None => WebAccountRateLimitSnapshot {
+            account_id: account.id.clone(),
+            label: account_display_label(account),
+            plan: None,
+            observed_at_unix_ms: None,
+            last_usage_limit_hit_at_unix_ms: None,
+            primary: None,
+            secondary: None,
+        },
+    }
+}
+
+fn build_rate_limit_snapshot_entry_without_account(
+    snapshot: StoredRateLimitSnapshot,
+) -> WebAccountRateLimitSnapshot {
+    build_rate_limit_snapshot(
+        snapshot.account_id,
+        None,
+        snapshot.plan,
+        snapshot.observed_at,
+        snapshot.last_usage_limit_hit_at,
+        snapshot.snapshot,
+        snapshot.primary_next_reset_at,
+        snapshot.secondary_next_reset_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_rate_limit_snapshot(
+    account_id: String,
+    label: Option<String>,
+    plan: Option<String>,
+    observed_at: Option<DateTime<chrono::Utc>>,
+    last_usage_limit_hit_at: Option<DateTime<chrono::Utc>>,
+    snapshot: Option<code_core::protocol::RateLimitSnapshotEvent>,
+    primary_next_reset_at: Option<DateTime<chrono::Utc>>,
+    secondary_next_reset_at: Option<DateTime<chrono::Utc>>,
+) -> WebAccountRateLimitSnapshot {
+    let (primary, secondary) = if let Some(snapshot) = snapshot {
+        (
+            Some(WebRateLimitWindow {
+                used_percent: snapshot.primary_used_percent,
+                window_minutes: snapshot.primary_window_minutes,
+                resets_at_unix_ms: datetime_to_unix_ms(primary_next_reset_at),
+            }),
+            Some(WebRateLimitWindow {
+                used_percent: snapshot.secondary_used_percent,
+                window_minutes: snapshot.secondary_window_minutes,
+                resets_at_unix_ms: datetime_to_unix_ms(secondary_next_reset_at),
+            }),
+        )
+    } else {
+        (None, None)
+    };
+
+    WebAccountRateLimitSnapshot {
+        account_id,
+        label,
+        plan,
+        observed_at_unix_ms: datetime_to_unix_ms(observed_at),
+        last_usage_limit_hit_at_unix_ms: datetime_to_unix_ms(last_usage_limit_hit_at),
+        primary,
+        secondary,
+    }
+}
+
+fn account_display_label(account: &StoredAccount) -> Option<String> {
+    let trimmed_label = account
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if trimmed_label.is_some() {
+        return trimmed_label;
+    }
+
+    account
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.id_token.email.clone())
+}
+
+fn datetime_to_unix_ms(value: Option<DateTime<chrono::Utc>>) -> Option<u64> {
+    value.and_then(|datetime| u64::try_from(datetime.timestamp_millis()).ok())
+}
+
+#[derive(Debug)]
+struct ContextPathMatch {
+    score: u8,
+    length: usize,
+    path: String,
+}
+
+fn search_context_paths(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    max_files: usize,
+) -> (Vec<String>, bool) {
+    let normalized_query = query.trim().to_ascii_lowercase();
+    let skipped_directory_names = [
+        ".git",
+        ".code",
+        ".codex",
+        ".build",
+        "node_modules",
+        "target",
+        "build",
+        "DerivedData",
+    ];
+
+    let mut directories = VecDeque::new();
+    directories.push_back(root.to_path_buf());
+
+    let mut candidates: Vec<ContextPathMatch> = Vec::new();
+    let mut files_seen = 0usize;
+    let mut truncated = false;
+
+    'walk: while let Some(directory) = directories.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.starts_with('.') {
+                continue;
+            }
+
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if file_type.is_dir() {
+                if skipped_directory_names
+                    .iter()
+                    .any(|name| file_name.eq_ignore_ascii_case(name))
+                {
+                    continue;
+                }
+                directories.push_back(entry.path());
+                continue;
+            }
+
+            if !file_type.is_file() {
+                continue;
+            }
+
+            files_seen = files_seen.saturating_add(1);
+            if files_seen > max_files {
+                truncated = true;
+                break 'walk;
+            }
+
+            let absolute = entry.path();
+            let Ok(relative) = absolute.strip_prefix(root) else {
+                continue;
+            };
+
+            let path = relative.to_string_lossy().replace('\\', "/");
+            if path.is_empty() {
+                continue;
+            }
+
+            if normalized_query.is_empty() {
+                candidates.push(ContextPathMatch {
+                    score: 0,
+                    length: path.len(),
+                    path,
+                });
+                continue;
+            }
+
+            let lower_path = path.to_ascii_lowercase();
+            let lower_file_name = file_name.to_ascii_lowercase();
+            let score = if lower_path.starts_with(normalized_query.as_str()) {
+                0
+            } else if lower_file_name.starts_with(normalized_query.as_str()) {
+                1
+            } else if lower_file_name.contains(normalized_query.as_str()) {
+                2
+            } else if lower_path.contains(normalized_query.as_str()) {
+                3
+            } else {
+                continue;
+            };
+
+            candidates.push(ContextPathMatch {
+                score,
+                length: path.len(),
+                path,
+            });
+        }
+    }
+
+    if normalized_query.is_empty() {
+        candidates.sort_by(|lhs, rhs| {
+            lhs.path
+                .to_ascii_lowercase()
+                .cmp(&rhs.path.to_ascii_lowercase())
+                .then(lhs.path.cmp(&rhs.path))
+        });
+    } else {
+        candidates.sort_by(|lhs, rhs| {
+            lhs.score
+                .cmp(&rhs.score)
+                .then(lhs.length.cmp(&rhs.length))
+                .then(
+                    lhs.path
+                        .to_ascii_lowercase()
+                        .cmp(&rhs.path.to_ascii_lowercase()),
+                )
+                .then(lhs.path.cmp(&rhs.path))
+        });
+    }
+
+    let total_matches = candidates.len();
+    let paths = candidates
+        .into_iter()
+        .take(limit)
+        .map(|candidate| candidate.path)
+        .collect::<Vec<_>>();
+    if total_matches > limit {
+        truncated = true;
+    }
+
+    (paths, truncated)
 }
 
 fn parse_reasoning_effort(value: Option<&str>) -> Result<Option<ReasoningEffort>, String> {

@@ -429,6 +429,7 @@ struct ContentView: View {
     @State private var indexedContextRootPath: String?
     @State private var indexedContextFilePaths: [String] = []
     @State private var contextIndexLoading = false
+    @State private var remoteContextSearchTask: Task<Void, Never>?
     @FocusState private var composerIsFocused: Bool
 
     private let transcriptBottomAnchor = "transcript.bottom"
@@ -1034,6 +1035,186 @@ struct ContentView: View {
     }
 
     var body: some View {
+        bodyWithLifecycleHandlers
+    }
+
+    private var bodyWithTask: some View {
+        presentedRootContent.task {
+            #if os(iOS)
+            // iOS is companion-only; avoid reconnect loops before the user pairs.
+            if store.connectionState == .disconnected,
+               store.companionSessionToken != nil {
+                await store.connect()
+            }
+            #else
+            if store.connectionState == .disconnected {
+                await store.connect()
+            }
+            #endif
+        }
+    }
+
+    private var bodyWithStateObservers: some View {
+        bodyWithTask
+        .onChange(of: selectedSessionTranscriptSourceKey) { _, _ in
+            scheduleTranscriptCacheRefresh(
+                delayNanoseconds: transcriptRefreshDebounceNanoseconds,
+                preserveBottomPin: true
+            )
+            handleAssistantSpeech()
+            enforceVoiceCapturePolicy(clearTranscript: true)
+            if let activeTranscriptItemID,
+               !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
+                self.activeTranscriptItemID = nil
+            }
+        }
+        .onChange(of: autoSpeakAssistant) { _, isEnabled in
+            if !isEnabled {
+                voiceOutput.stop()
+            }
+        }
+        .onChange(of: preferredVoiceIdentifier) { _, _ in
+            voiceOutput.stop()
+        }
+        .onChange(of: voicePlaybackRate) { _, _ in
+            voiceOutput.stop()
+        }
+        .onChange(of: store.selectedSessionID) { _, _ in
+            enforceIDEContextEnabled()
+            if voiceInput.isRecording {
+                stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
+            }
+            voiceInteractionNotice = nil
+            activeTranscriptItemID = nil
+            transcriptIsNearBottom = true
+            transcriptUserHasScrolled = false
+            pendingBottomScrollAfterThreadSwitch = true
+            pendingBottomPinPassesAfterThreadSwitch = 3
+            composerDraft = store.composerText
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+            ensureContextIndexLoaded()
+            scheduleRemoteContextSearch(query: activeContextSearchQuery, immediate: true)
+            #if os(iOS)
+            showThreadPicker = false
+            #else
+            focusComposerEditor(forceActivateApp: true)
+            #endif
+        }
+        .onChange(of: store.composerText) { _, newValue in
+            guard newValue != composerDraft else {
+                return
+            }
+
+            if !composerIsFocused || newValue.isEmpty {
+                composerDraft = newValue
+            }
+        }
+        .onChange(of: composerDraft) { _, newValue in
+            if ideContextEnabled,
+               ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
+                ensureContextIndexLoaded()
+                scheduleRemoteContextSearch(query: trailingMentionMatch?.query ?? "")
+            }
+            syncInlineContextSelection()
+            syncSlashCommandLauncher(with: newValue)
+        }
+        .onChange(of: contextPickerQuery) { _, newValue in
+            scheduleRemoteContextSearch(query: newValue)
+        }
+    }
+
+    private var bodyWithSessionObservers: some View {
+        bodyWithStateObservers
+        .onChange(of: showContextPicker) { _, isPresented in
+            if isPresented {
+                ensureContextIndexLoaded()
+                scheduleRemoteContextSearch(query: contextPickerQuery, immediate: true)
+            } else {
+                remoteContextSearchTask?.cancel()
+                remoteContextSearchTask = nil
+            }
+        }
+        .onChange(of: showSlashCommandLauncher) { _, isPresented in
+            if !isPresented {
+                slashLauncherOpenedByTyping = false
+            }
+        }
+        .onChange(of: ideContextEnabled) { _, isEnabled in
+            if isEnabled {
+                return
+            }
+
+            indexedContextRootPath = nil
+            indexedContextFilePaths = []
+            contextIndexLoading = false
+            selectedInlineContextPath = nil
+            contextPickerQuery = ""
+            showContextPicker = false
+            remoteContextSearchTask?.cancel()
+            remoteContextSearchTask = nil
+        }
+        .onChange(of: displayedInlineContextPaths) { _, _ in
+            syncInlineContextSelection()
+        }
+        .onChange(of: store.sessions) { _, _ in
+            pruneSessionIDEPreferences()
+            ensureVisibleSelection()
+        }
+        .onChange(of: showActivityEvents) { _, _ in
+            clearTranscriptSessionCaches()
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+        }
+        .onChange(of: store.connectionState) { _, newState in
+            if newState != .connected {
+                voiceOutput.stop()
+                enforceVoiceCapturePolicy(clearTranscript: true)
+            }
+        }
+    }
+
+    private var bodyWithLifecycleHandlers: some View {
+        bodyWithSessionObservers
+        #if os(iOS)
+        .onChange(of: showsIPadSplitLayout) { _, isSplit in
+            if isSplit {
+                showThreadPicker = false
+            }
+        }
+        #endif
+        .onDisappear {
+            transcriptRefreshTask?.cancel()
+            transcriptRefreshTask = nil
+            remoteContextSearchTask?.cancel()
+            remoteContextSearchTask = nil
+            stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
+            voiceOutput.stop()
+        }
+        #if os(macOS)
+        .onAppear {
+            enforceIDEContextEnabled()
+            composerDraft = store.composerText
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+            ensureContextIndexLoaded()
+            scheduleRemoteContextSearch(query: activeContextSearchQuery, immediate: true)
+            normalizeWorkflowSettings()
+            pruneSessionIDEPreferences()
+            focusComposerEditor(forceActivateApp: true)
+        }
+        #else
+        .onAppear {
+            enforceIDEContextEnabled()
+            composerDraft = store.composerText
+            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
+            ensureContextIndexLoaded()
+            scheduleRemoteContextSearch(query: activeContextSearchQuery, immediate: true)
+            normalizeWorkflowSettings()
+            pruneSessionIDEPreferences()
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var presentedRootContent: some View {
         ZStack {
             LinearGradient(
                 colors: [
@@ -1111,9 +1292,10 @@ struct ContentView: View {
             ContextReferencePickerView(
                 query: $contextPickerQuery,
                 candidates: filteredContextPickerPaths,
-                isLoading: contextIndexLoading,
+                isLoading: contextIndexLoading || store.contextSearchInFlight,
                 onRefresh: {
                     ensureContextIndexLoaded(forceReload: true)
+                    scheduleRemoteContextSearch(query: contextPickerQuery, immediate: true)
                 },
                 onSelect: { path in
                     insertContextReference(path: path)
@@ -1121,6 +1303,7 @@ struct ContentView: View {
             )
             .onAppear {
                 ensureContextIndexLoaded()
+                scheduleRemoteContextSearch(query: contextPickerQuery, immediate: true)
             }
             #if os(macOS)
             .frame(minWidth: 620, minHeight: 460)
@@ -1142,15 +1325,15 @@ struct ContentView: View {
 
                     sidebar
                 }
-                    .navigationTitle("Threads")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Done") {
-                                showThreadPicker = false
-                            }
+                .navigationTitle("Threads")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") {
+                            showThreadPicker = false
                         }
                     }
+                }
             }
         }
         .sheet(isPresented: $showCompanionConnectAssistant) {
@@ -1160,146 +1343,6 @@ struct ContentView: View {
                 refreshSharedCompanionBackends: refreshSharedCompanionBackends,
                 onSharedCompanionPreferencesChanged: onSharedCompanionPreferencesChanged
             )
-        }
-        #endif
-        .task {
-            #if os(iOS)
-            // iOS is companion-only; avoid reconnect loops before the user pairs.
-            if store.connectionState == .disconnected,
-               store.companionSessionToken != nil {
-                await store.connect()
-            }
-            #else
-            if store.connectionState == .disconnected {
-                await store.connect()
-            }
-            #endif
-        }
-        .onChange(of: selectedSessionTranscriptSourceKey) { _, _ in
-            scheduleTranscriptCacheRefresh(
-                delayNanoseconds: transcriptRefreshDebounceNanoseconds,
-                preserveBottomPin: true
-            )
-            handleAssistantSpeech()
-            enforceVoiceCapturePolicy(clearTranscript: true)
-            if let activeTranscriptItemID,
-               !transcriptItems.contains(where: { $0.id == activeTranscriptItemID }) {
-                self.activeTranscriptItemID = nil
-            }
-        }
-        .onChange(of: autoSpeakAssistant) { _, isEnabled in
-            if !isEnabled {
-                voiceOutput.stop()
-            }
-        }
-        .onChange(of: preferredVoiceIdentifier) { _, _ in
-            voiceOutput.stop()
-        }
-        .onChange(of: voicePlaybackRate) { _, _ in
-            voiceOutput.stop()
-        }
-        .onChange(of: store.selectedSessionID) { _, _ in
-            enforceIDEContextEnabled()
-            if voiceInput.isRecording {
-                stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
-            }
-            voiceInteractionNotice = nil
-            activeTranscriptItemID = nil
-            transcriptIsNearBottom = true
-            transcriptUserHasScrolled = false
-            pendingBottomScrollAfterThreadSwitch = true
-            pendingBottomPinPassesAfterThreadSwitch = 3
-            composerDraft = store.composerText
-            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
-            ensureContextIndexLoaded()
-            #if os(iOS)
-            showThreadPicker = false
-            #else
-            focusComposerEditor(forceActivateApp: true)
-            #endif
-        }
-        .onChange(of: store.composerText) { _, newValue in
-            guard newValue != composerDraft else {
-                return
-            }
-
-            if !composerIsFocused || newValue.isEmpty {
-                composerDraft = newValue
-            }
-        }
-        .onChange(of: composerDraft) { _, newValue in
-            if ideContextEnabled,
-               ComposerContextReferenceFormatter.trailingMentionMatch(in: newValue) != nil {
-                ensureContextIndexLoaded()
-            }
-            syncInlineContextSelection()
-            syncSlashCommandLauncher(with: newValue)
-        }
-        .onChange(of: showSlashCommandLauncher) { _, isPresented in
-            if !isPresented {
-                slashLauncherOpenedByTyping = false
-            }
-        }
-        .onChange(of: ideContextEnabled) { _, isEnabled in
-            if isEnabled {
-                return
-            }
-
-            indexedContextRootPath = nil
-            indexedContextFilePaths = []
-            contextIndexLoading = false
-            selectedInlineContextPath = nil
-            contextPickerQuery = ""
-            showContextPicker = false
-        }
-        .onChange(of: displayedInlineContextPaths) { _, _ in
-            syncInlineContextSelection()
-        }
-        .onChange(of: store.sessions) { _, _ in
-            pruneSessionIDEPreferences()
-            ensureVisibleSelection()
-        }
-        .onChange(of: showActivityEvents) { _, _ in
-            clearTranscriptSessionCaches()
-            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
-        }
-        .onChange(of: store.connectionState) { _, newState in
-            if newState != .connected {
-                voiceOutput.stop()
-                enforceVoiceCapturePolicy(clearTranscript: true)
-            }
-        }
-        #if os(iOS)
-        .onChange(of: showsIPadSplitLayout) { _, isSplit in
-            if isSplit {
-                showThreadPicker = false
-            }
-        }
-        #endif
-        .onDisappear {
-            transcriptRefreshTask?.cancel()
-            transcriptRefreshTask = nil
-            stopVoiceCapture(shouldSubmit: false, clearTranscript: true)
-            voiceOutput.stop()
-        }
-        #if os(macOS)
-        .onAppear {
-            enforceIDEContextEnabled()
-            composerDraft = store.composerText
-            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
-            ensureContextIndexLoaded()
-            normalizeWorkflowSettings()
-            pruneSessionIDEPreferences()
-            focusComposerEditor(forceActivateApp: true)
-        }
-        #else
-        .onAppear {
-            enforceIDEContextEnabled()
-            composerDraft = store.composerText
-            scheduleTranscriptCacheRefresh(delayNanoseconds: 0, preserveBottomPin: false)
-            ensureContextIndexLoaded()
-            normalizeWorkflowSettings()
-            pruneSessionIDEPreferences()
         }
         #endif
     }
@@ -4371,6 +4414,25 @@ struct ContentView: View {
         store.selectedSession?.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var hasAccessibleLocalContextRoot: Bool {
+        guard let rootPath = selectedSessionRootPath,
+              !rootPath.isEmpty
+        else {
+            return false
+        }
+
+        var isDirectory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(atPath: rootPath, isDirectory: &isDirectory)
+        return exists && isDirectory.boolValue
+    }
+
+    private var activeContextSearchQuery: String {
+        if showContextPicker {
+            return contextPickerQuery
+        }
+        return trailingMentionMatch?.query ?? ""
+    }
+
     private var trailingMentionMatch: ComposerContextMentionMatch? {
         ComposerContextReferenceFormatter.trailingMentionMatch(in: composerDraft)
     }
@@ -4763,6 +4825,14 @@ struct ContentView: View {
             return
         }
 
+        guard hasAccessibleLocalContextRoot else {
+            indexedContextRootPath = nil
+            indexedContextFilePaths = []
+            contextIndexLoading = false
+            scheduleRemoteContextSearch(query: activeContextSearchQuery)
+            return
+        }
+
         guard let rootPath = selectedSessionRootPath,
               !rootPath.isEmpty
         else {
@@ -4796,9 +4866,47 @@ struct ContentView: View {
         }
     }
 
+    private func scheduleRemoteContextSearch(query: String, immediate: Bool = false) {
+        guard ideContextEnabled,
+              !hasAccessibleLocalContextRoot
+        else {
+            remoteContextSearchTask?.cancel()
+            remoteContextSearchTask = nil
+            return
+        }
+
+        guard store.connectionState == .connected,
+              store.selectedSessionID != nil
+        else {
+            return
+        }
+
+        remoteContextSearchTask?.cancel()
+        remoteContextSearchTask = Task {
+            if !immediate {
+                try? await Task.sleep(nanoseconds: 180_000_000)
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await store.requestContextSearch(query: query)
+        }
+    }
+
     private func filteredContextPaths(query: String) -> [String] {
-        ComposerContextPathCatalog.filteredPaths(
+        let localMatches = ComposerContextPathCatalog.filteredPaths(
             from: indexedContextFilePaths,
+            query: query,
+            limit: 30
+        )
+        if !localMatches.isEmpty || hasAccessibleLocalContextRoot {
+            return localMatches
+        }
+
+        return ComposerContextPathCatalog.filteredPaths(
+            from: store.contextSearchPaths,
             query: query,
             limit: 30
         )
@@ -7081,6 +7189,34 @@ private struct CompanionConnectAssistantSheet: View {
         return "Backend \(backendVersion) • requires app \(minimumClientVersion)+"
     }
 
+    private var selectedSharedBackendMinimumVersion: String? {
+        guard let selectedSharedCompanionBackend else {
+            return nil
+        }
+
+        let minimumVersion = selectedSharedCompanionBackend.minimumSupportedClientVersion?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if minimumVersion.isEmpty {
+            return nil
+        }
+
+        return VersionComparator.normalizedVersionString(minimumVersion)
+    }
+
+    private var selectedSharedBackendRequiresUpgrade: Bool {
+        guard let minimumVersion = selectedSharedBackendMinimumVersion else {
+            return false
+        }
+
+        return !VersionComparator.isAtLeast(AppVersion.currentComparableVersion(), minimum: minimumVersion)
+    }
+
+    private var selectedSharedBackendUpgradeMessage: String {
+        let current = AppVersion.currentComparableVersion()
+        let required = selectedSharedBackendMinimumVersion ?? "unknown"
+        return "This backend requires app \(required)+ (current: \(current))."
+    }
+
     private var selectedSharedCompanionDescription: String {
         guard let selectedSharedCompanionBackend else {
             return "No iCloud backend discovered yet"
@@ -7143,6 +7279,12 @@ private struct CompanionConnectAssistantSheet: View {
                         Text(selectedSharedCompanionVersionText)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    }
+
+                    if selectedSharedBackendRequiresUpgrade {
+                        Text(selectedSharedBackendUpgradeMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
                     }
 
                     HStack(spacing: 8) {
@@ -7265,7 +7407,7 @@ private struct CompanionConnectAssistantSheet: View {
                             await reconnectWithCurrentConfiguration()
                         }
                     }
-                    .disabled(isApplying)
+                    .disabled(isApplying || selectedSharedBackendRequiresUpgrade)
                     .accessibilityIdentifier("connection.assistant.connect-now")
                 }
             }
@@ -7331,6 +7473,11 @@ private struct CompanionConnectAssistantSheet: View {
     }
 
     private func reconnectWithCurrentConfiguration() async {
+        guard !selectedSharedBackendRequiresUpgrade else {
+            localError = selectedSharedBackendUpgradeMessage
+            return
+        }
+
         if store.connectionState != .disconnected {
             store.disconnect()
         }
@@ -12285,7 +12432,7 @@ private struct ContextReferencePickerView: View {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Indexing workspace files…")
+                        Text("Loading workspace files…")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -12486,6 +12633,7 @@ private struct ContextReferencePickerView: View {
 
 private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
+    case limits
     case configuration
     case personalization
     case mcpServers
@@ -12500,6 +12648,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             return "General"
+        case .limits:
+            return "Limits"
         case .configuration:
             return "Configuration"
         case .personalization:
@@ -12595,6 +12745,12 @@ private struct NativeSettingsView: View {
     private static let updateCheckFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, yyyy h:mm a"
+        return formatter
+    }()
+
+    private static let limitsTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, h:mm a"
         return formatter
     }()
 
@@ -12854,6 +13010,71 @@ private struct NativeSettingsView: View {
         }
         let date = Date(timeIntervalSince1970: Double(selectedSharedCompanionBackend.updatedAtUnixMs) / 1_000)
         return Self.profileImportFormatter.string(from: date)
+    }
+
+    private func accountLimitsDisplayName(_ snapshot: AccountRateLimitSnapshot) -> String {
+        let trimmedLabel = snapshot.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedLabel.isEmpty {
+            return trimmedLabel
+        }
+
+        return snapshot.accountId
+    }
+
+    private func limitsTimestampText(_ unixMilliseconds: UInt64?) -> String {
+        guard let unixMilliseconds else {
+            return "Unknown"
+        }
+
+        let date = Date(timeIntervalSince1970: Double(unixMilliseconds) / 1_000)
+        return Self.limitsTimestampFormatter.string(from: date)
+    }
+
+    private func limitsPercentageText(_ value: Double?) -> String {
+        guard let value else {
+            return "--"
+        }
+
+        return "\(Int(value.rounded()))%"
+    }
+
+    private struct CompactLimitSnapshot {
+        let model: String?
+        let usedTokens: Int
+        let compactLimit: Int
+
+        var remainingTokens: Int {
+            max(0, compactLimit - usedTokens)
+        }
+
+        var usedFraction: Double {
+            guard compactLimit > 0 else {
+                return 0
+            }
+
+            return min(1, max(0, Double(usedTokens) / Double(compactLimit)))
+        }
+
+        var isOverLimit: Bool {
+            usedTokens >= compactLimit
+        }
+    }
+
+    private var compactLimitSnapshot: CompactLimitSnapshot? {
+        guard let latestTokenCount = store.selectedSessionItems.reversed().first(where: { $0.isTokenCountEvent }),
+              let totalTokens = latestTokenCount.tokenCountTotalTokens,
+              let modelContextWindow = latestTokenCount.tokenCountModelContextWindow,
+              modelContextWindow > 0
+        else {
+            return nil
+        }
+
+        let compactLimit = max(1, Int((Double(modelContextWindow) * 0.9).rounded(.down)))
+        return CompactLimitSnapshot(
+            model: latestTokenCount.tokenCountRequestedModel,
+            usedTokens: max(0, totalTokens),
+            compactLimit: compactLimit
+        )
     }
 
     private func importSelectedCLIProfile(from selectedDirectoryURL: URL) {
@@ -13161,6 +13382,149 @@ private struct NativeSettingsView: View {
             SettingsInfoCard(text: publicAppVersionText)
             SettingsInfoCard(text: publicAppBuildMarkerText)
             SettingsInfoCard(text: publicAppBinaryPathText)
+
+        case .limits:
+            SettingsInfoCard(text: "Account limits mirror the gateway snapshots and refresh in-place without leaving Settings.")
+
+            SettingsRow(title: "Accounts", description: "Swipe between linked accounts, similar to the TUI limits view.") {
+                Button("Refresh") {
+                    Task {
+                        await store.refreshAccountRateLimits()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("settings.limits.refresh")
+            }
+
+            if store.accountRateLimitSnapshots.isEmpty {
+                SettingsInfoCard(text: "No limit snapshots yet. Trigger a turn on this device or refresh after connecting your account.")
+            } else {
+                TabView {
+                    ForEach(store.accountRateLimitSnapshots) { snapshot in
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(accountLimitsDisplayName(snapshot))
+                                    .font(.headline)
+                                if store.activeRateLimitAccountID == snapshot.accountId {
+                                    Text("Active")
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(Color.green.opacity(0.22), in: Capsule())
+                                }
+                            }
+
+                            if let plan = snapshot.plan,
+                               !plan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("Plan: \(plan)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Group {
+                                if let primary = snapshot.primary {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            Text("Hourly")
+                                                .font(.subheadline.weight(.semibold))
+                                            Spacer()
+                                            Text(limitsPercentageText(primary.usedPercent))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        ProgressView(value: min(1, max(0, primary.usedPercent / 100)))
+                                        Text("Resets: \(limitsTimestampText(primary.resetsAtUnixMs))")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+
+                                if let secondary = snapshot.secondary {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            Text("Weekly")
+                                                .font(.subheadline.weight(.semibold))
+                                            Spacer()
+                                            Text(limitsPercentageText(secondary.usedPercent))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        ProgressView(value: min(1, max(0, secondary.usedPercent / 100)))
+                                        Text("Resets: \(limitsTimestampText(secondary.resetsAtUnixMs))")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+
+                            Text("Observed: \(limitsTimestampText(snapshot.observedAtUnixMs))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color.secondary.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+                        )
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 2)
+                    }
+                }
+                .frame(height: 260)
+                #if os(iOS)
+                .tabViewStyle(.page(indexDisplayMode: .automatic))
+                #else
+                .tabViewStyle(.automatic)
+                #endif
+            }
+
+            SettingsRow(
+                title: "Compact limit",
+                description: "Distance to automatic context compaction for the selected thread (90% of context window)."
+            ) {
+                if let compactLimitSnapshot {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let model = compactLimitSnapshot.model,
+                           !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(model)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+
+                        HStack {
+                            Text("\(compactLimitSnapshot.usedTokens) / \(compactLimitSnapshot.compactLimit)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 8)
+                            Text(limitsPercentageText(compactLimitSnapshot.usedFraction * 100))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        ProgressView(value: compactLimitSnapshot.usedFraction)
+
+                        Text(
+                            compactLimitSnapshot.isOverLimit
+                                ? "Auto-compact will trigger on the next turn"
+                                : "\(compactLimitSnapshot.remainingTokens) tokens before compact"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(compactLimitSnapshot.isOverLimit ? .orange : .secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text("Send a message in the selected thread to populate compact telemetry.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
 
         case .configuration:
             SettingsRow(
@@ -13617,6 +13981,19 @@ private struct NativeSettingsView: View {
                 rawDefaultIDE: defaultSessionIDERaw,
                 available: availableIDEs
             )
+
+            Task {
+                await store.refreshAccountRateLimits()
+            }
+        }
+        .onChange(of: selectedCategory) { _, newCategory in
+            guard newCategory == .limits else {
+                return
+            }
+
+            Task {
+                await store.refreshAccountRateLimits()
+            }
         }
         .onChange(of: autoConnectSharedCompanion) { _, _ in
             onSharedCompanionPreferencesChanged?()

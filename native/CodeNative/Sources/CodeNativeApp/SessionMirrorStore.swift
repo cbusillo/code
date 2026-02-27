@@ -100,6 +100,12 @@ final class SessionMirrorStore: ObservableObject {
     @Published private(set) var unavailableSessionErrors: [UUID: String] = [:]
     @Published private(set) var historyPageLoadInFlightSessionIDs: Set<UUID> = []
     @Published private(set) var historyPageTelemetry = HistoryPageTelemetry()
+    @Published private(set) var activeRateLimitAccountID: String?
+    @Published private(set) var accountRateLimitSnapshots: [AccountRateLimitSnapshot] = []
+    @Published private(set) var contextSearchRootPath: String?
+    @Published private(set) var contextSearchPaths: [String] = []
+    @Published private(set) var contextSearchTruncated = false
+    @Published private(set) var contextSearchInFlight = false
     @Published var composerText: String = ""
     @Published var selectedSessionID: UUID? {
         didSet {
@@ -109,6 +115,7 @@ final class SessionMirrorStore: ObservableObject {
             if suppressSelectionSideEffects {
                 return
             }
+            resetContextSearchState()
             enforceHistoryRetentionPolicy()
             attachmentGeneration = attachmentGeneration.saturatingIncrement()
             let generation = attachmentGeneration
@@ -143,6 +150,9 @@ final class SessionMirrorStore: ObservableObject {
     private var attachmentGeneration: UInt64 = 0
     private var pendingAttachRequestSessionIDs: [String: UUID] = [:]
     private var pendingHistoryPageRequestSessionIDs: [String: UUID] = [:]
+    private var pendingContextSearchRequestID: String?
+    private var pendingContextSearchSessionID: UUID?
+    private var pendingContextSearchQuery = ""
     private var historyPageRequestStartedAtByRequestID: [String: Date] = [:]
     private var lastHistoryPageRequestAtBySessionID: [UUID: Date] = [:]
     private var hasMoreHistoryBeforeBySessionID: [UUID: Bool] = [:]
@@ -391,6 +401,14 @@ final class SessionMirrorStore: ObservableObject {
         )
     }
 
+    func refreshAccountRateLimits() async {
+        guard connectionState == .connected else {
+            return
+        }
+
+        await send(AccountRateLimitsRequestMessage(requestId: nextRequestID()))
+    }
+
     func submitComposer(
         text explicitText: String? = nil,
         model: String? = nil,
@@ -510,10 +528,14 @@ final class SessionMirrorStore: ObservableObject {
         attachmentGeneration = attachmentGeneration.saturatingIncrement()
         pendingAttachRequestSessionIDs.removeAll()
         pendingHistoryPageRequestSessionIDs.removeAll()
+        pendingContextSearchRequestID = nil
+        pendingContextSearchSessionID = nil
+        pendingContextSearchQuery = ""
         historyPageRequestStartedAtByRequestID.removeAll()
         lastHistoryPageRequestAtBySessionID.removeAll()
         hasMoreHistoryBeforeBySessionID.removeAll()
         historyPageLoadInFlightSessionIDs.removeAll()
+        resetContextSearchState()
         sessionListRequestID = nil
         sessionListRequestStartedAt = nil
         if error != nil {
@@ -658,6 +680,7 @@ final class SessionMirrorStore: ObservableObject {
             Task { @MainActor in
                 await self.refreshSessions()
                 await self.send(OutboundMessage.listModels(requestId: self.nextRequestID()))
+                await self.refreshAccountRateLimits()
             }
 
         case .sessionList(let message):
@@ -683,6 +706,10 @@ final class SessionMirrorStore: ObservableObject {
 
         case .modelList(let message):
             availableModelOptions = message.data
+
+        case .accountRateLimits(let message):
+            activeRateLimitAccountID = message.activeAccountId
+            accountRateLimitSnapshots = message.snapshots
 
         case .sessionAttached(let message):
             let existing = itemsBySession[message.sessionId] ?? []
@@ -729,6 +756,22 @@ final class SessionMirrorStore: ObservableObject {
             hasMoreHistoryBeforeBySessionID[message.sessionId] = message.hasMoreBefore
             enforceHistoryRetentionPolicy()
 
+        case .contextSearchResults(let message):
+            guard let pendingContextSearchRequestID,
+                  message.requestId == pendingContextSearchRequestID,
+                  pendingContextSearchSessionID == message.sessionId
+            else {
+                return
+            }
+
+            self.pendingContextSearchRequestID = nil
+            self.pendingContextSearchSessionID = nil
+            self.pendingContextSearchQuery = ""
+            contextSearchInFlight = false
+            contextSearchRootPath = message.rootPath
+            contextSearchPaths = message.paths
+            contextSearchTruncated = message.truncated
+
         case .sessionDetached(let message):
             if attachedSessionID == message.sessionId {
                 attachedSessionID = nil
@@ -758,6 +801,17 @@ final class SessionMirrorStore: ObservableObject {
                 sessionListRequestID = nil
                 sessionListRequestStartedAt = nil
             }
+
+            if let requestId = message.requestId,
+               requestId == pendingContextSearchRequestID {
+                pendingContextSearchRequestID = nil
+                pendingContextSearchSessionID = nil
+                pendingContextSearchQuery = ""
+                contextSearchInFlight = false
+                contextSearchPaths = []
+                contextSearchTruncated = false
+            }
+
             lastError = message.message
             if let requestId = message.requestId,
                let historySessionID = pendingHistoryPageRequestSessionIDs.removeValue(forKey: requestId) {
@@ -907,6 +961,49 @@ final class SessionMirrorStore: ObservableObject {
         return true
     }
 
+    private func resetContextSearchState() {
+        pendingContextSearchRequestID = nil
+        pendingContextSearchSessionID = nil
+        pendingContextSearchQuery = ""
+        contextSearchRootPath = nil
+        contextSearchPaths = []
+        contextSearchTruncated = false
+        contextSearchInFlight = false
+    }
+
+    func requestContextSearch(query rawQuery: String, limit: Int = 30) async {
+        guard connectionState == .connected,
+              let selectedSessionID
+        else {
+            contextSearchInFlight = false
+            contextSearchPaths = []
+            contextSearchTruncated = false
+            return
+        }
+
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if pendingContextSearchRequestID != nil,
+           pendingContextSearchSessionID == selectedSessionID,
+           pendingContextSearchQuery == query {
+            return
+        }
+
+        let requestId = nextRequestID()
+        pendingContextSearchRequestID = requestId
+        pendingContextSearchSessionID = selectedSessionID
+        pendingContextSearchQuery = query
+        contextSearchInFlight = true
+
+        await send(
+            ContextSearchMessage(
+                requestId: requestId,
+                sessionId: selectedSessionID,
+                query: query,
+                limit: max(1, min(limit, 100))
+            )
+        )
+    }
+
     @discardableResult
     private func send(_ message: OutboundMessage) async -> Bool {
         await sendEncodable(message)
@@ -944,6 +1041,16 @@ final class SessionMirrorStore: ObservableObject {
 
     @discardableResult
     private func send(_ message: UserInputAnswerMessage) async -> Bool {
+        await sendEncodable(message)
+    }
+
+    @discardableResult
+    private func send(_ message: AccountRateLimitsRequestMessage) async -> Bool {
+        await sendEncodable(message)
+    }
+
+    @discardableResult
+    private func send(_ message: ContextSearchMessage) async -> Bool {
         await sendEncodable(message)
     }
 
