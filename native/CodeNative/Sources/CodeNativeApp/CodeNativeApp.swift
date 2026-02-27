@@ -1849,16 +1849,8 @@ struct CodeNativeApp: App {
     private func preferredEndpoint(for record: SharedCompanionBackendRecord) -> String {
         let trimmedPrimaryEndpoint = record.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Only prefer LAN when the advertised primary endpoint is itself LAN.
-        // If the backend prefers Tailscale, keep that selection to avoid false
-        // positives when remote networks share the same RFC1918 subnet.
-        let primaryEndpointPrefersLAN =
-            !trimmedPrimaryEndpoint.isEmpty
-                && Self.endpointHostIsPrivateLANIPv4(trimmedPrimaryEndpoint)
-
         let localLANAddresses = LocalBackendRuntimeSupervisor.localPrivateLANIPv4Addresses()
-        if primaryEndpointPrefersLAN,
-           let lanEndpoint = record.lanEndpoint,
+        if let lanEndpoint = record.lanEndpoint,
            Self.endpointIsOnSamePrivateLANSubnet(lanEndpoint, localLANAddresses: localLANAddresses) {
             return lanEndpoint
         }
@@ -1882,26 +1874,6 @@ struct CodeNativeApp: App {
         }
 
         return record.endpoint
-    }
-
-    private static func endpointHostIsPrivateLANIPv4(_ endpoint: String) -> Bool {
-        guard let endpointURL = URL(string: endpoint),
-              let endpointHost = endpointURL.host,
-              let octets = ipv4Octets(from: endpointHost)
-        else {
-            return false
-        }
-
-        if octets.0 == 10 || octets.0 == 192 && octets.1 == 168 {
-            return true
-        }
-
-        if octets.0 == 172,
-           (16...31).contains(octets.1) {
-            return true
-        }
-
-        return false
     }
 
     private func publishLocalBackendRecordIfNeeded(nowUnixMs: UInt64) {

@@ -179,13 +179,8 @@ struct CodeNativeiOSDemoApp: App {
     private func preferredEndpoint(for record: SharedCompanionBackendRecord) -> String {
         let trimmedPrimaryEndpoint = record.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let primaryEndpointPrefersLAN =
-            !trimmedPrimaryEndpoint.isEmpty
-                && endpointHostIsPrivateLANIPv4(trimmedPrimaryEndpoint)
-
         let localLANAddresses = localPrivateLANIPv4Addresses()
-        if primaryEndpointPrefersLAN,
-           let lanEndpoint = record.lanEndpoint,
+        if let lanEndpoint = record.lanEndpoint,
            endpointIsOnSamePrivateLANSubnet(lanEndpoint, localLANAddresses: localLANAddresses) {
             return lanEndpoint
         }
@@ -219,26 +214,6 @@ struct CodeNativeiOSDemoApp: App {
             }
             return isPrivateLANIPv4Address(ipAddress)
         }
-    }
-
-    private func endpointHostIsPrivateLANIPv4(_ endpoint: String) -> Bool {
-        guard let endpointURL = URL(string: endpoint),
-              let endpointHost = endpointURL.host,
-              let octets = ipv4Octets(from: endpointHost)
-        else {
-            return false
-        }
-
-        if octets.0 == 10 || octets.0 == 192 && octets.1 == 168 {
-            return true
-        }
-
-        if octets.0 == 172,
-           (16...31).contains(octets.1) {
-            return true
-        }
-
-        return false
     }
 
     private func isTailscaleInterface(_ lowerInterfaceName: String) -> Bool {
