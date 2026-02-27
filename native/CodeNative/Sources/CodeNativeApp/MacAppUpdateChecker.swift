@@ -93,7 +93,7 @@ enum MacAppUpdateChecker {
     private static let skippedVersionDefaultsKey = "code_native_macos_update_skipped_version"
     private static let automaticCheckInterval: TimeInterval = 60 * 60 * 6
     private static let globalCheckLock = NSLock()
-    private static var globalCheckInProgress = false
+    nonisolated(unsafe) private static var globalCheckInProgress = false
 
     @discardableResult
     static func beginGlobalCheck() -> Bool {

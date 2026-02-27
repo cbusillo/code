@@ -4981,14 +4981,6 @@ struct ContentView: View {
             guard didSubmit else {
                 return
             }
-
-            await MainActor.run {
-                let currentDraftTrimmed = composerDraft
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if currentDraftTrimmed == submittedText {
-                    composerDraft = ""
-                }
-            }
         }
     }
 
@@ -6054,7 +6046,6 @@ struct ContentView: View {
 
         if shouldAutoSubmit {
             let submittedText = finalText
-            let submittedTextTrimmed = normalized
             Task {
                 let didSubmit = await store.submitComposer(
                     text: submittedText,
@@ -6066,11 +6057,6 @@ struct ContentView: View {
                 }
 
                 await MainActor.run {
-                    let currentDraftTrimmed = composerDraft
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if currentDraftTrimmed == submittedTextTrimmed {
-                        composerDraft = ""
-                    }
                     voiceInput.clearTranscript()
                     voiceInteractionNotice = nil
                 }
@@ -7689,9 +7675,14 @@ private struct IOSComposerTextView: UIViewRepresentable {
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
-            _ = textView
-            if parent.isFocused {
-                parent.onFocusChange(false)
+            DispatchQueue.main.async {
+                guard !textView.isFirstResponder else {
+                    return
+                }
+
+                if self.parent.isFocused {
+                    self.parent.onFocusChange(false)
+                }
             }
         }
 
@@ -7767,8 +7758,8 @@ private struct MacComposerTextView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        textView.textColor = NSColor.white.withAlphaComponent(0.9)
-        textView.insertionPointColor = NSColor.white.withAlphaComponent(0.95)
+        textView.textColor = NSColor.labelColor
+        textView.insertionPointColor = NSColor.labelColor
         textView.isRichText = false
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -7815,6 +7806,8 @@ private struct MacComposerTextView: NSViewRepresentable {
             onSubmit(textView?.string ?? "")
         }
         textView.onEditorKeyCommand = onEditorKeyCommand
+        textView.textColor = NSColor.labelColor
+        textView.insertionPointColor = NSColor.labelColor
 
         if isFocused,
            let window = nsView.window,

@@ -427,9 +427,6 @@ final class SessionMirrorStore: ObservableObject {
                 reasoningEffort: reasoningEffort
             )
         )
-        if submitted {
-            composerText = ""
-        }
         return submitted
     }
 
