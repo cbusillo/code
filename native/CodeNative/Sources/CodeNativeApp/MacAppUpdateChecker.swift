@@ -20,8 +20,8 @@ enum MacAppUpdateAlert: Identifiable, Equatable {
         switch self {
         case .available(let candidate):
             return "available-\(candidate.version)"
-        case .info(let title, _):
-            return "info-\(title)"
+        case .info(let title, let message):
+            return "info-\(title)-\(message)"
         }
     }
 }
@@ -92,6 +92,27 @@ enum MacAppUpdateChecker {
     private static let lastCheckDefaultsKey = "code_native_macos_update_last_check_at"
     private static let skippedVersionDefaultsKey = "code_native_macos_update_skipped_version"
     private static let automaticCheckInterval: TimeInterval = 60 * 60 * 6
+    private static let globalCheckLock = NSLock()
+    private static var globalCheckInProgress = false
+
+    @discardableResult
+    static func beginGlobalCheck() -> Bool {
+        globalCheckLock.lock()
+        defer { globalCheckLock.unlock() }
+
+        guard !globalCheckInProgress else {
+            return false
+        }
+
+        globalCheckInProgress = true
+        return true
+    }
+
+    static func endGlobalCheck() {
+        globalCheckLock.lock()
+        globalCheckInProgress = false
+        globalCheckLock.unlock()
+    }
 
     static func shouldPerformAutomaticCheck(
         userDefaults: UserDefaults = .standard,

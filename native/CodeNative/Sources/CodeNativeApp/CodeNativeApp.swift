@@ -1555,6 +1555,8 @@ struct CodeNativeApp: App {
     @State private var isCheckingForUpdates = false
     @State private var isInstallingUpdate = false
     @State private var updateAlert: MacAppUpdateAlert?
+    @State private var lastInfoUpdateAlertSignature = ""
+    @State private var lastInfoUpdateAlertAt = Date.distantPast
     #endif
 
     init() {
@@ -1689,7 +1691,7 @@ struct CodeNativeApp: App {
                             },
                             secondaryButton: .default(Text("Skip This Version")) {
                                 MacAppUpdateChecker.skipVersion(candidate.version)
-                                updateAlert = .info(
+                                showInfoUpdateAlert(
                                     title: "Version Skipped",
                                     message: "Version \(candidate.version) is now skipped. You can clear this in Settings > General > App updates."
                                 )
@@ -1988,11 +1990,32 @@ struct CodeNativeApp: App {
 
     private func performUpdateCheck(userInitiated: Bool) {
         guard !isCheckingForUpdates else {
+            if userInitiated {
+                showInfoUpdateAlert(
+                    title: "Update Check In Progress",
+                    message: "An update check is already running. Please wait a moment and try again."
+                )
+            }
             return
         }
+
+        guard MacAppUpdateChecker.beginGlobalCheck() else {
+            if userInitiated {
+                showInfoUpdateAlert(
+                    title: "Update Check In Progress",
+                    message: "An update check is already running. Please wait a moment and try again."
+                )
+            }
+            return
+        }
+
         isCheckingForUpdates = true
 
         Task {
+            defer {
+                MacAppUpdateChecker.endGlobalCheck()
+            }
+
             do {
                 let outcome = try await MacAppUpdateChecker.checkForUpdate()
                 await MainActor.run {
@@ -2002,21 +2025,21 @@ struct CodeNativeApp: App {
                         updateAlert = .available(candidate)
                     case .skipped(let version):
                         if userInitiated {
-                            updateAlert = .info(
+                            showInfoUpdateAlert(
                                 title: "Version Skipped",
                                 message: "Version \(version) is currently skipped. Clear it in Settings > General > App updates to be prompted again."
                             )
                         }
                     case .upToDate:
                         if userInitiated {
-                            updateAlert = .info(
+                            showInfoUpdateAlert(
                                 title: "You're Up to Date",
                                 message: "Every Code Companion \(MacAppUpdateChecker.currentVersion()) is the latest available version."
                             )
                         }
                     case .managedByStore:
                         if userInitiated {
-                            updateAlert = .info(
+                            showInfoUpdateAlert(
                                 title: "Managed by Apple",
                                 message: "This build is updated through TestFlight or the App Store."
                             )
@@ -2027,7 +2050,7 @@ struct CodeNativeApp: App {
                 await MainActor.run {
                     MacAppUpdateChecker.markCheckAttempt()
                     if userInitiated {
-                        updateAlert = .info(
+                        showInfoUpdateAlert(
                             title: "Update Check Failed",
                             message: error.localizedDescription
                         )
@@ -2058,13 +2081,31 @@ struct CodeNativeApp: App {
             } catch {
                 await MainActor.run {
                     isInstallingUpdate = false
-                    updateAlert = .info(
+                    showInfoUpdateAlert(
                         title: "Install Failed",
                         message: error.localizedDescription
                     )
                 }
             }
         }
+    }
+
+    private func showInfoUpdateAlert(
+        title: String,
+        message: String,
+        dedupeWindow: TimeInterval = 2
+    ) {
+        let signature = "\(title)|\(message)"
+        let now = Date()
+
+        if signature == lastInfoUpdateAlertSignature,
+           now.timeIntervalSince(lastInfoUpdateAlertAt) < dedupeWindow {
+            return
+        }
+
+        lastInfoUpdateAlertSignature = signature
+        lastInfoUpdateAlertAt = now
+        updateAlert = .info(title: title, message: message)
     }
     #endif
 
