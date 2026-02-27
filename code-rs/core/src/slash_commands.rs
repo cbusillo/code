@@ -299,7 +299,7 @@ mod tests {
         assert!(defaults.iter().any(|v| v == "code-gpt-5.3-codex"));
         assert!(!defaults.iter().any(|v| v == "qwen-3-coder"));
         assert!(!defaults.iter().any(|v| v == "gemini-3-flash"));
-        assert!(!defaults.iter().any(|v| v == "claude-sonnet-4.5"));
+        assert!(!defaults.iter().any(|v| v == "claude-sonnet-4.6"));
 
         restore_var("PATH", orig_path);
         restore_var("HOME", orig_home);
@@ -334,7 +334,7 @@ mod tests {
         }
 
         let defaults = get_default_models();
-        assert!(defaults.iter().any(|v| v == "claude-sonnet-4.5"));
+        assert!(defaults.iter().any(|v| v == "claude-sonnet-4.6"));
 
         restore_var("PATH", orig_path);
         restore_var("HOME", orig_home);

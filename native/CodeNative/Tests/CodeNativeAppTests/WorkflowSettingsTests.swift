@@ -5,7 +5,7 @@ final class WorkflowSettingsTests: XCTestCase {
     func testNormalizedSelectionKeepsKnownOptionCaseInsensitively() {
         let normalized = WorkflowSettings.normalizedSelection(
             current: "gpt-5.2",
-            options: ["GPT-5.3-Codex", "GPT-5.2", "Claude Sonnet 4.5"],
+            options: ["GPT-5.3-Codex", "GPT-5.2", "Claude Sonnet 4.6"],
             fallback: "GPT-5.3-Codex"
         )
 
@@ -39,7 +39,11 @@ final class WorkflowSettingsTests: XCTestCase {
         )
         XCTAssertEqual(
             WorkflowSettings.canonicalModelIdentifier(from: "claude-sonnet-4.5"),
-            "claude-sonnet-4.5"
+            "claude-sonnet-4.6"
+        )
+        XCTAssertEqual(
+            WorkflowSettings.canonicalModelIdentifier(from: "claude-sonnet-4.6"),
+            "claude-sonnet-4.6"
         )
     }
 

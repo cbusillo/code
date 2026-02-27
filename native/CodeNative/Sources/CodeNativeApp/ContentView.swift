@@ -7648,9 +7648,6 @@ private struct IOSComposerTextView: UIViewRepresentable {
         if isFocused,
            !uiView.isFirstResponder {
             uiView.becomeFirstResponder()
-        } else if !isFocused,
-                  uiView.isFirstResponder {
-            uiView.resignFirstResponder()
         }
 
         let nextHeight = Self.measuredEditorHeight(for: uiView)

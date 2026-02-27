@@ -39,10 +39,10 @@ pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     "code-gpt-5.3-codex",
     "code-gpt-5.3-codex-spark",
     "claude-opus-4.6",
-    "gemini-3-pro",
+    "gemini-3.1-pro-preview",
     // Straightforward / cost-aware
     "code-gpt-5.1-codex-mini",
-    "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
     "gemini-3-flash",
     // Mixed/general and alternates
     "claude-haiku-4.5",
@@ -186,7 +186,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         pro_only: false,
     },
     AgentModelSpec {
-        slug: "claude-sonnet-4.5",
+        slug: "claude-sonnet-4.6",
         family: "claude",
         cli: "claude",
         read_only_args: CLAUDE_SONNET_READ_ONLY,
@@ -194,7 +194,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         model_args: &["--model", "sonnet"],
         description: "Balanced Claude model for implementation and debugging; a solid default when you want Claude.",
         enabled_by_default: true,
-        aliases: &["claude", "claude-sonnet"],
+        aliases: &["claude", "claude-sonnet", "claude-sonnet-4.5"],
         gating_env: None,
         is_frontline: false,
         pro_only: false,
@@ -214,7 +214,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         pro_only: false,
     },
     AgentModelSpec {
-        slug: "gemini-3-pro",
+        slug: "gemini-3.1-pro-preview",
         family: "gemini",
         cli: "gemini",
         read_only_args: GEMINI_PRO_READ_ONLY,
@@ -223,6 +223,8 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         description: "Higher-capacity Gemini model for harder tasks; use when gemini-3-flash misses details.",
         enabled_by_default: true,
         aliases: &[
+            "gemini-3.1-pro",
+            "gemini-3-pro",
             "gemini-3-pro-preview",
             "gemini-3",
             "gemini3",

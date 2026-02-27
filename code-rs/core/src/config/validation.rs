@@ -158,9 +158,11 @@ fn upgrade_legacy_model_slug(slug: &str) -> Option<String> {
 
     match slug {
         "gpt-5.1-codex" => return Some("gpt-5.1-codex-max".to_string()),
-        "gpt-4.1" => return Some("gpt-4.1-2024-04-09".to_string()),
-        "gpt-4.1-mini" => return Some("gpt-4.1-mini-2024-04-09".to_string()),
-        "gpt-4.1-nano" => return Some("gpt-4.1-nano-2024-04-09".to_string()),
+        // Prefer floating aliases for GPT-4.1 so configs do not pin stale dated snapshots.
+        "gpt-4.1-2024-04-09" => return Some("gpt-4.1".to_string()),
+        "gpt-4.1-mini-2024-04-09" => return Some("gpt-4.1-mini".to_string()),
+        "gpt-4.1-nano-2024-04-09" => return Some("gpt-4.1-nano".to_string()),
+        "claude-sonnet-4.5" => return Some("claude-sonnet-4.6".to_string()),
         _ => {}
     }
 
@@ -178,9 +180,12 @@ fn upgrade_legacy_model_slug(slug: &str) -> Option<String> {
         return Some("claude-opus-4.6".to_string());
     }
 
-    // Upgrade Gemini 2.5 Pro to Gemini 3 Pro (or preview alias)
-    if slug.eq_ignore_ascii_case("gemini-2.5-pro") || slug.eq_ignore_ascii_case("gemini-3-pro-preview") {
-        return Some("gemini-3-pro".to_string());
+    // Upgrade Gemini Pro aliases to Gemini 3.1 Pro Preview.
+    if slug.eq_ignore_ascii_case("gemini-2.5-pro")
+        || slug.eq_ignore_ascii_case("gemini-3-pro")
+        || slug.eq_ignore_ascii_case("gemini-3-pro-preview")
+    {
+        return Some("gemini-3.1-pro-preview".to_string());
     }
 
     // Upgrade Gemini 2.5 Flash to Gemini 3 Flash

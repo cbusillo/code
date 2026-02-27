@@ -21,8 +21,10 @@ enum WorkflowSettings {
             return "gpt-5.3-codex"
         case "gpt-5.2":
             return "gpt-5.2"
+        case "claude sonnet 4.6", "claude-sonnet-4.6":
+            return "claude-sonnet-4.6"
         case "claude sonnet 4.5", "claude-sonnet-4.5":
-            return "claude-sonnet-4.5"
+            return "claude-sonnet-4.6"
         default:
             return trimmed.contains(" ") ? nil : trimmed
         }
