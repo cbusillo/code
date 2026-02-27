@@ -5014,6 +5014,14 @@ struct ContentView: View {
             guard didSubmit else {
                 return
             }
+
+            await MainActor.run {
+                let currentDraftTrimmed = composerDraft
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if currentDraftTrimmed == submittedText {
+                    composerDraft = ""
+                }
+            }
         }
     }
 
@@ -6079,6 +6087,7 @@ struct ContentView: View {
 
         if shouldAutoSubmit {
             let submittedText = finalText
+            let submittedTextTrimmed = normalized
             Task {
                 let didSubmit = await store.submitComposer(
                     text: submittedText,
@@ -6090,6 +6099,11 @@ struct ContentView: View {
                 }
 
                 await MainActor.run {
+                    let currentDraftTrimmed = composerDraft
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if currentDraftTrimmed == submittedTextTrimmed {
+                        composerDraft = ""
+                    }
                     voiceInput.clearTranscript()
                     voiceInteractionNotice = nil
                 }

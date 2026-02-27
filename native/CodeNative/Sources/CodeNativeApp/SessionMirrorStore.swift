@@ -427,13 +427,6 @@ final class SessionMirrorStore: ObservableObject {
                 reasoningEffort: reasoningEffort
             )
         )
-
-        // Mirror composer updates from this client are intentionally ignored to avoid
-        // clobbering in-progress local edits, so clear locally after a successful send.
-        if submitted {
-            composerText = ""
-        }
-
         return submitted
     }
 
