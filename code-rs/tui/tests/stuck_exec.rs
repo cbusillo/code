@@ -746,13 +746,29 @@ fn background_style_exec_end_with_zero_seq_does_not_get_stuck() {
         std::thread::sleep(Duration::from_millis(100));
         harness.flush_into_widget();
         output = render_chat_widget_to_vt100(&mut harness, 80, 12);
-        if output.contains("bg") && !output.contains("Running...") {
+        let ended = harness.ended_exec_call_ids();
+        let running = harness.running_exec_call_ids();
+        let pending = harness.pending_exec_end_count();
+        if ended.iter().any(|id| id == &call_id) && running.is_empty() && pending == 0 {
             break;
         }
         if Instant::now() >= deadline {
-            panic!("exec with zero seq end should complete after flush:\n{}", output);
+            panic!(
+                "exec with zero seq end should complete after flush:\n{}\nrunning={:?} ended={:?} pending={} pending_keys={:?}",
+                output,
+                running,
+                ended,
+                pending,
+                harness.pending_exec_end_keys(),
+            );
         }
     }
+
+    assert!(
+        !output.contains("Running..."),
+        "zero-seq exec end should clear any running marker:\n{}",
+        output
+    );
 }
 
 #[test]
