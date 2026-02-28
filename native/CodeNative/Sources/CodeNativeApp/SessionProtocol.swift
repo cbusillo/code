@@ -2894,14 +2894,46 @@ extension SessionStreamItem {
               let payload = event?.payload,
               payload.typeHint == "token_count",
               let object = payload.objectValue,
-              let info = object["info"]?.objectValue,
-              let totalUsage = info["total_token_usage"]?.objectValue,
-              let total = totalUsage["total_tokens"]?.numberValue
+              let info = object["info"]?.objectValue
         else {
             return nil
         }
 
-        return Int(total)
+        if let totalUsage = info["total_token_usage"]?.objectValue,
+           let total = totalUsage["total_tokens"]?.numberValue {
+            return Int(total)
+        }
+
+        if let lastUsage = info["last_token_usage"]?.objectValue,
+           let total = lastUsage["total_tokens"]?.numberValue {
+            return Int(total)
+        }
+
+        return nil
+    }
+
+    var tokenCountContextWindowTokens: Int? {
+        guard type == "core_event",
+              let payload = event?.payload,
+              payload.typeHint == "token_count",
+              let object = payload.objectValue,
+              let info = object["info"]?.objectValue
+        else {
+            return nil
+        }
+
+        if let lastUsage = info["last_token_usage"]?.objectValue,
+           let total = lastUsage["total_tokens"]?.numberValue {
+            let reasoningOutput = max(0, lastUsage["reasoning_output_tokens"]?.numberValue ?? 0)
+            return max(0, Int(total - reasoningOutput))
+        }
+
+        if let totalUsage = info["total_token_usage"]?.objectValue,
+           let total = totalUsage["total_tokens"]?.numberValue {
+            return max(0, Int(total))
+        }
+
+        return nil
     }
 
     var tokenCountModelContextWindow: Int? {

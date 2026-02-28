@@ -303,9 +303,44 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertEqual(item.tokenUsageBreakdown?.reasoning, 120)
     }
 
-    func testTokenCountEventsAreHiddenFromTranscript() {
+    func testTokenCountContextWindowTokensSubtractsReasoningOutput() {
+        let item = makeCoreEventItem(
+            seq: 15,
+            payload: .object([
+                "type": .string("token_count"),
+                "info": .object([
+                    "last_token_usage": .object([
+                        "total_tokens": .number(1_200),
+                        "reasoning_output_tokens": .number(320),
+                    ]),
+                ]),
+            ])
+        )
+
+        XCTAssertEqual(item.tokenCountContextWindowTokens, 880)
+        XCTAssertEqual(item.tokenCountTotalTokens, 1_200)
+    }
+
+    func testTokenCountContextWindowTokensFallsBackToTotalUsage() {
         let item = makeCoreEventItem(
             seq: 16,
+            payload: .object([
+                "type": .string("token_count"),
+                "info": .object([
+                    "total_token_usage": .object([
+                        "total_tokens": .number(2_400),
+                    ]),
+                ]),
+            ])
+        )
+
+        XCTAssertEqual(item.tokenCountContextWindowTokens, 2_400)
+        XCTAssertEqual(item.tokenCountTotalTokens, 2_400)
+    }
+
+    func testTokenCountEventsAreHiddenFromTranscript() {
+        let item = makeCoreEventItem(
+            seq: 17,
             payload: .object([
                 "type": .string("token_count"),
                 "info": .object([
@@ -323,7 +358,7 @@ final class SessionProtocolTranscriptTests: XCTestCase {
 
     func testUserMessageStripsSystemStatusFooter() {
         let item = makeCoreEventItem(
-            seq: 17,
+            seq: 18,
             payload: .object([
                 "type": .string("user_message"),
                 "message": .string(
@@ -339,7 +374,7 @@ final class SessionProtocolTranscriptTests: XCTestCase {
 
     func testSystemStatusOnlyUserMessageIsHidden() {
         let item = makeCoreEventItem(
-            seq: 18,
+            seq: 19,
             payload: .object([
                 "type": .string("user_message"),
                 "message": .string(
@@ -354,7 +389,7 @@ final class SessionProtocolTranscriptTests: XCTestCase {
 
     func testAutoReviewAgentSummaryIsNormalizedForTranscript() {
         let item = makeCoreEventItem(
-            seq: 19,
+            seq: 20,
             payload: .object([
                 "type": .string("agent_message"),
                 "message": .string("[auto-review] main: 2 issue(s) found. Merge worktree to apply fixes.")

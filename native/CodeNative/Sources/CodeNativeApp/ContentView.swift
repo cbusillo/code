@@ -307,7 +307,6 @@ struct ContentView: View {
     let refreshSharedCompanionBackends: (() -> Void)?
     let onSharedCompanionPreferencesChanged: (() -> Void)?
     @Environment(\.openURL) private var openURL
-    @Environment(\.colorScheme) private var colorScheme
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -436,7 +435,17 @@ struct ContentView: View {
     private let transcriptBottomAnchor = "transcript.bottom"
     private let transcriptScrollCoordinateSpaceName = "transcript.scroll"
     private let transcriptSessionCacheLimit = 6
-    private let transcriptRefreshDebounceNanoseconds: UInt64 = 45_000_000
+    private var transcriptRefreshDebounceNanoseconds: UInt64 {
+        #if os(iOS)
+        if isIPadLayout {
+            return 95_000_000
+        }
+
+        return isCompactPhoneLayout ? 75_000_000 : 85_000_000
+        #else
+        return 45_000_000
+        #endif
+    }
     private let sandboxOptions = WorkflowSettings.sandboxOptions
     private let approvalPolicyOptions = WorkflowSettings.approvalPolicyOptions
 
@@ -733,17 +742,21 @@ struct ContentView: View {
             return 336
         }
 
+        if showsIPadSplitLayout {
+            return 1_040
+        }
+
         if isIPadLayout {
-            return showsIPadSplitLayout ? 980 : 900
+            return 960
         }
 
         if showsIPadSplitLayout {
-            return 760
+            return 820
         }
 
-        return 700
-        #else
         return 760
+        #else
+        return 820
         #endif
     }
 
@@ -797,21 +810,11 @@ struct ContentView: View {
 
     #if os(macOS)
     private var macComposerTextColor: NSColor {
-        let usesLightStyle = selectedThemeMode == .light
-            || (selectedThemeMode == .system && colorScheme == .light)
-        if usesLightStyle {
-            return NSColor.black.withAlphaComponent(0.88)
-        }
-        return NSColor.white.withAlphaComponent(0.90)
+        NSColor.labelColor
     }
 
     private var macComposerInsertionPointColor: NSColor {
-        let usesLightStyle = selectedThemeMode == .light
-            || (selectedThemeMode == .system && colorScheme == .light)
-        if usesLightStyle {
-            return NSColor.black.withAlphaComponent(0.94)
-        }
-        return NSColor.white.withAlphaComponent(0.95)
+        NSColor.controlAccentColor
     }
     #endif
 
@@ -2528,15 +2531,16 @@ struct ContentView: View {
         guard let sessionID = store.selectedSessionID,
               let sourceKey = transcriptSourceKey(for: store.selectedSessionItems, sessionID: sessionID)
         else {
-            cachedTranscriptItems = []
-            taskActivityByStartItemID = [:]
+            applyTranscriptCacheState(items: [], taskActivityByStartItemID: [:])
             return
         }
 
         if let cached = transcriptCacheBySessionID[sessionID],
            cached.sourceKey == sourceKey {
-            cachedTranscriptItems = cached.items
-            taskActivityByStartItemID = cached.taskActivityByStartItemID
+            applyTranscriptCacheState(
+                items: cached.items,
+                taskActivityByStartItemID: cached.taskActivityByStartItemID
+            )
             touchTranscriptCache(sessionID)
             return
         }
@@ -2568,8 +2572,10 @@ struct ContentView: View {
             )
         )
 
-        cachedTranscriptItems = reducedItems
-        taskActivityByStartItemID = taskMerged.activityByStartItemID
+        applyTranscriptCacheState(
+            items: reducedItems,
+            taskActivityByStartItemID: taskMerged.activityByStartItemID
+        )
         storeTranscriptCache(
             sessionID: sessionID,
             entry: TranscriptSessionCacheEntry(
@@ -2578,6 +2584,19 @@ struct ContentView: View {
                 taskActivityByStartItemID: taskMerged.activityByStartItemID
             )
         )
+    }
+
+    private func applyTranscriptCacheState(
+        items: [SessionStreamItem],
+        taskActivityByStartItemID: [String: [String]]
+    ) {
+        if cachedTranscriptItems != items {
+            cachedTranscriptItems = items
+        }
+
+        if self.taskActivityByStartItemID != taskActivityByStartItemID {
+            self.taskActivityByStartItemID = taskActivityByStartItemID
+        }
     }
 
     private func dedupeToolCallLifecycleCards(in items: [SessionStreamItem]) -> [SessionStreamItem] {
@@ -5633,15 +5652,15 @@ struct ContentView: View {
                 return 318 + widthDelta
             }
 
-            if isIPadLayout {
-                return 780 + widthDelta
-            }
-
             if showsIPadSplitLayout {
-                return 640 + widthDelta
+                return 920 + widthDelta
             }
 
-            return 520 + widthDelta
+            if isIPadLayout {
+                return 860 + widthDelta
+            }
+
+            return 560 + widthDelta
         }()
 
         let toolCap: CGFloat = {
@@ -5649,15 +5668,15 @@ struct ContentView: View {
                 return 330 + widthDelta
             }
 
-            if isIPadLayout {
-                return 980 + widthDelta
-            }
-
             if showsIPadSplitLayout {
-                return 760 + widthDelta
+                return 1_140 + widthDelta
             }
 
-            return 640 + widthDelta
+            if isIPadLayout {
+                return 1_040 + widthDelta
+            }
+
+            return 680 + widthDelta
         }()
 
         if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent || item.isCollaborationProgressEvent {
@@ -5665,19 +5684,19 @@ struct ContentView: View {
         }
 
         if item.prefersTrailingBubble {
-            let estimatedCharWidth: CGFloat = isIPadLayout ? 6.2 : (showsIPadSplitLayout ? 6.1 : 5.4)
+            let estimatedCharWidth: CGFloat = showsIPadSplitLayout ? 6.4 : (isIPadLayout ? 6.2 : 5.4)
             let estimated = CGFloat(item.body.count) * estimatedCharWidth + 64
             let trailingMaxWidth: CGFloat = {
                 if isCompactPhoneLayout {
                     return 252
                 }
 
-                if isIPadLayout {
-                    return 640
+                if showsIPadSplitLayout {
+                    return 820
                 }
 
-                if showsIPadSplitLayout {
-                    return 460
+                if isIPadLayout {
+                    return 760
                 }
 
                 return 420
@@ -8295,7 +8314,7 @@ private struct MacComposerTextView: NSViewRepresentable {
                     return
                 }
 
-                if !hasShift && !hasCommand && !hasOption && !hasControl {
+                if !hasShift && !hasOption && !hasControl {
                     onSubmit?()
                     return
                 }
@@ -13272,7 +13291,7 @@ private struct NativeSettingsView: View {
 
     private var compactLimitSnapshot: CompactLimitSnapshot? {
         guard let latestTokenCount = store.selectedSessionItems.reversed().first(where: { $0.isTokenCountEvent }),
-              let totalTokens = latestTokenCount.tokenCountTotalTokens,
+              let usedContextTokens = latestTokenCount.tokenCountContextWindowTokens,
               let modelContextWindow = latestTokenCount.tokenCountModelContextWindow,
               modelContextWindow > 0
         else {
@@ -13282,7 +13301,7 @@ private struct NativeSettingsView: View {
         let compactLimit = max(1, Int((Double(modelContextWindow) * 0.9).rounded(.down)))
         return CompactLimitSnapshot(
             model: latestTokenCount.tokenCountRequestedModel,
-            usedTokens: max(0, totalTokens),
+            usedTokens: max(0, usedContextTokens),
             compactLimit: compactLimit
         )
     }

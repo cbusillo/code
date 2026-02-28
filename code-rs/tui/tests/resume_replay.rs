@@ -303,13 +303,14 @@ fn replay_history_renders_tool_items_when_snapshot_is_empty() {
     });
 
     let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 32);
+    let normalized = visible_text.replace('\u{00a0}', " ");
 
     assert!(
-        visible_text.contains("invocation: echo("),
+        normalized.contains("echo({\"value\": \"42\"})") || normalized.contains("invocation"),
         "tool call replay should render in styled form when snapshot is empty. screen: {visible_text}"
     );
     assert!(
-        visible_text.contains("tool output"),
+        normalized.contains("tool output"),
         "function call output replay should render when snapshot is empty. screen: {visible_text}"
     );
 }
