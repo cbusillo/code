@@ -5712,14 +5712,26 @@ impl ChatWidget<'_> {
             return Err((replay_message_count, snapshot_message_count));
         }
 
+        let tail_start_index = if snapshot_message_count == 0 {
+            Some(0)
+        } else {
+            replay_entries
+                .get(snapshot_message_count.saturating_sub(1))
+                .map(|(index, _, _)| index.saturating_add(1))
+        }
+        .filter(|index| *index < items.len());
+
         if replay_message_count > snapshot_message_count {
-            if snapshot_message_count == 0 {
-                return Ok(Some(0));
-            }
-            if let Some((start_index, _, _)) = replay_entries.get(snapshot_message_count) {
-                return Ok(Some(*start_index));
-            }
-            return Ok(Some(0));
+            return Ok(tail_start_index.or(Some(0)));
+        }
+
+        if replay_has_non_conversation_items
+            && let Some(start_index) = tail_start_index
+            && items[start_index..]
+                .iter()
+                .any(|item| !Self::is_replay_conversation_message_item(item))
+        {
+            return Ok(Some(start_index));
         }
 
         Ok(None)

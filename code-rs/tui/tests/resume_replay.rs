@@ -3,7 +3,8 @@
 
 use code_core::history::{
     ExploreEntry, ExploreEntryStatus, ExploreRecord, ExploreSummary, HistoryId, HistoryRecord,
-    HistorySnapshot, InlineSpan, OrderKeySnapshot, PlanIcon, PlanProgress, PlanStep, PlanUpdateState,
+    HistorySnapshot, InlineSpan, MessageLine, MessageLineKind, OrderKeySnapshot, PlainMessageKind,
+    PlainMessageRole, PlainMessageState, PlanIcon, PlanProgress, PlanStep, PlanUpdateState,
     ReasoningBlock, ReasoningSection, ReasoningState, TextEmphasis, TextTone,
 };
 use code_core::plan_tool::StepStatus;
@@ -304,11 +305,86 @@ fn replay_history_renders_tool_items_when_snapshot_is_empty() {
     let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 32);
 
     assert!(
-        visible_text.contains("🔧 Tool call: echo"),
-        "tool call replay should render when snapshot is empty"
+        visible_text.contains("invocation: echo("),
+        "tool call replay should render in styled form when snapshot is empty. screen: {visible_text}"
     );
     assert!(
         visible_text.contains("tool output"),
-        "function call output replay should render when snapshot is empty"
+        "function call output replay should render when snapshot is empty. screen: {visible_text}"
+    );
+}
+
+#[test]
+fn replay_history_replays_non_message_items_after_snapshot_message_match() {
+    let snapshot = HistorySnapshot {
+        records: vec![
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Please summarize the plan.")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(2),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Working.")],
+                }],
+                metadata: None,
+            }),
+        ],
+        next_id: 3,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![
+            OrderKeySnapshot { req: 1, out: 0, seq: 1 },
+            OrderKeySnapshot { req: 2, out: 0, seq: 2 },
+        ],
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![
+                message("user", "Please summarize the plan."),
+                message("assistant", "Working."),
+                ResponseItem::FunctionCall {
+                    id: Some("tool-call".to_string()),
+                    name: "echo".to_string(),
+                    arguments: "{\"value\": \"42\"}".to_string(),
+                    call_id: "tool-1".to_string(),
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: "tool-1".to_string(),
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text("tool output".to_string()),
+                        success: Some(true),
+                    },
+                },
+            ],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 32);
+
+    assert!(
+        visible_text.contains("tool output"),
+        "tool output replay should render even when snapshot/user-assistant messages match. screen: {visible_text}"
     );
 }
