@@ -8,7 +8,9 @@ use code_core::history::{
 };
 use code_core::plan_tool::StepStatus;
 use code_core::protocol::{Event, EventMsg, ReplayHistoryEvent};
-use code_protocol::models::{ContentItem, ResponseItem};
+use code_protocol::models::{
+    ContentItem, FunctionCallOutputBody, FunctionCallOutputPayload, ResponseItem,
+};
 use code_tui::test_helpers::{render_chat_widget_to_vt100, ChatWidgetHarness};
 use serde_json::to_value;
 
@@ -257,5 +259,56 @@ fn replay_history_keeps_spacing_before_final_reasoning() {
     assert!(
         in_between.iter().any(|line| line.trim().is_empty()),
         "expected blank line between exploring and reasoning. screen: {screen}"
+    );
+}
+
+#[test]
+fn replay_history_renders_tool_items_when_snapshot_is_empty() {
+    let snapshot = HistorySnapshot {
+        records: Vec::new(),
+        next_id: 2,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: Vec::new(),
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![
+                ResponseItem::FunctionCall {
+                    id: Some("tool-call".to_string()),
+                    name: "echo".to_string(),
+                    arguments: "{\"value\": \"42\"}".to_string(),
+                    call_id: "tool-1".to_string(),
+                },
+                ResponseItem::FunctionCallOutput {
+                    call_id: "tool-1".to_string(),
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text("tool output".to_string()),
+                        success: Some(true),
+                    },
+                },
+            ],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 32);
+
+    assert!(
+        visible_text.contains("🔧 Tool call: echo"),
+        "tool call replay should render when snapshot is empty"
+    );
+    assert!(
+        visible_text.contains("tool output"),
+        "function call output replay should render when snapshot is empty"
     );
 }

@@ -5588,6 +5588,136 @@ impl ChatWidget<'_> {
         }
     }
 
+    fn replay_conversation_entries_with_indices(
+        items: &[ResponseItem],
+    ) -> Vec<(usize, PlainMessageKind, String)> {
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item {
+                ResponseItem::Message { role, content, .. }
+                    if role == "user" || role == "assistant" =>
+                {
+                    let mut text = String::new();
+                    for content_item in content {
+                        match content_item {
+                            ContentItem::OutputText { text: value }
+                            | ContentItem::InputText { text: value } => {
+                                if !text.is_empty() {
+                                    text.push('\n');
+                                }
+                                text.push_str(value);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let trimmed = text.trim();
+                    if trimmed.is_empty()
+                        || trimmed.starts_with("<user_action>")
+                        || trimmed.starts_with("== System Status ==")
+                    {
+                        return None;
+                    }
+
+                    let kind = if role == "user" {
+                        PlainMessageKind::User
+                    } else {
+                        PlainMessageKind::Assistant
+                    };
+
+                    Some((index, kind, Self::normalize_text(trimmed)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn snapshot_conversation_entries(snapshot: &HistorySnapshot) -> Vec<(PlainMessageKind, String)> {
+        snapshot
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                HistoryRecord::PlainMessage(state)
+                    if matches!(state.kind, PlainMessageKind::User | PlainMessageKind::Assistant) =>
+                {
+                    let text = state
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.text.as_str())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let normalized = Self::normalize_text(text.trim());
+                    if normalized.is_empty() {
+                        None
+                    } else {
+                        Some((state.kind, normalized))
+                    }
+                }
+                HistoryRecord::AssistantMessage(state) => {
+                    let normalized = Self::normalize_text(state.markdown.trim());
+                    if normalized.is_empty() {
+                        None
+                    } else {
+                        Some((PlainMessageKind::Assistant, normalized))
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn replay_start_index_for_snapshot(
+        snapshot: &HistorySnapshot,
+        items: &[ResponseItem],
+    ) -> Result<Option<usize>, (usize, usize)> {
+        let replay_entries = Self::replay_conversation_entries_with_indices(items);
+        let snapshot_entries = Self::snapshot_conversation_entries(snapshot);
+        let replay_has_non_conversation_items =
+            items.iter().any(|item| !Self::is_replay_conversation_message_item(item));
+
+        if replay_entries.is_empty() {
+            if replay_has_non_conversation_items && snapshot.records.is_empty() {
+                return Ok(Some(0));
+            }
+            return Ok(None);
+        }
+
+        let replay_messages: Vec<(PlainMessageKind, String)> = replay_entries
+            .iter()
+            .map(|(_, kind, text)| (*kind, text.clone()))
+            .collect();
+
+        let common_prefix = snapshot_entries
+            .iter()
+            .zip(replay_messages.iter())
+            .take_while(|(snapshot_entry, replay_entry)| snapshot_entry == replay_entry)
+            .count();
+
+        let replay_message_count = replay_messages.len();
+        let snapshot_message_count = snapshot_entries.len();
+        if common_prefix < replay_message_count.min(snapshot_message_count) {
+            return Err((replay_message_count, snapshot_message_count));
+        }
+
+        if replay_message_count > snapshot_message_count {
+            if snapshot_message_count == 0 {
+                return Ok(Some(0));
+            }
+            if let Some((start_index, _, _)) = replay_entries.get(snapshot_message_count) {
+                return Ok(Some(*start_index));
+            }
+            return Ok(Some(0));
+        }
+
+        Ok(None)
+    }
+
     fn is_replay_conversation_message_item(item: &ResponseItem) -> bool {
         matches!(
             item,
@@ -14630,38 +14760,54 @@ impl ChatWidget<'_> {
                 self.replay_history_depth = self.replay_history_depth.saturating_add(1);
                 let max_req = self.last_seen_request_index;
                 let mut processed_snapshot = false;
+                let mut replay_start_index = None;
                 if let Some(snapshot_value) = history_snapshot {
                     match serde_json::from_value::<HistorySnapshot>(snapshot_value) {
                         Ok(snapshot) => {
-                            self.restore_history_snapshot(&snapshot);
-                            self.flush_history_snapshot_if_needed(true);
-                            processed_snapshot = true;
+                            match Self::replay_start_index_for_snapshot(&snapshot, &items) {
+                                Ok(start_index) => {
+                                    self.restore_history_snapshot(&snapshot);
+                                    self.flush_history_snapshot_if_needed(true);
+                                    processed_snapshot = true;
+                                    replay_start_index = start_index;
+                                }
+                                Err((replay_message_count, snapshot_message_count)) => {
+                                    tracing::debug!(
+                                        "replay_history: ignored stale snapshot (replay_messages={}, snapshot_messages={})",
+                                        replay_message_count,
+                                        snapshot_message_count
+                                    );
+                                }
+                            }
                         }
                         Err(err) => {
                             tracing::warn!("failed to deserialize replay snapshot: {err}");
                         }
                     }
                 }
+                let mut replayed_items = false;
                 if processed_snapshot {
-                    for item in &items {
-                        if Self::is_replay_conversation_message_item(item) {
+                    if let Some(start_index) = replay_start_index {
+                        for item in items.iter().skip(start_index) {
                             self.render_replay_item(item.clone());
+                            replayed_items = true;
                         }
                     }
                 } else {
                     for item in &items {
                         self.render_replay_item(item.clone());
+                        replayed_items = true;
                     }
-                    if !items.is_empty() {
-                        self.last_seen_request_index =
-                            self.last_seen_request_index.max(self.current_request_index);
-                    }
+                }
+                if replayed_items {
+                    self.last_seen_request_index =
+                        self.last_seen_request_index.max(self.current_request_index);
                 }
                 if max_req > 0 {
                     self.last_seen_request_index = self.last_seen_request_index.max(max_req);
                     self.current_request_index = self.last_seen_request_index;
                 }
-                if processed_snapshot || !items.is_empty() {
+                if processed_snapshot || replayed_items {
                     self.reset_resume_order_anchor();
                 }
                 self.request_redraw();
