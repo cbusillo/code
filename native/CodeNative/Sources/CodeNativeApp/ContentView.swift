@@ -307,6 +307,7 @@ struct ContentView: View {
     let refreshSharedCompanionBackends: (() -> Void)?
     let onSharedCompanionPreferencesChanged: (() -> Void)?
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -619,6 +620,14 @@ struct ContentView: View {
         #endif
     }
 
+    private var isIPadLayout: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .pad
+        #else
+        return false
+        #endif
+    }
+
     private var topBarActionButtonSize: CGFloat {
         isCompactPhoneLayout ? 30 : 34
     }
@@ -724,11 +733,15 @@ struct ContentView: View {
             return 336
         }
 
+        if isIPadLayout {
+            return showsIPadSplitLayout ? 980 : 900
+        }
+
         if showsIPadSplitLayout {
             return 760
         }
 
-        return 620
+        return 700
         #else
         return 760
         #endif
@@ -781,6 +794,26 @@ struct ContentView: View {
     private var composerControlForegroundStyle: Color {
         isCompactPhoneLayout ? Color.white.opacity(0.62) : .secondary
     }
+
+    #if os(macOS)
+    private var macComposerTextColor: NSColor {
+        let usesLightStyle = selectedThemeMode == .light
+            || (selectedThemeMode == .system && colorScheme == .light)
+        if usesLightStyle {
+            return NSColor.black.withAlphaComponent(0.88)
+        }
+        return NSColor.white.withAlphaComponent(0.90)
+    }
+
+    private var macComposerInsertionPointColor: NSColor {
+        let usesLightStyle = selectedThemeMode == .light
+            || (selectedThemeMode == .system && colorScheme == .light)
+        if usesLightStyle {
+            return NSColor.black.withAlphaComponent(0.94)
+        }
+        return NSColor.white.withAlphaComponent(0.95)
+    }
+    #endif
 
     private var selectedThemeMode: AppThemeMode {
         AppThemeMode(rawValue: themeModeRaw) ?? .system
@@ -1715,7 +1748,19 @@ struct ContentView: View {
         #else
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         #endif
-        .background(
+        .background {
+            #if os(iOS)
+            ZStack {
+                let sidebarBase = Color(red: 0.08, green: 0.09, blue: 0.12)
+                RoundedRectangle(cornerRadius: 0)
+                    .fill(sidebarBase.opacity(glassWindow ? 0.92 : 0.97))
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.06))
+                    .frame(width: 1)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            #else
             ZStack {
                 let sidebarBase = Color(red: 0.08, green: 0.09, blue: 0.12)
                 RoundedRectangle(cornerRadius: 0)
@@ -1747,7 +1792,8 @@ struct ContentView: View {
                     .frame(width: 1)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
-        )
+            #endif
+        }
     }
 
     private var mainPanel: some View {
@@ -2204,13 +2250,17 @@ struct ContentView: View {
                 #endif
                 .onPreferenceChange(TranscriptBottomOffsetPreferenceKey.self) { bottomOffset in
                     let isNearBottom = bottomOffset <= geometry.size.height + 32
-                    transcriptIsNearBottom = isNearBottom
+                    if transcriptIsNearBottom != isNearBottom {
+                        transcriptIsNearBottom = isNearBottom
+                    }
 
                     guard !isNearBottom else {
                         return
                     }
 
-                    transcriptUserHasScrolled = true
+                    if !transcriptUserHasScrolled {
+                        transcriptUserHasScrolled = true
+                    }
                     pendingBottomPinPassesAfterThreadSwitch = 0
                     #if os(iOS)
                     if composerIsFocused {
@@ -2378,11 +2428,15 @@ struct ContentView: View {
 
     private var transcriptContentMaxWidth: CGFloat {
         #if os(iOS)
+        if isIPadLayout {
+            return showsIPadSplitLayout ? 1_480 : 1_340
+        }
+
         if showsIPadSplitLayout {
             return 1_220
         }
 
-        return isCompactPhoneLayout ? 920 : 1_000
+        return isCompactPhoneLayout ? 920 : 1_100
         #else
         return 920
         #endif
@@ -2390,6 +2444,10 @@ struct ContentView: View {
 
     private var transcriptBubbleGutter: CGFloat {
         #if os(iOS)
+        if isIPadLayout {
+            return selectedTranscriptDensity.bubbleGutter + 14
+        }
+
         if showsIPadSplitLayout {
             return selectedTranscriptDensity.bubbleGutter + 10
         }
@@ -3487,6 +3545,8 @@ struct ContentView: View {
                         text: $composerDraft,
                         isFocused: composerIsFocused,
                         measuredHeight: $composerMeasuredHeight,
+                        textColor: macComposerTextColor,
+                        insertionPointColor: macComposerInsertionPointColor,
                         onFocusChange: { composerIsFocused = $0 },
                         onSubmit: { submitComposerAction(text: $0) },
                         onEditorKeyCommand: handleComposerKeyCommand
@@ -4396,8 +4456,7 @@ struct ContentView: View {
     }
 
     private var canSubmit: Bool {
-        store.connectionState == .connected
-            && !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var filteredSlashCommands: [ComposerSlashCommand] {
@@ -5574,11 +5633,15 @@ struct ContentView: View {
                 return 318 + widthDelta
             }
 
+            if isIPadLayout {
+                return 780 + widthDelta
+            }
+
             if showsIPadSplitLayout {
                 return 640 + widthDelta
             }
 
-            return 420 + widthDelta
+            return 520 + widthDelta
         }()
 
         let toolCap: CGFloat = {
@@ -5586,11 +5649,15 @@ struct ContentView: View {
                 return 330 + widthDelta
             }
 
+            if isIPadLayout {
+                return 980 + widthDelta
+            }
+
             if showsIPadSplitLayout {
                 return 760 + widthDelta
             }
 
-            return 460 + widthDelta
+            return 640 + widthDelta
         }()
 
         if item.isPatchApplyEndEvent || item.isTokenCountEvent || item.isBackgroundEvent || item.isBrowserWorkflowEvent || item.isCollaborationProgressEvent {
@@ -5598,18 +5665,22 @@ struct ContentView: View {
         }
 
         if item.prefersTrailingBubble {
-            let estimatedCharWidth: CGFloat = showsIPadSplitLayout ? 6.1 : 5.4
+            let estimatedCharWidth: CGFloat = isIPadLayout ? 6.2 : (showsIPadSplitLayout ? 6.1 : 5.4)
             let estimated = CGFloat(item.body.count) * estimatedCharWidth + 64
             let trailingMaxWidth: CGFloat = {
                 if isCompactPhoneLayout {
                     return 252
                 }
 
+                if isIPadLayout {
+                    return 640
+                }
+
                 if showsIPadSplitLayout {
                     return 460
                 }
 
-                return 320
+                return 420
             }()
             return min(trailingMaxWidth, max(120, estimated))
         }
@@ -8058,6 +8129,8 @@ private struct MacComposerTextView: NSViewRepresentable {
     @Binding var text: String
     var isFocused: Bool
     @Binding var measuredHeight: CGFloat
+    let textColor: NSColor
+    let insertionPointColor: NSColor
     let onFocusChange: (Bool) -> Void
     let onSubmit: (String) -> Void
     let onEditorKeyCommand: (ComposerEditorKeyCommand) -> Bool
@@ -8077,8 +8150,8 @@ private struct MacComposerTextView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        textView.textColor = NSColor.white.withAlphaComponent(0.90)
-        textView.insertionPointColor = NSColor.white.withAlphaComponent(0.95)
+        textView.textColor = textColor
+        textView.insertionPointColor = insertionPointColor
         textView.isRichText = false
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -8125,8 +8198,8 @@ private struct MacComposerTextView: NSViewRepresentable {
             onSubmit(textView?.string ?? "")
         }
         textView.onEditorKeyCommand = onEditorKeyCommand
-        textView.textColor = NSColor.white.withAlphaComponent(0.90)
-        textView.insertionPointColor = NSColor.white.withAlphaComponent(0.95)
+        textView.textColor = textColor
+        textView.insertionPointColor = insertionPointColor
 
         if isFocused,
            let window = nsView.window,
@@ -10232,18 +10305,30 @@ private struct TranscriptCard: View {
     }
 
     private var cardShadowColor: Color {
+        #if os(iOS)
+        return .clear
+        #else
         if item.cardStyle == .assistant || cardBackground == .clear {
             return .clear
         }
         return Color.black.opacity(isActive ? 0.30 : 0.18)
+        #endif
     }
 
     private var cardShadowRadius: CGFloat {
+        #if os(iOS)
+        return 0
+        #else
         isActive ? 14 : 8
+        #endif
     }
 
     private var cardShadowY: CGFloat {
+        #if os(iOS)
+        return 0
+        #else
         isActive ? 8 : 4
+        #endif
     }
 
     private var collapsedBodyLimit: Int {

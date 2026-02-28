@@ -5588,56 +5588,11 @@ impl ChatWidget<'_> {
         }
     }
 
-    fn replay_conversation_message_count(items: &[ResponseItem]) -> usize {
-        items
-            .iter()
-            .filter_map(|item| match item {
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" || role == "assistant" =>
-                {
-                    let mut text = String::new();
-                    for content_item in content {
-                        match content_item {
-                            ContentItem::OutputText { text: value }
-                            | ContentItem::InputText { text: value } => {
-                                if !text.is_empty() {
-                                    text.push('\n');
-                                }
-                                text.push_str(value);
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    let trimmed = text.trim();
-                    if trimmed.is_empty()
-                        || trimmed.starts_with("<user_action>")
-                        || trimmed.starts_with("== System Status ==")
-                    {
-                        None
-                    } else {
-                        Some(())
-                    }
-                }
-                _ => None,
-            })
-            .count()
-    }
-
-    fn snapshot_conversation_message_count(snapshot: &HistorySnapshot) -> usize {
-        snapshot
-            .records
-            .iter()
-            .filter_map(|record| match record {
-                HistoryRecord::PlainMessage(state)
-                    if matches!(state.kind, PlainMessageKind::User | PlainMessageKind::Assistant) =>
-                {
-                    Some(())
-                }
-                HistoryRecord::AssistantMessage(_) => Some(()),
-                _ => None,
-            })
-            .count()
+    fn is_replay_conversation_message_item(item: &ResponseItem) -> bool {
+        matches!(
+            item,
+            ResponseItem::Message { role, .. } if role == "user" || role == "assistant"
+        )
     }
 
     fn is_auto_review_cell(item: &dyn HistoryCell) -> bool {
@@ -14675,32 +14630,25 @@ impl ChatWidget<'_> {
                 self.replay_history_depth = self.replay_history_depth.saturating_add(1);
                 let max_req = self.last_seen_request_index;
                 let mut processed_snapshot = false;
-                let replay_message_count = Self::replay_conversation_message_count(&items);
                 if let Some(snapshot_value) = history_snapshot {
                     match serde_json::from_value::<HistorySnapshot>(snapshot_value) {
                         Ok(snapshot) => {
-                            let snapshot_message_count =
-                                Self::snapshot_conversation_message_count(&snapshot);
-                            let snapshot_lags_replay = !items.is_empty()
-                                && replay_message_count > snapshot_message_count;
-                            if snapshot_lags_replay {
-                                tracing::debug!(
-                                    "replay_history: ignored stale snapshot (replay_messages={}, snapshot_messages={})",
-                                    replay_message_count,
-                                    snapshot_message_count
-                                );
-                            } else {
-                                self.restore_history_snapshot(&snapshot);
-                                self.flush_history_snapshot_if_needed(true);
-                                processed_snapshot = true;
-                            }
+                            self.restore_history_snapshot(&snapshot);
+                            self.flush_history_snapshot_if_needed(true);
+                            processed_snapshot = true;
                         }
                         Err(err) => {
                             tracing::warn!("failed to deserialize replay snapshot: {err}");
                         }
                     }
                 }
-                if !processed_snapshot {
+                if processed_snapshot {
+                    for item in &items {
+                        if Self::is_replay_conversation_message_item(item) {
+                            self.render_replay_item(item.clone());
+                        }
+                    }
+                } else {
                     for item in &items {
                         self.render_replay_item(item.clone());
                     }
