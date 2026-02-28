@@ -272,6 +272,40 @@ impl OutgoingMessageSender {
         });
     }
 
+    /// Cancel all pending callbacks scoped to a conversation (e.g. on `TurnAborted`).
+    ///
+    /// Dropping the senders causes waiting receivers to get `Err(RecvError)`, which the
+    /// approval/tool-call handlers treat as a denied decision. This prevents stale requests
+    /// from being replayed to reconnecting clients after the originating turn has ended.
+    pub(crate) async fn cancel_callbacks_for_conversation(&self, conversation_id: Uuid) {
+        let removed: Vec<PendingRequestCallback> = {
+            let mut request_id_to_callback = self.request_id_to_callback.lock().await;
+            let to_remove: Vec<RequestId> = request_id_to_callback
+                .iter()
+                .filter_map(|(id, pending)| {
+                    if pending.conversation_id == Some(conversation_id) {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            to_remove
+                .into_iter()
+                .filter_map(|id| request_id_to_callback.remove(&id))
+                .collect()
+        };
+
+        if !removed.is_empty() {
+            tracing::debug!(
+                "cancel_callbacks_for_conversation: cancelled {} pending request(s) for conversation {conversation_id}",
+                removed.len()
+            );
+        }
+        // Senders are dropped here, causing receivers to resolve with Err(RecvError).
+        drop(removed);
+    }
+
     pub(crate) async fn replay_pending_requests_for_conversation(
         &self,
         connection_id: ConnectionId,
@@ -593,6 +627,52 @@ mod tests {
             .await;
         let value = callback_conn2.await.expect("remaining callback should resolve");
         assert_eq!(value, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn cancel_callbacks_for_conversation_drops_conversation_senders() {
+        let (tx, mut rx_messages) = mpsc::unbounded_channel();
+        let sender = OutgoingMessageSender::new(tx);
+        let conversation_id = Uuid::new_v4();
+        let other_conv_id = Uuid::new_v4();
+
+        let callback_conv = sender
+            .send_request_to_connection_for_conversation(
+                ConnectionId(1),
+                conversation_id,
+                "exec/approval",
+                None,
+            )
+            .await;
+        let _ = rx_messages.recv().await.expect("first request emitted");
+
+        // A second callback for a different conversation must not be affected.
+        let callback_other = sender
+            .send_request_to_connection_for_conversation(
+                ConnectionId(1),
+                other_conv_id,
+                "exec/approval",
+                None,
+            )
+            .await;
+        let _ = rx_messages.recv().await.expect("second request emitted");
+
+        sender.cancel_callbacks_for_conversation(conversation_id).await;
+
+        // The cancelled callback resolves immediately with Err (sender dropped).
+        let cancelled = timeout(Duration::from_millis(25), callback_conv)
+            .await
+            .expect("cancelled callback should resolve")
+            .is_err();
+        assert!(cancelled, "cancelled callback should be an error");
+
+        // The other conversation's callback should still be pending.
+        assert!(
+            timeout(Duration::from_millis(25), callback_other)
+                .await
+                .is_err(),
+            "unrelated conversation callback should remain pending"
+        );
     }
 
     #[tokio::test]

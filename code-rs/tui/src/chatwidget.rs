@@ -5707,19 +5707,27 @@ impl ChatWidget<'_> {
 
         let replay_message_count = replay_messages.len();
         let snapshot_message_count = snapshot_entries.len();
-        if snapshot_message_count > replay_message_count {
-            return Err((replay_message_count, snapshot_message_count));
-        }
+        let replay_is_embedded_in_snapshot = replay_message_count <= snapshot_message_count
+            && snapshot_entries
+                .windows(replay_message_count)
+                .any(|window| window == replay_messages.as_slice());
 
-        if common_prefix < replay_message_count.min(snapshot_message_count) {
-            return Err((replay_message_count, snapshot_message_count));
-        }
+        let skip_indices = if replay_is_embedded_in_snapshot {
+            replay_entries
+                .iter()
+                .map(|(index, _, _)| *index)
+                .collect::<std::collections::HashSet<_>>()
+        } else {
+            if common_prefix < replay_message_count.min(snapshot_message_count) {
+                return Err((replay_message_count, snapshot_message_count));
+            }
 
-        let skip_indices = replay_entries
-            .iter()
-            .take(common_prefix)
-            .map(|(index, _, _)| *index)
-            .collect::<std::collections::HashSet<_>>();
+            replay_entries
+                .iter()
+                .take(common_prefix)
+                .map(|(index, _, _)| *index)
+                .collect::<std::collections::HashSet<_>>()
+        };
 
         let start_index = items.iter().enumerate().find_map(|(index, _)| {
             if skip_indices.contains(&index) {

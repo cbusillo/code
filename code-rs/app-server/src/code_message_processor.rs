@@ -1623,7 +1623,15 @@ async fn apply_bespoke_event_handling(
                 on_request_user_input_response(request_turn_id, rx, conversation).await;
             });
         }
-        // No special handling needed for interrupts; responses are sent immediately.
+        EventMsg::TurnAborted(_ev) => {
+            // Clear any pending approval/tool-call callbacks scoped to this conversation.
+            // Without this, callbacks from the aborted turn survive disconnect and are
+            // replayed to the next client connection via replay_pending_requests_for_conversation,
+            // causing spurious approval prompts for commands that no longer exist.
+            outgoing
+                .cancel_callbacks_for_conversation(uuid::Uuid::from(conversation_id))
+                .await;
+        }
 
         _ => {}
     }
@@ -2121,6 +2129,94 @@ mod tests {
         assert_eq!(
             replayed_request_id, first_request_id,
             "dynamic tool call requests should replay across reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_aborted_clears_conversation_scoped_pending_requests() {
+        let config = Arc::new(
+            Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default())
+                .expect("load default config"),
+        );
+        let auth_manager = AuthManager::shared_with_mode_and_originator(
+            config.code_home.clone(),
+            AuthMode::ApiKey,
+            config.responses_originator_header.clone(),
+        );
+        let conversation_manager = Arc::new(ConversationManager::new(
+            auth_manager,
+            SessionSource::Mcp,
+        ));
+
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
+        let outgoing = Arc::new(OutgoingMessageSender::new(outgoing_tx));
+
+        let new_conversation = conversation_manager
+            .new_conversation((*config).clone())
+            .await
+            .expect("create conversation");
+
+        let conversation_id = new_conversation.conversation_id;
+        let conversation = new_conversation.conversation;
+        apply_bespoke_event_handling(
+            Event {
+                id: "evt-dynamic".to_string(),
+                event_seq: 0,
+                msg: EventMsg::DynamicToolCallRequest(
+                    code_protocol::dynamic_tools::DynamicToolCallRequest {
+                        call_id: "call-abort".to_string(),
+                        turn_id: "turn-abort".to_string(),
+                        tool: "demo".to_string(),
+                        arguments: serde_json::json!({"ok": true}),
+                    },
+                ),
+                order: None,
+            },
+            conversation_id,
+            ConnectionId(7),
+            conversation.clone(),
+            outgoing.clone(),
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+        .await;
+
+        let _ = outgoing_rx
+            .recv()
+            .await
+            .expect("dynamic request should be emitted");
+
+        apply_bespoke_event_handling(
+            Event {
+                id: "evt-abort".to_string(),
+                event_seq: 1,
+                msg: EventMsg::TurnAborted(code_protocol::protocol::TurnAbortedEvent {
+                    reason: code_protocol::protocol::TurnAbortReason::Interrupted,
+                }),
+                order: None,
+            },
+            conversation_id,
+            ConnectionId(7),
+            conversation,
+            outgoing.clone(),
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+        .await;
+
+        outgoing
+            .clear_callbacks_for_connection(ConnectionId(7))
+            .await;
+        outgoing
+            .replay_pending_requests_for_conversation(
+                ConnectionId(8),
+                uuid::Uuid::from(conversation_id),
+            )
+            .await;
+
+        assert!(
+            timeout(Duration::from_millis(25), outgoing_rx.recv())
+                .await
+                .is_err(),
+            "aborted turn should not replay stale pending requests"
         );
     }
 

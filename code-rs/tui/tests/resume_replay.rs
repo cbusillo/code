@@ -391,6 +391,225 @@ fn replay_history_replays_non_message_items_after_snapshot_message_match() {
 }
 
 #[test]
+fn replay_history_accepts_larger_snapshot_when_replay_is_prefix() {
+    // Replay can legitimately contain just a short tail while snapshot holds the fuller
+    // restored transcript. In that case we should keep the snapshot and skip replayed
+    // message duplicates.
+    let snapshot = HistorySnapshot {
+        records: vec![
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("First question")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(2),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Stale answer")],
+                }],
+                metadata: None,
+            }),
+        ],
+        next_id: 3,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![
+            OrderKeySnapshot { req: 1, out: 0, seq: 1 },
+            OrderKeySnapshot { req: 2, out: 0, seq: 2 },
+        ],
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    // Replay only includes the first message from snapshot.
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![message("user", "First question")],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 24);
+
+    // The larger snapshot should be preserved.
+    assert!(
+        visible_text.contains("Stale answer"),
+        "larger matching snapshot should be accepted; screen: {visible_text}"
+    );
+}
+
+#[test]
+fn replay_history_rejects_mismatched_snapshot_when_replay_is_shorter() {
+    let snapshot = HistorySnapshot {
+        records: vec![
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("First question")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(2),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Old answer")],
+                }],
+                metadata: None,
+            }),
+        ],
+        next_id: 3,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![
+            OrderKeySnapshot { req: 1, out: 0, seq: 1 },
+            OrderKeySnapshot { req: 2, out: 0, seq: 2 },
+        ],
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    // Replay diverges immediately, so snapshot should be treated as stale.
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![message("user", "Different prompt")],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 24);
+    assert!(
+        !visible_text.contains("Old answer"),
+        "mismatched snapshot should be rejected; screen: {visible_text}"
+    );
+}
+
+#[test]
+fn replay_history_accepts_larger_snapshot_when_replay_matches_suffix() {
+    let snapshot = HistorySnapshot {
+        records: vec![
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Question A")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(2),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Answer A")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(3),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Question B")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(4),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Answer B")],
+                }],
+                metadata: None,
+            }),
+        ],
+        next_id: 5,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![
+            OrderKeySnapshot { req: 1, out: 0, seq: 1 },
+            OrderKeySnapshot { req: 2, out: 0, seq: 2 },
+            OrderKeySnapshot { req: 3, out: 0, seq: 3 },
+            OrderKeySnapshot { req: 4, out: 0, seq: 4 },
+        ],
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![
+                message("user", "Question B"),
+                message("assistant", "Answer B"),
+                ResponseItem::FunctionCallOutput {
+                    call_id: "tool-2".to_string(),
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text("suffix tool output".to_string()),
+                        success: Some(true),
+                    },
+                },
+            ],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 90, 32);
+    assert!(
+        visible_text.contains("Answer A"),
+        "larger snapshot prefix should be preserved when replay is suffix. screen: {visible_text}"
+    );
+    assert!(
+        visible_text.contains("suffix tool output"),
+        "non-message replay tail should still render. screen: {visible_text}"
+    );
+}
+
+#[test]
 fn replay_history_keeps_interleaved_non_message_items_without_duplicates() {
     let snapshot = HistorySnapshot {
         records: vec![
