@@ -389,3 +389,84 @@ fn replay_history_replays_non_message_items_after_snapshot_message_match() {
         "tool output replay should render even when snapshot/user-assistant messages match. screen: {visible_text}"
     );
 }
+
+#[test]
+fn replay_history_keeps_interleaved_non_message_items_without_duplicates() {
+    let snapshot = HistorySnapshot {
+        records: vec![
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Please summarize the plan.")],
+                }],
+                metadata: None,
+            }),
+            HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(2),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![inline_span("Working baseline")],
+                }],
+                metadata: None,
+            }),
+        ],
+        next_id: 3,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![
+            OrderKeySnapshot { req: 1, out: 0, seq: 1 },
+            OrderKeySnapshot { req: 2, out: 0, seq: 2 },
+        ],
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![
+                message("user", "Please summarize the plan."),
+                ResponseItem::FunctionCall {
+                    id: Some("tool-call".to_string()),
+                    name: "echo".to_string(),
+                    arguments: "{\"value\": \"42\"}".to_string(),
+                    call_id: "tool-1".to_string(),
+                },
+                message("assistant", "Working baseline"),
+                ResponseItem::FunctionCallOutput {
+                    call_id: "tool-1".to_string(),
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text("tool output".to_string()),
+                        success: Some(true),
+                    },
+                },
+            ],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 80, 32);
+    let normalized = visible_text.replace('\u{00a0}', " ");
+
+    assert!(
+        normalized.contains("tool output"),
+        "interleaved non-message replay item should be preserved. screen: {visible_text}"
+    );
+    assert_eq!(
+        normalized.matches("Working baseline").count(),
+        1,
+        "matched assistant text should not be duplicated. screen: {visible_text}"
+    );
+}

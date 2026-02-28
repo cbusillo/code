@@ -1570,7 +1570,12 @@ async fn apply_bespoke_event_handling(
             };
             let value = serde_json::to_value(&params).unwrap_or_default();
             let rx = outgoing
-                .send_request_to_connection(owner_connection_id, DYNAMIC_TOOL_CALL_METHOD, Some(value))
+                .send_request_to_connection_for_conversation(
+                    owner_connection_id,
+                    uuid::Uuid::from(conversation_id),
+                    DYNAMIC_TOOL_CALL_METHOD,
+                    Some(value),
+                )
                 .await;
 
             tokio::spawn(async move {
@@ -1927,6 +1932,14 @@ mod tests {
     use code_protocol::protocol::SessionSource;
     use mcp_types::RequestId;
     use tokio::sync::mpsc;
+    use tokio::time::{timeout, Duration};
+
+    fn request_id_from_message(message: crate::outgoing_message::OutgoingMessage) -> RequestId {
+        match message {
+            crate::outgoing_message::OutgoingMessage::Request(request) => request.id,
+            _ => panic!("expected request message"),
+        }
+    }
 
     fn make_processor_for_tests() -> (CodexMessageProcessor, mpsc::UnboundedReceiver<crate::outgoing_message::OutgoingMessage>) {
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
@@ -2031,6 +2044,84 @@ mod tests {
         );
         assert_eq!(parse_plan_type(Some("mystery".to_string())), PlanType::Unknown);
         assert_eq!(parse_plan_type(None), PlanType::Unknown);
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_call_request_replays_to_new_connection() {
+        let config = Arc::new(
+            Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default())
+                .expect("load default config"),
+        );
+        let auth_manager = AuthManager::shared_with_mode_and_originator(
+            config.code_home.clone(),
+            AuthMode::ApiKey,
+            config.responses_originator_header.clone(),
+        );
+        let conversation_manager = Arc::new(ConversationManager::new(
+            auth_manager,
+            SessionSource::Mcp,
+        ));
+
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
+        let outgoing = Arc::new(OutgoingMessageSender::new(outgoing_tx));
+
+        let new_conversation = conversation_manager
+            .new_conversation((*config).clone())
+            .await
+            .expect("create conversation");
+
+        let conversation_id = new_conversation.conversation_id;
+        let conversation = new_conversation.conversation;
+        apply_bespoke_event_handling(
+            Event {
+                id: "evt-dynamic".to_string(),
+                event_seq: 0,
+                msg: EventMsg::DynamicToolCallRequest(
+                    code_protocol::dynamic_tools::DynamicToolCallRequest {
+                        call_id: "call-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        tool: "demo".to_string(),
+                        arguments: serde_json::json!({"ok": true}),
+                    },
+                ),
+                order: None,
+            },
+            conversation_id,
+            ConnectionId(7),
+            conversation,
+            outgoing.clone(),
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+        .await;
+
+        let first_request_id = request_id_from_message(
+            outgoing_rx
+                .recv()
+                .await
+                .expect("dynamic tool request should be sent"),
+        );
+
+        outgoing
+            .clear_callbacks_for_connection(ConnectionId(7))
+            .await;
+
+        outgoing
+            .replay_pending_requests_for_conversation(
+                ConnectionId(8),
+                uuid::Uuid::from(conversation_id),
+            )
+            .await;
+
+        let replayed_request = timeout(Duration::from_millis(25), outgoing_rx.recv())
+            .await
+            .expect("replay should emit request")
+            .expect("request should be received");
+        let replayed_request_id = request_id_from_message(replayed_request);
+
+        assert_eq!(
+            replayed_request_id, first_request_id,
+            "dynamic tool call requests should replay across reconnect"
+        );
     }
 
     #[test]

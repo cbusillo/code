@@ -84,6 +84,7 @@ impl OutgoingMessageSender {
         self.send_request_impl(None, None, method, params).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn send_request_to_connection(
         &self,
         connection_id: ConnectionId,

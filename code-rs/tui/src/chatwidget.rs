@@ -5682,17 +5682,16 @@ impl ChatWidget<'_> {
     fn replay_start_index_for_snapshot(
         snapshot: &HistorySnapshot,
         items: &[ResponseItem],
-    ) -> Result<Option<usize>, (usize, usize)> {
+    ) -> Result<(Option<usize>, std::collections::HashSet<usize>), (usize, usize)> {
         let replay_entries = Self::replay_conversation_entries_with_indices(items);
         let snapshot_entries = Self::snapshot_conversation_entries(snapshot);
-        let replay_has_non_conversation_items =
-            items.iter().any(|item| !Self::is_replay_conversation_message_item(item));
 
         if replay_entries.is_empty() {
-            if replay_has_non_conversation_items && snapshot.records.is_empty() {
-                return Ok(Some(0));
+            if snapshot.records.is_empty() {
+                let start_index = if items.is_empty() { None } else { Some(0) };
+                return Ok((start_index, std::collections::HashSet::new()));
             }
-            return Ok(None);
+            return Ok((None, std::collections::HashSet::new()));
         }
 
         let replay_messages: Vec<(PlainMessageKind, String)> = replay_entries
@@ -5708,40 +5707,33 @@ impl ChatWidget<'_> {
 
         let replay_message_count = replay_messages.len();
         let snapshot_message_count = snapshot_entries.len();
+        if snapshot_message_count > replay_message_count {
+            return Err((replay_message_count, snapshot_message_count));
+        }
+
         if common_prefix < replay_message_count.min(snapshot_message_count) {
             return Err((replay_message_count, snapshot_message_count));
         }
 
-        let tail_start_index = if snapshot_message_count == 0 {
-            Some(0)
-        } else {
-            replay_entries
-                .get(snapshot_message_count.saturating_sub(1))
-                .map(|(index, _, _)| index.saturating_add(1))
-        }
-        .filter(|index| *index < items.len());
+        let skip_indices = replay_entries
+            .iter()
+            .take(common_prefix)
+            .map(|(index, _, _)| *index)
+            .collect::<std::collections::HashSet<_>>();
 
-        if replay_message_count > snapshot_message_count {
-            return Ok(tail_start_index.or(Some(0)));
-        }
+        let start_index = items.iter().enumerate().find_map(|(index, _)| {
+            if skip_indices.contains(&index) {
+                None
+            } else {
+                Some(index)
+            }
+        });
 
-        if replay_has_non_conversation_items
-            && let Some(start_index) = tail_start_index
-            && items[start_index..]
-                .iter()
-                .any(|item| !Self::is_replay_conversation_message_item(item))
-        {
-            return Ok(Some(start_index));
+        if start_index.is_none() {
+            return Ok((None, skip_indices));
         }
 
-        Ok(None)
-    }
-
-    fn is_replay_conversation_message_item(item: &ResponseItem) -> bool {
-        matches!(
-            item,
-            ResponseItem::Message { role, .. } if role == "user" || role == "assistant"
-        )
+        Ok((start_index, skip_indices))
     }
 
     fn is_auto_review_cell(item: &dyn HistoryCell) -> bool {
@@ -14782,15 +14774,17 @@ impl ChatWidget<'_> {
                 let max_req = self.last_seen_request_index;
                 let mut processed_snapshot = false;
                 let mut replay_start_index = None;
+                let mut replay_skip_indices = std::collections::HashSet::new();
                 if let Some(snapshot_value) = history_snapshot {
                     match serde_json::from_value::<HistorySnapshot>(snapshot_value) {
                         Ok(snapshot) => {
                             match Self::replay_start_index_for_snapshot(&snapshot, &items) {
-                                Ok(start_index) => {
+                                Ok((start_index, skip_indices)) => {
                                     self.restore_history_snapshot(&snapshot);
                                     self.flush_history_snapshot_if_needed(true);
                                     processed_snapshot = true;
                                     replay_start_index = start_index;
+                                    replay_skip_indices = skip_indices;
                                 }
                                 Err((replay_message_count, snapshot_message_count)) => {
                                     tracing::debug!(
@@ -14809,7 +14803,10 @@ impl ChatWidget<'_> {
                 let mut replayed_items = false;
                 if processed_snapshot {
                     if let Some(start_index) = replay_start_index {
-                        for item in items.iter().skip(start_index) {
+                        for (index, item) in items.iter().enumerate().skip(start_index) {
+                            if replay_skip_indices.contains(&index) {
+                                continue;
+                            }
                             self.render_replay_item(item.clone());
                             replayed_items = true;
                         }
@@ -35734,6 +35731,86 @@ use code_core::protocol::OrderMeta;
             !visible_text.contains("old-assistant-snapshot"),
             "stale snapshot content should not replace fresher replay items"
         );
+    }
+
+    #[test]
+    fn replay_snapshot_plan_keeps_interleaved_non_message_items() {
+        let snapshot = HistorySnapshot {
+            records: vec![
+                HistoryRecord::PlainMessage(PlainMessageState {
+                    id: HistoryId(1),
+                    role: PlainMessageRole::User,
+                    kind: PlainMessageKind::User,
+                    header: None,
+                    lines: vec![MessageLine {
+                        kind: MessageLineKind::Paragraph,
+                        spans: vec![InlineSpan {
+                            text: "user prompt".to_string(),
+                            tone: TextTone::Default,
+                            emphasis: TextEmphasis::default(),
+                            entity: None,
+                        }],
+                    }],
+                    metadata: None,
+                }),
+                HistoryRecord::PlainMessage(PlainMessageState {
+                    id: HistoryId(2),
+                    role: PlainMessageRole::Assistant,
+                    kind: PlainMessageKind::Assistant,
+                    header: None,
+                    lines: vec![MessageLine {
+                        kind: MessageLineKind::Paragraph,
+                        spans: vec![InlineSpan {
+                            text: "assistant baseline".to_string(),
+                            tone: TextTone::Default,
+                            emphasis: TextEmphasis::default(),
+                            entity: None,
+                        }],
+                    }],
+                    metadata: None,
+                }),
+            ],
+            next_id: 3,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![OrderKeySnapshot {
+                req: 1,
+                out: 0,
+                seq: 0,
+            }],
+            order_debug: Vec::new(),
+        };
+
+        let replay_items = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "user prompt".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+            ResponseItem::Other,
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "assistant baseline".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+        ];
+
+        let (start_index, skip_indices) =
+            ChatWidget::replay_start_index_for_snapshot(&snapshot, &replay_items)
+                .expect("snapshot prefix should match replay messages");
+
+        assert_eq!(start_index, Some(1));
+        assert!(skip_indices.contains(&0));
+        assert!(skip_indices.contains(&2));
     }
 
 
