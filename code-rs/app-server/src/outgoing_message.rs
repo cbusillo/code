@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::error_code::INTERNAL_ERROR_CODE;
 
@@ -39,6 +40,8 @@ pub(crate) enum OutgoingEnvelope {
 #[derive(Debug)]
 struct PendingRequestCallback {
     connection_id: Option<ConnectionId>,
+    conversation_id: Option<Uuid>,
+    original_request: OutgoingRequest,
     sender: oneshot::Sender<JsonRpcResult>,
 }
 
@@ -78,7 +81,7 @@ impl OutgoingMessageSender {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> oneshot::Receiver<JsonRpcResult> {
-        self.send_request_impl(None, method, params).await
+        self.send_request_impl(None, None, method, params).await
     }
 
     pub(crate) async fn send_request_to_connection(
@@ -87,18 +90,35 @@ impl OutgoingMessageSender {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> oneshot::Receiver<JsonRpcResult> {
-        self.send_request_impl(Some(connection_id), method, params)
+        self.send_request_impl(Some(connection_id), None, method, params)
+            .await
+    }
+
+    pub(crate) async fn send_request_to_connection_for_conversation(
+        &self,
+        connection_id: ConnectionId,
+        conversation_id: Uuid,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> oneshot::Receiver<JsonRpcResult> {
+        self.send_request_impl(Some(connection_id), Some(conversation_id), method, params)
             .await
     }
 
     async fn send_request_impl(
         &self,
         connection_id: Option<ConnectionId>,
+        conversation_id: Option<Uuid>,
         method: &str,
         params: Option<serde_json::Value>,
     ) -> oneshot::Receiver<JsonRpcResult> {
         let id = RequestId::Integer(self.next_request_id.fetch_add(1, Ordering::Relaxed));
         let outgoing_message_id = id.clone();
+        let outgoing_request = OutgoingRequest {
+            id: outgoing_message_id.clone(),
+            method: method.to_string(),
+            params,
+        };
         let (tx_callback, rx_callback) = oneshot::channel();
 
         {
@@ -107,16 +127,14 @@ impl OutgoingMessageSender {
                 id,
                 PendingRequestCallback {
                     connection_id,
+                    conversation_id,
+                    original_request: outgoing_request.clone(),
                     sender: tx_callback,
                 },
             );
         }
 
-        let outgoing_message = OutgoingMessage::Request(OutgoingRequest {
-            id: outgoing_message_id.clone(),
-            method: method.to_string(),
-            params,
-        });
+        let outgoing_message = OutgoingMessage::Request(outgoing_request);
         let envelope = match connection_id {
             Some(connection_id) => OutgoingEnvelope::ToConnection {
                 connection_id,
@@ -223,11 +241,68 @@ impl OutgoingMessageSender {
 
     pub(crate) async fn clear_callbacks_for_connection(&self, connection_id: ConnectionId) {
         let mut request_id_to_callback = self.request_id_to_callback.lock().await;
+        let mut remove_ids = Vec::new();
+
+        for (request_id, pending) in request_id_to_callback.iter_mut() {
+            if pending.connection_id != Some(connection_id) {
+                continue;
+            }
+
+            if pending.conversation_id.is_some() {
+                // Preserve conversation-scoped callbacks so they can be replayed
+                // to a fresh connection after reconnect.
+                pending.connection_id = None;
+            } else {
+                remove_ids.push(request_id.clone());
+            }
+        }
+
+        for request_id in remove_ids {
+            request_id_to_callback.remove(&request_id);
+        }
+    }
+
+    pub(crate) async fn clear_callbacks_for_connection_fully(&self, connection_id: ConnectionId) {
+        let mut request_id_to_callback = self.request_id_to_callback.lock().await;
         request_id_to_callback.retain(|_, pending| {
             pending
                 .connection_id
                 .is_none_or(|owner_connection_id| owner_connection_id != connection_id)
         });
+    }
+
+    pub(crate) async fn replay_pending_requests_for_conversation(
+        &self,
+        connection_id: ConnectionId,
+        conversation_id: Uuid,
+    ) {
+        let mut pending_requests: Vec<OutgoingRequest> = {
+            let mut request_id_to_callback = self.request_id_to_callback.lock().await;
+            request_id_to_callback
+                .values_mut()
+                .filter_map(|pending| {
+                    if pending.conversation_id == Some(conversation_id) {
+                        pending.connection_id = Some(connection_id);
+                        Some(pending.original_request.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        pending_requests.sort_by(|left, right| compare_request_ids(&left.id, &right.id));
+
+        for request in pending_requests {
+            let request_id = request.id.clone();
+            let envelope = OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: OutgoingMessage::Request(request),
+            };
+            if let Err(err) = self.send_envelope(envelope).await {
+                warn!("failed to replay request {request_id:?}: {err:?}");
+            }
+        }
     }
 
     pub async fn send_response<T: Serialize>(&self, id: RequestId, response: T) {
@@ -321,6 +396,17 @@ impl OutgoingMessageSender {
     }
 }
 
+fn compare_request_ids(left: &RequestId, right: &RequestId) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match (left, right) {
+        (RequestId::Integer(left), RequestId::Integer(right)) => left.cmp(right),
+        (RequestId::String(left), RequestId::String(right)) => left.cmp(right),
+        (RequestId::Integer(_), RequestId::String(_)) => Ordering::Less,
+        (RequestId::String(_), RequestId::Integer(_)) => Ordering::Greater,
+    }
+}
+
 /// Outgoing message from the server to the client.
 #[derive(Debug, Clone)]
 pub enum OutgoingMessage {
@@ -398,6 +484,7 @@ mod tests {
     use serde_json::json;
     use tokio::time::Duration;
     use tokio::time::timeout;
+    use uuid::Uuid;
 
     fn request_id_from_message(message: OutgoingMessage) -> RequestId {
         match message {
@@ -504,6 +591,60 @@ mod tests {
             )
             .await;
         let value = callback_conn2.await.expect("remaining callback should resolve");
+        assert_eq!(value, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn replay_pending_requests_for_conversation_sends_to_new_connection() {
+        let (tx, mut rx_messages) = mpsc::unbounded_channel();
+        let sender = OutgoingMessageSender::new(tx);
+        let conversation_id = Uuid::new_v4();
+
+        let mut callback = sender
+            .send_request_to_connection_for_conversation(
+                ConnectionId(1),
+                conversation_id,
+                "item/tool/requestUserInput",
+                Some(json!({ "question": "q" })),
+            )
+            .await;
+        let request_id = request_id_from_message(
+            rx_messages
+                .recv()
+                .await
+                .expect("initial request should be emitted"),
+        );
+
+        sender.clear_callbacks_for_connection(ConnectionId(1)).await;
+
+        assert!(
+            timeout(Duration::from_millis(25), &mut callback)
+                .await
+                .is_err(),
+            "conversation-scoped callback should remain pending after disconnect"
+        );
+
+        sender
+            .replay_pending_requests_for_conversation(ConnectionId(2), conversation_id)
+            .await;
+
+        let replayed_request_id = request_id_from_message(
+            rx_messages
+                .recv()
+                .await
+                .expect("replayed request should be emitted"),
+        );
+        assert_eq!(replayed_request_id, request_id);
+
+        sender
+            .notify_client_response_for_connection(
+                Some(ConnectionId(2)),
+                request_id,
+                json!({ "ok": true }),
+            )
+            .await;
+
+        let value = callback.await.expect("callback should resolve after replay");
         assert_eq!(value, json!({ "ok": true }));
     }
 }

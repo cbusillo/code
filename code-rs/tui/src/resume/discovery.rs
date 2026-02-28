@@ -3,11 +3,13 @@ use code_protocol::protocol::SessionSource;
 use std::path::{Path, PathBuf};
 use std::thread;
 use tokio::runtime::{Builder, Handle};
+use uuid::Uuid;
 
 /// One candidate session for the picker
 #[derive(Clone, Debug)]
 pub struct ResumeCandidate {
     pub path: PathBuf,
+    pub session_id: Uuid,
     pub nickname: Option<String>,
     pub subtitle: Option<String>,
     pub created_ts: Option<String>,
@@ -101,6 +103,7 @@ fn entry_to_candidate(code_home: &Path, entry: SessionIndexEntry) -> ResumeCandi
 
     ResumeCandidate {
         path,
+        session_id: entry.session_id,
         nickname: entry.nickname.clone(),
         subtitle: entry.last_user_snippet.clone(),
         created_ts: Some(entry.created_at.clone()),

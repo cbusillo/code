@@ -14956,6 +14956,11 @@
             "description": "Working directory captured for the thread.",
             "type": "string"
           },
+          "ephemeral": {
+            "default": false,
+            "description": "Whether the thread is ephemeral (not persisted to disk).",
+            "type": "boolean"
+          },
           "gitInfo": {
             "anyOf": [
               {

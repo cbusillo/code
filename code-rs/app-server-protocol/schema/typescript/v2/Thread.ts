@@ -27,6 +27,10 @@ updatedAt: number,
  */
 path: string | null, 
 /**
+ * Whether the thread is ephemeral (not persisted to disk).
+ */
+ephemeral: boolean, 
+/**
  * Working directory captured for the thread.
  */
 cwd: string, 

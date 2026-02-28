@@ -776,6 +776,14 @@ impl CodexMessageProcessor {
                 }
             }
         });
+
+        self.outgoing
+            .replay_pending_requests_for_conversation(
+                owner_connection_id,
+                uuid::Uuid::from(conversation_id),
+            )
+            .await;
+
         let response = AddConversationSubscriptionResponse { subscription_id };
         self.outgoing.send_response(request_id, response).await;
     }
@@ -1502,7 +1510,12 @@ async fn apply_bespoke_event_handling(
             };
             let value = serde_json::to_value(&params).unwrap_or_default();
             let rx = outgoing
-                .send_request_to_connection(owner_connection_id, APPLY_PATCH_APPROVAL_METHOD, Some(value))
+                .send_request_to_connection_for_conversation(
+                    owner_connection_id,
+                    uuid::Uuid::from(conversation_id),
+                    APPLY_PATCH_APPROVAL_METHOD,
+                    Some(value),
+                )
                 .await;
             // TODO(mbolin): Enforce a timeout so this task does not live indefinitely?
             let approval_id = call_id.clone(); // correlate by call_id, not event_id
@@ -1532,7 +1545,12 @@ async fn apply_bespoke_event_handling(
             };
             let value = serde_json::to_value(&params).unwrap_or_default();
             let rx = outgoing
-                .send_request_to_connection(owner_connection_id, EXEC_COMMAND_APPROVAL_METHOD, Some(value))
+                .send_request_to_connection_for_conversation(
+                    owner_connection_id,
+                    uuid::Uuid::from(conversation_id),
+                    EXEC_COMMAND_APPROVAL_METHOD,
+                    Some(value),
+                )
                 .await;
 
             // TODO(mbolin): Enforce a timeout so this task does not live indefinitely?
@@ -1588,8 +1606,9 @@ async fn apply_bespoke_event_handling(
             };
             let value = serde_json::to_value(&params).unwrap_or_default();
             let rx = outgoing
-                .send_request_to_connection(
+                .send_request_to_connection_for_conversation(
                     owner_connection_id,
+                    uuid::Uuid::from(conversation_id),
                     TOOL_REQUEST_USER_INPUT_METHOD,
                     Some(value),
                 )

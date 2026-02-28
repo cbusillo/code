@@ -5494,28 +5494,16 @@ impl ChatWidget<'_> {
                 }
             }
             ResponseItem::FunctionCall { name, arguments, call_id, .. } => {
-                let mut message = self
-                    .format_tool_call_preview(&name, &arguments)
-                    .unwrap_or_else(|| {
-                        let pretty_args = serde_json::from_str::<JsonValue>(&arguments)
-                            .and_then(|v| serde_json::to_string_pretty(&v))
-                            .unwrap_or_else(|_| arguments.clone());
-                        let mut m = format!("🔧 Tool call: {}", name);
-                        if !pretty_args.trim().is_empty() {
-                            m.push_str("\n");
-                            m.push_str(&pretty_args);
-                        }
-                        m
-                    });
-                if !call_id.is_empty() {
-                    message.push_str(&format!("\ncall_id: {}", call_id));
+                if call_id.is_empty() {
+                    return;
                 }
-                let key = self.next_internal_key();
-                let _ = self.history_insert_with_key_global_tagged(
-                    Box::new(crate::history_cell::new_background_event(message)),
-                    key,
-                    "background",
-                    None,
+                let _ = self.format_tool_call_preview(&name, &arguments);
+                self.tools_state.replay_function_calls.insert(
+                    ToolCallId(call_id),
+                    ReplayFunctionCall {
+                        tool_name: name,
+                        arguments: (!arguments.trim().is_empty()).then_some(arguments),
+                    },
                 );
             }
             ResponseItem::Reasoning { summary, .. } => {
@@ -5534,6 +5522,25 @@ impl ChatWidget<'_> {
                 }
             }
             ResponseItem::FunctionCallOutput { output, call_id, .. } => {
+                let replay_call = self
+                    .tools_state
+                    .replay_function_calls
+                    .remove(&ToolCallId(call_id.clone()));
+
+                if let Some(replay_call) = replay_call {
+                    let mut completed = history_cell::new_completed_custom_tool_call(
+                        replay_call.tool_name,
+                        replay_call.arguments,
+                        Duration::ZERO,
+                        output.success.unwrap_or(true),
+                        output.body.to_text().unwrap_or_default(),
+                    );
+                    completed.state_mut().call_id = Some(call_id);
+                    let key = self.next_internal_key();
+                    let _ = self.history_insert_with_key_global(Box::new(completed), key);
+                    return;
+                }
+
                 let mut content = output.body.to_text().unwrap_or_default();
                 let mut metadata_summary = String::new();
                 if let Ok(v) = serde_json::from_str::<JsonValue>(&content) {
@@ -8184,6 +8191,7 @@ impl ChatWidget<'_> {
             canceled_exec_call_ids: HashSet::new(),
             tools_state: ToolState {
                 running_custom_tools: HashMap::new(),
+                replay_function_calls: HashMap::new(),
                 web_search_sessions: HashMap::new(),
                 web_search_by_call: HashMap::new(),
                 web_search_by_order: HashMap::new(),
@@ -14757,6 +14765,7 @@ impl ChatWidget<'_> {
             EventMsg::ReplayHistory(ev) => {
                 self.clear_resume_placeholder();
                 let code_core::protocol::ReplayHistoryEvent { items, history_snapshot } = ev;
+                self.tools_state.replay_function_calls.clear();
                 self.replay_history_depth = self.replay_history_depth.saturating_add(1);
                 let max_req = self.last_seen_request_index;
                 let mut processed_snapshot = false;
@@ -43347,6 +43356,12 @@ pub(super) struct RunningToolEntry {
     history_id: Option<HistoryId>,
 }
 
+#[derive(Clone, Debug)]
+struct ReplayFunctionCall {
+    tool_name: String,
+    arguments: Option<String>,
+}
+
 impl RunningToolEntry {
     fn new(order_key: OrderKey, fallback_index: usize) -> Self {
         Self {
@@ -43365,6 +43380,7 @@ impl RunningToolEntry {
 #[derive(Default)]
 struct ToolState {
     running_custom_tools: HashMap<ToolCallId, RunningToolEntry>,
+    replay_function_calls: HashMap<ToolCallId, ReplayFunctionCall>,
     web_search_sessions: HashMap<String, web_search_sessions::WebSearchTracker>,
     web_search_by_call: HashMap<String, String>,
     web_search_by_order: HashMap<u64, String>,

@@ -279,7 +279,7 @@ pub async fn run_main_with_transport(
                             // Stdio clients can close stdin after sending requests while still
                             // expecting pending responses on stdout.
                             outgoing_message_sender
-                                .clear_callbacks_for_connection(connection_id)
+                                .clear_callbacks_for_connection_fully(connection_id)
                                 .await;
                             processor.on_connection_closed(connection_id).await;
                             let pending_request_routes = wait_for_request_routes_for_connection(

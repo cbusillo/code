@@ -2165,6 +2165,9 @@ pub struct Thread {
     pub updated_at: i64,
     /// [UNSTABLE] Path to the thread on disk.
     pub path: Option<PathBuf>,
+    /// Whether the thread is ephemeral (not persisted to disk).
+    #[serde(default)]
+    pub ephemeral: bool,
     /// Working directory captured for the thread.
     pub cwd: PathBuf,
     /// Version of the CLI that created the thread.
