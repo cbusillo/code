@@ -51,6 +51,34 @@ fn inline_span(text: &str) -> InlineSpan {
     }
 }
 
+fn plain_user_record(id: u64, text: &str) -> HistoryRecord {
+    HistoryRecord::PlainMessage(PlainMessageState {
+        id: HistoryId(id),
+        role: PlainMessageRole::User,
+        kind: PlainMessageKind::User,
+        header: None,
+        lines: vec![MessageLine {
+            kind: MessageLineKind::Paragraph,
+            spans: vec![inline_span(text)],
+        }],
+        metadata: None,
+    })
+}
+
+fn plain_assistant_record(id: u64, text: &str) -> HistoryRecord {
+    HistoryRecord::PlainMessage(PlainMessageState {
+        id: HistoryId(id),
+        role: PlainMessageRole::Assistant,
+        kind: PlainMessageKind::Assistant,
+        header: None,
+        lines: vec![MessageLine {
+            kind: MessageLineKind::Paragraph,
+            spans: vec![inline_span(text)],
+        }],
+        metadata: None,
+    })
+}
+
 fn reasoning_state(id: u64, heading: &str) -> HistoryRecord {
     let summary = vec![inline_span(heading)];
     let section = ReasoningSection {
@@ -687,5 +715,72 @@ fn replay_history_keeps_interleaved_non_message_items_without_duplicates() {
         normalized.matches("Working baseline").count(),
         1,
         "matched assistant text should not be duplicated. screen: {visible_text}"
+    );
+}
+
+#[test]
+fn replay_history_keeps_snapshot_when_hidden_user_action_is_interleaved() {
+    let snapshot = HistorySnapshot {
+        records: vec![
+            plain_user_record(1, "Question A"),
+            plain_assistant_record(2, "Answer A"),
+            plain_user_record(3, "Question B"),
+            plain_user_record(
+                4,
+                "<user_action>\n  <context>review</context>\n</user_action>",
+            ),
+            plain_assistant_record(5, "Answer B"),
+        ],
+        next_id: 6,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![
+            OrderKeySnapshot { req: 1, out: 0, seq: 1 },
+            OrderKeySnapshot { req: 2, out: 0, seq: 2 },
+            OrderKeySnapshot { req: 3, out: 0, seq: 3 },
+            OrderKeySnapshot { req: 4, out: 0, seq: 4 },
+            OrderKeySnapshot { req: 5, out: 0, seq: 5 },
+        ],
+        order_debug: Vec::new(),
+    };
+
+    let snapshot_json = to_value(&snapshot).expect("snapshot to json");
+    let mut harness = ChatWidgetHarness::new();
+
+    harness.handle_event(Event {
+        id: "resume".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![
+                message("user", "Question B"),
+                message(
+                    "user",
+                    "<user_action>\n  <context>review</context>\n</user_action>",
+                ),
+                message("assistant", "Answer B"),
+                ResponseItem::FunctionCallOutput {
+                    call_id: "tool-2".to_string(),
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(
+                            "interleaved hidden tail".to_string(),
+                        ),
+                        success: Some(true),
+                    },
+                },
+            ],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let visible_text = render_chat_widget_to_vt100(&mut harness, 90, 32);
+    assert!(
+        visible_text.contains("Answer A"),
+        "matching snapshot should survive hidden interleaved entries. screen: {visible_text}"
+    );
+    assert!(
+        visible_text.contains("interleaved hidden tail"),
+        "non-message replay tail should still render. screen: {visible_text}"
     );
 }

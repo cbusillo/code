@@ -5620,10 +5620,7 @@ impl ChatWidget<'_> {
                     }
 
                     let trimmed = text.trim();
-                    if trimmed.is_empty()
-                        || trimmed.starts_with("<user_action>")
-                        || trimmed.starts_with("== System Status ==")
-                    {
+                    if Self::should_ignore_replay_message(trimmed) {
                         return None;
                     }
 
@@ -5638,6 +5635,12 @@ impl ChatWidget<'_> {
                 _ => None,
             })
             .collect()
+    }
+
+    fn should_ignore_replay_message(trimmed: &str) -> bool {
+        trimmed.is_empty()
+            || trimmed.starts_with("<user_action>")
+            || trimmed.starts_with("== System Status ==")
     }
 
     fn snapshot_conversation_entries(snapshot: &HistorySnapshot) -> Vec<(PlainMessageKind, String)> {
@@ -5659,19 +5662,29 @@ impl ChatWidget<'_> {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let normalized = Self::normalize_text(text.trim());
-                    if normalized.is_empty() {
+                    let trimmed = text.trim();
+                    if Self::should_ignore_replay_message(trimmed) {
                         None
                     } else {
-                        Some((state.kind, normalized))
+                        let normalized = Self::normalize_text(trimmed);
+                        if normalized.is_empty() {
+                            None
+                        } else {
+                            Some((state.kind, normalized))
+                        }
                     }
                 }
                 HistoryRecord::AssistantMessage(state) => {
-                    let normalized = Self::normalize_text(state.markdown.trim());
-                    if normalized.is_empty() {
+                    let trimmed = state.markdown.trim();
+                    if Self::should_ignore_replay_message(trimmed) {
                         None
                     } else {
-                        Some((PlainMessageKind::Assistant, normalized))
+                        let normalized = Self::normalize_text(trimmed);
+                        if normalized.is_empty() {
+                            None
+                        } else {
+                            Some((PlainMessageKind::Assistant, normalized))
+                        }
                     }
                 }
                 _ => None,
