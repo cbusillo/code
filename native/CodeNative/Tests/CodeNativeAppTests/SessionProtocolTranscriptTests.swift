@@ -957,6 +957,70 @@ final class SessionProtocolTranscriptTests: XCTestCase {
         XCTAssertTrue(item.body.contains("tool timeout"))
     }
 
+    func testAgentStatusUpdateRendersAsCollaborationProgressCard() {
+        let item = makeCoreEventItem(
+            seq: 32,
+            payload: .object([
+                "type": .string("agent_status"),
+                "agents": .array([
+                    .object([
+                        "id": .string("agent-1"),
+                        "name": .string("code-gpt-5.3-codex"),
+                        "status": .string("running"),
+                        "batch_id": .string("batch-123"),
+                        "last_progress": .string("Searching upstream commits")
+                    ]),
+                    .object([
+                        "id": .string("agent-2"),
+                        "name": .string("claude-sonnet-4.6"),
+                        "status": .string("failed"),
+                        "error": .string("network timeout")
+                    ]),
+                    .object([
+                        "id": .string("agent-3"),
+                        "name": .string("gemini-3-flash"),
+                        "status": .string("completed")
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.cardStyle, .tool)
+        XCTAssertTrue(item.isCollaborationProgressEvent)
+        XCTAssertTrue(item.shouldHideFromTranscript)
+        XCTAssertTrue(item.isOptionalActivityEvent)
+        XCTAssertEqual(item.collaborationProgressEvent?.status, .inProgress)
+        XCTAssertTrue(item.body.contains("agent running"))
+        XCTAssertTrue(item.body.contains("Failed: 1"))
+        XCTAssertTrue(item.body.contains("Searching upstream commits"))
+    }
+
+    func testAgentStatusUpdateMarksFailuresWhenNoAgentsRunning() {
+        let item = makeCoreEventItem(
+            seq: 33,
+            payload: .object([
+                "type": .string("agent_status"),
+                "agents": .array([
+                    .object([
+                        "id": .string("agent-1"),
+                        "name": .string("code-gpt-5.3-codex"),
+                        "status": .string("failed"),
+                        "error": .string("invalid response")
+                    ]),
+                    .object([
+                        "id": .string("agent-2"),
+                        "name": .string("claude-sonnet-4.6"),
+                        "status": .string("cancelled")
+                    ])
+                ])
+            ])
+        )
+
+        XCTAssertEqual(item.collaborationProgressEvent?.status, .failed)
+        XCTAssertTrue(item.body.contains("Agents completed with errors"))
+        XCTAssertTrue(item.body.contains("Cancelled: 1"))
+    }
+
     private func makeCoreEventItem(seq: UInt64, payload: JSONValue) -> SessionStreamItem {
         let event = CoreEventPayload(
             id: "event-\(seq)",

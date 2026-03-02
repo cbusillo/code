@@ -1197,6 +1197,9 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         object: [String: JSONValue]
     ) -> CollaborationProgressEvent? {
         switch payloadType {
+        case "agent_status":
+            return parseAgentStatusUpdateEvent(object)
+
         case "collab_agent_spawn_begin":
             let callId = normalizedBrowserValue(object["call_id"]?.stringValue)
             let senderThread = normalizedBrowserValue(object["sender_thread_id"]?.stringValue)
@@ -1443,6 +1446,108 @@ struct SessionStreamItem: Decodable, Hashable, Identifiable {
         default:
             return nil
         }
+    }
+
+    private func parseAgentStatusUpdateEvent(
+        _ object: [String: JSONValue]
+    ) -> CollaborationProgressEvent? {
+        guard let agents = object["agents"]?.arrayValue,
+              !agents.isEmpty
+        else {
+            return nil
+        }
+
+        var pendingCount = 0
+        var runningCount = 0
+        var completedCount = 0
+        var failedCount = 0
+        var cancelledCount = 0
+        var detailLines: [String] = []
+        var artifactLines: [String] = []
+        var batchID: String?
+
+        for value in agents {
+            guard let agent = value.objectValue else {
+                continue
+            }
+
+            let status = agent["status"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? "running"
+
+            switch status {
+            case "pending", "pending_init":
+                pendingCount += 1
+            case "running":
+                runningCount += 1
+            case "completed", "succeeded", "success", "shutdown":
+                completedCount += 1
+            case "cancelled", "canceled":
+                cancelledCount += 1
+            case "failed", "error", "errored", "not_found":
+                failedCount += 1
+            default:
+                runningCount += 1
+            }
+
+            let displayName = normalizedBrowserValue(
+                agent["name"]?.stringValue
+                    ?? agent["model"]?.stringValue
+                    ?? agent["id"]?.stringValue
+            )
+            let normalizedStatus = status.replacingOccurrences(of: "_", with: " ")
+
+            if let displayName,
+               detailLines.count < 4 {
+                detailLines.append("\(displayName): \(normalizedStatus)")
+            }
+
+            let progress = normalizedBrowserValue(agent["last_progress"]?.stringValue)
+            let error = normalizedBrowserValue(agent["error"]?.stringValue)
+            if let displayName,
+               let preview = error ?? progress,
+               !preview.isEmpty,
+               artifactLines.count < 2 {
+                artifactLines.append("\(displayName): \(truncate(preview, maxCharacters: 180))")
+            }
+
+            if batchID == nil {
+                batchID = normalizedBrowserValue(agent["batch_id"]?.stringValue)
+            }
+        }
+
+        let activeCount = pendingCount + runningCount
+        let status: CollaborationProgressStatus
+        let headline: String
+        if activeCount > 0 {
+            status = .inProgress
+            headline = activeCount == 1 ? "1 agent running" : "\(activeCount) agents running"
+        } else if failedCount > 0 {
+            status = .failed
+            headline = "Agents completed with errors"
+        } else {
+            status = .succeeded
+            headline = "Agents finished"
+        }
+
+        var summary = "Running: \(runningCount) · Pending: \(pendingCount) · Completed: \(completedCount)"
+        if failedCount > 0 {
+            summary += " · Failed: \(failedCount)"
+        }
+        if cancelledCount > 0 {
+            summary += " · Cancelled: \(cancelledCount)"
+        }
+
+        var lines = [summary]
+        lines.append(contentsOf: detailLines)
+
+        return CollaborationProgressEvent(
+            status: status,
+            headline: headline,
+            detailLines: lines,
+            artifactPreview: artifactLines.isEmpty ? nil : artifactLines.joined(separator: "\n"),
+            callId: batchID
+        )
     }
 
     private func parseCollaborationAgentStatus(_ value: JSONValue?) -> CollaborationAgentStatusSummary {

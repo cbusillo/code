@@ -3,6 +3,7 @@ import Combine
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Network
+import UniformTypeIdentifiers
 
 #if os(macOS)
 import AppKit
@@ -810,7 +811,7 @@ struct ContentView: View {
 
     #if os(macOS)
     private var macComposerTextColor: NSColor {
-        NSColor.labelColor
+        NSColor.white.withAlphaComponent(0.92)
     }
 
     private var macComposerInsertionPointColor: NSColor {
@@ -1149,7 +1150,14 @@ struct ContentView: View {
                 return
             }
 
-            if !composerIsFocused || newValue.isEmpty {
+            if !composerIsFocused {
+                composerDraft = newValue
+                return
+            }
+
+            // Keep local in-progress edits while focused; only merge remote
+            // updates into an empty draft to avoid keystrokes disappearing.
+            if composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 composerDraft = newValue
             }
         }
@@ -3604,6 +3612,9 @@ struct ContentView: View {
                 .onTapGesture {
                     focusComposerEditor(forceActivateApp: true)
                 }
+                .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil) { providers in
+                    handleComposerDrop(providers: providers)
+                }
                 #endif
 
                 if showsInlineContextSuggestions {
@@ -5058,6 +5069,109 @@ struct ContentView: View {
         showContextPicker = false
         focusComposerEditor(forceActivateApp: true)
     }
+
+    #if os(macOS)
+    private func handleComposerDrop(providers: [NSItemProvider]) -> Bool {
+        let fileURLProviders = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }
+        guard !fileURLProviders.isEmpty else {
+            return false
+        }
+
+        for provider in fileURLProviders {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let droppedURL: URL?
+                if let url = item as? URL {
+                    droppedURL = url
+                } else if let data = item as? Data {
+                    droppedURL = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let string = item as? String {
+                    droppedURL = URL(string: string)
+                } else {
+                    droppedURL = nil
+                }
+
+                guard let droppedURL,
+                      droppedURL.isFileURL
+                else {
+                    return
+                }
+
+                Task { @MainActor in
+                    handleDroppedFileURL(droppedURL.standardizedFileURL)
+                }
+            }
+        }
+
+        return true
+    }
+
+    private func handleDroppedFileURL(_ url: URL) {
+        let droppedPath = url.path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !droppedPath.isEmpty else {
+            return
+        }
+
+        if isImageFile(url) {
+            appendToComposer("[image: \(droppedPath)]")
+        } else {
+            let referencePath = droppedContextReference(for: droppedPath)
+            let referenceToken = ComposerContextReferenceFormatter.formattedReferenceToken(path: referencePath)
+            appendToComposer(referenceToken)
+        }
+
+        focusComposerEditor(forceActivateApp: true)
+    }
+
+    private func appendToComposer(_ token: String) {
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else {
+            return
+        }
+
+        if composerDraft.isEmpty {
+            composerDraft = trimmedToken
+            return
+        }
+
+        let needsSeparator = !composerDraft.hasSuffix(" ") && !composerDraft.hasSuffix("\n")
+        composerDraft += needsSeparator ? " " : ""
+        composerDraft += trimmedToken
+    }
+
+    private func droppedContextReference(for droppedPath: String) -> String {
+        guard let cwd = store.selectedSession?.cwd,
+              !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return droppedPath
+        }
+
+        let cwdURL = URL(fileURLWithPath: cwd, isDirectory: true).standardizedFileURL
+        let droppedURL = URL(fileURLWithPath: droppedPath).standardizedFileURL
+        let cwdComponents = cwdURL.pathComponents
+        let droppedComponents = droppedURL.pathComponents
+
+        guard droppedComponents.starts(with: cwdComponents),
+              droppedComponents.count > cwdComponents.count
+        else {
+            return droppedPath
+        }
+
+        return droppedComponents.dropFirst(cwdComponents.count).joined(separator: "/")
+    }
+
+    private func isImageFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ext.isEmpty,
+              let type = UTType(filenameExtension: ext)
+        else {
+            return false
+        }
+
+        return type.conforms(to: .image)
+    }
+    #endif
 
     private func syncInlineContextSelection() {
         guard showsInlineContextSuggestions else {

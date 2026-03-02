@@ -68,7 +68,7 @@ const CONTEXT_SEARCH_LIMIT_MAX: usize = 100;
 const CONTEXT_SEARCH_MAX_FILES: usize = 5_000;
 const ROLLOUT_TAIL_POLL_INTERVAL_MS: u64 = 350;
 const NO_STORE: &str = "no-store, max-age=0";
-const DEFAULT_OWNER_MIRROR_ENDPOINT: &str = "ws://127.0.0.1:4317/ws";
+const MAX_OWNER_MIRROR_RECONNECT_FAILURES: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct WebServerOptions {
@@ -332,7 +332,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 from_seq,
             } => {
                 match state.hub.attach_session(session_id, from_seq).await {
-                    Ok((history_batch, stream)) => {
+                    Ok((history_batch, stream, link_state)) => {
                         let replay_bytes: usize =
                             history_batch.items.iter().map(estimate_stream_item_json_size).sum();
                         info!(
@@ -350,6 +350,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             session_id,
                             from_seq: from_seq.unwrap_or(0),
                             has_more_before: history_batch.has_more_before,
+                            link_state,
                             items: history_batch.items,
                         }).await;
 
@@ -682,12 +683,12 @@ fn owner_mirror_endpoint_from_session_details(details: Option<&str>) -> Option<S
     }
 }
 
-fn default_owner_mirror_endpoint() -> String {
+fn owner_mirror_endpoint_from_env() -> Option<String> {
     std::env::var("CODE_APP_SERVER_MIRROR_ENDPOINT")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_OWNER_MIRROR_ENDPOINT.to_string())
+        .filter(|value| value.starts_with("ws://") || value.starts_with("wss://"))
 }
 
 fn owner_mirror_endpoint_for_listener(
@@ -786,6 +787,15 @@ struct WebUserInputAnswer {
     answers: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLinkState {
+    Live,
+    Mirroring,
+    HistoryOnly,
+    Unavailable,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMessage {
@@ -809,6 +819,7 @@ enum ServerMessage {
         session_id: Uuid,
         from_seq: u64,
         has_more_before: bool,
+        link_state: SessionLinkState,
         items: Vec<SessionStreamItem>,
     },
     SessionHistoryPage {
@@ -894,6 +905,8 @@ enum OwnerMirrorServerMessage {
         session_id: Uuid,
         from_seq: u64,
         has_more_before: bool,
+        #[serde(default)]
+        link_state: Option<SessionLinkState>,
         items: Vec<SessionStreamItem>,
     },
     SessionStream {
@@ -921,6 +934,7 @@ pub struct SessionSummary {
     cwd: String,
     created_at_unix_ms: u64,
     last_event_at_unix_ms: u64,
+    link_state: SessionLinkState,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
 }
@@ -991,10 +1005,11 @@ impl SessionHub {
     async fn list_sessions(&self) -> Vec<SessionSummary> {
         let mut values_by_id: HashMap<Uuid, SessionSummary> = {
             let sessions = self.sessions.read().await;
-            sessions
-                .values()
-                .map(|session| (session.summary.id, session.summary.clone()))
-                .collect()
+            let mut summaries = HashMap::with_capacity(sessions.len());
+            for session in sessions.values() {
+                summaries.insert(session.summary.id, session.summary_snapshot().await);
+            }
+            summaries
         };
 
         for summary in self.catalog_summaries().await {
@@ -1112,15 +1127,16 @@ impl SessionHub {
         &self,
         session_id: Uuid,
         from_seq: Option<u64>,
-    ) -> Result<(HistoryBatch, broadcast::Receiver<SessionStreamItem>), String> {
+    ) -> Result<(HistoryBatch, broadcast::Receiver<SessionStreamItem>, SessionLinkState), String> {
         let session = self.session_for_id(session_id).await?;
         let requested_from_seq = from_seq.unwrap_or(0);
+        let link_state = session.current_link_state().await;
 
         // Subscribe first to avoid losing events emitted during history replay.
         let receiver = session.stream.subscribe();
         let history = session.history_since(requested_from_seq).await;
         let history = truncate_attach_history(history, requested_from_seq);
-        Ok((history, receiver))
+        Ok((history, receiver, link_state))
     }
 
     async fn load_history_before(
@@ -1317,42 +1333,76 @@ impl SessionHub {
                 details,
             }) => {
                 let hinted_endpoint = owner_mirror_endpoint_from_session_details(Some(&details));
-                let endpoint = hinted_endpoint
-                    .clone()
-                    .unwrap_or_else(default_owner_mirror_endpoint);
-                info!(
-                    "Session {session_id} is active in owner runtime {conversation_id}{details}; mirroring via {endpoint}"
-                );
-
                 let seed_history = load_rollout_seed_history(session_id, &rollout_path).await;
-                let summary = SessionSummary {
-                    id: session_id,
-                    conversation_id: session_id.to_string(),
-                    model: entry
-                        .model_provider
-                        .unwrap_or_else(|| "Unknown model".to_string()),
-                    cwd: entry.cwd_real.display().to_string(),
-                    created_at_unix_ms: parse_rfc3339_millis(&entry.created_at),
-                    last_event_at_unix_ms: parse_rfc3339_millis(&entry.last_event_at),
-                    title: entry
-                        .nickname
-                        .and_then(|value| {
+                let endpoint = hinted_endpoint.or_else(owner_mirror_endpoint_from_env);
+
+                let summary_title = entry
+                    .nickname
+                    .and_then(|value| {
+                        let trimmed = value.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    })
+                    .or_else(|| {
+                        entry.last_user_snippet.and_then(|value| {
                             let trimmed = value.trim();
                             (!trimmed.is_empty()).then(|| trimmed.to_string())
                         })
-                        .or_else(|| {
-                            entry.last_user_snippet.and_then(|value| {
-                                let trimmed = value.trim();
-                                (!trimmed.is_empty()).then(|| trimmed.to_string())
-                            })
-                        }),
-                };
+                    });
 
-                Ok(LiveSession::new_owner_mirror(
-                    summary,
-                    endpoint,
-                    seed_history.items,
-                ))
+                let summary_model = entry
+                    .model_provider
+                    .unwrap_or_else(|| "Unknown model".to_string());
+
+                match endpoint {
+                    Some(endpoint) => {
+                        info!(
+                            "Session {session_id} is active in owner runtime {conversation_id}{details}; mirroring via {endpoint}"
+                        );
+
+                        let summary = SessionSummary {
+                            id: session_id,
+                            conversation_id: session_id.to_string(),
+                            model: summary_model,
+                            cwd: entry.cwd_real.display().to_string(),
+                            created_at_unix_ms: parse_rfc3339_millis(&entry.created_at),
+                            last_event_at_unix_ms: parse_rfc3339_millis(&entry.last_event_at),
+                            link_state: SessionLinkState::Mirroring,
+                            title: summary_title,
+                        };
+
+                        Ok(LiveSession::new_owner_mirror(
+                            summary,
+                            endpoint,
+                            seed_history.items,
+                        ))
+                    }
+                    None => {
+                        warn!(
+                            "Session {session_id} is active in owner runtime {conversation_id}{details}, but no mirror endpoint hint/env was available; showing history-only snapshot"
+                        );
+
+                        let summary = SessionSummary {
+                            id: session_id,
+                            conversation_id: session_id.to_string(),
+                            model: summary_model,
+                            cwd: entry.cwd_real.display().to_string(),
+                            created_at_unix_ms: parse_rfc3339_millis(&entry.created_at),
+                            last_event_at_unix_ms: parse_rfc3339_millis(&entry.last_event_at),
+                            link_state: SessionLinkState::HistoryOnly,
+                            title: summary_title,
+                        };
+
+                        let session = LiveSession::new_history_only(summary, seed_history.items);
+                        session
+                            .push_system_message(
+                                "warning".to_string(),
+                                "[session_link_state] history_only: owner endpoint unavailable; this session is read-only until the owner reconnects"
+                                    .to_string(),
+                            )
+                            .await;
+                        Ok(session)
+                    }
+                }
             }
             Err(err) => Err(format!("Failed to resume session {session_id}: {err}")),
         }
@@ -1392,6 +1442,7 @@ impl SessionHub {
                 cwd: entry.cwd_real.display().to_string(),
                 created_at_unix_ms: parse_rfc3339_millis(&entry.created_at),
                 last_event_at_unix_ms: parse_rfc3339_millis(&entry.last_event_at),
+                link_state: SessionLinkState::Unavailable,
                 title: entry
                     .nickname
                     .and_then(|value| {
@@ -1742,6 +1793,7 @@ struct LiveSession {
     summary: SessionSummary,
     conversation: Option<Arc<CodexConversation>>,
     owner_mirror_endpoint: Option<String>,
+    link_state: RwLock<SessionLinkState>,
     stream: broadcast::Sender<SessionStreamItem>,
     history: RwLock<Vec<SessionStreamItem>>,
     next_stream_seq: AtomicU64,
@@ -1770,6 +1822,7 @@ impl LiveSession {
             cwd: cwd.display().to_string(),
             created_at_unix_ms,
             last_event_at_unix_ms: created_at_unix_ms,
+            link_state: SessionLinkState::Live,
             title: None,
         };
 
@@ -1779,6 +1832,7 @@ impl LiveSession {
             summary,
             conversation: Some(new_conversation.conversation),
             owner_mirror_endpoint: None,
+            link_state: RwLock::new(SessionLinkState::Live),
             stream,
             history: RwLock::new(initial_history),
             next_stream_seq: AtomicU64::new(next_seq),
@@ -1804,6 +1858,7 @@ impl LiveSession {
             summary,
             conversation: None,
             owner_mirror_endpoint: Some(owner_mirror_endpoint),
+            link_state: RwLock::new(SessionLinkState::Mirroring),
             stream,
             history: RwLock::new(seed_history),
             next_stream_seq: AtomicU64::new(next_seq),
@@ -1813,6 +1868,43 @@ impl LiveSession {
                 cursor: 0,
             }),
         })
+    }
+
+    fn new_history_only(summary: SessionSummary, seed_history: Vec<SessionStreamItem>) -> Arc<Self> {
+        let next_seq = seed_history
+            .last()
+            .map_or(1, |item| item.seq().saturating_add(1));
+        let (stream, _) = broadcast::channel::<SessionStreamItem>(1024);
+
+        Arc::new(Self {
+            summary,
+            conversation: None,
+            owner_mirror_endpoint: None,
+            link_state: RwLock::new(SessionLinkState::HistoryOnly),
+            stream,
+            history: RwLock::new(seed_history),
+            next_stream_seq: AtomicU64::new(next_seq),
+            composer: RwLock::new(ComposerState {
+                rev: 0,
+                text: String::new(),
+                cursor: 0,
+            }),
+        })
+    }
+
+    async fn current_link_state(&self) -> SessionLinkState {
+        *self.link_state.read().await
+    }
+
+    async fn summary_snapshot(&self) -> SessionSummary {
+        let mut summary = self.summary.clone();
+        summary.link_state = self.current_link_state().await;
+        summary
+    }
+
+    async fn set_link_state(&self, next_state: SessionLinkState) {
+        let mut state = self.link_state.write().await;
+        *state = next_state;
     }
 
     fn spawn_dispatcher(self: &Arc<Self>) {
@@ -1843,17 +1935,30 @@ impl LiveSession {
             let session = Arc::clone(self);
             tokio::spawn(async move {
                 let mut reconnect_delay = std::time::Duration::from_millis(800);
+                let mut consecutive_failures = 0usize;
                 loop {
                     let result = session.run_owner_mirror_stream_once(&endpoint).await;
                     match result {
                         Ok(()) => break,
                         Err(err) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
                             warn!(
                                 "owner mirror stream ended for session {} via {}: {}",
                                 session.summary.id,
                                 endpoint,
                                 err
                             );
+                            if consecutive_failures >= MAX_OWNER_MIRROR_RECONNECT_FAILURES {
+                                session.set_link_state(SessionLinkState::HistoryOnly).await;
+                                session
+                                    .push_system_message(
+                                        "warning".to_string(),
+                                        "[session_link_state] history_only: owner mirror unavailable; showing cached history only"
+                                            .to_string(),
+                                    )
+                                    .await;
+                                break;
+                            }
                             tokio::time::sleep(reconnect_delay).await;
                             reconnect_delay = (reconnect_delay * 2)
                                 .min(std::time::Duration::from_secs(8));
@@ -1965,10 +2070,16 @@ impl LiveSession {
             return Ok(());
         }
 
+        let cwd = PathBuf::from(&self.summary.cwd);
+        let items = composer_text_to_input_items(&text, &cwd);
+        if items.is_empty() {
+            return Ok(());
+        }
+
         if let Some(conversation) = &self.conversation {
             conversation
                 .submit(Op::UserInput {
-                    items: vec![InputItem::Text { text }],
+                    items,
                     final_output_json_schema: None,
                 })
                 .await
@@ -2220,12 +2331,16 @@ impl LiveSession {
                     session_id,
                     from_seq,
                     has_more_before,
+                    link_state,
                     items,
                 } => {
                     if session_id != self.summary.id {
                         continue;
                     }
                     let _ = (from_seq, has_more_before);
+                    if let Some(next_link_state) = link_state {
+                        self.set_link_state(next_link_state).await;
+                    }
                     for item in items {
                         self.push_item(item).await;
                     }
@@ -2337,6 +2452,78 @@ impl LiveSession {
         tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_ack)
             .await
             .map_err(|_| "timed out waiting for owner mirror command ack".to_string())?
+    }
+}
+
+fn composer_text_to_input_items(text: &str, cwd: &Path) -> Vec<InputItem> {
+    let mut items = Vec::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("[image:") {
+        let (before, marker_and_after) = remaining.split_at(start);
+        if !before.trim().is_empty() {
+            items.push(InputItem::Text {
+                text: before.to_string(),
+            });
+        }
+
+        let after_marker = &marker_and_after["[image:".len()..];
+        let Some(end) = after_marker.find(']') else {
+            if !marker_and_after.trim().is_empty() {
+                items.push(InputItem::Text {
+                    text: marker_and_after.to_string(),
+                });
+            }
+            remaining = "";
+            break;
+        };
+
+        let raw_path = after_marker[..end].trim();
+        if raw_path.is_empty() {
+            let literal = &marker_and_after[.."[image:".len() + end + 1];
+            if !literal.trim().is_empty() {
+                items.push(InputItem::Text {
+                    text: literal.to_string(),
+                });
+            }
+        } else {
+            let resolved_path = resolve_image_path(raw_path, cwd);
+            let filename = resolved_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image")
+                .to_string();
+            items.push(InputItem::Text {
+                text: format!("[image: {filename}]"),
+            });
+            items.push(InputItem::LocalImage {
+                path: resolved_path,
+            });
+        }
+
+        remaining = &after_marker[end + 1..];
+    }
+
+    if !remaining.trim().is_empty() {
+        items.push(InputItem::Text {
+            text: remaining.to_string(),
+        });
+    }
+
+    items
+}
+
+fn resolve_image_path(raw_path: &str, cwd: &Path) -> PathBuf {
+    let trimmed = raw_path
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
     }
 }
 
@@ -2801,7 +2988,25 @@ fn merge_session_summaries(existing: &SessionSummary, incoming: &SessionSummary)
         cwd: existing.cwd.clone(),
         created_at_unix_ms: existing.created_at_unix_ms.min(incoming.created_at_unix_ms),
         last_event_at_unix_ms: session_activity_unix_ms(existing).max(session_activity_unix_ms(incoming)),
+        link_state: preferred_link_state(existing.link_state, incoming.link_state),
         title: existing.title.clone().or_else(|| incoming.title.clone()),
+    }
+}
+
+fn preferred_link_state(existing: SessionLinkState, incoming: SessionLinkState) -> SessionLinkState {
+    fn rank(state: SessionLinkState) -> u8 {
+        match state {
+            SessionLinkState::Live => 4,
+            SessionLinkState::Mirroring => 3,
+            SessionLinkState::HistoryOnly => 2,
+            SessionLinkState::Unavailable => 1,
+        }
+    }
+
+    if rank(incoming) > rank(existing) {
+        incoming
+    } else {
+        existing
     }
 }
 
@@ -3372,6 +3577,52 @@ mod tests {
     }
 
     #[test]
+    fn composer_text_to_input_items_converts_image_placeholders() {
+        let cwd = Path::new("/workspace/project");
+        let text = "Review this [image: /tmp/screenshot.png] before patching";
+        let items = composer_text_to_input_items(text, cwd);
+
+        assert_eq!(items.len(), 4);
+        match &items[0] {
+            InputItem::Text { text } => assert_eq!(text, "Review this "),
+            other => panic!("expected text item, got {other:?}"),
+        }
+        match &items[1] {
+            InputItem::Text { text } => assert_eq!(text, "[image: screenshot.png]"),
+            other => panic!("expected image marker text, got {other:?}"),
+        }
+        match &items[2] {
+            InputItem::LocalImage { path } => {
+                assert_eq!(path, &PathBuf::from("/tmp/screenshot.png"));
+            }
+            other => panic!("expected local image item, got {other:?}"),
+        }
+        match &items[3] {
+            InputItem::Text { text } => assert_eq!(text, " before patching"),
+            other => panic!("expected trailing text item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composer_text_to_input_items_resolves_relative_image_paths_against_cwd() {
+        let cwd = Path::new("/workspace/project");
+        let text = "[image: assets/mock.png]";
+        let items = composer_text_to_input_items(text, cwd);
+
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            InputItem::Text { text } => assert_eq!(text, "[image: mock.png]"),
+            other => panic!("expected image marker text, got {other:?}"),
+        }
+        match &items[1] {
+            InputItem::LocalImage { path } => {
+                assert_eq!(path, &PathBuf::from("/workspace/project/assets/mock.png"));
+            }
+            other => panic!("expected local image item, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn owner_mirror_endpoint_from_session_details_parses_ws_endpoint() {
         let details = "(pid 9999, session abc, endpoint ws://127.0.0.1:45555/ws)";
         let parsed = owner_mirror_endpoint_from_session_details(Some(details));
@@ -3428,6 +3679,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             created_at_unix_ms: 0,
             last_event_at_unix_ms: 0,
+            link_state: SessionLinkState::Live,
             title: None,
         }
     }
