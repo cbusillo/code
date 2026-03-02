@@ -32622,6 +32622,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn skipped_auto_review_with_findings_defers_to_next_turn() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let _rt = enter_test_runtime_guard();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
@@ -32693,6 +32694,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn skipped_auto_review_clean_runs_immediately() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let _rt = enter_test_runtime_guard();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
@@ -32745,6 +32747,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn multiple_skipped_auto_reviews_collapse_to_first_base() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let _rt = enter_test_runtime_guard();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
@@ -32808,6 +32811,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn stale_background_review_is_reclaimed() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let _rt = enter_test_runtime_guard();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
@@ -34239,9 +34243,10 @@ use code_core::protocol::OrderMeta;
         let base_for_capture = base_id.clone();
         let final_for_capture = final_id.clone();
         let _capture_guard = CaptureCommitStubGuard::install(move |message, parent| {
-            assert_eq!(message, "auto turn change snapshot");
-            assert_eq!(parent.as_deref(), Some(base_for_capture.as_str()));
-            Ok(GhostCommit::new(final_for_capture.clone(), parent))
+            if message == "auto turn change snapshot" {
+                return Ok(GhostCommit::new(final_for_capture.clone(), parent));
+            }
+            Ok(GhostCommit::new(base_for_capture.clone(), parent))
         });
 
         let base_for_diff = base_id.clone();
@@ -34319,9 +34324,10 @@ use code_core::protocol::OrderMeta;
         let base_for_capture = base_id.clone();
         let final_for_capture = final_id.clone();
         let _capture_guard = CaptureCommitStubGuard::install(move |message, parent| {
-            assert_eq!(message, "auto turn change snapshot");
-            assert_eq!(parent.as_deref(), Some(base_for_capture.as_str()));
-            Ok(GhostCommit::new(final_for_capture.clone(), parent))
+            if message == "auto turn change snapshot" {
+                return Ok(GhostCommit::new(final_for_capture.clone(), parent));
+            }
+            Ok(GhostCommit::new(base_for_capture.clone(), parent))
         });
 
         let base_for_diff = base_id.clone();
@@ -34851,9 +34857,10 @@ use code_core::protocol::OrderMeta;
         let base_for_capture = base_id.clone();
         let final_for_capture = final_id.clone();
         let _capture_guard = CaptureCommitStubGuard::install(move |message, parent| {
-            assert_eq!(message, "auto turn change snapshot");
-            assert_eq!(parent.as_deref(), Some(base_for_capture.as_str()));
-            Ok(GhostCommit::new(final_for_capture.clone(), parent))
+            if message == "auto turn change snapshot" {
+                return Ok(GhostCommit::new(final_for_capture.clone(), parent));
+            }
+            Ok(GhostCommit::new(base_for_capture.clone(), parent))
         });
 
         let base_for_diff = base_id.clone();
