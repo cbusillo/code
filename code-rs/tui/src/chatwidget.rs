@@ -43,7 +43,7 @@ use code_core::config_types::Notifications;
 use code_core::config_types::ReasoningEffort;
 use code_core::config_types::ServiceTier;
 use code_core::config_types::TextVerbosity;
-use code_core::spawn::spawn_std_command_with_retry;
+use code_core::spawn::spawn_background_command_with_retry;
 use code_core::plan_tool::{PlanItemArg, StepStatus, UpdatePlanArgs};
 use code_core::model_family::derive_default_model_family;
 use code_core::model_family::find_family_for_model;
@@ -27355,7 +27355,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with profile: {err}");
             }
         }
@@ -27377,7 +27377,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with profile: {err}");
             }
         }
@@ -27410,7 +27410,7 @@ Have we met every part of this goal and is there no further work to do?"#
                         .stderr(Stdio::null())
                         .stdin(Stdio::null());
                     self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-                    if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+                    if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                         tracing::warn!("failed to launch Chrome with profile: {err}");
                     }
                     break;
@@ -28010,7 +28010,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with temp profile: {err}");
             }
         }
@@ -28033,7 +28033,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with temp profile: {err}");
             }
         }
@@ -28067,7 +28067,7 @@ Have we met every part of this goal and is there no further work to do?"#
                         .stderr(Stdio::null())
                         .stdin(Stdio::null());
                     self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-                    if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+                    if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                         tracing::warn!("failed to launch Chrome with temp profile: {err}");
                     }
                     break;
