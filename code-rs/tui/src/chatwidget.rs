@@ -4802,6 +4802,7 @@ impl ChatWidget<'_> {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn reasoning_preview(lines: &[Line<'static>]) -> String {
         const MAX_LINES: usize = 3;
         const MAX_CHARS: usize = 120;
@@ -42042,6 +42043,7 @@ impl WidgetRef for &ChatWidget<'_> {
             preview: String,
         }
 
+        #[allow(unused_mut)]
         let mut height_mismatches: Vec<HeightMismatch> = Vec::new();
         let is_collapsed_reasoning_at = |idx: usize| {
             if idx >= request_count {

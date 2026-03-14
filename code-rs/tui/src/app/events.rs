@@ -1,8 +1,10 @@
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -12,7 +14,9 @@ use crossterm::SynchronizedUpdate;
 use code_cloud_tasks_client::{CloudTaskError, TaskId};
 use code_core::config::add_project_allowed_command;
 use code_core::config_types::Notifications;
-use code_core::protocol::{Event, Op, SandboxPolicy};
+#[cfg(debug_assertions)]
+use code_core::protocol::Event;
+use code_core::protocol::{Op, SandboxPolicy};
 use code_core::SessionCatalog;
 use code_login::{AuthManager, AuthMode, ServerOptions};
 use portable_pty::PtySize;
