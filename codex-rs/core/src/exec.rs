@@ -2,6 +2,7 @@
 use std::os::unix::process::ExitStatusExt;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -238,7 +239,7 @@ pub async fn process_exec_tool_call(
 /// Transform a portable exec request into the concrete argv/env that should be
 /// spawned under the requested sandbox policy.
 pub fn build_exec_request(
-    params: ExecParams,
+    mut params: ExecParams,
     sandbox_policy: &SandboxPolicy,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     network_sandbox_policy: NetworkSandboxPolicy,
@@ -246,6 +247,8 @@ pub fn build_exec_request(
     codex_linux_sandbox_exe: &Option<PathBuf>,
     use_legacy_landlock: bool,
 ) -> Result<ExecRequest> {
+    maybe_apply_python_runtime_env(&mut params);
+
     let windows_sandbox_level = params.windows_sandbox_level;
     let enforce_managed_network = params.network.is_some();
     let sandbox_type = select_process_exec_tool_sandbox_type(
@@ -311,6 +314,132 @@ pub fn build_exec_request(
         })
         .map_err(CodexErr::from)?;
     Ok(exec_req)
+}
+
+fn maybe_apply_python_runtime_env(params: &mut ExecParams) {
+    if !command_needs_python_runtime(&params.command) {
+        return;
+    }
+
+    let Some(virtualenv_root) = find_virtualenv_root(&params.cwd) else {
+        return;
+    };
+    let Some(bin_dir) = virtualenv_bin_dir(&virtualenv_root) else {
+        return;
+    };
+
+    params.env.insert(
+        "PATH".to_string(),
+        prepend_path_for_env(params.env.get("PATH"), &bin_dir),
+    );
+    params.env.insert(
+        "VIRTUAL_ENV".to_string(),
+        virtualenv_root.to_string_lossy().to_string(),
+    );
+}
+
+fn command_needs_python_runtime(command: &[String]) -> bool {
+    let Some(program) = extract_primary_command_token(command) else {
+        return false;
+    };
+
+    let normalized = normalize_program_name(&program);
+    matches!(
+        normalized.as_str(),
+        "python" | "python2" | "python3" | "pip" | "pip3" | "pytest" | "mypy"
+            | "pyright" | "ruff"
+    )
+}
+
+fn extract_primary_command_token(command: &[String]) -> Option<String> {
+    match command {
+        [program, flag, script]
+            if is_shell_like_executable(program) && matches!(flag.as_str(), "-c" | "-lc") =>
+        {
+            let tokens = shlex::split(script)?;
+            first_non_assignment_token(&tokens)
+        }
+        _ => first_non_assignment_token(command),
+    }
+}
+
+fn first_non_assignment_token<T>(tokens: &[T]) -> Option<String>
+where
+    T: AsRef<str>,
+{
+    tokens
+        .iter()
+        .map(AsRef::as_ref)
+        .find(|token| !is_env_assignment_token(token))
+        .map(str::to_string)
+}
+
+fn is_env_assignment_token(token: &str) -> bool {
+    if token.is_empty() || token.starts_with('-') {
+        return false;
+    }
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_shell_like_executable(program: &str) -> bool {
+    matches!(
+        normalize_program_name(program).as_str(),
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish"
+    )
+}
+
+fn normalize_program_name(program: &str) -> String {
+    Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase()
+}
+
+fn find_virtualenv_root(cwd: &Path) -> Option<PathBuf> {
+    for dir in cwd.ancestors() {
+        for candidate_name in [".venv", "venv"] {
+            let candidate = dir.join(candidate_name);
+            if virtualenv_bin_dir(&candidate).is_some() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn virtualenv_bin_dir(virtualenv_root: &Path) -> Option<PathBuf> {
+    let unix_bin = virtualenv_root.join("bin");
+    if unix_bin.is_dir() {
+        return Some(unix_bin);
+    }
+
+    let windows_bin = virtualenv_root.join("Scripts");
+    if windows_bin.is_dir() {
+        return Some(windows_bin);
+    }
+
+    None
+}
+
+fn prepend_path_for_env(existing_path: Option<&String>, bin_dir: &Path) -> String {
+    let existing = existing_path
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let mut parts = vec![bin_dir.to_path_buf()];
+    if let Some(existing) = existing {
+        parts.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(parts)
+        .unwrap_or_else(|_| bin_dir.as_os_str().to_os_string())
+        .to_string_lossy()
+        .to_string()
 }
 
 pub(crate) async fn execute_exec_request(
