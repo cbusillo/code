@@ -1895,6 +1895,7 @@ async fn execute_model_with_permissions(
         }
 
         cmd.args(final_args.clone());
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         for (k, v) in &env {
@@ -2417,7 +2418,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 },
             }),
                 description: Some(
-                    "Optional array of model names (e.g., ['code-gpt-5.4','claude-sonnet-4.5','code-gpt-5.3-codex-spark','gemini-3-flash'])".to_string(),
+                    "Optional array of model names (e.g., ['code-gpt-5.4','claude-sonnet-4.6','code-gpt-5.3-codex-spark','gemini-3-flash-preview'])".to_string(),
                 ),
         },
     );
@@ -2829,6 +2830,44 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
+    #[cfg(unix)]
+    static STDIN_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    struct StdinRedirectGuard {
+        saved_stdin_fd: i32,
+        read_fd: i32,
+        write_fd: i32,
+    }
+
+    #[cfg(unix)]
+    impl StdinRedirectGuard {
+        fn install_pipe_as_stdin() -> Self {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+            let saved_stdin_fd = unsafe { libc::dup(libc::STDIN_FILENO) };
+            assert!(saved_stdin_fd >= 0, "dup stdin");
+            assert_eq!(unsafe { libc::dup2(fds[0], libc::STDIN_FILENO) }, libc::STDIN_FILENO, "dup2 stdin");
+            Self {
+                saved_stdin_fd,
+                read_fd: fds[0],
+                write_fd: fds[1],
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StdinRedirectGuard {
+        fn drop(&mut self) {
+            unsafe {
+                assert_eq!(libc::dup2(self.saved_stdin_fd, libc::STDIN_FILENO), libc::STDIN_FILENO, "restore stdin");
+                libc::close(self.saved_stdin_fd);
+                libc::close(self.read_fd);
+                libc::close(self.write_fd);
+            }
+        }
+    }
+
     #[test]
     fn drops_empty_names() {
         assert_eq!(normalize_agent_name(None), None);
@@ -2956,6 +2995,41 @@ mod tests {
         assert_eq!(output.trim(), "current");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_agents_redirect_stdin_away_from_parent_pipe() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _stdin_lock = STDIN_LOCK.lock().expect("stdin lock");
+        let _reset_binary = EnvReset::capture("CODE_BINARY_PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let current = script_path(dir.path(), "current");
+        write_stdin_mode_script(&current);
+
+        let _stdin_guard = StdinRedirectGuard::install_pipe_as_stdin();
+
+        unsafe {
+            std::env::set_var("CODE_BINARY_PATH", &current);
+        }
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "code-gpt-5.3-codex",
+            "ok",
+            true,
+            None,
+            None,
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute read-only agent");
+
+        assert_eq!(output.trim(), "detached");
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn claude_agent_uses_local_install_when_not_on_path() {
@@ -2975,7 +3049,7 @@ mod tests {
         }
 
         let cfg = AgentConfig {
-            name: "claude-sonnet-4.5".to_string(),
+            name: "claude-sonnet-4.6".to_string(),
             command: "claude".to_string(),
             args: Vec::new(),
             read_only: true,
@@ -2989,7 +3063,7 @@ mod tests {
 
         let output = execute_model_with_permissions(
             "agent-test",
-            "claude-sonnet-4.5",
+            "claude-sonnet-4.6",
             "ok",
             true,
             None,
@@ -3119,6 +3193,30 @@ mod tests {
     fn write_argv_script(path: &Path) {
         let script = "#!/bin/sh\nprintf '%s' \"$1\"\nshift\nfor arg in \"$@\"; do\n  printf '|%s' \"$arg\"\ndone\nprintf '\\n'\nexit 0\n";
         std::fs::write(path, script).expect("write argv script");
+        let mut perms = std::fs::metadata(path)
+            .expect("script metadata")
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script");
+    }
+
+    #[cfg(unix)]
+    fn write_stdin_mode_script(path: &Path) {
+        let script = r#"#!/bin/sh
+python3 - <<'PY'
+import os
+import stat
+
+mode = os.fstat(0).st_mode
+if stat.S_ISFIFO(mode):
+    print("fifo")
+else:
+    print("detached")
+PY
+exit 0
+"#;
+        std::fs::write(path, script).expect("write stdin mode script");
         let mut perms = std::fs::metadata(path)
             .expect("script metadata")
             .permissions();

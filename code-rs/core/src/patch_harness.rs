@@ -3,6 +3,7 @@ use crate::workflow_validation::maybe_run_actionlint;
 use code_apply_patch::{ApplyPatchAction, ApplyPatchFileChange};
 use serde_json as json;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,20 @@ pub struct HarnessFinding {
     pub tool: String,
     pub file: Option<PathBuf>,
     pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedExternalTool {
+    executable: PathBuf,
+    env_updates: Vec<(OsString, OsString)>,
+}
+
+impl ResolvedExternalTool {
+    fn apply_to_command(&self, cmd: &mut std::process::Command) {
+        for (key, value) in &self.env_updates {
+            cmd.env(key, value);
+        }
+    }
 }
 
 /// Run fast validations on the files touched by a patch. Returns `None` when the
@@ -164,6 +179,36 @@ pub fn run_patch_harness(
             }],
         }
     };
+    let run_overlay_tool = |tool: &str, args: &[&str], files: &[PathBuf], group_enabled: bool| -> Vec<HarnessFinding> {
+        if !group_enabled || files.is_empty() || !is_allowed(tool) {
+            return Vec::new();
+        }
+        let Some(exe) = which(Path::new(tool)) else { return Vec::new() };
+        match WorkspaceOverlay::apply(action) {
+            Ok(_overlay) => {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.current_dir(cwd);
+                cmd.args(args);
+                cmd.args(files);
+                match run_with_timeout(cmd, timeout) {
+                    Some(output) => collect_output_lines(&output.stdout, &output.stderr)
+                        .into_iter()
+                        .map(|message| HarnessFinding { tool: tool.to_string(), file: None, message })
+                        .collect(),
+                    None => vec![HarnessFinding {
+                        tool: tool.to_string(),
+                        file: None,
+                        message: format!("{tool} timed out after {timeout} second(s)"),
+                    }],
+                }
+            }
+            Err(err) => vec![HarnessFinding {
+                tool: tool.to_string(),
+                file: None,
+                message: format!("failed to stage workspace for {tool}: {err}"),
+            }],
+        }
+    };
 
     let shell_scripts: Vec<PathBuf> = changed_paths
         .iter()
@@ -190,9 +235,9 @@ pub fn run_patch_harness(
         if which(Path::new("markdownlint")).is_some() || which(Path::new("markdownlint-cli2")).is_some() {
             record_ran("markdownlint");
         }
-        let mut lines = run_tool("markdownlint", &[], &markdown_files, markdownlint_group_enabled);
+        let mut lines = run_overlay_tool("markdownlint", &[], &markdown_files, markdownlint_group_enabled);
         if lines.is_empty() {
-            lines = run_tool("markdownlint-cli2", &[], &markdown_files, markdownlint_group_enabled);
+            lines = run_overlay_tool("markdownlint-cli2", &[], &markdown_files, markdownlint_group_enabled);
         }
         findings.extend(lines);
     }
@@ -222,7 +267,7 @@ pub fn run_patch_harness(
         if which(Path::new("yamllint")).is_some() {
             record_ran("yamllint");
         }
-        findings.extend(run_tool("yamllint", &["-f", "parsable"], &yaml_files, yamllint_group_enabled));
+        findings.extend(run_overlay_tool("yamllint", &["-f", "parsable"], &yaml_files, yamllint_group_enabled));
     }
 
     let rust_files: Vec<PathBuf> = changed_paths
@@ -240,16 +285,9 @@ pub fn run_patch_harness(
         findings.extend(run_tool("shfmt", &["-d"], &shell_scripts, shfmt_group_enabled));
     }
 
-    let prettier_exts = [
-        "js", "jsx", "ts", "tsx", "json", "css", "scss", "less", "html", "yml", "yaml",
-    ];
     let prettier_files: Vec<PathBuf> = changed_paths
         .iter()
-        .filter(|path| path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| prettier_exts.contains(&ext))
-            .unwrap_or(false))
+        .filter(|path| is_prettier_path(path))
         .cloned()
         .collect();
     let prettier_group = validation_tool_category("prettier");
@@ -258,7 +296,7 @@ pub fn run_patch_harness(
         if which(Path::new("prettier")).is_some() {
             record_ran("prettier");
         }
-        findings.extend(run_tool("prettier", &["--check"], &prettier_files, prettier_group_enabled));
+        findings.extend(run_overlay_tool("prettier", &["--check"], &prettier_files, prettier_group_enabled));
     }
 
     let ts_files: Vec<PathBuf> = changed_paths
@@ -465,13 +503,14 @@ pub fn run_patch_harness(
         .cloned()
         .collect();
     if functional_enabled && cfg.tools.mypy.unwrap_or(true) && !py_files.is_empty() && is_allowed("mypy") {
-        if let Some(exe) = which(Path::new("mypy")) {
+        if let Some(tool) = resolve_python_tool(cwd, &py_files, "mypy") {
             record_ran("mypy");
             let mypy_timeout = timeout.max(20);
             match WorkspaceOverlay::apply(action) {
                 Ok(_overlay) => {
-                    let mut cmd = std::process::Command::new(&exe);
+                    let mut cmd = std::process::Command::new(&tool.executable);
                     cmd.current_dir(cwd);
+                    tool.apply_to_command(&mut cmd);
                     cmd.args(["--no-color-output", "--hide-error-context"]);
                     for path in &py_files {
                         cmd.arg(path);
@@ -505,13 +544,14 @@ pub fn run_patch_harness(
     }
 
     if functional_enabled && cfg.tools.pyright.unwrap_or(true) && !py_files.is_empty() && is_allowed("pyright") {
-        if let Some(exe) = which(Path::new("pyright")) {
+        if let Some(tool) = resolve_python_tool(cwd, &py_files, "pyright") {
             record_ran("pyright");
             let pyright_timeout = timeout.max(20);
             match WorkspaceOverlay::apply(action) {
                 Ok(_overlay) => {
-                    let mut cmd = std::process::Command::new(&exe);
+                    let mut cmd = std::process::Command::new(&tool.executable);
                     cmd.current_dir(cwd);
+                    tool.apply_to_command(&mut cmd);
                     cmd.arg("--warnings");
                     for path in &py_files {
                         cmd.arg(path);
@@ -697,6 +737,37 @@ fn is_dockerfile(path: &Path) -> bool {
     name.eq_ignore_ascii_case("Dockerfile") || name.starts_with("Dockerfile.")
 }
 
+fn is_prettier_path(path: &Path) -> bool {
+    let prettier_exts = [
+        "js", "jsx", "ts", "tsx", "json", "css", "scss", "less", "html", "yml", "yaml", "md", "mdx",
+    ];
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| prettier_exts.contains(&ext))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else { return false };
+    matches!(
+        name,
+        ".prettierrc"
+            | ".prettierrc.json"
+            | ".prettierrc.json5"
+            | ".prettierrc.yml"
+            | ".prettierrc.yaml"
+            | ".prettierrc.js"
+            | ".prettierrc.cjs"
+            | ".prettierrc.mjs"
+            | ".prettierrc.ts"
+            | "prettier.config.js"
+            | "prettier.config.cjs"
+            | "prettier.config.mjs"
+            | "prettier.config.ts"
+    )
+}
+
 fn which(exe: &Path) -> Option<PathBuf> {
     if exe.is_absolute() {
         return exe.exists().then(|| exe.to_path_buf());
@@ -712,6 +783,77 @@ fn which(exe: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn resolve_python_tool(cwd: &Path, files: &[PathBuf], tool: &str) -> Option<ResolvedExternalTool> {
+    if let Some(resolved) = find_virtualenv_tool(cwd, files, tool) {
+        return Some(resolved);
+    }
+    which(Path::new(tool)).map(|executable| ResolvedExternalTool {
+        executable,
+        env_updates: Vec::new(),
+    })
+}
+
+fn find_virtualenv_tool(cwd: &Path, files: &[PathBuf], tool: &str) -> Option<ResolvedExternalTool> {
+    for search_dir in python_search_dirs(cwd, files) {
+        if let Some((virtualenv_root, executable)) = find_virtualenv_tool_in_dir(&search_dir, tool) {
+            let mut env_updates: Vec<(OsString, OsString)> = Vec::new();
+            if let Some(bin_dir) = executable.parent() {
+                env_updates.push((OsString::from("PATH"), prepend_path(bin_dir)));
+            }
+            env_updates.push((OsString::from("VIRTUAL_ENV"), virtualenv_root.into_os_string()));
+            return Some(ResolvedExternalTool { executable, env_updates });
+        }
+    }
+    None
+}
+
+fn python_search_dirs(cwd: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for relative in files {
+        let Some(mut current) = cwd.join(relative).parent().map(Path::to_path_buf) else { continue };
+        loop {
+            if seen.insert(current.clone()) {
+                search_dirs.push(current.clone());
+            }
+            if current == cwd {
+                break;
+            }
+            let Some(parent) = current.parent() else { break };
+            current = parent.to_path_buf();
+        }
+    }
+    if seen.insert(cwd.to_path_buf()) {
+        search_dirs.push(cwd.to_path_buf());
+    }
+    search_dirs
+}
+
+fn find_virtualenv_tool_in_dir(dir: &Path, tool: &str) -> Option<(PathBuf, PathBuf)> {
+    for env_dir_name in [".venv", "venv"] {
+        let virtualenv_root = dir.join(env_dir_name);
+        let unix_tool = virtualenv_root.join("bin").join(tool);
+        if unix_tool.is_file() {
+            return Some((virtualenv_root, unix_tool));
+        }
+        let windows_tool = virtualenv_root.join("Scripts").join(format!("{tool}.exe"));
+        if windows_tool.is_file() {
+            return Some((virtualenv_root, windows_tool));
+        }
+    }
+    None
+}
+
+fn prepend_path(bin_dir: &Path) -> OsString {
+    let path_entries = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<PathBuf>>())
+        .unwrap_or_default();
+    let mut combined: Vec<PathBuf> = Vec::with_capacity(path_entries.len() + 1);
+    combined.push(bin_dir.to_path_buf());
+    combined.extend(path_entries);
+    std::env::join_paths(combined).unwrap_or_else(|_| bin_dir.as_os_str().to_os_string())
 }
 
 fn run_with_timeout(mut cmd: std::process::Command, timeout_secs: u64) -> Option<CommandCapture> {
@@ -1098,4 +1240,210 @@ struct CommandCapture {
     status: Option<ExitStatus>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        find_virtualenv_tool, is_prettier_path, python_search_dirs, resolve_python_tool,
+        run_patch_harness, which,
+    };
+    use crate::config_types::{GithubConfig, ValidationConfig, ValidationGroups, ValidationTools};
+    use code_apply_patch::ApplyPatchAction;
+    use std::ffi::OsString;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    #[test]
+    fn python_search_dirs_prefers_nearest_directory_first() {
+        let repo = TempDir::new().expect("tempdir");
+        let cwd = repo.path();
+        let file = Path::new("packages/app/src/main.py");
+
+        let search_dirs = python_search_dirs(cwd, &[file.to_path_buf()]);
+
+        assert_eq!(search_dirs[0], cwd.join("packages/app/src"));
+        assert_eq!(search_dirs[1], cwd.join("packages/app"));
+        assert!(search_dirs.contains(&cwd.to_path_buf()));
+    }
+
+    #[test]
+    fn resolves_nearest_virtualenv_tool_before_path() {
+        let repo = TempDir::new().expect("tempdir");
+        let cwd = repo.path();
+        let nested_root = cwd.join("packages/app");
+        let nested_bin = nested_root.join(".venv/bin");
+        fs::create_dir_all(&nested_bin).expect("create venv bin");
+        write_executable(&nested_bin.join("mypy"));
+
+        let resolved = find_virtualenv_tool(cwd, &[Path::new("packages/app/src/main.py").to_path_buf()], "mypy")
+            .expect("resolve local mypy");
+
+        assert_eq!(resolved.executable, nested_bin.join("mypy"));
+        assert!(resolved
+            .env_updates
+            .iter()
+            .any(|(key, value)| key == "VIRTUAL_ENV" && value == nested_root.join(".venv").as_os_str()));
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_python_tool_falls_back_when_virtualenv_is_missing() {
+        let repo = TempDir::new().expect("tempdir");
+        let cwd = repo.path();
+        let fake_bin_dir = repo.path().join("bin");
+        fs::create_dir_all(&fake_bin_dir).expect("create fake bin");
+        write_executable(&fake_bin_dir.join("fake-python-tool"));
+        #[cfg(unix)]
+        let _path_guard = ScopedEnvVar::set("PATH", Some(fake_bin_dir.into_os_string()));
+        assert!(which(Path::new("fake-python-tool")).is_some(), "fake fallback tool not found on PATH");
+
+        let resolved = resolve_python_tool(cwd, &[Path::new("script.py").to_path_buf()], "fake-python-tool")
+            .expect("find fallback tool");
+
+        assert!(resolved.executable.ends_with("fake-python-tool"));
+        assert!(resolved.env_updates.is_empty());
+    }
+
+    fn write_executable(path: &Path) {
+        fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("chmod");
+        }
+    }
+
+    #[test]
+    fn prettier_matches_markdown_and_dot_config_files() {
+        assert!(is_prettier_path(Path::new("README.md")));
+        assert!(is_prettier_path(Path::new(".prettierrc")));
+        assert!(is_prettier_path(Path::new("prettier.config.ts")));
+        assert!(is_prettier_path(Path::new(".eslintrc.js")));
+        assert!(!is_prettier_path(Path::new("README.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn prettier_runs_from_repo_root_so_repo_config_is_visible() {
+        let repo = TempDir::new().expect("tempdir");
+        let bin_dir = repo.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        write_shell_tool(
+            &bin_dir.join("prettier"),
+            "#!/bin/sh\n[ -f .prettierrc ] || { echo missing prettier config; exit 1; }\nexit 0\n",
+        );
+        fs::write(repo.path().join(".prettierrc"), "{}\n").expect("write config");
+
+        let path_guard = ScopedEnvVar::set("PATH", Some(bin_dir.into_os_string()));
+        assert!(which(Path::new("prettier")).is_some(), "fake prettier not found on PATH");
+        let action = ApplyPatchAction::new_add_for_test(
+            &repo.path().join("src/index.ts"),
+            "const x = 1;\n".to_string(),
+        );
+        let (findings, ran) = run_patch_harness(
+            &action,
+            repo.path(),
+            &stylistic_config("prettier", false),
+            &GithubConfig::default(),
+        )
+        .expect("prettier harness result");
+        drop(path_guard);
+
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+        assert_eq!(ran, vec!["prettier".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn markdownlint_runs_from_repo_root_so_repo_config_is_visible() {
+        let repo = TempDir::new().expect("tempdir");
+        let bin_dir = repo.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        write_shell_tool(
+            &bin_dir.join("markdownlint"),
+            "#!/bin/sh\n[ -f .markdownlint.json ] || { echo missing markdownlint config; exit 1; }\nexit 0\n",
+        );
+        fs::write(repo.path().join(".markdownlint.json"), "{}\n").expect("write config");
+
+        let path_guard = ScopedEnvVar::set("PATH", Some(bin_dir.into_os_string()));
+        assert!(which(Path::new("markdownlint")).is_some(), "fake markdownlint not found on PATH");
+        let action = ApplyPatchAction::new_add_for_test(
+            &repo.path().join("README.md"),
+            "# Title\n".to_string(),
+        );
+        let (findings, ran) = run_patch_harness(
+            &action,
+            repo.path(),
+            &stylistic_config("markdownlint", true),
+            &GithubConfig::default(),
+        )
+        .expect("markdownlint harness result");
+        drop(path_guard);
+
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+        assert_eq!(ran, vec!["markdownlint".to_string()]);
+    }
+
+    fn stylistic_config(tool: &str, disable_prettier: bool) -> ValidationConfig {
+        ValidationConfig {
+            tools_allowlist: Some(vec![tool.to_string()]),
+            groups: ValidationGroups {
+                functional: false,
+                stylistic: true,
+            },
+            tools: ValidationTools {
+                prettier: disable_prettier.then_some(false),
+                ..ValidationTools::default()
+            },
+            ..ValidationConfig::default()
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_shell_tool(path: &Path, script: &str) {
+        fs::write(path, script).expect("write shell tool");
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod");
+    }
+
+    #[cfg(unix)]
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: Option<OsString>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                match &value {
+                    Some(current) => std::env::set_var(key, current),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(previous) => std::env::set_var(self.key, previous),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 }

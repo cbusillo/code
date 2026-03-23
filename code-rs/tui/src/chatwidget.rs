@@ -43,7 +43,7 @@ use code_core::config_types::Notifications;
 use code_core::config_types::ReasoningEffort;
 use code_core::config_types::ServiceTier;
 use code_core::config_types::TextVerbosity;
-use code_core::spawn::spawn_std_command_with_retry;
+use code_core::spawn::spawn_background_command_with_retry;
 use code_core::plan_tool::{PlanItemArg, StepStatus, UpdatePlanArgs};
 use code_core::model_family::derive_default_model_family;
 use code_core::model_family::find_family_for_model;
@@ -1892,6 +1892,7 @@ pub(crate) struct ChatWidget<'a> {
     rate_limit_secondary_next_reset_at: Option<DateTime<Utc>>,
     rate_limit_refresh_scheduled_for: Option<DateTime<Utc>>,
     rate_limit_refresh_schedule_id: Arc<AtomicU64>,
+    rate_limit_refresh_task: Option<task::JoinHandle<()>>,
     content_buffer: String,
     // Buffer for streaming assistant answer text; we do not surface partial
     // We wait for the final AgentMessage event and then emit the full text
@@ -5000,6 +5001,7 @@ impl ChatWidget<'_> {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn reasoning_preview(lines: &[Line<'static>]) -> String {
         const MAX_LINES: usize = 3;
         const MAX_CHARS: usize = 120;
@@ -6890,6 +6892,7 @@ impl ChatWidget<'_> {
             rate_limit_secondary_next_reset_at: None,
             rate_limit_refresh_scheduled_for: None,
             rate_limit_refresh_schedule_id: Arc::new(AtomicU64::new(0)),
+            rate_limit_refresh_task: None,
             content_buffer: String::new(),
             last_assistant_message: None,
             last_answer_stream_id_in_turn: None,
@@ -7260,6 +7263,7 @@ impl ChatWidget<'_> {
             rate_limit_secondary_next_reset_at: None,
             rate_limit_refresh_scheduled_for: None,
             rate_limit_refresh_schedule_id: Arc::new(AtomicU64::new(0)),
+            rate_limit_refresh_task: None,
             content_buffer: String::new(),
             last_assistant_message: None,
             last_answer_stream_id_in_turn: None,
@@ -11068,7 +11072,17 @@ impl ChatWidget<'_> {
     /// Push a cell using a synthetic key at the TOP of the NEXT request.
     fn history_push_top_next_req(&mut self, cell: impl HistoryCell + 'static) {
         let key = self.next_req_key_top();
-        let _ = self.history_insert_with_key_global_tagged(Box::new(cell), key, "prelude", None);
+        let cell = Box::new(cell);
+        if matches!(cell.kind(), HistoryCellType::BackgroundEvent) {
+            let record = cell
+                .as_any()
+                .downcast_ref::<crate::history_cell::BackgroundEventCell>()
+                .map(|background| HistoryDomainRecord::BackgroundEvent(background.state().clone()));
+            let _ = self.history_insert_with_key_global_tagged(cell, key, "background", record);
+            return;
+        }
+
+        let _ = self.history_insert_with_key_global_tagged(cell, key, "prelude", None);
     }
     fn history_replace_with_record(
         &mut self,
@@ -16669,10 +16683,17 @@ impl ChatWidget<'_> {
         self.maybe_schedule_rate_limit_refresh();
     }
 
+    fn cancel_rate_limit_refresh_task(&mut self) {
+        if let Some(handle) = self.rate_limit_refresh_task.take() {
+            handle.abort();
+        }
+    }
+
     fn maybe_schedule_rate_limit_refresh(&mut self) {
         let Some(reset_at) = self.rate_limit_secondary_next_reset_at else {
             self.rate_limit_refresh_scheduled_for = None;
             self.rate_limit_refresh_schedule_id.fetch_add(1, Ordering::SeqCst);
+            self.cancel_rate_limit_refresh_task();
             return;
         };
 
@@ -16680,6 +16701,7 @@ impl ChatWidget<'_> {
             return;
         }
 
+        self.cancel_rate_limit_refresh_task();
         self.rate_limit_refresh_scheduled_for = Some(reset_at);
         let schedule_id = self
             .rate_limit_refresh_schedule_id
@@ -16699,47 +16721,54 @@ impl ChatWidget<'_> {
             return;
         }
 
+        let Some(account) = account else {
+            return;
+        };
+
+        let now = Utc::now();
+        let delay = reset_at.signed_duration_since(now) + ChronoDuration::seconds(1);
+        let delay = delay.to_std().ok();
+
+        if let Ok(runtime_handle) = tokio::runtime::Handle::try_current() {
+            self.rate_limit_refresh_task = Some(runtime_handle.spawn(async move {
+                if let Some(delay) = delay {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+
+                maybe_run_rate_limit_refresh(
+                    schedule_token,
+                    schedule_id,
+                    reset_at,
+                    app_event_tx,
+                    config,
+                    debug_enabled,
+                    account,
+                );
+            }));
+            return;
+        }
+
+        tracing::warn!(
+            "rate reset refresh scheduled without Tokio runtime; falling back to lightweight thread"
+        );
         if thread_spawner::spawn_lightweight("rate-reset-refresh", move || {
-            let now = Utc::now();
-            let delay = reset_at.signed_duration_since(now) + ChronoDuration::seconds(1);
-            if let Ok(delay) = delay.to_std() {
+            if let Some(delay) = delay {
                 if !delay.is_zero() {
                     std::thread::sleep(delay);
                 }
             }
 
-            if schedule_token.load(Ordering::SeqCst) != schedule_id {
-                return;
-            }
-
-            let Some(account) = account else {
-                return;
-            };
-
-            let plan = account
-                .tokens
-                .as_ref()
-                .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type());
-            let should_refresh = account_usage::mark_rate_limit_refresh_attempt_if_due(
-                &config.code_home,
-                &account.id,
-                plan.as_deref(),
-                Some(reset_at),
-                Utc::now(),
-                account_usage::rate_limit_refresh_stale_interval(),
-            )
-            .unwrap_or(false);
-
-            if should_refresh {
-                start_rate_limit_refresh_for_account(
-                    app_event_tx,
-                    config,
-                    debug_enabled,
-                    account,
-                    true,
-                    false,
-                );
-            }
+            maybe_run_rate_limit_refresh(
+                schedule_token,
+                schedule_id,
+                reset_at,
+                app_event_tx,
+                config,
+                debug_enabled,
+                account,
+            );
         })
         .is_none()
         {
@@ -18775,6 +18804,10 @@ fi\n\
     }
 
     fn auto_show_goal_entry_panel(&mut self) {
+        self.auto_show_goal_entry_panel_with_draft(false);
+    }
+
+    fn auto_show_goal_entry_panel_with_draft(&mut self, preserve_draft: bool) {
         self.auto_state.set_phase(AutoRunPhase::AwaitingGoalEntry);
         self.auto_state.goal = None;
         self.auto_pending_goal_request = false;
@@ -18784,7 +18817,9 @@ fi\n\
             self.auto_reset_intro_timing();
             self.auto_ensure_intro_timing();
         }
-        self.auto_goal_escape_state = AutoGoalEscState::Inactive;
+        if !preserve_draft {
+            self.auto_goal_escape_state = AutoGoalEscState::Inactive;
+        }
         let hint = "Let's do this! What's your goal?".to_string();
         let status_lines = vec![hint];
         let model = AutoCoordinatorViewModel::Active(AutoActiveViewModel {
@@ -18818,7 +18853,11 @@ fi\n\
         self.bottom_pane.update_status_text("Auto Drive".to_string());
         self.auto_update_terminal_hint();
         self.bottom_pane.ensure_input_focus();
-        self.clear_composer();
+        if preserve_draft {
+            self.auto_sync_goal_escape_state_from_composer();
+        } else {
+            self.clear_composer();
+        }
         self.request_redraw();
     }
 
@@ -20739,10 +20778,6 @@ Have we met every part of this goal and is there no further work to do?"#
 
     fn auto_rebuild_live_ring(&mut self) {
         if !self.auto_state.is_active() {
-            if self.auto_state.should_show_goal_entry() {
-                self.auto_show_goal_entry_panel();
-                return;
-            }
             if let Some(summary) = self.auto_state.last_run_summary.clone() {
                 self.bottom_pane.clear_live_ring();
                 self.auto_reset_intro_timing();
@@ -20791,6 +20826,11 @@ Have we met every part of this goal and is there no further work to do?"#
                 .show_auto_coordinator_view(model);
             self.bottom_pane.release_auto_drive_style();
             self.bottom_pane.set_standard_terminal_hint(None);
+            return;
+        }
+
+        if self.auto_state.should_show_goal_entry() {
+            self.auto_show_goal_entry_panel();
             return;
         }
 
@@ -27330,7 +27370,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with profile: {err}");
             }
         }
@@ -27352,7 +27392,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with profile: {err}");
             }
         }
@@ -27385,7 +27425,7 @@ Have we met every part of this goal and is there no further work to do?"#
                         .stderr(Stdio::null())
                         .stdin(Stdio::null());
                     self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-                    if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+                    if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                         tracing::warn!("failed to launch Chrome with profile: {err}");
                     }
                     break;
@@ -27985,7 +28025,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with temp profile: {err}");
             }
         }
@@ -28008,7 +28048,7 @@ Have we met every part of this goal and is there no further work to do?"#
                 .stderr(Stdio::null())
                 .stdin(Stdio::null());
             self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-            if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+            if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                 tracing::warn!("failed to launch Chrome with temp profile: {err}");
             }
         }
@@ -28042,7 +28082,7 @@ Have we met every part of this goal and is there no further work to do?"#
                         .stderr(Stdio::null())
                         .stdin(Stdio::null());
                     self.apply_chrome_logging(&mut cmd, log_path.as_deref());
-                    if let Err(err) = spawn_std_command_with_retry(&mut cmd) {
+                    if let Err(err) = spawn_background_command_with_retry(&mut cmd) {
                         tracing::warn!("failed to launch Chrome with temp profile: {err}");
                     }
                     break;
@@ -30586,6 +30626,51 @@ fn release_background_lock(agent_id: &Option<String>) {
     }
 }
 
+fn maybe_run_rate_limit_refresh(
+    schedule_token: Arc<AtomicU64>,
+    schedule_id: u64,
+    reset_at: DateTime<Utc>,
+    app_event_tx: AppEventSender,
+    config: Config,
+    debug_enabled: bool,
+    account: StoredAccount,
+) {
+    if schedule_token.load(Ordering::SeqCst) != schedule_id {
+        return;
+    }
+
+    let plan = account
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.id_token.get_chatgpt_plan_type());
+    let should_refresh = account_usage::mark_rate_limit_refresh_attempt_if_due(
+        &config.code_home,
+        &account.id,
+        plan.as_deref(),
+        Some(reset_at),
+        Utc::now(),
+        account_usage::rate_limit_refresh_stale_interval(),
+    )
+    .unwrap_or(false);
+
+    if should_refresh {
+        start_rate_limit_refresh_for_account(
+            app_event_tx,
+            config,
+            debug_enabled,
+            account,
+            true,
+            false,
+        );
+    }
+}
+
+impl Drop for ChatWidget<'_> {
+    fn drop(&mut self) {
+        self.cancel_rate_limit_refresh_task();
+    }
+}
+
 #[cfg(test)]
 static AUTO_REVIEW_STUB: once_cell::sync::Lazy<std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
@@ -31141,6 +31226,66 @@ use code_core::protocol::OrderMeta;
 
         assert_eq!(reloaded.active_profile.as_deref(), Some("work"));
         assert_eq!(reloaded.service_tier, None);
+    }
+
+    #[test]
+    fn repeated_rate_limit_reschedules_do_not_consume_lightweight_threads() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let code_home = tempdir().expect("temp code home");
+        auth_accounts::upsert_api_key_account(
+            code_home.path(),
+            "sk-test".to_string(),
+            Some("Test Account".to_string()),
+            true,
+        )
+        .expect("active account");
+
+        let mut config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            code_home.path().to_path_buf(),
+        )
+        .expect("config");
+        config.code_home = code_home.path().to_path_buf();
+
+        let (tx_raw, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_event_tx = crate::app_event_sender::AppEventSender::new(tx_raw);
+        let terminal_info = crate::tui::TerminalInfo {
+            picker: None,
+            font_size: (8, 16),
+        };
+        let mut chat = ChatWidget::new(
+            config,
+            app_event_tx,
+            None,
+            Vec::new(),
+            false,
+            terminal_info,
+            false,
+            None,
+        );
+
+        let baseline = crate::thread_spawner::active_thread_count();
+        for offset_minutes in 10..18 {
+            chat.rate_limit_secondary_next_reset_at =
+                Some(Utc::now() + ChronoDuration::minutes(offset_minutes));
+            chat.maybe_schedule_rate_limit_refresh();
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        assert!(
+            chat.rate_limit_refresh_task.is_some(),
+            "expected rate-limit refresh to use a tracked async task"
+        );
+        assert_eq!(
+            crate::thread_spawner::active_thread_count(),
+            baseline,
+            "rate-limit refresh reschedules should not consume lightweight threads"
+        );
+
+        chat.rate_limit_secondary_next_reset_at = None;
+        chat.maybe_schedule_rate_limit_refresh();
     }
 
     #[test]
@@ -32537,7 +32682,7 @@ use code_core::protocol::OrderMeta;
         let (rows, _commands) = chat.collect_agents_overview_rows();
         let qwen = rows
             .iter()
-            .find(|row| row.name == "qwen-3-coder")
+            .find(|row| row.name == "qwen3-coder-plus")
             .expect("qwen row present");
         assert_eq!(qwen.enabled, qwen.installed);
 
@@ -33833,6 +33978,103 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn completed_auto_drive_prefers_summary_before_next_goal_prompt() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.last_run_summary = Some(AutoRunSummary {
+            duration: Duration::from_secs(42),
+            turns_completed: 3,
+            message: Some("All tasks done.".to_string()),
+            goal: Some("Finish feature".to_string()),
+        });
+        chat.auto_state.set_phase(AutoRunPhase::AwaitingGoalEntry);
+
+        chat.auto_rebuild_live_ring();
+
+        let model = chat
+            .bottom_pane
+            .auto_view_model()
+            .expect("auto coordinator view should be active");
+        let AutoCoordinatorViewModel::Active(active) = model;
+        assert_eq!(active.goal.as_deref(), Some("Finish feature"));
+        assert_eq!(active.status_lines, vec!["All tasks done.".to_string()]);
+        assert!(active.ctrl_switch_hint.contains("Esc"));
+
+        assert!(chat.auto_state.should_show_goal_entry());
+        assert!(chat.auto_state.last_run_summary.is_some());
+
+        let route = chat.describe_esc_context();
+        assert_eq!(route.intent, EscIntent::AutoDismissSummary);
+        assert!(chat.execute_esc_intent(
+            route.intent,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ));
+
+        let model = chat
+            .bottom_pane
+            .auto_view_model()
+            .expect("auto coordinator view should show goal entry after dismissing summary");
+        let AutoCoordinatorViewModel::Active(active) = model;
+        assert!(active.goal.is_none());
+        assert_eq!(
+            active.status_lines,
+            vec!["Let's do this! What's your goal?".to_string()]
+        );
+    }
+
+    #[test]
+    fn dismissing_completed_summary_preserves_typed_next_goal() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.last_run_summary = Some(AutoRunSummary {
+            duration: Duration::from_secs(42),
+            turns_completed: 3,
+            message: Some("All tasks done.".to_string()),
+            goal: Some("Finish feature".to_string()),
+        });
+        chat.auto_state.set_phase(AutoRunPhase::AwaitingGoalEntry);
+        chat.auto_rebuild_live_ring();
+        chat.handle_paste("Suggested goal".to_string());
+
+        assert_eq!(chat.bottom_pane.composer_text(), "Suggested goal");
+        assert!(matches!(
+            chat.auto_goal_escape_state,
+            AutoGoalEscState::NeedsEnableEditing
+        ));
+
+        let route = chat.describe_esc_context();
+        assert_eq!(route.intent, EscIntent::AutoDismissSummary);
+        assert!(chat.execute_esc_intent(
+            route.intent,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ));
+
+        assert!(chat.auto_state.last_run_summary.is_none());
+        assert!(chat.auto_state.should_show_goal_entry());
+        assert_eq!(chat.bottom_pane.composer_text(), "Suggested goal");
+        assert!(matches!(
+            chat.auto_goal_escape_state,
+            AutoGoalEscState::NeedsEnableEditing
+        ));
+
+        let model = chat
+            .bottom_pane
+            .auto_view_model()
+            .expect("auto coordinator view should show preserved goal draft");
+        let AutoCoordinatorViewModel::Active(active) = model;
+        assert!(active.goal.is_none());
+        assert_eq!(
+            active.status_lines,
+            vec!["Let's do this! What's your goal?".to_string()]
+        );
+
+        let route = chat.describe_esc_context();
+        assert_eq!(route.intent, EscIntent::AutoGoalEnableEdit);
+    }
+
+    #[test]
     fn goal_entry_typing_arms_escape_state() {
         let mut harness = ChatWidgetHarness::new();
         {
@@ -34737,8 +34979,8 @@ use code_core::protocol::OrderMeta;
             write: false,
             write_requested: Some(false),
             models: Some(vec![
-                "claude-sonnet-4.5".to_string(),
-                "gemini-3-pro".to_string(),
+                "claude-sonnet-4.6".to_string(),
+                "gemini-3.1-pro-preview".to_string(),
             ]),
         }];
         chat.auto_state.pending_agent_timing = Some(AutoTurnAgentsTiming::Blocking);
@@ -34752,7 +34994,7 @@ use code_core::protocol::OrderMeta;
         assert!(message.contains("Run diagnostics"));
         assert!(message.contains("Please run agent.create"));
         assert!(message.contains("write: false"));
-        assert!(message.contains("Models: [claude-sonnet-4.5, gemini-3-pro]"));
+        assert!(message.contains("Models: [claude-sonnet-4.6, gemini-3.1-pro-preview]"));
         assert!(message.contains("Draft alternative fix"));
         assert!(message.contains("Focus on parser module"));
         assert!(message.contains("agent.wait"));
@@ -35617,6 +35859,18 @@ use code_core::protocol::OrderMeta;
             vec![HistoryCellType::BackgroundEvent, HistoryCellType::Assistant],
             "streaming assistant output should append after the existing background tail cell",
         );
+    }
+
+    #[test]
+    fn startup_background_prelude_uses_background_tagging() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        chat.history_push_top_next_req(history_cell::new_connecting_mcp_status());
+
+        assert_eq!(chat.history_cells.len(), 1);
+        assert_eq!(chat.history_cells[0].kind(), HistoryCellType::BackgroundEvent);
     }
 
     #[test]
@@ -42339,6 +42593,7 @@ impl WidgetRef for &ChatWidget<'_> {
             preview: String,
         }
 
+        #[allow(unused_mut)]
         let mut height_mismatches: Vec<HeightMismatch> = Vec::new();
         let is_collapsed_reasoning_at = |idx: usize| {
             if idx >= request_count {
