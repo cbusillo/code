@@ -7,6 +7,8 @@
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecToolCallOutput;
 use crate::guardian::GuardianApprovalRequest;
+use crate::patch_validation::append_validation_summary;
+use crate::patch_validation::run_post_apply_validation;
 use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
 use crate::sandboxing::CommandSpec;
@@ -210,9 +212,31 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         let env = attempt
             .env_for(spec, /*network*/ None)
             .map_err(|err| ToolError::Codex(err.into()))?;
-        let out = execute_env(env, Self::stdout_stream(ctx))
+        let mut out = execute_env(env, Self::stdout_stream(ctx))
             .await
             .map_err(ToolError::Codex)?;
+        if out.exit_code == 0 {
+            let cwd = req.action.cwd.clone();
+            let changed_files = req
+                .action
+                .changes()
+                .iter()
+                .filter_map(|(path, change)| match change {
+                    codex_apply_patch::ApplyPatchFileChange::Add { .. } => Some(path.clone()),
+                    codex_apply_patch::ApplyPatchFileChange::Update { move_path, .. } => {
+                        Some(move_path.clone().unwrap_or_else(|| path.clone()))
+                    }
+                    codex_apply_patch::ApplyPatchFileChange::Delete { .. } => None,
+                })
+                .collect();
+            if let Ok(Some(summary)) = tokio::task::spawn_blocking(move || {
+                run_post_apply_validation(cwd, changed_files)
+            })
+            .await
+            {
+                append_validation_summary(&mut out, &summary);
+            }
+        }
         Ok(out)
     }
 }
