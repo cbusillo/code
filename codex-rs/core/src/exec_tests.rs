@@ -2,7 +2,9 @@ use super::*;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 
 fn make_exec_output(
@@ -231,6 +233,144 @@ fn full_buffer_capture_policy_disables_caps_and_exec_expiration() {
         Duration::from_millis(IO_DRAIN_TIMEOUT_MS)
     );
     assert!(!ExecCapturePolicy::FullBuffer.uses_expiration());
+}
+
+#[test]
+fn build_exec_request_applies_project_virtualenv_to_python_commands() {
+    let repo = tempdir().expect("tempdir");
+    let cwd = repo.path().join("packages/app");
+    let venv_root = repo.path().join(".venv");
+    let venv_bin = virtualenv_bin_for_tests(&venv_root);
+    std::fs::create_dir_all(&venv_bin).expect("create venv");
+    std::fs::create_dir_all(&cwd).expect("create cwd");
+
+    let request = build_exec_request(
+        ExecParams {
+            command: vec!["python".to_string(), "script.py".to_string()],
+            cwd: cwd.clone(),
+            expiration: ExecExpiration::DefaultTimeout,
+            capture_policy: ExecCapturePolicy::ShellTool,
+            env: HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]),
+            network: None,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_private_desktop: false,
+            justification: None,
+            arg0: None,
+        },
+        &SandboxPolicy::DangerFullAccess,
+        &FileSystemSandboxPolicy::unrestricted(),
+        NetworkSandboxPolicy::Enabled,
+        cwd.as_path(),
+        &None,
+        false,
+    )
+    .expect("build exec request");
+
+    assert_eq!(
+        request.env.get("VIRTUAL_ENV").map(String::as_str),
+        Some(venv_root.to_string_lossy().as_ref())
+    );
+
+    let path = request.env.get("PATH").expect("PATH");
+    let expected_prefix = venv_bin.to_string_lossy().to_string();
+    assert!(
+        path.starts_with(&expected_prefix),
+        "expected PATH to start with {expected_prefix}, got {path}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn build_exec_request_applies_virtualenv_to_shell_wrapped_python_commands() {
+    let repo = tempdir().expect("tempdir");
+    let cwd = repo.path().join("pkg/app");
+    let venv_root = cwd.join(".venv");
+    let venv_bin = virtualenv_bin_for_tests(&venv_root);
+    std::fs::create_dir_all(&venv_bin).expect("create venv");
+    std::fs::create_dir_all(&cwd).expect("create cwd");
+
+    let request = build_exec_request(
+        ExecParams {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "PYTHONPATH=src pytest -q".to_string(),
+            ],
+            cwd: cwd.clone(),
+            expiration: ExecExpiration::DefaultTimeout,
+            capture_policy: ExecCapturePolicy::ShellTool,
+            env: HashMap::new(),
+            network: None,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_private_desktop: false,
+            justification: None,
+            arg0: None,
+        },
+        &SandboxPolicy::DangerFullAccess,
+        &FileSystemSandboxPolicy::unrestricted(),
+        NetworkSandboxPolicy::Enabled,
+        cwd.as_path(),
+        &None,
+        false,
+    )
+    .expect("build exec request");
+
+    assert_eq!(
+        request.env.get("VIRTUAL_ENV").map(String::as_str),
+        Some(venv_root.to_string_lossy().as_ref())
+    );
+    assert!(
+        request
+            .env
+            .get("PATH")
+            .is_some_and(|path| path.starts_with(venv_bin.to_string_lossy().as_ref()))
+    );
+}
+
+#[test]
+fn build_exec_request_leaves_non_python_commands_unchanged() {
+    let repo = tempdir().expect("tempdir");
+    let cwd = repo.path().join("packages/app");
+    let venv_root = repo.path().join(".venv");
+    let venv_bin = virtualenv_bin_for_tests(&venv_root);
+    std::fs::create_dir_all(&venv_bin).expect("create venv");
+    std::fs::create_dir_all(&cwd).expect("create cwd");
+
+    let request = build_exec_request(
+        ExecParams {
+            command: vec!["node".to_string(), "app.js".to_string()],
+            cwd: cwd.clone(),
+            expiration: ExecExpiration::DefaultTimeout,
+            capture_policy: ExecCapturePolicy::ShellTool,
+            env: HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]),
+            network: None,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_private_desktop: false,
+            justification: None,
+            arg0: None,
+        },
+        &SandboxPolicy::DangerFullAccess,
+        &FileSystemSandboxPolicy::unrestricted(),
+        NetworkSandboxPolicy::Enabled,
+        cwd.as_path(),
+        &None,
+        false,
+    )
+    .expect("build exec request");
+
+    assert_eq!(request.env.get("PATH").map(String::as_str), Some("/usr/bin"));
+    assert!(!request.env.contains_key("VIRTUAL_ENV"));
+}
+
+fn virtualenv_bin_for_tests(root: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        root.join("Scripts")
+    } else {
+        root.join("bin")
+    }
 }
 
 #[tokio::test]

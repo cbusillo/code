@@ -9,7 +9,11 @@ use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_shell_command_call;
 use core_test_support::test_codex::ApplyPatchModelOutput;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
+use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 
@@ -1433,4 +1437,86 @@ async fn apply_patch_change_context_disambiguates_target(
     let contents = fs::read_to_string(&target)?;
     assert_eq!(contents, "fn a\nx=10\ny=2\nfn b\nx=11\ny=20\n");
     Ok(())
+}
+
+#[cfg(unix)]
+#[large_stack_test]
+#[serial]
+async fn apply_patch_appends_validation_summary_to_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = apply_patch_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let bin_dir = harness.path("bin");
+    fs::create_dir_all(&bin_dir)?;
+    write_shell_tool(
+        &bin_dir.join("prettier"),
+        "#!/bin/sh\n[ -f .prettierrc ] || { echo missing prettier config; exit 1; }\nexit 0\n",
+    )?;
+    fs::write(harness.path(".prettierrc"), "{}\n")?;
+
+    let _path_guard = ScopedEnvVar::set("PATH", Some(bin_dir.into_os_string()));
+    let patch = "*** Begin Patch\n*** Add File: src/index.ts\n+const x = 1;\n*** End Patch";
+    let call_id = "apply-validation-summary";
+    mount_apply_patch(
+        &harness,
+        call_id,
+        patch,
+        "done",
+        ApplyPatchModelOutput::Function,
+    )
+    .await;
+
+    harness.submit("apply patch with validation").await?;
+
+    let out = harness.apply_patch_output(call_id, ApplyPatchModelOutput::Function).await;
+    assert!(
+        out.contains("Validate New Code: no issues"),
+        "expected validation summary in output: {out}"
+    );
+    assert!(
+        out.contains("Checks run: prettier"),
+        "expected prettier check marker in output: {out}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_shell_tool(path: &std::path::Path, script: &str) -> Result<()> {
+    fs::write(path, script)?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+#[cfg(unix)]
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: Option<OsString>) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            match &value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        Self { key, previous }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }

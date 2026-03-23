@@ -24,16 +24,81 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Duration;
 
 use crossterm::event::Event;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
+#[cfg(unix)]
+use tokio::time::Sleep;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::TuiEvent;
+
+#[cfg(unix)]
+const FOREGROUND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(unix)]
+fn process_group_exists(pgid: libc::pid_t) -> bool {
+    if pgid <= 0 {
+        return false;
+    }
+
+    let result = unsafe { libc::kill(-pgid, 0) };
+    if result == 0 {
+        return true;
+    }
+
+    let err = std::io::Error::last_os_error();
+    matches!(err.raw_os_error(), Some(libc::EPERM))
+}
+
+#[cfg(unix)]
+fn reclaim_stdin_foreground_process_group(target_pgrp: libc::pid_t) -> bool {
+    if target_pgrp <= 0 {
+        return false;
+    }
+
+    unsafe {
+        let mut block_set = std::mem::zeroed();
+        let mut previous_set = std::mem::zeroed();
+        libc::sigemptyset(&mut block_set);
+        libc::sigaddset(&mut block_set, libc::SIGTTOU);
+
+        if libc::pthread_sigmask(libc::SIG_BLOCK, &block_set, &mut previous_set) != 0 {
+            return false;
+        }
+
+        let reclaimed = libc::tcsetpgrp(libc::STDIN_FILENO, target_pgrp) == 0;
+        let _ = libc::pthread_sigmask(libc::SIG_SETMASK, &previous_set, std::ptr::null_mut());
+
+        reclaimed && libc::tcgetpgrp(libc::STDIN_FILENO) == target_pgrp
+    }
+}
+
+#[cfg(unix)]
+fn stdin_is_foreground_process_group() -> bool {
+    unsafe {
+        let stdin_pgrp = libc::tcgetpgrp(libc::STDIN_FILENO);
+        if stdin_pgrp == -1 {
+            return true;
+        }
+
+        let self_pgrp = libc::getpgrp();
+        if stdin_pgrp == self_pgrp {
+            return true;
+        }
+
+        if !process_group_exists(stdin_pgrp) {
+            return reclaim_stdin_foreground_process_group(self_pgrp);
+        }
+
+        false
+    }
+}
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -143,6 +208,8 @@ pub struct TuiEventStream<S: EventSource + Default + Unpin = CrosstermEventSourc
     terminal_focused: Arc<AtomicBool>,
     poll_draw_first: bool,
     #[cfg(unix)]
+    foreground_retry: Option<Pin<Box<Sleep>>>,
+    #[cfg(unix)]
     suspend_context: crate::tui::job_control::SuspendContext,
     #[cfg(unix)]
     alt_screen_active: Arc<AtomicBool>,
@@ -164,6 +231,8 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             terminal_focused,
             poll_draw_first: false,
             #[cfg(unix)]
+            foreground_retry: None,
+            #[cfg(unix)]
             suspend_context,
             #[cfg(unix)]
             alt_screen_active,
@@ -179,6 +248,17 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         // Some crossterm events map to None (e.g. FocusLost, mouse); loop so we keep polling
         // until we return a mapped event, hit Pending, or see EOF/error.
         loop {
+            #[cfg(unix)]
+            if !stdin_is_foreground_process_group() {
+                self.drop_event_source_until_foreground_returns();
+                match self.poll_foreground_retry(cx) {
+                    Poll::Ready(()) => continue,
+                    Poll::Pending => return Poll::Pending,
+                }
+            } else {
+                self.foreground_retry = None;
+            }
+
             let poll_result = {
                 let mut state = self
                     .broker
@@ -218,6 +298,32 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             if let Some(mapped) = poll_result.and_then(|event| self.map_crossterm_event(event)) {
                 return Poll::Ready(Some(mapped));
             }
+        }
+    }
+
+    #[cfg(unix)]
+    fn drop_event_source_until_foreground_returns(&self) {
+        let mut state = self
+            .broker
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(&*state, EventBrokerState::Running(_)) {
+            *state = EventBrokerState::Start;
+        }
+    }
+
+    #[cfg(unix)]
+    fn poll_foreground_retry(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        let sleep = self
+            .foreground_retry
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(FOREGROUND_RETRY_INTERVAL)));
+        match sleep.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                self.foreground_retry = None;
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -507,5 +613,18 @@ mod tests {
             Some(TuiEvent::Key(key)) => assert_eq!(key, expected_key),
             other => panic!("expected key event, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_process_group_exists() {
+        let current_pgrp = unsafe { libc::getpgrp() };
+        assert!(process_group_exists(current_pgrp));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absurd_process_group_is_missing() {
+        assert!(!process_group_exists(999_999_999));
     }
 }

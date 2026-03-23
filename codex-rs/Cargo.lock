@@ -2158,6 +2158,7 @@ dependencies = [
  "chrono",
  "codex-config",
  "codex-protocol",
+ "codex-utils-pty",
  "futures",
  "pretty_assertions",
  "regex",

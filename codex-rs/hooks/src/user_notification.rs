@@ -9,6 +9,19 @@ use crate::HookPayload;
 use crate::HookResult;
 use crate::command_from_argv;
 
+fn spawn_background_notification(command: &mut std::process::Command) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        unsafe {
+            command.pre_exec(codex_utils_pty::process_group::detach_from_tty);
+        }
+    }
+
+    command.spawn().map(|_| ())
+}
+
 /// Legacy notify payload appended as the final argv argument for backward compatibility.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -68,7 +81,7 @@ pub fn notify_hook(argv: Vec<String>) -> Hook {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
 
-                match command.spawn() {
+                match spawn_background_notification(&mut command) {
                     Ok(_) => HookResult::Success,
                     Err(err) => HookResult::FailedContinue(err.into()),
                 }

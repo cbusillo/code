@@ -54,6 +54,7 @@ mod network_policy_decision;
 pub mod network_proxy_loader;
 mod original_image_detail;
 mod packages;
+mod patch_validation;
 pub use mcp_connection_manager::MCP_SANDBOX_STATE_CAPABILITY;
 pub use mcp_connection_manager::MCP_SANDBOX_STATE_METHOD;
 pub use mcp_connection_manager::SandboxState;
