@@ -111,6 +111,7 @@ pub mod edit;
 mod managed_features;
 mod network_proxy_spec;
 mod permissions;
+mod validation;
 pub mod profile;
 pub mod schema;
 pub mod service;
@@ -2095,11 +2096,12 @@ impl Config {
     }
 
     pub(crate) fn load_config_with_layer_stack(
-        cfg: ConfigToml,
+        mut cfg: ConfigToml,
         overrides: ConfigOverrides,
         codex_home: PathBuf,
         config_layer_stack: ConfigLayerStack,
     ) -> std::io::Result<Self> {
+        validation::upgrade_legacy_model_slugs(&mut cfg);
         validate_reserved_model_provider_ids(&cfg.model_providers)
             .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         // Ensure that every field of ConfigRequirements is applied to the final
