@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Every Code Shared Session Spike</title>
+    <link rel="stylesheet" href="./app.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">Every Code experiment</p>
+        <div>
+          <h1>Shared sessions, straight from the app-server.</h1>
+          <p class="hero-copy">
+            Browser-first thread listing, reading, and prompting over the
+            current app-server thread transport.
+          </p>
+        </div>
+      </header>
+
+      <section class="control-strip card">
+        <form id="connect-form" class="cluster">
+          <label>
+            <span>WebSocket URL</span>
+            <input
+              id="ws-url"
+              name="wsUrl"
+              type="text"
+              value="ws://127.0.0.1:8877"
+            />
+          </label>
+          <button type="submit">Connect</button>
+          <button id="disconnect" type="button" class="ghost">
+            Disconnect
+          </button>
+          <button id="refresh-sessions" type="button" class="ghost">
+            Refresh sessions
+          </button>
+        </form>
+        <div class="status-row">
+          <span id="connection-pill" class="pill idle">Offline</span>
+          <span id="status-text">Waiting for a local app-server.</span>
+        </div>
+      </section>
+
+      <main class="workspace">
+        <section class="panel session-panel card">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Persisted sessions</p>
+              <h2>Session inventory</h2>
+            </div>
+            <span id="session-count" class="counter">0 sessions</span>
+          </div>
+          <div id="session-list" class="session-list empty-state">
+            Connect to load persisted CLI, TUI, exec, and app-server sessions.
+          </div>
+        </section>
+
+        <section class="panel detail-panel card">
+          <div class="panel-head split-head">
+            <div>
+              <p class="section-kicker">Transcript</p>
+              <h2 id="thread-title">No session selected</h2>
+            </div>
+            <div class="button-row">
+              <button id="resume-thread" type="button" class="ghost" disabled>
+                Load
+              </button>
+              <button id="reload-thread" type="button" class="ghost" disabled>
+                Reload
+              </button>
+            </div>
+          </div>
+          <div id="thread-meta" class="thread-meta muted">
+            Select a thread from the left, then load it to hydrate its turn
+            history.
+          </div>
+          <div id="thread-turns" class="thread-turns empty-state">
+            Load a stored thread to hydrate its turn history here.
+          </div>
+        </section>
+
+        <section class="panel composer-panel card">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Drive the session</p>
+              <h2>Start or continue</h2>
+            </div>
+          </div>
+
+          <form id="start-form" class="stacked-form">
+            <h3>Start a new session</h3>
+            <label>
+              <span>Working directory</span>
+              <input
+                id="start-cwd"
+                name="cwd"
+                type="text"
+                placeholder="/absolute/path"
+              />
+            </label>
+            <label>
+              <span>Model override</span>
+              <input
+                id="start-model"
+                name="model"
+                type="text"
+                placeholder="optional"
+              />
+            </label>
+            <label>
+              <span>Opening prompt</span>
+              <textarea
+                id="start-prompt"
+                name="prompt"
+                rows="4"
+                placeholder="Start a new thread and optionally send the opening prompt."
+              ></textarea>
+            </label>
+            <button type="submit">Start thread</button>
+          </form>
+
+          <form id="prompt-form" class="stacked-form">
+            <h3>Send to selected session</h3>
+            <label>
+              <span>Prompt</span>
+              <textarea
+                id="turn-prompt"
+                name="prompt"
+                rows="4"
+                placeholder="Select or load a thread, then send the next prompt."
+                disabled
+              ></textarea>
+            </label>
+            <button id="send-turn" type="submit" disabled>Send prompt</button>
+          </form>
+
+          <div class="event-log-wrap">
+            <div class="subhead">
+              <h3>Live event rail</h3>
+              <span class="muted">Notifications from the app-server</span>
+            </div>
+            <div id="event-log" class="event-log empty-state">
+              Event deltas will appear here once a live turn starts.
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="session-card-template">
+      <button class="session-card" type="button">
+        <div class="session-card-top">
+          <span class="source-badge"></span>
+          <span class="updated-at"></span>
+        </div>
+        <h3 class="preview"></h3>
+        <p class="cwd"></p>
+        <p class="meta"></p>
+      </button>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

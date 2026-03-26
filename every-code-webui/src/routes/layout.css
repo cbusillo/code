@@ -1,0 +1,38 @@
+@import 'tailwindcss';
+@plugin '@tailwindcss/forms';
+@plugin '@tailwindcss/typography';
+
+:root {
+	color-scheme: dark;
+	--font-display: 'Fraunces', 'Iowan Old Style', 'Palatino Linotype', serif;
+	--font-ui: 'IBM Plex Sans', 'Avenir Next', 'Segoe UI', sans-serif;
+	--font-code: 'IBM Plex Mono', 'SFMono-Regular', monospace;
+	--page-bg: #0a1011;
+	--page-fg: #f7f2ea;
+}
+
+html,
+body {
+	min-height: 100%;
+	background: var(--page-bg);
+	color: var(--page-fg);
+	font-family: var(--font-ui);
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+body {
+	margin: 0;
+}
+
+button,
+textarea,
+input {
+	font: inherit;
+}
+
+::selection {
+	background: rgba(230, 185, 92, 0.35);
+	color: #fffdf9;
+}

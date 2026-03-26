@@ -39,10 +39,10 @@ use code_core::AuthManager;
 use code_core::ConversationManager;
 use code_core::config::Config;
 use code_core::default_client::get_code_user_agent_with_suffix;
-use code_protocol::mcp_protocol::ClientRequest;
-use code_protocol::mcp_protocol::ClientRequest::Initialize;
-use code_protocol::mcp_protocol::GetUserAgentResponse;
-use code_protocol::mcp_protocol::InitializeResponse;
+use code_app_server_protocol::ClientRequest;
+use code_app_server_protocol::ClientRequest::Initialize;
+use code_app_server_protocol::GetUserAgentResponse;
+use code_app_server_protocol::InitializeResponse;
 use code_protocol::protocol::SessionSource;
 use mcp_types::JSONRPCError;
 use mcp_types::JSONRPCErrorError;
@@ -137,6 +137,7 @@ impl MessageProcessor {
                 // Handle Initialize internally so CodexMessageProcessor does not have to concern
                 // itself with per-connection initialization state.
                 Initialize { request_id, params } => {
+                    let request_id = wire_request_id_to_mcp(request_id);
                     if session.initialized {
                         let error = JSONRPCErrorError {
                             code: INVALID_REQUEST_ERROR_CODE,
@@ -148,10 +149,7 @@ impl MessageProcessor {
                     }
 
                     let client_info = params.client_info;
-                    let opted_out_notification_methods = params
-                        .capabilities
-                        .and_then(|capabilities| capabilities.opt_out_notification_methods)
-                        .unwrap_or_default();
+                    let opted_out_notification_methods: Vec<String> = Vec::new();
                     session.opted_out_notification_methods =
                         opted_out_notification_methods.into_iter().collect();
                     session.user_agent_suffix = Some(format!("{}; {}", client_info.name, client_info.version));
@@ -172,6 +170,7 @@ impl MessageProcessor {
                     return;
                 }
                 ClientRequest::GetUserAgent { request_id, .. } => {
+                    let request_id = wire_request_id_to_mcp(request_id);
                     if !session.initialized {
                         let error = JSONRPCErrorError {
                             code: INVALID_REQUEST_ERROR_CODE,
@@ -748,6 +747,15 @@ impl MessageProcessor {
         };
 
         Ok(path)
+    }
+}
+
+fn wire_request_id_to_mcp(request_id: code_app_server_protocol::RequestId) -> mcp_types::RequestId {
+    match request_id {
+        code_app_server_protocol::RequestId::String(value) => mcp_types::RequestId::String(value),
+        code_app_server_protocol::RequestId::Integer(value) => {
+            mcp_types::RequestId::Integer(value)
+        }
     }
 }
 

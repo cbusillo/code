@@ -125,6 +125,10 @@ impl ConversationManager {
             .ok_or_else(|| CodexErr::ConversationNotFound(conversation_id.into()))
     }
 
+    pub async fn loaded_conversation_ids(&self) -> Vec<ConversationId> {
+        self.conversations.read().await.keys().cloned().collect()
+    }
+
     pub async fn resume_conversation_from_rollout(
         &self,
         mut config: Config,

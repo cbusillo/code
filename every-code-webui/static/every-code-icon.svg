@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">EveryCode Companion</title>
+  <desc id="desc">Rounded dark square with EC monogram for the EveryCode browser companion.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#143236" />
+      <stop offset="100%" stop-color="#090c0d" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#8ef1e4" />
+      <stop offset="100%" stop-color="#f7db7d" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)" />
+  <path d="M179 73h-69c-20.435 0-37 16.565-37 37v36c0 20.435 16.565 37 37 37h69v-20h-69c-9.389 0-17-7.611-17-17v-36c0-9.389 7.611-17 17-17h69z" fill="url(#accent)" />
+  <path d="M178 92h-54c-7.18 0-13 5.82-13 13s5.82 13 13 13h46v20h-46c-7.18 0-13 5.82-13 13s5.82 13 13 13h54v20h-54c-18.225 0-33-14.775-33-33 0-8.62 3.307-16.469 8.718-22.342A32.8 32.8 0 0 1 91 105c0-18.225 14.775-33 33-33h54z" fill="#f7f3eb" />
+  <circle cx="193" cy="68" r="9" fill="#8ef1e4" opacity="0.9" />
+  <circle cx="68" cy="188" r="11" fill="#f7db7d" opacity="0.85" />
+</svg>

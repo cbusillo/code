@@ -1,0 +1,18 @@
+{
+  "name": "EveryCode Companion",
+  "short_name": "EveryCode",
+  "description": "Shared-session browser companion for away-from-keyboard unblock, review, and monitoring.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#090c0d",
+  "theme_color": "#143236",
+  "icons": [
+    {
+      "src": "/every-code-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -43,6 +43,7 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 tokio-tungstenite = { version = "0.23", default-features = true, features = ["rustls-tls-webpki-roots"] }
+time = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 toml = { workspace = true }
@@ -50,3 +51,4 @@ uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+wiremock = { workspace = true }
