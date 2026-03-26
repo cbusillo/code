@@ -43,7 +43,6 @@ struct TypeScriptProjectGroup {
     config: Option<PathBuf>,
     files: Vec<PathBuf>,
 }
-
 /// Run fast validations on the files touched by a patch. Returns `None` when the
 /// harness is disabled and no checks were executed.
 pub fn run_patch_harness(
@@ -845,7 +844,6 @@ fn find_node_tool_in_dir(project_root: &Path, tool: &str) -> Option<PathBuf> {
     }
     None
 }
-
 fn find_virtualenv_tool(cwd: &Path, files: &[PathBuf], tool: &str) -> Option<ResolvedExternalTool> {
     for search_dir in python_search_dirs(cwd, files) {
         if let Some((virtualenv_root, executable)) = find_virtualenv_tool_in_dir(&search_dir, tool) {
@@ -1075,7 +1073,6 @@ fn run_overlay_command(
         }],
     }
 }
-
 fn prepend_path(bin_dir: &Path) -> OsString {
     let path_entries = std::env::var_os("PATH")
         .map(|value| std::env::split_paths(&value).collect::<Vec<PathBuf>>())
@@ -1557,7 +1554,6 @@ mod tests {
         assert_eq!(resolved.executable, bin_dir.join("prettier"));
         assert!(resolved.executable.is_file(), "symlinked local bin should resolve to a valid file");
     }
-
     fn write_executable(path: &Path) {
         fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable");
         #[cfg(unix)]
