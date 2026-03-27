@@ -6,8 +6,9 @@
   static code reading.
 - The working native Gemini path is to use the `browser-ui-review` skill from
   `~/.agents/skills/browser-ui-review`, which drives the `ui-browser` helper.
-- Before asking Gemini for a broad critique, do a tiny smoke test first to
-  confirm live browser access. Example:
+- Before asking Gemini for a broad critique, do a tiny smoke test only for the
+  first such task in a session or when browser access/approvals are uncertain.
+  Example:
 
 ```text
 Use the browser-ui-review skill. Open http://127.0.0.1:4185/ with the real
@@ -16,6 +17,9 @@ browser helper, then reply with only: TITLE: <page title>.
 
 - If that smoke test succeeds, Gemini can be trusted for live exploratory UI
   review on this app.
+- When launching browser subagents via `agent.create`, prefer `write: true`
+  even for read-only exploration. In this harness, read-only subagents may hit
+  browser-tool permission blockers that writable worktree agents avoid.
 
 ## Claude/Gemini agent caveat
 
