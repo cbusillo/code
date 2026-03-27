@@ -29,7 +29,7 @@ pnpm install --ignore-workspace --dir every-code-webui
 Run the local prototype:
 
 ```sh
-pnpm --dir every-code-webui dev --host 127.0.0.1 --port 4173
+pnpm --dir every-code-webui dev --host 0.0.0.0 --port 4173
 ```
 
 Deterministic transcript fixture route:

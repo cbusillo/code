@@ -80,13 +80,13 @@ export function deriveTranscriptSessionBanner(
 	if (loadedElsewhere) {
 		return {
 			state: 'active_elsewhere',
-			title: 'Another surface is attached to this thread.',
+			title: 'This thread is open somewhere else.',
 			detail:
 				hasPendingStructuredRequests
-					? 'You can still answer structured requests here, but take over first before steering or sending a new prompt from this browser.'
-					: 'Live control is still attached elsewhere. Take over here before sending the next prompt from this browser.',
+					? 'You can still answer structured requests here, but bring the live session to this browser before steering or sending a new prompt.'
+					: 'Live control is still attached somewhere else. Bring it here before sending the next prompt from this browser.',
 			primaryAction: 'take_over',
-			primaryLabel: 'Take over here'
+			primaryLabel: 'Bring it here'
 		};
 	}
 
@@ -95,15 +95,15 @@ export function deriveTranscriptSessionBanner(
 			state: 'active_elsewhere',
 			title:
 				takeoverRequestedThreadId === selectedThread.id
-					? 'Takeover queued for this browser.'
-					: 'Another surface is driving this turn.',
+					? 'This browser is next in line.'
+					: 'Another window is driving this turn.',
 			detail:
 				takeoverRequestedThreadId === selectedThread.id
 					? 'Keep reading and answer structured requests here. Live updates will attach automatically when the active turn settles.'
 					: 'You can keep reading and answer structured requests here, but wait for the turn to settle unless you intentionally want this browser to take over.',
 			primaryAction: 'take_over',
 			primaryLabel:
-				takeoverRequestedThreadId === selectedThread.id ? 'Takeover queued' : 'Take over here'
+				takeoverRequestedThreadId === selectedThread.id ? 'Queued here' : 'Bring it here'
 		};
 	}
 

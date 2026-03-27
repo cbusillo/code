@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { SharedSessionDomain, type SharedSessionTransport } from '$lib/shared-session-domain';
+import {
+	buildDefaultWsUrl,
+	SharedSessionDomain,
+	type SharedSessionTransport
+} from '$lib/shared-session-domain';
 import type {
 	ConversationListenerResult,
 	JsonRpcNotification,
@@ -21,6 +25,12 @@ describe('SharedSessionDomain', () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.unstubAllGlobals();
+	});
+
+	it('defaults the websocket url to the current browser host', () => {
+		expect(buildDefaultWsUrl({ protocol: 'http:', hostname: '192.168.1.24' })).toBe(
+			'ws://192.168.1.24:8877'
+		);
 	});
 
 	it('connects, lists threads, and hydrates the selected transcript', async () => {
@@ -159,7 +169,9 @@ describe('SharedSessionDomain', () => {
 			threads: [thread],
 			threadReads: new Map([[thread.id, thread]]),
 			threadResumes: new Map([[thread.id, thread]]),
-			turnStarts: [makeTurn('turn_override', 'inProgress', 'Route this through a different repo root')]
+			turnStarts: [
+				makeTurn('turn_override', 'inProgress', 'Route this through a different repo root')
+			]
 		});
 		const domain = new SharedSessionDomain(client);
 
@@ -594,7 +606,9 @@ describe('SharedSessionDomain', () => {
 					{
 						type: 'userMessage',
 						id: 'turn_live_user',
-						content: [{ type: 'text', text: 'Keep the browser transcript fresh', text_elements: [] }]
+						content: [
+							{ type: 'text', text: 'Keep the browser transcript fresh', text_elements: [] }
+						]
 					},
 					{
 						type: 'agentMessage',
@@ -779,7 +793,11 @@ class FakeSharedSessionClient implements SharedSessionTransport {
 	): Promise<ThreadForkResult> {
 		const thread =
 			this.forkedThreads.get(threadId) ??
-			makeThread(`fork_${threadId}`, this.threadReads.get(threadId)?.turns ?? [], overrides?.cwd ?? this.threads[0]!.cwd);
+			makeThread(
+				`fork_${threadId}`,
+				this.threadReads.get(threadId)?.turns ?? [],
+				overrides?.cwd ?? this.threads[0]!.cwd
+			);
 		if (!this.loadedThreadIds.includes(thread.id)) {
 			this.loadedThreadIds.push(thread.id);
 		}
@@ -806,11 +824,7 @@ class FakeSharedSessionClient implements SharedSessionTransport {
 			this.loadedThreadIds.push(threadId);
 		}
 		return {
-			thread: makeThread(
-				threadId,
-				[],
-				cwd ?? '/Users/cbusillo/Developer/code/every-code-webui'
-			),
+			thread: makeThread(threadId, [], cwd ?? '/Users/cbusillo/Developer/code/every-code-webui'),
 			model: 'gpt-5.4',
 			modelProvider: 'openai',
 			cwd: cwd ?? '/Users/cbusillo/Developer/code/every-code-webui',

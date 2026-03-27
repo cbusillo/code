@@ -689,37 +689,48 @@
 					</p>
 				{/if}
 			</div>
-			<div class="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 text-xs font-[var(--font-ui)] text-stone-700 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0 sm:pb-0">
-				<button
-					type="button"
-					onclick={() => (showAllReasoning = !showAllReasoning)}
-					class={`rounded-full px-3 py-2 transition ${showAllReasoning ? 'bg-stone-950 text-stone-50' : 'bg-stone-900/6 text-stone-700 hover:bg-stone-900/10'}`}
-				>
-					{showAllReasoning ? 'Reasoning: all' : 'Reasoning: auto'}
-				</button>
-				<button
-					type="button"
-					onclick={() => (autoCompactTools = !autoCompactTools)}
-					class={`rounded-full px-3 py-2 transition ${autoCompactTools ? 'bg-teal-900 text-teal-50' : 'bg-stone-900/6 text-stone-700 hover:bg-stone-900/10'}`}
-				>
-					{autoCompactTools ? 'Tools: compact' : 'Tools: expanded'}
-				</button>
-				<button
-					type="button"
-					onclick={openLatestDiff}
-					disabled={!latestDiffId}
-					class="rounded-full bg-stone-900/6 px-3 py-2 transition hover:bg-stone-900/10 disabled:cursor-not-allowed disabled:opacity-45"
-				>
-					Latest diff
-				</button>
-				<button
-					type="button"
-					onclick={jumpToLatest}
-					class="rounded-full bg-stone-900/6 px-3 py-2 transition hover:bg-stone-900/10"
-				>
-					Latest turn
-				</button>
-			</div>
+			<details class="rounded-[22px] border border-stone-900/10 bg-white/55 px-4 py-3 text-xs font-[var(--font-ui)] text-stone-700">
+				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+					<div>
+						<p class="text-[0.68rem] tracking-[0.18em] text-stone-500 uppercase">View options</p>
+						<p class="mt-1 text-xs text-stone-600">Reasoning, tool density, and jump links stay here when you need them.</p>
+					</div>
+					<span class="rounded-full border border-stone-900/10 bg-white/75 px-3 py-1.5 text-[11px] text-stone-700">
+						{showAllReasoning ? 'Reasoning: all' : 'Reasoning: auto'}
+					</span>
+				</summary>
+				<div class="-mx-1 mt-4 flex gap-2 overflow-x-auto px-1 pb-1 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0 sm:pb-0">
+					<button
+						type="button"
+						onclick={() => (showAllReasoning = !showAllReasoning)}
+						class={`rounded-full px-3 py-2 transition ${showAllReasoning ? 'bg-stone-950 text-stone-50' : 'bg-stone-900/6 text-stone-700 hover:bg-stone-900/10'}`}
+					>
+						{showAllReasoning ? 'Show all reasoning' : 'Auto-hide reasoning'}
+					</button>
+					<button
+						type="button"
+						onclick={() => (autoCompactTools = !autoCompactTools)}
+						class={`rounded-full px-3 py-2 transition ${autoCompactTools ? 'bg-teal-900 text-teal-50' : 'bg-stone-900/6 text-stone-700 hover:bg-stone-900/10'}`}
+					>
+						{autoCompactTools ? 'Tools stay compact' : 'Expand tool details'}
+					</button>
+					<button
+						type="button"
+						onclick={openLatestDiff}
+						disabled={!latestDiffId}
+						class="rounded-full bg-stone-900/6 px-3 py-2 transition hover:bg-stone-900/10 disabled:cursor-not-allowed disabled:opacity-45"
+					>
+						Jump to latest diff
+					</button>
+					<button
+						type="button"
+						onclick={jumpToLatest}
+						class="rounded-full bg-stone-900/6 px-3 py-2 transition hover:bg-stone-900/10"
+					>
+						Jump to latest turn
+					</button>
+				</div>
+			</details>
 		</div>
 
 		<div class="mt-5 flex flex-wrap gap-2 text-xs font-[var(--font-ui)] text-stone-600">

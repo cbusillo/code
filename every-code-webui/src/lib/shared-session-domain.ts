@@ -33,7 +33,7 @@ import type {
 	TurnStartResult
 } from '$lib/shared-session-types';
 
-const DEFAULT_WS_URL = 'ws://127.0.0.1:8877';
+const DEFAULT_WS_PORT = '8877';
 const STORAGE_KEYS = {
 	wsUrl: 'every-code-webui.ws-url',
 	cwd: 'every-code-webui.cwd',
@@ -46,6 +46,8 @@ const STORAGE_KEYS = {
 } as const;
 
 const AUTO_RECONNECT_DELAYS_MS = [1_500, 3_000, 5_000] as const;
+
+type DefaultWsLocation = Pick<Location, 'protocol' | 'hostname'>;
 
 export type ConnectionPhase = 'offline' | 'connecting' | 'connected' | 'error';
 
@@ -155,8 +157,8 @@ export interface SharedSessionTransport {
 
 const initialState: SharedSessionState = {
 	connectionPhase: 'offline',
-	statusMessage: 'Waiting for a local app-server.',
-	wsUrl: DEFAULT_WS_URL,
+	statusMessage: 'Waiting for an app-server.',
+	wsUrl: buildDefaultWsUrl(typeof window === 'undefined' ? null : window.location),
 	startCwd: '',
 	startPrompt: '',
 	composerText: '',
@@ -436,7 +438,10 @@ export class SharedSessionDomain {
 				throw new Error('Select a thread before branching from it.');
 			}
 
-			const response = await this.#client.forkThread(thread.id, buildForkOverrides(this.getSnapshot()));
+			const response = await this.#client.forkThread(
+				thread.id,
+				buildForkOverrides(this.getSnapshot())
+			);
 			await this.#ensureListener(response.thread.id);
 			persistOptionalValue(STORAGE_KEYS.selectedThreadId, response.thread.id);
 			this.#state.update((state) => ({
@@ -737,8 +742,12 @@ export class SharedSessionDomain {
 		if (threadId && turn) {
 			this.#state.update((state) => {
 				const nextHydratedThread =
-					state.hydratedThread?.id === threadId ? mergeTurn(state.hydratedThread, turn) : state.hydratedThread;
-				const nextThreads = nextHydratedThread ? upsertThread(state.threads, nextHydratedThread) : state.threads;
+					state.hydratedThread?.id === threadId
+						? mergeTurn(state.hydratedThread, turn)
+						: state.hydratedThread;
+				const nextThreads = nextHydratedThread
+					? upsertThread(state.threads, nextHydratedThread)
+					: state.threads;
 
 				if (state.hydratedThread?.id !== threadId) {
 					return {
@@ -991,7 +1000,9 @@ export class SharedSessionDomain {
 		}
 	}
 
-	async #refreshThreadInventory(preferredSelectedThreadId: string | null = this.getSnapshot().selectedThreadId) {
+	async #refreshThreadInventory(
+		preferredSelectedThreadId: string | null = this.getSnapshot().selectedThreadId
+	) {
 		const [response, loadedResponse] = await Promise.all([
 			this.#client.listThreads(),
 			this.#client.listLoadedThreads()
@@ -1004,10 +1015,11 @@ export class SharedSessionDomain {
 				loadedThreadIds.includes(threadId)
 			);
 			selectedThreadId =
-				preferredSelectedThreadId && response.data.some((thread) => thread.id === preferredSelectedThreadId)
+				preferredSelectedThreadId &&
+				response.data.some((thread) => thread.id === preferredSelectedThreadId)
 					? preferredSelectedThreadId
 					: state.selectedThreadId &&
-						response.data.some((thread) => thread.id === state.selectedThreadId)
+						  response.data.some((thread) => thread.id === state.selectedThreadId)
 						? state.selectedThreadId
 						: (response.data[0]?.id ?? null);
 
@@ -1110,8 +1122,7 @@ export class SharedSessionDomain {
 			return {
 				...state,
 				threads: upsertThread(state.threads, hydratedThread),
-				hydratedThread:
-					state.selectedThreadId === threadId ? hydratedThread : state.hydratedThread
+				hydratedThread: state.selectedThreadId === threadId ? hydratedThread : state.hydratedThread
 			};
 		});
 	}
@@ -1138,16 +1149,25 @@ function loadPersistedState(): SharedSessionState {
 		composerText:
 			window.localStorage.getItem(STORAGE_KEYS.composerText) ?? initialState.composerText,
 		turnOverrideModel:
-			window.localStorage.getItem(STORAGE_KEYS.turnOverrideModel) ??
-			initialState.turnOverrideModel,
+			window.localStorage.getItem(STORAGE_KEYS.turnOverrideModel) ?? initialState.turnOverrideModel,
 		turnOverrideCwd:
-			window.localStorage.getItem(STORAGE_KEYS.turnOverrideCwd) ??
-			initialState.turnOverrideCwd,
+			window.localStorage.getItem(STORAGE_KEYS.turnOverrideCwd) ?? initialState.turnOverrideCwd,
 		turnOverridePersonality:
-			normalizeStoredPersonality(window.localStorage.getItem(STORAGE_KEYS.turnOverridePersonality)) ??
-			initialState.turnOverridePersonality,
+			normalizeStoredPersonality(
+				window.localStorage.getItem(STORAGE_KEYS.turnOverridePersonality)
+			) ?? initialState.turnOverridePersonality,
 		selectedThreadId: window.localStorage.getItem(STORAGE_KEYS.selectedThreadId)
 	};
+}
+
+export function buildDefaultWsUrl(location?: DefaultWsLocation | null) {
+	if (!location) {
+		return `ws://127.0.0.1:${DEFAULT_WS_PORT}`;
+	}
+
+	const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+	const hostname = location.hostname || '127.0.0.1';
+	return `${protocol}://${hostname}:${DEFAULT_WS_PORT}`;
 }
 
 function buildTurnOverrides(state: SharedSessionState): SharedSessionTurnOverrides | undefined {
@@ -1195,9 +1215,7 @@ function trimOptionalText(value: string) {
 	return trimmed ? trimmed : undefined;
 }
 
-function normalizeStoredPersonality(
-	value: string | null
-): '' | ProtocolPersonality | null {
+function normalizeStoredPersonality(value: string | null): '' | ProtocolPersonality | null {
 	if (!value) {
 		return '';
 	}
@@ -1236,10 +1254,7 @@ function upsertThread(threads: ProtocolThread[], nextThread: ProtocolThread) {
 		return [nextThread, ...threads];
 	}
 
-	return [
-		nextThread,
-		...threads.filter((thread, index) => index !== existingIndex)
-	];
+	return [nextThread, ...threads.filter((thread, index) => index !== existingIndex)];
 }
 
 function mergeTurn(thread: ProtocolThread, nextTurn: ProtocolTurn) {

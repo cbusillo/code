@@ -137,6 +137,8 @@
 	let pendingActionsSection = $state<HTMLElement | null>(null);
 	let responderSection = $state<HTMLElement | null>(null);
 	let composerSection = $state<HTMLElement | null>(null);
+	let threadRailSection = $state<HTMLElement | null>(null);
+	let companionToolsSection = $state<HTMLDetailsElement | null>(null);
 	let focusedQuestionRequestId = $state<string | null>(null);
 	let showConnectionSettings = $state(domain.getSnapshot().connectionPhase !== 'connected');
 	let threadSearch = $state('');
@@ -405,28 +407,35 @@
 			return [];
 		}
 
+		const pendingCount = selectedRequests.filter((request) => request.status === 'pending').length;
+		const branchLabel = selectedThread.gitInfo?.branch?.trim();
+		const contextLabel = compactThreadPath(selectedThread.cwd);
+
 		return [
-			selectedThread.cwd,
 			`${selectedThread.turns.length} turn${selectedThread.turns.length === 1 ? '' : 's'}`,
-			selectedThread.gitInfo?.branch ? `branch ${selectedThread.gitInfo.branch}` : 'no git info',
-			`${selectedRequests.filter((request) => request.status === 'pending').length} pending actions`
-		];
+			branchLabel ? `branch ${branchLabel}` : null,
+			pendingCount > 0 ? `${pendingCount} pending action${pendingCount === 1 ? '' : 's'}` : null,
+			contextLabel
+		].filter((badge): badge is string => Boolean(badge));
 	});
-	const sessionBanner = $derived.by(() =>
-		deriveTranscriptSessionBanner({
+	const selectedThreadId = $derived.by(() => selectedThread?.id ?? null);
+	const sessionBanner = $derived.by(() => {
+		const selectedThreadLoadedElsewhere = selectedThreadId
+			? $workspaceState.loadedThreadIds.includes(selectedThreadId) &&
+				!$workspaceState.attachedThreadIds.includes(selectedThreadId)
+			: false;
+
+		return deriveTranscriptSessionBanner({
 			connectionPhase: $workspaceState.connectionPhase,
 			statusMessage: $workspaceState.statusMessage,
 			selectedThread,
 			activeThreadId: $workspaceState.activeThreadId,
-			loadedElsewhere:
-				Boolean(selectedThread) &&
-				$workspaceState.loadedThreadIds.includes(selectedThread.id) &&
-				!$workspaceState.attachedThreadIds.includes(selectedThread.id),
+			loadedElsewhere: selectedThreadLoadedElsewhere,
 			takeoverRequestedThreadId: $workspaceState.takeoverRequestedThreadId,
 			pendingAction: $workspaceState.pendingAction,
 			structuredRequests: selectedRequests
-		})
-	);
+		});
+	});
 	const pendingApprovals = $derived.by(() =>
 		selectedRequests.filter(
 			(request): request is SharedSessionApprovalRequest =>
@@ -528,19 +537,23 @@
 	const selectedTakeoverQueued = $derived.by(
 		() => selectedThread?.id === $workspaceState.takeoverRequestedThreadId
 	);
-	const selectedLoadedElsewhere = $derived.by(
-		() =>
-			Boolean(selectedThread) &&
-			$workspaceState.loadedThreadIds.includes(selectedThread.id) &&
-			!$workspaceState.attachedThreadIds.includes(selectedThread.id)
-	);
+	const selectedLoadedElsewhere = $derived.by(() => {
+		if (!selectedThreadId) {
+			return false;
+		}
+
+		return (
+			$workspaceState.loadedThreadIds.includes(selectedThreadId) &&
+			!$workspaceState.attachedThreadIds.includes(selectedThreadId)
+		);
+	});
 	const composerBlockedReason = $derived.by(() => {
 		if ($workspaceState.connectionPhase !== 'connected') {
 			return 'Connect and restore live updates before composing here.';
 		}
 
 		if (selectedLoadedElsewhere) {
-			return 'Another surface still has this thread attached. Take over here before sending the next prompt from this browser.';
+			return 'Another window still has this thread attached. Bring it here before sending the next prompt from this browser.';
 		}
 
 		if (selectedTakeoverQueued) {
@@ -548,7 +561,7 @@
 		}
 
 		if (selectedRunningElsewhere) {
-			return 'Another surface is still driving this turn. Wait for it to settle or explicitly take over here first.';
+			return 'Another window is still driving this turn. Wait for it to settle or bring it here first.';
 		}
 
 		return '';
@@ -853,6 +866,17 @@
 		await domain.hydrateSelectedThread();
 	}
 
+	async function scrollToThreadRail() {
+		await tickAfterDomWork();
+		threadRailSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+
+	async function scrollToCompanionTools() {
+		companionToolsSection?.setAttribute('open', 'open');
+		await tickAfterDomWork();
+		companionToolsSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+
 	async function focusRequestedThreadTarget() {
 		await tickAfterDomWork();
 		if (requestedFocus === 'pending') {
@@ -1008,7 +1032,65 @@
 	}
 
 	function sourceBadge(thread: ProtocolThread) {
-		return typeof thread.source === 'string' ? thread.source : thread.source.subAgent;
+		if (typeof thread.source === 'string') {
+			return thread.source;
+		}
+
+		const subAgent = thread.source.subAgent;
+		if (typeof subAgent === 'string') {
+			return subAgent;
+		}
+
+		if ('thread_spawn' in subAgent) {
+			return 'spawn';
+		}
+
+		if ('other' in subAgent) {
+			return subAgent.other;
+		}
+
+		return 'unknown';
+	}
+
+	function looksLikeThreadId(value: string | null | undefined) {
+		return Boolean(value?.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i));
+	}
+
+	function threadDisplayLabel(thread: ProtocolThread | null | undefined) {
+		if (!thread) {
+			return 'No thread selected';
+		}
+
+		const preview = thread.preview?.trim();
+		if (preview && !looksLikeThreadId(preview)) {
+			return preview;
+		}
+
+		return thread.turns.length > 0 ? 'Untitled thread' : 'New thread';
+	}
+
+	function compactThreadPath(path: string | null | undefined) {
+		if (!path) {
+			return '';
+		}
+
+		const normalized = path.replace(/\\/g, '/');
+		const parts = normalized.split('/').filter(Boolean);
+		if (parts.length <= 2) {
+			return path;
+		}
+
+		return `.../${parts.slice(-2).join('/')}`;
+	}
+
+	function threadContextLabel(thread: ProtocolThread) {
+		const parts = [thread.gitInfo?.branch?.trim(), compactThreadPath(thread.cwd)].filter(Boolean);
+
+		return parts.join(' · ');
+	}
+
+	function showThreadSourceBadge(thread: ProtocolThread) {
+		return sourceBadge(thread) !== 'cli';
 	}
 
 	function formatUpdatedAt(timestamp: number) {
@@ -1055,7 +1137,7 @@
 			case 'error':
 				return 'Connection needs attention.';
 			default:
-				return 'Waiting for your local workspace.';
+				return 'Bring your local workspace into the browser.';
 		}
 	}
 
@@ -1068,7 +1150,7 @@
 			case 'error':
 				return 'Check the server address and reconnect. Your threads and pending actions will reappear when the connection is healthy.';
 			default:
-				return 'Connect first, then open a saved thread or start a new one from this browser.';
+				return 'Connect once, then reopen a saved thread or start a new one without losing continuity.';
 		}
 	}
 
@@ -1105,7 +1187,7 @@
 			return 'Working';
 		}
 
-		return 'Quiet';
+		return 'Idle';
 	}
 
 	function currentSignalTone() {
@@ -1151,6 +1233,69 @@
 		queueMicrotask(() => {
 			pendingActionsSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		});
+	}
+
+	async function runHeroPrimaryAction() {
+		if ($workspaceState.connectionPhase !== 'connected') {
+			showConnectionSettings = true;
+			await connect();
+			return;
+		}
+
+		if (sessionBanner?.primaryAction) {
+			await handleSessionAction(sessionBanner.primaryAction);
+			return;
+		}
+
+		if (selectedThread) {
+			composerSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+			return;
+		}
+
+		await startThread();
+	}
+
+	function heroPrimaryLabel() {
+		if ($workspaceState.connectionPhase !== 'connected') {
+			return $workspaceState.connectionPhase === 'connecting' ? 'Connecting...' : 'Connect browser';
+		}
+
+		if (sessionBanner?.primaryLabel) {
+			return sessionBanner.primaryLabel;
+		}
+
+		if (selectedThread) {
+			return 'Continue this thread';
+		}
+
+		return 'Start a new thread';
+	}
+
+	function heroSecondaryLabel() {
+		if (inboxThreads.length > 0) {
+			return 'Review waiting threads';
+		}
+
+		if (selectedThread || $workspaceState.threads.length > 0) {
+			return 'Browse saved threads';
+		}
+
+		return 'Companion tools';
+	}
+
+	async function runHeroSecondaryAction() {
+		if (inboxThreads.length > 0) {
+			await tickAfterDomWork();
+			pendingActionsSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+			return;
+		}
+
+		if (selectedThread || $workspaceState.threads.length > 0) {
+			await scrollToThreadRail();
+			return;
+		}
+
+		await scrollToCompanionTools();
 	}
 
 	function inboxCardTone(entry: PendingThreadInboxEntry) {
@@ -1514,7 +1659,7 @@
 				</p>
 				<div class="space-y-3">
 					<h1
-						class="max-w-3xl text-[3.05rem] leading-[0.95] font-[var(--font-display)] tracking-[-0.04em] text-stone-50 sm:text-[3.5rem] md:text-5xl lg:text-[4rem]"
+						class="max-w-3xl text-[3.05rem] leading-[0.95] font-[var(--font-display)] tracking-[-0.04em] text-stone-50 sm:text-[3.35rem] md:text-[4rem] lg:text-[4.45rem]"
 					>
 						Pick up the same thread from the browser.
 					</h1>
@@ -1546,7 +1691,7 @@
 						<p
 							class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.24em] text-stone-400 uppercase"
 						>
-							Browser status
+							Start here
 						</p>
 						<p class="mt-2 text-2xl font-[var(--font-display)] text-stone-50">
 							{phaseLabel()}
@@ -1562,7 +1707,7 @@
 				<div class="rounded-[22px] border border-white/12 bg-white/7 px-4 py-4">
 					<div class="flex flex-wrap items-start justify-between gap-3">
 						<div>
-							<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Current signal</p>
+							<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">What happens next</p>
 							<p class="mt-2 text-sm leading-6 font-[var(--font-ui)] text-stone-100">
 								{$workspaceState.statusMessage}
 							</p>
@@ -1571,135 +1716,149 @@
 							{currentSignalLabel()}
 						</span>
 					</div>
-					<div class="mt-3 flex flex-wrap gap-2 text-[11px] font-[var(--font-ui)] tracking-[0.16em] text-stone-300 uppercase">
-						<span class={`rounded-full border px-2.5 py-1 ${isOnline ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100' : 'border-rose-300/25 bg-rose-300/10 text-rose-100'}`}>
-							{isOnline ? 'Online' : 'Offline'}
-						</span>
-						<span class={`rounded-full border px-2.5 py-1 ${pageVisibility === 'visible' ? 'border-white/12 bg-white/6 text-stone-100' : 'border-amber-300/25 bg-amber-300/10 text-amber-100'}`}>
-							{pageVisibility === 'visible' ? 'Foreground' : 'Background'}
-						</span>
-						{#if $workspaceState.pendingAction}
-							<span class="rounded-full border border-sky-300/25 bg-sky-300/10 px-2.5 py-1 text-sky-100">
-								{$workspaceState.pendingAction}
-							</span>
-						{/if}
-						{#if selectedActiveTurn}
-							<span class="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-1 text-emerald-100">
-								Turn running now
-							</span>
-						{/if}
-						{#if selectedPendingCount() > 0}
-							<span class="rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-amber-100">
-								{selectedPendingCount()} waiting on this thread
-							</span>
+					<div class="mt-4 flex flex-wrap gap-3 text-sm font-[var(--font-ui)]">
+						<button
+							type="button"
+							onclick={runHeroPrimaryAction}
+							class="rounded-full bg-teal-200 px-4 py-2.5 text-stone-950 transition hover:bg-teal-100"
+						>
+							{heroPrimaryLabel()}
+						</button>
+						<button
+							type="button"
+							onclick={runHeroSecondaryAction}
+							class="rounded-full border border-white/12 bg-white/6 px-4 py-2.5 text-stone-100 transition hover:bg-white/10"
+						>
+							{heroSecondaryLabel()}
+						</button>
+						{#if $workspaceState.connectionPhase === 'connected'}
+							<button
+								type="button"
+								onclick={refresh}
+								class="rounded-full border border-white/12 bg-white/6 px-4 py-2.5 text-stone-100 transition hover:bg-white/10"
+							>
+								Refresh threads
+							</button>
 						{/if}
 					</div>
-					{#if persistentRemoteBoundaryNotice}
-						<p class="mt-3 rounded-[18px] border border-amber-300/18 bg-amber-200/8 px-4 py-3 text-sm leading-6 font-[var(--font-ui)] text-amber-100/88">
-							{persistentRemoteBoundaryNotice}
-						</p>
-					{/if}
 				</div>
-				<div class="grid gap-2 text-sm font-[var(--font-ui)] text-stone-300 sm:grid-cols-3">
+				<div class="grid gap-2 text-sm font-[var(--font-ui)] text-stone-300 sm:grid-cols-2 xl:grid-cols-3">
 					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3">
-						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Threads ready</p>
+						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Saved threads</p>
 						<p class="mt-2 text-2xl font-[var(--font-display)] text-stone-50">{$workspaceState.threads.length}</p>
 					</div>
 					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3">
-						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Open thread</p>
+						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Waiting on you</p>
+						<p class="mt-2 text-2xl font-[var(--font-display)] text-stone-50">{globalPendingCount}</p>
+					</div>
+					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3 sm:col-span-2 xl:col-span-1">
+						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Current thread</p>
 						<p class="mt-2 text-sm leading-6 text-stone-100">
-							{selectedThread ? (selectedThread.preview || selectedThread.id) : 'None yet'}
+							{selectedThread ? threadDisplayLabel(selectedThread) : 'Not open yet'}
 						</p>
-					</div>
-					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3">
-						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Pending actions</p>
-						<p class="mt-2 text-2xl font-[var(--font-display)] text-stone-50">{selectedPendingCount()}</p>
-					</div>
-					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3 sm:col-span-3">
-						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Background alerts</p>
-						<div class="mt-2 flex flex-wrap items-center justify-between gap-3">
-							<p class="max-w-2xl text-sm leading-6 text-stone-100">{notificationsStatusLabel()}</p>
-							<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
-								{#if notificationPermission === 'granted' && notificationsEnabled}
-									<button
-										type="button"
-										onclick={disableNotifications}
-										class="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-stone-100 transition hover:bg-white/12"
-									>
-										Disable alerts
-									</button>
-								{:else}
-									<button
-										type="button"
-										onclick={requestNotifications}
-										disabled={!notificationsSupported() || notificationPermission === 'denied'}
-										class="rounded-full bg-teal-200 px-4 py-2 text-stone-950 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-45"
-									>
-										Enable alerts
-									</button>
-								{/if}
-							</div>
-						</div>
-					</div>
-					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3 sm:col-span-3">
-						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Install path</p>
-						<div class="mt-2 flex flex-wrap items-center justify-between gap-3">
-							<p class="max-w-2xl text-sm leading-6 text-stone-100">{installStatusLabel()}</p>
-							<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
-								<button
-									type="button"
-									onclick={promptInstall}
-									disabled={!deferredInstallPrompt}
-									class="rounded-full bg-amber-200 px-4 py-2 text-stone-950 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"
-								>
-									Install app
-								</button>
-							</div>
-						</div>
-					</div>
-					<div class="rounded-[22px] border border-white/12 bg-white/8 px-3 py-3 sm:col-span-3">
-						<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Mobile continuity</p>
-						<div class="mt-2 flex flex-wrap items-start justify-between gap-3">
-							<div>
-								<p class="max-w-2xl text-sm leading-6 text-stone-100">{mobileContinuityLabel()}</p>
-								<div class="mt-3 flex flex-wrap gap-2 text-[11px] font-[var(--font-ui)] tracking-[0.16em] uppercase">
-									<span class={`rounded-full border px-2.5 py-1 ${isOnline ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100' : 'border-rose-300/25 bg-rose-300/10 text-rose-100'}`}>
-										{isOnline ? 'network online' : 'network offline'}
-									</span>
-									<span class="rounded-full border border-white/12 bg-white/6 px-2.5 py-1 text-stone-100">
-										{pageVisibility === 'visible' ? 'tab visible' : 'tab hidden'}
-									</span>
-									<span class={`rounded-full border px-2.5 py-1 ${wakeLockStatus === 'active' ? 'border-amber-300/25 bg-amber-300/10 text-amber-100' : 'border-white/12 bg-white/6 text-stone-100'}`}>
-										{wakeLockStatusLabel()}
-									</span>
-									<span class={`rounded-full border px-2.5 py-1 ${voiceCaptureState === 'unsupported' ? 'border-white/12 bg-white/6 text-stone-100' : 'border-sky-300/25 bg-sky-300/10 text-sky-100'}`}>
-										{voiceSupported() ? 'voice ready' : 'voice unavailable'}
-									</span>
-								</div>
-							</div>
-							<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
-								<button
-									type="button"
-									onclick={refreshForForeground}
-									disabled={$workspaceState.connectionPhase !== 'connected'}
-									class="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-stone-100 transition hover:bg-white/12 disabled:cursor-not-allowed disabled:opacity-45"
-								>
-									Sync now
-								</button>
-								<button
-									type="button"
-									onclick={toggleKeepAwake}
-									disabled={!wakeLockSupported()}
-									class="rounded-full bg-amber-200 px-4 py-2 text-stone-950 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"
-								>
-									{keepAwakeEnabled ? 'Disable stay awake' : 'Stay awake on live turn'}
-								</button>
-							</div>
-						</div>
 					</div>
 				</div>
 			</section>
 		</header>
+
+		<details
+			bind:this={companionToolsSection}
+			class="mb-4 rounded-[24px] border border-white/10 bg-black/16 p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)] lg:mb-6"
+		>
+			<summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+				<div>
+					<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase">
+						Companion tools
+					</p>
+					<p class="mt-2 text-sm leading-6 font-[var(--font-ui)] text-stone-300">
+						Alerts, install flow, and away-from-desk continuity live here when you need them.
+					</p>
+				</div>
+				<span class="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs font-[var(--font-ui)] text-stone-200">
+					Optional
+				</span>
+			</summary>
+			<div class="mt-4 grid gap-3 text-sm font-[var(--font-ui)] text-stone-300 lg:grid-cols-3">
+				<div class="rounded-[22px] border border-white/12 bg-white/8 px-4 py-4">
+					<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Background alerts</p>
+					<div class="mt-2 flex flex-wrap items-center justify-between gap-3">
+						<p class="max-w-2xl text-sm leading-6 text-stone-100">{notificationsStatusLabel()}</p>
+						<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
+							{#if notificationPermission === 'granted' && notificationsEnabled}
+								<button
+									type="button"
+									onclick={disableNotifications}
+									class="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-stone-100 transition hover:bg-white/12"
+								>
+									Disable alerts
+								</button>
+							{:else}
+								<button
+									type="button"
+									onclick={requestNotifications}
+									disabled={!notificationsSupported() || notificationPermission === 'denied'}
+									class="rounded-full bg-teal-200 px-4 py-2 text-stone-950 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-45"
+								>
+									Enable alerts
+								</button>
+							{/if}
+						</div>
+					</div>
+				</div>
+				<div class="rounded-[22px] border border-white/12 bg-white/8 px-4 py-4">
+					<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Install app</p>
+					<div class="mt-2 flex flex-wrap items-center justify-between gap-3">
+						<p class="max-w-2xl text-sm leading-6 text-stone-100">{installStatusLabel()}</p>
+						<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
+							<button
+								type="button"
+								onclick={promptInstall}
+								disabled={!deferredInstallPrompt}
+								class="rounded-full bg-amber-200 px-4 py-2 text-stone-950 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"
+							>
+								Install app
+							</button>
+						</div>
+					</div>
+				</div>
+				<div class="rounded-[22px] border border-white/12 bg-white/8 px-4 py-4">
+					<p class="text-[0.68rem] tracking-[0.18em] text-stone-400 uppercase">Away-from-desk continuity</p>
+					<p class="mt-2 max-w-2xl text-sm leading-6 text-stone-100">{mobileContinuityLabel()}</p>
+					<div class="mt-3 flex flex-wrap gap-2 text-[11px] font-[var(--font-ui)] tracking-[0.16em] uppercase">
+						<span class={`rounded-full border px-2.5 py-1 ${isOnline ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100' : 'border-rose-300/25 bg-rose-300/10 text-rose-100'}`}>
+							{isOnline ? 'network online' : 'network offline'}
+						</span>
+						<span class="rounded-full border border-white/12 bg-white/6 px-2.5 py-1 text-stone-100">
+							{pageVisibility === 'visible' ? 'tab visible' : 'tab hidden'}
+						</span>
+						<span class={`rounded-full border px-2.5 py-1 ${wakeLockStatus === 'active' ? 'border-amber-300/25 bg-amber-300/10 text-amber-100' : 'border-white/12 bg-white/6 text-stone-100'}`}>
+							{wakeLockStatusLabel()}
+						</span>
+						<span class={`rounded-full border px-2.5 py-1 ${voiceCaptureState === 'unsupported' ? 'border-white/12 bg-white/6 text-stone-100' : 'border-sky-300/25 bg-sky-300/10 text-sky-100'}`}>
+							{voiceSupported() ? 'voice ready' : 'voice unavailable'}
+						</span>
+					</div>
+					<div class="mt-4 flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
+						<button
+							type="button"
+							onclick={refreshForForeground}
+							disabled={$workspaceState.connectionPhase !== 'connected'}
+							class="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-stone-100 transition hover:bg-white/12 disabled:cursor-not-allowed disabled:opacity-45"
+						>
+							Sync now
+						</button>
+						<button
+							type="button"
+							onclick={toggleKeepAwake}
+							disabled={!wakeLockSupported()}
+							class="rounded-full bg-amber-200 px-4 py-2 text-stone-950 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"
+						>
+							{keepAwakeEnabled ? 'Disable stay awake' : 'Stay awake on live turn'}
+						</button>
+					</div>
+				</div>
+			</div>
+		</details>
 
 		{#if inboxThreads.length}
 			<section class="mb-4 overflow-hidden rounded-[28px] border border-amber-300/14 bg-[linear-gradient(135deg,_rgba(38,28,17,0.94),_rgba(16,19,18,0.94))] shadow-[0_20px_80px_rgba(0,0,0,0.3)] lg:mb-6">
@@ -1790,6 +1949,7 @@
 
 		<div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
 			<aside
+				bind:this={threadRailSection}
 				class="overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,_rgba(255,255,255,0.07),_rgba(255,255,255,0.03))] p-4 shadow-[0_16px_60px_rgba(0,0,0,0.25)] backdrop-blur lg:sticky lg:top-6 lg:self-start"
 			>
 				<div class="mb-4 flex items-center justify-between gap-3">
@@ -1797,7 +1957,7 @@
 						<p
 							class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase"
 						>
-							Live workspace
+							Saved threads
 						</p>
 						<h2 class="mt-2 text-3xl font-[var(--font-display)] text-stone-50">Your threads</h2>
 					</div>
@@ -1815,7 +1975,7 @@
 						type="search"
 						bind:value={threadSearch}
 						class="rounded-2xl border border-white/12 bg-white/8 px-4 py-3 text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
-						placeholder="Search by prompt, path, branch, or id"
+						placeholder="Search by thread, branch, path, or id"
 					/>
 				</label>
 
@@ -1825,10 +1985,14 @@
 							<p
 								class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.2em] text-stone-400 uppercase"
 							>
-								Live connection
+							{$workspaceState.connectionPhase === 'connected' && !showConnectionSettings
+								? 'Connected'
+								: 'Connection'}
 							</p>
 							<p class="mt-2 max-w-[13rem] text-xs leading-5 font-[var(--font-ui)] text-stone-400">
-								Connect once, then keep working from the same thread list here.
+								{$workspaceState.connectionPhase === 'connected' && !showConnectionSettings
+									? 'The browser is already synced. Reopen these settings only when you need a different app-server.'
+									: 'Save the server address here, then return whenever you want the same threads in the browser.'}
 							</p>
 						</div>
 						<button
@@ -1836,18 +2000,24 @@
 							onclick={() => (showConnectionSettings = !showConnectionSettings)}
 							class="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-[var(--font-ui)] text-stone-200 transition hover:bg-white/10"
 						>
-							{showConnectionSettings ? 'Hide settings' : 'Server settings'}
+							{showConnectionSettings ? 'Hide settings' : 'Edit address'}
 						</button>
 					</div>
 					<div class="flex flex-wrap items-center gap-2 text-xs font-[var(--font-ui)] text-stone-300">
 						<span class={`rounded-full px-2.5 py-1 ${phaseTone()}`}>
 							{$workspaceState.connectionPhase}
 						</span>
-						<span>
-							{$workspaceState.connectionPhase === 'connected'
-								? 'This browser can open, resume, and answer threads.'
-								: 'Connect to load your saved threads here.'}
-						</span>
+						{#if $workspaceState.connectionPhase === 'connected' && !showConnectionSettings}
+							<span class="min-w-0 truncate font-[var(--font-mono)] text-[11px] text-stone-400" title={wsUrl}>
+								{wsUrl}
+							</span>
+						{:else}
+							<span>
+								{$workspaceState.connectionPhase === 'connected'
+									? 'This browser can open, resume, and answer threads.'
+									: 'Connect to load your saved threads here.'}
+							</span>
+						{/if}
 					</div>
 					{#if persistentRemoteBoundaryNotice && !(showConnectionSettings || $workspaceState.connectionPhase !== 'connected')}
 						<p class="rounded-2xl border border-amber-300/16 bg-amber-200/8 px-3 py-3 text-[11px] leading-5 font-[var(--font-ui)] text-amber-100/88">
@@ -1873,7 +2043,7 @@
 									<p
 										class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.2em] text-stone-400 uppercase"
 									>
-										Remote access posture
+								How this browser connects
 									</p>
 									<p class="mt-2 text-sm font-[var(--font-ui)] text-stone-100">
 										{connectionAssessment.headline}
@@ -1919,7 +2089,7 @@
 									{/each}
 								</div>
 								<p class="mt-3 text-[11px] leading-5 font-[var(--font-ui)] text-stone-500">
-									Operator notes live in <code>{connectionAssessment.guide.docsPath}</code>.
+									More setup notes are available in the repo docs if you need them.
 								</p>
 							</div>
 							{#if connectionAssessment.requiresAcknowledgement && connectionAssessment.acknowledgementLabel}
@@ -1949,19 +2119,25 @@
 								</div>
 							{/if}
 						</div>
+					{:else}
+						<p class="rounded-2xl border border-white/10 bg-white/6 px-3 py-3 text-xs leading-5 font-[var(--font-ui)] text-stone-300">
+							This saved address is working. Threads, transcript updates, and approvals will keep syncing here until you disconnect.
+						</p>
 					{/if}
 					<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
-						<button
-							type="button"
-							onclick={connect}
-							disabled={!connectionAssessment.canConnect || connectBlockedByAcknowledgement}
-							class="rounded-full bg-teal-200 px-4 py-2 text-stone-950 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:bg-stone-500 disabled:text-stone-300"
-							>{!connectionAssessment.canConnect
-								? 'Fix address first'
-								: connectBlockedByAcknowledgement
-									? 'Confirm before connect'
-									: 'Connect'}</button
-						>
+						{#if showConnectionSettings || $workspaceState.connectionPhase !== 'connected'}
+							<button
+								type="button"
+								onclick={connect}
+								disabled={!connectionAssessment.canConnect || connectBlockedByAcknowledgement}
+								class="rounded-full bg-teal-200 px-4 py-2 text-stone-950 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:bg-stone-500 disabled:text-stone-300"
+								>{!connectionAssessment.canConnect
+									? 'Fix address first'
+									: connectBlockedByAcknowledgement
+										? 'Confirm before connect'
+										: 'Connect'}</button
+							>
+						{/if}
 						<button
 							type="button"
 							onclick={() => domain.disconnect('Disconnected.')}
@@ -1971,36 +2147,78 @@
 					</div>
 				</div>
 
-				<div class="mt-4 space-y-3 rounded-[24px] border border-white/8 bg-black/14 p-4">
-					<p
-						class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase"
-					>
-						Start here
-					</p>
-					<p class="text-xs leading-5 font-[var(--font-ui)] text-stone-400">
-						Launch a new thread from this browser, with an optional opening prompt.
-					</p>
-					<input
-						type="text"
-						bind:value={startCwd}
-						oninput={() => domain.setStartCwd(startCwd)}
-						class="w-full rounded-2xl border border-white/12 bg-white/8 px-4 py-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
-						placeholder="/Users/cbusillo/Developer/code"
-					/>
-					<textarea
-						rows="3"
-						bind:value={startPrompt}
-						oninput={() => domain.setStartPrompt(startPrompt)}
-						class="w-full rounded-[24px] border border-white/12 bg-white/8 px-4 py-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
-						placeholder="Optional first prompt..."
-					></textarea>
-					<button
-						type="button"
-						onclick={startThread}
-						class="w-full rounded-[22px] bg-amber-200 px-4 py-3 text-sm font-[var(--font-ui)] font-medium text-stone-950 transition hover:bg-amber-100"
-						>Start new thread</button
-					>
-				</div>
+				{#if $workspaceState.connectionPhase === 'connected' && $workspaceState.threads.length > 0}
+					<details class="mt-4 rounded-[24px] border border-white/8 bg-black/14 p-4">
+						<summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+							<div>
+								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase">
+									Fresh thread
+								</p>
+								<p class="mt-2 text-xs leading-5 font-[var(--font-ui)] text-stone-400">
+									Open this only when you want a clean thread instead of resuming one from the rail.
+								</p>
+							</div>
+							<span class="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs font-[var(--font-ui)] text-stone-200">
+								Optional
+							</span>
+						</summary>
+						<div class="mt-4 space-y-3">
+							<input
+								type="text"
+								bind:value={startCwd}
+								oninput={() => domain.setStartCwd(startCwd)}
+								class="w-full rounded-2xl border border-white/12 bg-white/8 px-4 py-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
+								placeholder="/Users/cbusillo/Developer/code"
+							/>
+							<textarea
+								rows="3"
+								bind:value={startPrompt}
+								oninput={() => domain.setStartPrompt(startPrompt)}
+								class="w-full rounded-[24px] border border-white/12 bg-white/8 px-4 py-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
+								placeholder="Optional first prompt..."
+							></textarea>
+							<button
+								type="button"
+								onclick={startThread}
+								class="w-full rounded-[22px] bg-amber-200 px-4 py-3 text-sm font-[var(--font-ui)] font-medium text-stone-950 transition hover:bg-amber-100"
+							>
+								Start new thread
+							</button>
+						</div>
+					</details>
+				{:else}
+					<div class="mt-4 space-y-3 rounded-[24px] border border-white/8 bg-black/14 p-4">
+						<p
+							class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase"
+						>
+							Start here
+						</p>
+						<p class="text-xs leading-5 font-[var(--font-ui)] text-stone-400">
+							Launch a new thread from this browser, with an optional opening prompt.
+						</p>
+						<input
+							type="text"
+							bind:value={startCwd}
+							oninput={() => domain.setStartCwd(startCwd)}
+							class="w-full rounded-2xl border border-white/12 bg-white/8 px-4 py-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
+							placeholder="/Users/cbusillo/Developer/code"
+						/>
+						<textarea
+							rows="3"
+							bind:value={startPrompt}
+							oninput={() => domain.setStartPrompt(startPrompt)}
+							class="w-full rounded-[24px] border border-white/12 bg-white/8 px-4 py-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-teal-300/40 focus:ring-0"
+							placeholder="Optional first prompt..."
+						></textarea>
+						<button
+							type="button"
+							onclick={startThread}
+							class="w-full rounded-[22px] bg-amber-200 px-4 py-3 text-sm font-[var(--font-ui)] font-medium text-stone-950 transition hover:bg-amber-100"
+						>
+							Start new thread
+						</button>
+					</div>
+				{/if}
 
 				<div class="mt-4 space-y-3">
 					{#if !$workspaceState.threads.length}
@@ -2021,10 +2239,10 @@
 								<div class="flex items-center justify-between gap-3">
 									<div>
 										<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.2em] text-stone-400 uppercase">
-											Recent handoff
+											Recent threads
 										</p>
 										<p class="mt-2 text-xs leading-5 font-[var(--font-ui)] text-stone-400">
-											Return to the threads you last opened, even if newer idle sessions exist lower in the rail.
+											Return to the threads you opened most recently, even if newer idle sessions exist lower in the rail.
 										</p>
 									</div>
 									<span class="rounded-full border border-white/10 bg-white/6 px-2.5 py-1 text-[11px] font-[var(--font-ui)] tracking-[0.18em] text-stone-200 uppercase">
@@ -2038,7 +2256,7 @@
 											onclick={() => openThread(entry.threadId)}
 											class="min-w-[180px] shrink-0 snap-start rounded-[20px] border border-white/10 bg-white/7 px-3 py-3 text-left text-sm font-[var(--font-ui)] text-stone-100 transition hover:bg-white/10"
 										>
-											<p class="line-clamp-2 text-sm leading-5">{entry.thread.preview || entry.threadId}</p>
+											<p class="line-clamp-2 text-sm leading-5">{threadDisplayLabel(entry.thread)}</p>
 											<p class="mt-2 text-[11px] tracking-[0.16em] text-stone-400 uppercase">
 												{formatUpdatedAt(entry.thread.updatedAt)}
 											</p>
@@ -2053,16 +2271,35 @@
 								class={`w-[calc(100vw-3.5rem)] min-w-[280px] shrink-0 snap-start rounded-[24px] border px-4 py-4 transition sm:w-[340px] lg:w-full lg:min-w-0 ${threadTone(entry)}`}
 							>
 								<div class="mb-3 flex items-center justify-between gap-3">
-									<span
-										class="rounded-full border border-white/12 bg-white/8 px-2.5 py-1 text-[11px] font-[var(--font-ui)] tracking-[0.18em] text-stone-200 uppercase"
-										>{sourceBadge(entry.thread)}</span
-									>
-									<div class="flex items-center gap-2">
-										{#if entry.isUnread}
-											<span class="rounded-full bg-emerald-400/16 px-2.5 py-1 text-[11px] font-[var(--font-ui)] tracking-[0.16em] text-emerald-100 uppercase ring-1 ring-emerald-300/25">
-												Unread
+									<div class="flex flex-wrap items-center gap-2 text-[11px] font-[var(--font-ui)] tracking-[0.16em] uppercase">
+										{#if showThreadSourceBadge(entry.thread)}
+											<span class="rounded-full border border-white/12 bg-white/8 px-2.5 py-1 text-stone-200">
+												{sourceBadge(entry.thread)}
 											</span>
 										{/if}
+										{#if entry.pendingCount}
+											<span class="rounded-full bg-amber-400/14 px-2 py-0.5 text-amber-100 ring-1 ring-amber-300/25">
+												{entry.pendingCount} waiting
+											</span>
+										{/if}
+										{#if entry.isLive}
+											<span class="rounded-full bg-emerald-400/14 px-2 py-0.5 text-emerald-100 ring-1 ring-emerald-300/25">
+												Live
+											</span>
+										{/if}
+										{#if entry.isLoadedElsewhere}
+											<span class="rounded-full bg-violet-400/14 px-2 py-0.5 text-violet-100 ring-1 ring-violet-300/25">
+												Open elsewhere
+											</span>
+										{/if}
+										{#if entry.isUnread}
+											<span class="inline-flex items-center gap-1.5 text-emerald-100">
+												<span class="h-2 w-2 rounded-full bg-emerald-300"></span>
+												New
+											</span>
+										{/if}
+									</div>
+									<div class="flex items-center gap-2">
 										<button
 											type="button"
 											onclick={() => toggleThreadPin(entry.threadId)}
@@ -2079,37 +2316,18 @@
 								>
 									<div class="flex items-center justify-between gap-3">
 										<h3 class="text-[1.35rem] leading-tight font-[var(--font-display)] text-stone-50">
-											{entry.thread.preview || entry.thread.id}
+											{threadDisplayLabel(entry.thread)}
 										</h3>
 										<span class="text-[11px] font-[var(--font-ui)] text-stone-400">
 											{formatUpdatedAt(entry.thread.updatedAt)}
 										</span>
 									</div>
 									<p
-										class="mt-3 text-xs font-[var(--font-ui)] tracking-[0.18em] text-stone-500 uppercase"
+										class="mt-3 truncate text-xs font-[var(--font-ui)] text-stone-400"
+										title={entry.thread.cwd}
 									>
-										{entry.thread.cwd}
+										{threadContextLabel(entry.thread) || compactThreadPath(entry.thread.cwd)}
 									</p>
-									<div class="mt-3 flex flex-wrap gap-2 text-xs font-[var(--font-ui)] text-stone-300">
-										<span>{entry.thread.gitInfo?.branch ?? 'no branch'}</span>
-										<span>·</span>
-										<span>{entry.thread.modelProvider}</span>
-										{#if entry.pendingCount}
-											<span class="rounded-full bg-amber-400/14 px-2 py-0.5 text-amber-100 ring-1 ring-amber-300/25">
-												{entry.pendingCount} pending
-											</span>
-										{/if}
-											{#if entry.isLive}
-												<span class="rounded-full bg-emerald-400/14 px-2 py-0.5 text-emerald-100 ring-1 ring-emerald-300/25">
-													Live
-												</span>
-											{/if}
-											{#if entry.isLoadedElsewhere}
-												<span class="rounded-full bg-violet-400/14 px-2 py-0.5 text-violet-100 ring-1 ring-violet-300/25">
-													Attached elsewhere
-												</span>
-											{/if}
-										</div>
 									</button>
 								</section>
 						{/each}
@@ -2251,8 +2469,8 @@
 
 					<TranscriptThreadView
 						threadId={selectedThread.id}
-						title={selectedThread.preview || selectedThread.id}
-						description="This view combines the saved thread with any approvals or questions that still need a response here."
+						title={threadDisplayLabel(selectedThread)}
+						description="Keep the transcript, blockers, and next prompt in one place."
 						badges={transcriptBadges}
 						cells={transcriptCells}
 						sessionBanner={sessionBanner}
@@ -2277,11 +2495,11 @@
 								<p
 									class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase"
 								>
-									Composer
+									Next prompt
 								</p>
 								<p class="mt-2 max-w-2xl text-sm leading-6 font-[var(--font-ui)] text-stone-300">
 									Send the next prompt from this browser. If the thread is not already active,
-									EveryCode will resume it first.
+									EveryCode will attach it here first.
 								</p>
 							</div>
 							<div class="flex flex-wrap gap-2 text-sm font-[var(--font-ui)]">
@@ -2298,11 +2516,25 @@
 						<p class="mt-3 text-xs leading-6 font-[var(--font-ui)] text-stone-300">
 							{voiceCaptureStatusLabel(voiceCaptureState, interimVoiceTranscript, voiceErrorMessage)}
 						</p>
-						<div class="mt-3 rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
+						<details class="mt-3 rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
+							<summary class="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+								<div>
+									<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">
+										Thread tools
+									</p>
+									<p class="mt-2 max-w-2xl text-xs leading-6 font-[var(--font-ui)] text-stone-300">
+										Open this when you need next-turn overrides, steer notes, checkpoints, or a handoff helper.
+									</p>
+								</div>
+								<span class="rounded-full border border-white/12 bg-white/6 px-3 py-2 text-xs font-[var(--font-ui)] text-stone-100">
+									Advanced
+								</span>
+							</summary>
+							<div class="mt-4 rounded-[22px] border border-white/10 bg-black/18 px-4 py-4">
 							<div class="flex flex-wrap items-start justify-between gap-3">
 								<div>
 									<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">
-										Turn steering
+									Next-turn options
 									</p>
 									<p class="mt-2 max-w-2xl text-xs leading-6 font-[var(--font-ui)] text-stone-300">
 										These overrides apply to the next prompt you send here and stay with the thread until you change or clear them.
@@ -2316,7 +2548,7 @@
 									}}
 									class="rounded-full border border-white/12 bg-white/6 px-3 py-2 text-xs font-[var(--font-ui)] text-stone-100 transition hover:bg-white/10"
 								>
-									Clear steering
+									Clear overrides
 								</button>
 							</div>
 							<div class="mt-4 grid gap-3 md:grid-cols-2">
@@ -2358,10 +2590,10 @@
 						<div class="mt-3 grid gap-3 xl:grid-cols-3">
 							<section class="rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
 								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">
-									Live steer
+									Guide the active turn
 								</p>
 								<p class="mt-2 text-xs leading-6 font-[var(--font-ui)] text-stone-300">
-									Queue follow-up guidance into the running turn without taking over the thread with a new prompt.
+									Send a short follow-up instruction into the active turn without starting a brand new prompt.
 								</p>
 								<textarea
 									bind:value={steerText}
@@ -2379,10 +2611,10 @@
 							</section>
 							<section class="rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
 								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">
-									Checkpoint + branch
+									Save a checkpoint
 								</p>
 								<p class="mt-2 text-xs leading-6 font-[var(--font-ui)] text-stone-300">
-									Save a durable checkpoint for this thread, or branch it into a fresh thread you can resume later from the browser or TUI.
+									Save a durable note for this thread, or fork it into a fresh thread you can reopen later.
 								</p>
 								<input
 									type="text"
@@ -2416,10 +2648,10 @@
 							</section>
 							<section class="rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
 								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">
-									External handoff
+									Share context elsewhere
 								</p>
 								<p class="mt-2 text-xs leading-6 font-[var(--font-ui)] text-stone-300">
-									Start the next browser prompt from a GitHub, Slack, Jira, or Linear update while keeping the thread and review context intact.
+									Draft the next prompt from a GitHub, Slack, Jira, or Linear update while keeping the thread context intact.
 								</p>
 								<input
 									type="url"
@@ -2501,6 +2733,7 @@
 								</div>
 							</section>
 						{/if}
+						</details>
 							<div class="mt-3 grid gap-3 lg:grid-cols-[1fr_auto]">
 								<textarea
 									bind:value={composerText}
@@ -2550,23 +2783,15 @@
 					>
 						<div class="border-b border-white/8 px-6 py-6 md:px-8">
 							<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.22em] text-stone-400 uppercase">
-								Browser continuation
+								Choose your next thread
 							</p>
 							<h2 class="mt-3 text-4xl leading-none font-[var(--font-display)] text-stone-50 md:text-5xl">
-								Open a thread or start one here.
+								Pick one thread and keep moving.
 							</h2>
 							<p class="mt-4 max-w-3xl text-sm leading-7 font-[var(--font-ui)] text-stone-300">
-								Once connected, this browser can reopen saved work, keep the transcript live, and
-								handle any approvals or question sets that are waiting on you.
+								Open a saved thread from the rail, or start a fresh one from this browser when you need a clean handoff.
 							</p>
 							<div class="mt-5 flex flex-wrap gap-3 text-sm font-[var(--font-ui)]">
-								<button
-									type="button"
-									onclick={connect}
-									class="rounded-full bg-teal-200 px-4 py-2 text-stone-950 transition hover:bg-teal-100"
-								>
-									Connect browser
-								</button>
 								<button
 									type="button"
 									onclick={refresh}
@@ -2579,25 +2804,25 @@
 									onclick={startThread}
 									class="rounded-full border border-amber-300/25 bg-amber-200/12 px-4 py-2 text-amber-50 transition hover:bg-amber-200/20"
 								>
-									Start here
+									Start new thread
 								</button>
 							</div>
 						</div>
 						<div class="grid gap-4 px-6 py-6 md:grid-cols-3 md:px-8">
 							<div class="rounded-[24px] border border-white/8 bg-black/16 p-4">
-								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">1. Connect</p>
-								<p class="mt-3 text-xl font-[var(--font-display)] text-stone-50">Connect this browser to your workspace.</p>
-								<p class="mt-3 text-sm leading-6 font-[var(--font-ui)] text-stone-300">Use the saved server address on the left, then reload when you want the newest thread list.</p>
+								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">1. Browse</p>
+								<p class="mt-3 text-xl font-[var(--font-display)] text-stone-50">Scan the saved thread rail.</p>
+								<p class="mt-3 text-sm leading-6 font-[var(--font-ui)] text-stone-300">Open a past thread when you want context, or ignore the rail if you just need a fresh start.</p>
 							</div>
 							<div class="rounded-[24px] border border-white/8 bg-black/16 p-4">
 								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">2. Open</p>
-								<p class="mt-3 text-xl font-[var(--font-display)] text-stone-50">Open any saved thread.</p>
-								<p class="mt-3 text-sm leading-6 font-[var(--font-ui)] text-stone-300">The browser loads the transcript, pulls in any pending requests, and shows whether that thread is already live elsewhere.</p>
+								<p class="mt-3 text-xl font-[var(--font-display)] text-stone-50">Bring one thread into focus.</p>
+								<p class="mt-3 text-sm leading-6 font-[var(--font-ui)] text-stone-300">The browser loads the transcript, shows blockers, and tells you if that thread is already open somewhere else.</p>
 							</div>
 							<div class="rounded-[24px] border border-white/8 bg-black/16 p-4">
 								<p class="text-[0.68rem] font-[var(--font-ui)] tracking-[0.18em] text-stone-400 uppercase">3. Continue</p>
-								<p class="mt-3 text-xl font-[var(--font-display)] text-stone-50">Answer, resume, or send the next prompt.</p>
-								<p class="mt-3 text-sm leading-6 font-[var(--font-ui)] text-stone-300">Approvals and grouped questions can stay lightweight here, while full prompt entry resumes the same shared thread.</p>
+								<p class="mt-3 text-xl font-[var(--font-display)] text-stone-50">Reply, resume, or start fresh.</p>
+								<p class="mt-3 text-sm leading-6 font-[var(--font-ui)] text-stone-300">Use the browser for quick replies and approvals, or jump into the composer when you need the next full prompt.</p>
 							</div>
 						</div>
 					</section>
@@ -2610,7 +2835,7 @@
 								Recent activity
 							</p>
 							<p class="mt-2 text-sm font-[var(--font-ui)] text-stone-300">
-								Open this only when you want to inspect the live event stream.
+								Open this when you want the raw event feed.
 							</p>
 						</div>
 						<span class="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs font-[var(--font-ui)] text-stone-200">
@@ -2688,7 +2913,7 @@
 							Mobile companion
 						</p>
 						<p class="mt-2 truncate text-base leading-6 font-[var(--font-display)] text-stone-50">
-							{selectedThread.preview || selectedThread.id}
+							{threadDisplayLabel(selectedThread)}
 						</p>
 						<p class="mt-1 text-xs leading-5 font-[var(--font-ui)] text-stone-300">
 							{currentSignalLabel()} · {selectedPendingCount()} pending · {$workspaceState.connectionPhase}

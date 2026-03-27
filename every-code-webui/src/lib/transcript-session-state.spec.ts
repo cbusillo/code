@@ -96,7 +96,7 @@ describe('deriveTranscriptSessionBanner', () => {
 
 		expect(banner?.state).toBe('active_elsewhere');
 		expect(banner?.primaryAction).toBe('take_over');
-		expect(banner?.primaryLabel).toBe('Take over here');
+		expect(banner?.primaryLabel).toBe('Bring it here');
 	});
 
 	it('keeps remote running turns explicit when takeover is queued here', () => {
@@ -114,8 +114,8 @@ describe('deriveTranscriptSessionBanner', () => {
 		});
 
 		expect(banner?.state).toBe('active_elsewhere');
-		expect(banner?.title).toBe('Takeover queued for this browser.');
-		expect(banner?.primaryLabel).toBe('Takeover queued');
+		expect(banner?.title).toBe('This browser is next in line.');
+		expect(banner?.primaryLabel).toBe('Queued here');
 	});
 
 	it('marks pending structured requests as respond_remotely when not active locally', () => {
@@ -158,7 +158,7 @@ describe('deriveTranscriptSessionBanner', () => {
 
 		expect(banner?.state).toBe('active_elsewhere');
 		expect(banner?.primaryAction).toBe('take_over');
-		expect(banner?.title).toBe('Another surface is attached to this thread.');
+		expect(banner?.title).toBe('This thread is open somewhere else.');
 	});
 
 	it('marks settled unattached threads as can_continue_here', () => {
