@@ -33978,9 +33978,22 @@ use code_core::protocol::OrderMeta;
         let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
 
         let route = chat.describe_esc_context();
+        assert_eq!(route.intent, EscIntent::AutoDismissSummary);
+        assert!(chat.execute_esc_intent(route.intent, esc_event));
+        assert!(chat.auto_state.should_show_goal_entry());
+        assert!(chat.auto_state.last_run_summary.is_none());
+        assert_eq!(chat.bottom_pane.composer_text(), "Suggested goal");
+        assert!(matches!(
+            chat.auto_goal_escape_state,
+            AutoGoalEscState::NeedsEnableEditing
+        ));
+
+        let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let route = chat.describe_esc_context();
         assert_eq!(route.intent, EscIntent::AutoGoalEnableEdit);
         assert!(chat.execute_esc_intent(route.intent, esc_event));
         assert!(chat.auto_state.should_show_goal_entry());
+        assert_eq!(chat.bottom_pane.composer_text(), "Suggested goal");
         assert!(matches!(
             chat.auto_goal_escape_state,
             AutoGoalEscState::ArmedForExit
@@ -33992,10 +34005,6 @@ use code_core::protocol::OrderMeta;
         assert!(chat.execute_esc_intent(route.intent, esc_event));
         assert!(!chat.auto_state.should_show_goal_entry());
         assert_eq!(chat.bottom_pane.composer_text(), "Suggested goal");
-        assert!(chat.auto_state.last_run_summary.is_some());
-
-        let route = chat.describe_esc_context();
-        assert_eq!(route.intent, EscIntent::AutoDismissSummary);
     }
 
     #[test]
