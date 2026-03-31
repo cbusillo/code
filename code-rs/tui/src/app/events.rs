@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::thread;
@@ -12,7 +11,7 @@ use crossterm::SynchronizedUpdate;
 use code_cloud_tasks_client::{CloudTaskError, TaskId};
 use code_core::config::add_project_allowed_command;
 use code_core::config_types::Notifications;
-use code_core::protocol::{Event, Op, SandboxPolicy};
+use code_core::protocol::{Op, SandboxPolicy};
 use code_core::SessionCatalog;
 use code_login::{AuthManager, AuthMode, ServerOptions};
 use portable_pty::PtySize;
@@ -1358,7 +1357,7 @@ impl App<'_> {
                             use code_core::protocol::ApplyPatchApprovalRequestEvent;
                             use code_core::protocol::FileChange;
 
-                            self.app_event_tx.send(AppEvent::CodexEvent(Event {
+                            self.app_event_tx.send(AppEvent::CodexEvent(code_core::protocol::Event {
                                 id: "1".to_string(),
                                 event_seq: 0,
                                 // msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
@@ -1372,13 +1371,13 @@ impl App<'_> {
                                         call_id: "1".to_string(),
                                         changes: HashMap::from([
                                             (
-                                                PathBuf::from("/tmp/test.txt"),
+                                                std::path::PathBuf::from("/tmp/test.txt"),
                                                 FileChange::Add {
                                                     content: "test".to_string(),
                                                 },
                                             ),
                                             (
-                                                PathBuf::from("/tmp/test2.txt"),
+                                                std::path::PathBuf::from("/tmp/test2.txt"),
                                                 FileChange::Update {
                                                     unified_diff: "+test\n-test2".to_string(),
                                                     move_path: None,
@@ -1388,7 +1387,7 @@ impl App<'_> {
                                             ),
                                         ]),
                                         reason: None,
-                                        grant_root: Some(PathBuf::from("/tmp")),
+                                        grant_root: Some(std::path::PathBuf::from("/tmp")),
                                     },
                                 ),
                                 order: None,
