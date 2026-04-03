@@ -7,6 +7,24 @@
 
 - (none)
 
+## [0.6.91] - 2026-04-03
+
+- Core: support command-backed provider auth and dynamic bearer token sources for more flexible login flows. (6dc620cb, 20f43c1e, 00719688, ea650a91)
+- TUI: fix zellij redraw/composer rendering plus resume picker and review-follow-up stale state issues for smoother sessions. (0bd31dc3, cb8dc18a, c0f2fed6, 57b98bc4)
+- App Server: fix `/status` accuracy by showing fork source correctly and preventing stale rate-limit data in active sessions. (9bb7f0a6, ae057e0b)
+- Windows: improve shell startup reliability with PowerShell fallback paths and longer startup timeouts on slower runners. (93380a6f, 5d64e58a, 30ee9e76)
+- Core: reduce `codex-core` compile times substantially by moving key execution paths to native async handlers. (3c7f013f, 7a3eec6f)
+
+## [0.6.90] - 2026-03-31
+
+- CI: remove legacy Rust CI workflows to streamline repository automation and reduce maintenance overhead. (6966db8b)
+- CI: simplify workflow policy/docs after retiring Rust CI jobs, making release checks more predictable. (6966db8b)
+
+## [0.6.89] - 2026-03-31
+
+- CI: increase hosted-runner time budget for argument lint jobs to reduce timeout-related release failures. (46e59276)
+- CI: improve release pipeline stability by giving slower lint runs more time before cancellation. (46e59276)
+
 ## [0.6.87] - 2026-03-30
 
 - CI: switch `rust-ci-full` Windows jobs to hosted GitHub runners to reduce runner pool dependency in release validation. (bb2e39be)

@@ -780,7 +780,8 @@ impl ModelClient {
                 }
             }
 
-            let auth = auth_manager.as_ref().and_then(|m| m.auth());
+            let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
+            let auth = self.provider.effective_auth(&base_auth).await?;
             let endpoint = self.provider.get_full_url(&auth);
 
             let url = reqwest::Url::parse(&endpoint).map_err(|err| {
@@ -798,7 +799,12 @@ impl ModelClient {
             };
             let mut req_builder = self
                 .provider
-                .create_request_builder_for_url(&self.client, &auth, reqwest::Method::GET, url)
+                .create_request_builder_for_url_with_auth(
+                    &self.client,
+                    &auth,
+                    reqwest::Method::GET,
+                    url,
+                )
                 .await?;
 
             let has_beta_header = req_builder
@@ -1226,7 +1232,8 @@ impl ModelClient {
             let mut auth_refresh_error: Option<RefreshTokenError> = None;
 
             // Always fetch the latest auth in case a prior attempt refreshed the token.
-            let auth = auth_manager.as_ref().and_then(|m| m.auth());
+            let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
+            let auth = self.provider.effective_auth(&base_auth).await?;
 
             trace!(
                 "POST to {}: {}",
@@ -1236,7 +1243,7 @@ impl ModelClient {
 
             let mut req_builder = self
                 .provider
-                .create_request_builder(&self.client, &auth)
+                .create_request_builder_with_auth(&self.client, &auth)
                 .await?;
 
             let has_beta_header = req_builder
@@ -1425,7 +1432,9 @@ impl ModelClient {
                         .and_then(|raw| parse_retry_after_header(raw, now));
 
                     if status == StatusCode::UNAUTHORIZED {
-                        if let Some(manager) = auth_manager.as_ref() {
+                        if self.provider.has_command_auth() {
+                            self.provider.invalidate_cached_auth_token();
+                        } else if let Some(manager) = auth_manager.as_ref() {
                             match manager.refresh_token_classified().await {
                                 Ok(Some(_)) => {}
                                 Ok(None) => {
@@ -1437,7 +1446,7 @@ impl ModelClient {
                                     auth_refresh_error = Some(err);
                                 }
                             }
-                        } else {
+                        } else if auth.is_none() {
                             auth_refresh_error = Some(RefreshTokenError::permanent(
                                 "Authentication manager unavailable; please log in again.",
                             ));
@@ -1849,10 +1858,11 @@ impl ModelClient {
         let mut request_id = String::new();
 
         loop {
-            let auth = auth_manager.as_ref().and_then(|m| m.auth());
+            let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
+            let auth = self.provider.effective_auth(&base_auth).await?;
             let mut request = self
                 .provider
-                .create_compact_request_builder(&self.client, &auth)
+                .create_compact_request_builder_with_auth(&self.client, &auth)
                 .await?;
 
             // Ensure Responses API beta header is present for compact calls. Mirror the
@@ -2991,6 +3001,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3039,6 +3050,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3089,6 +3101,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: Some(headers),
@@ -3236,6 +3249,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3302,6 +3316,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3354,6 +3369,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3449,6 +3465,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3556,6 +3573,7 @@ mod tests {
                 env_key: Some("TEST_API_KEY".to_string()),
                 env_key_instructions: None,
                 experimental_bearer_token: None,
+                auth: None,
                 wire_api: WireApi::Responses,
                 query_params: None,
                 http_headers: None,
@@ -3796,6 +3814,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3827,6 +3846,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3861,6 +3881,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3892,6 +3913,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -3923,6 +3945,7 @@ mod tests {
             env_key: Some("TEST_API_KEY".to_string()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,

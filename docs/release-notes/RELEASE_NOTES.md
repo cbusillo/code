@@ -1,11 +1,14 @@
-## @just-every/code v0.6.87
+## @just-every/code v0.6.91
 
-This release improves CI reliability for cross-platform validation and release readiness.
+This release improves auth flexibility, TUI/session reliability, and build performance.
 
 ### Changes
 
-- CI: switch `rust-ci-full` Windows jobs to hosted GitHub runners to reduce runner pool dependency in release validation.
-- CI: move Linux and Windows target matrices in `rust-ci-full` to hosted runners, improving cross-platform build reliability in restricted environments.
+- Core: support command-backed provider auth and dynamic bearer token sources for more flexible login flows.
+- TUI: fix zellij redraw/composer rendering plus resume picker and review-follow-up stale state issues for smoother sessions.
+- App Server: fix `/status` accuracy by showing fork source correctly and preventing stale rate-limit data in active sessions.
+- Windows: improve shell startup reliability with PowerShell fallback paths and longer startup timeouts on slower runners.
+- Core: reduce `codex-core` compile times substantially by moving key execution paths to native async handlers.
 
 ### Install
 
@@ -14,4 +17,8 @@ npm install -g @just-every/code@latest
 code
 ```
 
-Compare: https://github.com/just-every/code/compare/v0.6.86...v0.6.87
+### Thanks
+
+Thanks to @owenlin0 for contributions!
+
+Compare: https://github.com/just-every/code/compare/v0.6.90...v0.6.91

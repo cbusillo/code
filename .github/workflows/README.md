@@ -1,33 +1,13 @@
 # Workflow Strategy
 
-The workflows in this directory are split so that pull requests get fast, review-friendly signal while `main` still gets the full cross-platform verification pass.
+Rust-specific `rust-ci*.yml` workflows are intentionally removed in this fork.
 
-## Pull Requests
+## Verification Paths
 
-- `bazel.yml` is the main pre-merge verification path for Rust code.
-  It runs Bazel `test` and Bazel `clippy` on the supported Bazel targets.
-- `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
-  - `cargo fmt --check`
-  - `cargo shear`
-  - `argument-comment-lint` on Linux, macOS, and Windows
-  - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+- `bazel.yml` is the primary Rust verification path for pull requests and for `main`.
+- `release.yml` remains the post-merge release pipeline for `main`.
 
-The PR workflow still keeps the Linux lint lane on the default-targets-only invocation for now, but the released linter runs on Linux, macOS, and Windows before merge.
+## Upstream Merge Guardrail
 
-## Post-Merge On `main`
-
-- `bazel.yml` also runs on pushes to `main`.
-  This re-verifies the merged Bazel path and helps keep the BuildBuddy caches warm.
-- `rust-ci-full.yml` is the full Cargo-native verification workflow.
-  It keeps the heavier checks off the PR path while still validating them after merge:
-  - the full Cargo `clippy` matrix
-  - the full Cargo `nextest` matrix
-  - release-profile Cargo builds
-  - cross-platform `argument-comment-lint`
-  - Linux remote-env tests
-
-## Rule Of Thumb
-
-- If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
-- Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
-- Reserve `rust-ci-full.yml` for heavyweight Cargo-native coverage that Bazel does not replace yet.
+- `.github/workflows/**` is fork-owned during upstream merges.
+- `.github/workflows/rust-ci.yml` and `.github/workflows/rust-ci-full.yml` are also listed in `.github/merge-policy.json` under `perma_removed_paths` so future upstream syncs keep them deleted.
