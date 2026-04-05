@@ -2,11 +2,11 @@ use std::process::Command;
 use std::sync::Arc;
 
 use codex_core::ModelClient;
-use codex_core::ModelProviderInfo;
 use codex_core::Prompt;
 use codex_core::ResponseEvent;
-use codex_core::WireApi;
 use codex_login::CodexAuth;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
@@ -129,10 +129,16 @@ async fn responses_stream_includes_subagent_header_on_review() {
     }
 
     let request = request_recorder.single_request();
+    let expected_window_id = format!("{conversation_id}:0");
     assert_eq!(
         request.header("x-openai-subagent").as_deref(),
         Some("review")
     );
+    assert_eq!(
+        request.header("x-codex-window-id").as_deref(),
+        Some(expected_window_id.as_str())
+    );
+    assert_eq!(request.header("x-codex-parent-thread-id"), None);
     assert_eq!(request.header("x-codex-sandbox"), None);
 }
 

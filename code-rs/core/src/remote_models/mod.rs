@@ -267,11 +267,7 @@ impl RemoteModelsManager {
 
         let info = {
             let state = self.state.read().await;
-            state
-                .models
-                .iter()
-                .find(|info| info.slug.eq_ignore_ascii_case(model))
-                .cloned()
+            find_remote_model_info(&state.models, model)
         };
         let Some(info) = info else {
             return family;
@@ -358,6 +354,39 @@ impl RemoteModelsManager {
     }
 }
 
+fn namespaced_model_suffix(model: &str) -> Option<&str> {
+    let (namespace, suffix) = model.split_once('/')?;
+    if suffix.contains('/') {
+        return None;
+    }
+    if !namespace
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    Some(suffix)
+}
+
+fn find_remote_model_info(models: &[ModelInfo], model: &str) -> Option<ModelInfo> {
+    models
+        .iter()
+        .filter(|info| model.eq_ignore_ascii_case(&info.slug) || model.starts_with(&info.slug))
+        .cloned()
+        .max_by_key(|info| info.slug.len())
+        .or_else(|| {
+            namespaced_model_suffix(model).and_then(|suffix| {
+                models
+                    .iter()
+                    .filter(|info| {
+                        suffix.eq_ignore_ascii_case(&info.slug) || suffix.starts_with(&info.slug)
+                    })
+                    .cloned()
+                    .max_by_key(|info| info.slug.len())
+            })
+        })
+}
+
 pub fn apply_model_info_overrides(info: &ModelInfo, family: ModelFamily) -> ModelFamily {
     apply_model_info_overrides_with_personality(info, family, None)
 }
@@ -410,6 +439,69 @@ fn apply_model_info_overrides_with_personality(
     }
     family.default_reasoning_summary = map_reasoning_summary(info.default_reasoning_summary);
     family
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_remote_model_info;
+    use code_protocol::config_types::ReasoningSummary;
+    use code_protocol::openai_models::ConfigShellToolType;
+    use code_protocol::openai_models::ModelInfo;
+    use code_protocol::openai_models::ModelVisibility;
+    use code_protocol::openai_models::TruncationPolicyConfig;
+    use code_protocol::openai_models::WebSearchToolType;
+    use code_protocol::openai_models::default_input_modalities;
+
+    fn model(slug: &str) -> ModelInfo {
+        ModelInfo {
+            slug: slug.to_string(),
+            display_name: slug.to_string(),
+            description: None,
+            default_reasoning_level: None,
+            supported_reasoning_levels: Vec::new(),
+            shell_type: ConfigShellToolType::Default,
+            visibility: ModelVisibility::None,
+            supported_in_api: true,
+            priority: 0,
+            availability_nux: None,
+            upgrade: None,
+            base_instructions: String::new(),
+            model_messages: None,
+            supports_reasoning_summaries: false,
+            default_reasoning_summary: ReasoningSummary::Auto,
+            support_verbosity: false,
+            default_verbosity: None,
+            apply_patch_tool_type: None,
+            web_search_tool_type: WebSearchToolType::Text,
+            truncation_policy: TruncationPolicyConfig::bytes(10_000),
+            supports_parallel_tool_calls: false,
+            supports_image_detail_original: false,
+            context_window: None,
+            auto_compact_token_limit: None,
+            effective_context_window_percent: 95,
+            experimental_supported_tools: Vec::new(),
+            input_modalities: default_input_modalities(),
+            prefer_websockets: false,
+            used_fallback_model_metadata: false,
+        }
+    }
+
+    #[test]
+    fn find_remote_model_info_matches_namespaced_suffix() {
+        let models = vec![model("gpt-5.3-codex")];
+
+        let found = find_remote_model_info(&models, "custom/gpt-5.3-codex")
+            .expect("namespaced slug should resolve");
+
+        assert_eq!(found.slug, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn find_remote_model_info_rejects_multi_segment_namespace() {
+        let models = vec![model("gpt-5.3-codex")];
+
+        assert!(find_remote_model_info(&models, "foo/bar/gpt-5.3-codex").is_none());
+    }
 }
 
 fn map_web_search_tool_type(tool_type: WebSearchToolType) -> WebSearchToolType {

@@ -7,6 +7,14 @@
 
 - (none)
 
+## [0.6.92] - 2026-04-05
+
+- TUI: enable Wayland clipboard image paste so screenshot paste works reliably on Linux Wayland sessions. (fbe95ad8)
+- Core: align model/provider behavior by syncing remote model parity and updating Copilot/GPT-5.4 mini agent flags. (eff1ef4f, 93ad10cd)
+- Remote: forward `--cd` consistently across remote start/resume/fork/list flows so session directory targeting works as expected. (0ab8eda3)
+- Core/TUI: fix MCP tool listing for hyphenated server names and prevent stale `/copy` output after commentary-only turns. (a3b3e7a6, cc8fd0ff)
+- Platform: improve macOS stability by preventing sandbox HTTP-client panics and filtering malloc diagnostics from composer input. (1cc87019, a71fc47c)
+
 ## [0.6.91] - 2026-04-03
 
 - Core: support command-backed provider auth and dynamic bearer token sources for more flexible login flows. (6dc620cb, 20f43c1e, 00719688, ea650a91)

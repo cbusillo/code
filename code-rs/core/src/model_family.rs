@@ -40,10 +40,24 @@ const MAX_OUTPUT_DEFAULT: u64 = 128_000;
 const IMAGE_GENERATION_TOOL: &str = "image_generation";
 
 static UPSTREAM_MODELS: Lazy<Vec<ModelInfo>> = Lazy::new(|| {
-    serde_json::from_str::<ModelsResponse>(include_str!("../../../codex-rs/core/models.json"))
+    serde_json::from_str::<ModelsResponse>(include_str!("../../../codex-rs/models-manager/models.json"))
         .map(|response| response.models)
         .unwrap_or_else(|err| panic!("failed to parse upstream models.json: {err}"))
 });
+
+fn namespaced_model_suffix(model: &str) -> Option<&str> {
+    let (namespace, suffix) = model.split_once('/')?;
+    if suffix.contains('/') {
+        return None;
+    }
+    if !namespace
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    Some(suffix)
+}
 
 pub const STANDARD_CONTEXT_WINDOW_272K: u64 = CONTEXT_WINDOW_272K;
 pub const EXTENDED_CONTEXT_WINDOW_1M: u64 = CONTEXT_WINDOW_1M;
@@ -101,6 +115,10 @@ pub struct ModelFamily {
     /// Present if the model performs better when `apply_patch` is provided as
     /// a tool call instead of just a bash command
     pub apply_patch_tool_type: Option<ApplyPatchToolType>,
+
+    /// This should be set when the model expects a `shell_command` tool that
+    /// accepts a shell script string instead of argv-style arguments.
+    pub uses_shell_command_tool: bool,
 
     /// Whether web_search should request text-only or multimodal results.
     pub web_search_tool_type: WebSearchToolType,
@@ -160,6 +178,7 @@ macro_rules! model_family {
             prefer_websockets: false,
             uses_local_shell_tool: false,
             apply_patch_tool_type: None,
+            uses_shell_command_tool: false,
             web_search_tool_type: WebSearchToolType::Text,
             supports_image_detail_original: false,
             supports_image_generation: false,
@@ -174,7 +193,12 @@ macro_rules! model_family {
 }
 
 fn apply_upstream_model_overrides(mut family: ModelFamily) -> ModelFamily {
-    let Some(model_info) = UPSTREAM_MODELS.iter().find(|model| model.slug == family.slug) else {
+    let model_slug = family
+        .slug
+        .strip_prefix("openai/")
+        .or_else(|| namespaced_model_suffix(&family.slug))
+        .unwrap_or(&family.slug);
+    let Some(model_info) = UPSTREAM_MODELS.iter().find(|model| model.slug == model_slug) else {
         return family;
     };
 
@@ -198,6 +222,8 @@ fn apply_upstream_model_overrides(mut family: ModelFamily) -> ModelFamily {
         .iter()
         .any(|tool| tool == IMAGE_GENERATION_TOOL);
     family.uses_local_shell_tool = matches!(model_info.shell_type, ConfigShellToolType::Local);
+    family.uses_shell_command_tool =
+        matches!(model_info.shell_type, ConfigShellToolType::ShellCommand);
     family.auto_compact_token_limit = model_info.auto_compact_token_limit();
     family.truncation_policy = match model_info.truncation_policy.mode {
         TruncationMode::Bytes => TruncationPolicy::Bytes(
@@ -214,6 +240,13 @@ fn apply_upstream_model_overrides(mut family: ModelFamily) -> ModelFamily {
 /// Returns a `ModelFamily` for the given model slug, or `None` if the slug
 /// does not match any known model family.
 pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
+    if let Some(suffix) = namespaced_model_suffix(slug)
+        && let Some(mut family) = find_family_for_model(suffix)
+    {
+        family.slug = slug.to_string();
+        return Some(family);
+    }
+
     if slug.starts_with("o3") {
         model_family!(
             slug, "o3",
@@ -430,6 +463,7 @@ pub fn derive_default_model_family(model: &str) -> ModelFamily {
         prefer_websockets: false,
         uses_local_shell_tool: false,
         apply_patch_tool_type: None,
+        uses_shell_command_tool: false,
         web_search_tool_type: WebSearchToolType::Text,
         supports_image_detail_original: false,
         supports_image_generation: false,

@@ -25,6 +25,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use crate::error::EnvVarError;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+pub(crate) const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 /// Hard cap for user-configured `stream_max_retries`.
@@ -130,6 +131,9 @@ pub struct ModelProviderInfo {
     /// Idle timeout (in milliseconds) to wait for activity on a streaming response before treating
     /// the connection as lost.
     pub stream_idle_timeout_ms: Option<u64>,
+
+    /// Timeout (in milliseconds) when establishing a websocket transport connection.
+    pub websocket_connect_timeout_ms: Option<u64>,
 
     /// Whether this provider requires some form of standard authentication (API key, ChatGPT token).
     #[serde(default)]
@@ -573,6 +577,12 @@ impl ModelProviderInfo {
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
 
+    pub fn websocket_connect_timeout(&self) -> Duration {
+        self.websocket_connect_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS))
+    }
+
     pub fn base_url_for_probe(&self) -> String {
         self.base_url
             .clone()
@@ -744,6 +754,7 @@ pub fn built_in_model_providers(
                 request_max_retries: None,
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
+                websocket_connect_timeout_ms: None,
                 requires_openai_auth: true,
                 openrouter: None,
             },
@@ -791,6 +802,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str) -> ModelProviderInfo {
         request_max_retries: None,
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         openrouter: None,
     }
@@ -837,6 +849,7 @@ base_url = "http://localhost:11434/v1"
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             openrouter: None,
         };
@@ -869,6 +882,7 @@ query_params = { api-version = "2025-04-01-preview" }
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             openrouter: None,
         };
@@ -904,6 +918,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             openrouter: None,
         };
@@ -929,6 +944,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
                 request_max_retries: None,
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
+                websocket_connect_timeout_ms: None,
                 requires_openai_auth: false,
                 openrouter: None,
             }
@@ -964,6 +980,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             openrouter: None,
         };
@@ -1066,6 +1083,7 @@ refresh_interval_ms = 0
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             openrouter: None,
         };

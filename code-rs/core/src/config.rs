@@ -1391,6 +1391,7 @@ impl Config {
                 || agent.name.eq_ignore_ascii_case("codex")
                 || agent.name.eq_ignore_ascii_case("claude")
                 || agent.name.eq_ignore_ascii_case("gemini")
+                || agent.name.eq_ignore_ascii_case("copilot")
                 || agent.name.eq_ignore_ascii_case("qwen")
                 || agent.name.eq_ignore_ascii_case("cloud")
             {
@@ -2411,6 +2412,7 @@ model_verbosity = "high"
             request_max_retries: Some(4),
             stream_max_retries: Some(10),
             stream_idle_timeout_ms: Some(300_000),
+            websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             openrouter: None,
         };
@@ -3351,14 +3353,14 @@ mod agent_merge_tests {
 
         let mini = merged
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
             .expect("mini present");
 
         assert!(!mini.enabled, "disabled state should persist for alias");
         assert_eq!(
             merged
                 .iter()
-                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
                 .count(),
             1,
             "should dedupe alias/canonical"
@@ -3367,19 +3369,19 @@ mod agent_merge_tests {
 
     #[test]
     fn disabled_codex_mini_slug_is_preserved_with_command() {
-        let agents = vec![agent("code-gpt-5.1-codex-mini", "coder", false)];
+        let agents = vec![agent("code-gpt-5.4-mini", "coder", false)];
         let merged = merge_with_default_agents(agents);
 
         let mini = merged
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
             .expect("mini present");
 
         assert!(!mini.enabled, "disabled state should persist for canonical slug");
         assert_eq!(
             merged
                 .iter()
-                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
                 .count(),
             1,
             "should dedupe canonical entry"
@@ -3390,20 +3392,20 @@ mod agent_merge_tests {
     fn codex_mini_alias_then_canonical_last_wins_disabled() {
         let agents = vec![
             agent("codex-mini", "coder", true),
-            agent("code-gpt-5.1-codex-mini", "coder", false),
+            agent("code-gpt-5.4-mini", "coder", false),
         ];
         let merged = merge_with_default_agents(agents);
 
         let mini = merged
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
             .expect("mini present");
 
         assert!(!mini.enabled, "later canonical disable should win");
         assert_eq!(
             merged
                 .iter()
-                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
                 .count(),
             1,
             "should dedupe alias and canonical"
@@ -3413,21 +3415,21 @@ mod agent_merge_tests {
     #[test]
     fn codex_mini_canonical_then_alias_last_wins_disabled() {
         let agents = vec![
-            agent("code-gpt-5.1-codex-mini", "coder", true),
+            agent("code-gpt-5.4-mini", "coder", true),
             agent("codex-mini", "coder", false),
         ];
         let merged = merge_with_default_agents(agents);
 
         let mini = merged
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+            .find(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
             .expect("mini present");
 
         assert!(!mini.enabled, "later alias disable should win");
         assert_eq!(
             merged
                 .iter()
-                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.1-codex-mini"))
+                .filter(|a| a.name.eq_ignore_ascii_case("code-gpt-5.4-mini"))
                 .count(),
             1,
             "should dedupe alias and canonical"
