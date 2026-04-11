@@ -1,5 +1,5 @@
+use crate::theme::{PaletteMode, current_theme, palette_mode, quantize_color_for_palette};
 use ratatui::style::Color;
-use crate::theme::{current_theme, palette_mode, quantize_color_for_palette, PaletteMode};
 
 // Legacy color constants - now redirect to theme
 pub(crate) fn light_blue() -> Color {
@@ -54,7 +54,8 @@ pub(crate) fn border_dim() -> Color {
             let (br, bg_g, bb) = color_to_rgb(b);
             let (rr, rg, rb) = color_to_rgb(bg);
             let t: f32 = 0.30; // 30% toward background
-            let mix = |a: u8, b: u8| -> u8 { ((a as f32) * (1.0 - t) + (b as f32) * t).round() as u8 };
+            let mix =
+                |a: u8, b: u8| -> u8 { ((a as f32) * (1.0 - t) + (b as f32) * t).round() as u8 };
             let r = mix(br, rr);
             let g = mix(bg_g, rg);
             let bl = mix(bb, rb);
@@ -240,6 +241,71 @@ pub(crate) fn tint_background_toward(accent: Color) -> Color {
     Color::Rgb(r, g, b)
 }
 
+fn assistant_tint_alpha(bg: Color, mid_turn: bool) -> f32 {
+    match (is_dark_rgb(color_to_rgb(bg)), mid_turn) {
+        (true, false) => 0.34,
+        (true, true) => 0.06,
+        (false, false) => 0.14,
+        (false, true) => 0.04,
+    }
+}
+
+fn assistant_final_accent(bg: Color) -> Color {
+    if is_dark_rgb(color_to_rgb(bg)) {
+        // Bias completed assistant cards toward a vivid DOS-like blue.
+        Color::Rgb(0, 0, 139)
+    } else {
+        current_theme().primary
+    }
+}
+
+fn assistant_dark_completed_bg() -> Color {
+    quantize_color_for_palette(Color::Rgb(0, 0, 139))
+}
+
+fn assistant_dark_mid_turn_bg() -> Color {
+    quantize_color_for_palette(Color::Rgb(0, 0, 72))
+}
+
+fn assistant_card_prominence(color: Color, bg: Color) -> u32 {
+    let (cr, cg, cb) = color_to_rgb(color);
+    let (br, bg_g, bb) = color_to_rgb(bg);
+    let dr = cr as i32 - br as i32;
+    let dg = cg as i32 - bg_g as i32;
+    let db = cb as i32 - bb as i32;
+    (dr * dr + dg * dg + db * db) as u32
+}
+
+fn assistant_card_tint(bg: Color, accent: Color, alpha: f32) -> Color {
+    mix_toward(bg, accent, alpha)
+}
+
+fn assistant_bg_for(bg: Color, accent: Color) -> Color {
+    if is_dark_rgb(color_to_rgb(bg)) {
+        return assistant_dark_completed_bg();
+    }
+    assistant_card_tint(bg, accent, assistant_tint_alpha(bg, false))
+}
+
+fn assistant_mid_turn_bg_for(bg: Color, accent: Color) -> Color {
+    if is_dark_rgb(color_to_rgb(bg)) {
+        return assistant_dark_mid_turn_bg();
+    }
+
+    let completed = assistant_bg_for(bg, accent);
+    let completed_prominence = assistant_card_prominence(completed, bg);
+    let base_alpha = assistant_tint_alpha(bg, true);
+
+    for alpha in [base_alpha, base_alpha * 0.75, base_alpha * 0.5, 0.0] {
+        let candidate = assistant_card_tint(bg, accent, alpha);
+        if assistant_card_prominence(candidate, bg) <= completed_prominence {
+            return candidate;
+        }
+    }
+
+    completed
+}
+
 fn blend_with_black(rgb: (u8, u8, u8), alpha: f32) -> (u8, u8, u8) {
     // target = bg*(1-alpha) + black*alpha => bg*(1-alpha)
     let inv = 1.0 - alpha;
@@ -254,10 +320,6 @@ fn is_light(rgb: (u8, u8, u8)) -> bool {
     l >= 0.6
 }
 
-fn relative_luminance(rgb: (u8, u8, u8)) -> f32 {
-    (0.2126 * rgb.0 as f32 + 0.7152 * rgb.1 as f32 + 0.0722 * rgb.2 as f32) / 255.0
-}
-
 pub(crate) fn overlay_scrim() -> Color {
     let bg = current_theme().background;
     let rgb = color_to_rgb(bg);
@@ -267,7 +329,10 @@ pub(crate) fn overlay_scrim() -> Color {
     quantize_color_for_palette(Color::Rgb(r, g, b))
 }
 
-/// Background for assistant messages: theme background moved 5% toward theme info.
+/// Background for completed assistant messages.
+///
+/// Rich terminals keep the stronger accent tint so completed assistant cards
+/// remain easy to scan without falling back to ANSI16.
 pub(crate) fn assistant_bg() -> Color {
     match palette_mode() {
         PaletteMode::Ansi16 => {
@@ -279,22 +344,21 @@ pub(crate) fn assistant_bg() -> Color {
         }
         PaletteMode::Ansi256 => {
             let bg = current_theme().background;
-            let info = current_theme().info;
-            mix_toward(bg, info, 0.05)
+            assistant_bg_for(bg, assistant_final_accent(bg))
         }
     }
 }
 
 /// Background for mid-turn assistant messages.
 ///
-/// Uses a lighter tint than `assistant_bg` so progress inserts feel secondary.
+/// Uses the same accent family as `assistant_bg` but a weaker mix so progress
+/// inserts feel secondary even after ANSI256 quantization.
 pub(crate) fn assistant_mid_turn_bg() -> Color {
     match palette_mode() {
         PaletteMode::Ansi16 => assistant_bg(),
         PaletteMode::Ansi256 => {
             let bg = current_theme().background;
-            let info = current_theme().info;
-            mix_toward(bg, info, 0.02)
+            assistant_mid_turn_bg_for(bg, assistant_final_accent(bg))
         }
     }
 }
@@ -322,18 +386,123 @@ pub(crate) fn assistant_hr() -> Color {
         }
         PaletteMode::Ansi256 => {
             let bg = current_theme().background;
-            let info = current_theme().info;
             let cell = assistant_bg();
-            let candidate = mix_toward(bg, info, 0.15);
-            let cand_l = relative_luminance(color_to_rgb(candidate));
-            let cell_l = relative_luminance(color_to_rgb(cell));
-            let result = if cand_l < cell_l {
+            let candidate = mix_toward(bg, assistant_final_accent(bg), 0.15);
+            let cand_p = assistant_card_prominence(candidate, bg);
+            let cell_p = assistant_card_prominence(cell, bg);
+            let result = if cand_p < cell_p {
                 candidate
             } else {
                 let (r, g, b) = blend_with_black(color_to_rgb(cell), 0.12);
                 Color::Rgb(r, g, b)
             };
             quantize_color_for_palette(result)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        assistant_bg_for, assistant_card_prominence, assistant_dark_completed_bg,
+        assistant_dark_mid_turn_bg, assistant_final_accent, assistant_mid_turn_bg_for,
+        assistant_tint_alpha,
+    };
+    use ratatui::style::Color;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ForcedAnsi256Guard {
+        previous: Option<String>,
+    }
+
+    impl Drop for ForcedAnsi256Guard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                // Safe here because the guard is only used in a locked test.
+                unsafe { std::env::set_var("CODE_FORCE_ANSI256", value) };
+            } else {
+                // Safe here because the guard is only used in a locked test.
+                unsafe { std::env::remove_var("CODE_FORCE_ANSI256") };
+            }
+        }
+    }
+
+    fn force_ansi256() -> ForcedAnsi256Guard {
+        let previous = std::env::var("CODE_FORCE_ANSI256").ok();
+        // Safe here because the guard is only used in a locked test.
+        unsafe { std::env::set_var("CODE_FORCE_ANSI256", "1") };
+        ForcedAnsi256Guard { previous }
+    }
+
+    #[test]
+    fn assistant_tint_is_stronger_on_dark_backgrounds() {
+        assert_eq!(assistant_tint_alpha(Color::Rgb(7, 11, 20), false), 0.34);
+        assert_eq!(assistant_tint_alpha(Color::Rgb(7, 11, 20), true), 0.06);
+    }
+
+    #[test]
+    fn assistant_tint_stays_more_reserved_on_light_backgrounds() {
+        assert_eq!(assistant_tint_alpha(Color::Rgb(245, 247, 250), false), 0.14);
+        assert_eq!(assistant_tint_alpha(Color::Rgb(245, 247, 250), true), 0.04);
+    }
+
+    #[test]
+    fn assistant_final_accent_uses_vivid_blue_on_dark_backgrounds() {
+        assert_eq!(
+            assistant_final_accent(Color::Rgb(7, 11, 20)),
+            Color::Rgb(0, 0, 139)
+        );
+    }
+
+    #[test]
+    fn assistant_dark_backgrounds_use_direct_dos_blues() {
+        let bg = Color::Rgb(7, 11, 20);
+        let completed = assistant_bg_for(bg, Color::Rgb(0, 0, 139));
+        let mid_turn = assistant_mid_turn_bg_for(bg, Color::Rgb(0, 0, 139));
+
+        assert_eq!(completed, assistant_dark_completed_bg());
+        assert_eq!(mid_turn, assistant_dark_mid_turn_bg());
+        assert!(assistant_card_prominence(mid_turn, bg) < assistant_card_prominence(completed, bg));
+    }
+
+    #[test]
+    fn mid_turn_card_never_outshines_completed_card_after_quantization() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let _env_guard = force_ansi256();
+
+        let cases = [
+            (
+                Color::Rgb(11, 13, 16),
+                Color::Rgb(0, 0, 139),
+                "DarkCarbonNight",
+            ),
+            (
+                Color::Rgb(12, 12, 8),
+                Color::Rgb(0, 0, 139),
+                "DarkAmberTerminal",
+            ),
+            (
+                Color::Rgb(250, 250, 250),
+                Color::Rgb(0, 162, 255),
+                "LightPhoton",
+            ),
+            (
+                Color::Rgb(247, 247, 245),
+                Color::Rgb(0, 95, 204),
+                "DarkPaperLightPro",
+            ),
+        ];
+
+        for (bg, accent, name) in cases {
+            let completed = assistant_bg_for(bg, accent);
+            let mid_turn = assistant_mid_turn_bg_for(bg, accent);
+
+            assert!(
+                assistant_card_prominence(mid_turn, bg) <= assistant_card_prominence(completed, bg),
+                "mid-turn tint should stay below completed tint for {name}: completed={completed:?} mid_turn={mid_turn:?}"
+            );
         }
     }
 }
