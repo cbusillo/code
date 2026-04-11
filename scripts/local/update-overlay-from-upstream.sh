@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
-manifest="$repo_root/scripts/local/overlay-branches.txt"
+manifest="$repo_root/scripts/local/overlay-picks.txt"
 
 branch="$(git symbolic-ref --quiet --short HEAD || true)"
 if [[ -z "$branch" ]]; then
@@ -33,26 +33,26 @@ echo "Merging upstream/main into $branch"
 git merge --no-edit upstream/main
 
 echo
-echo "Applying overlay branch stack from $(basename "$manifest")"
+echo "Applying overlay commit stack from $(basename "$manifest")"
 while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
 	line="${raw_line%%#*}"
-	branch_name="$(printf '%s' "$line" | xargs)"
-	if [[ -z "$branch_name" ]]; then
+	pick_commit="$(printf '%s' "$line" | xargs)"
+	if [[ -z "$pick_commit" ]]; then
 		continue
 	fi
 
-	if ! git show-ref --verify --quiet "refs/heads/$branch_name"; then
-		echo "error: overlay branch '$branch_name' does not exist locally" >&2
+	if ! git cat-file -e "$pick_commit^{commit}" 2>/dev/null; then
+		echo "error: overlay commit '$pick_commit' does not exist" >&2
 		exit 1
 	fi
 
-	if git merge-base --is-ancestor "$branch_name" HEAD; then
-		echo "- $branch_name already merged"
+	if git merge-base --is-ancestor "$pick_commit" HEAD; then
+		echo "- $pick_commit already present"
 		continue
 	fi
 
-	echo "- merging $branch_name"
-	git merge --no-edit "$branch_name"
+	echo "- cherry-picking $pick_commit"
+	git cherry-pick "$pick_commit"
 done <"$manifest"
 
 echo
