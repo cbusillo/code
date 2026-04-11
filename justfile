@@ -61,6 +61,14 @@ bazel-lock-update:
 bazel-lock-check:
     ./scripts/check-module-bazel-lock.sh
 
+[no-cd]
+local-code-rebuild:
+    ./scripts/local/rebuild-path-code.sh
+
+[no-cd]
+local-overlay-update:
+    ./scripts/local/update-overlay-from-upstream.sh
+
 bazel-test:
     bazel test --test_tag_filters=-argument-comment-lint //... --keep_going
 
