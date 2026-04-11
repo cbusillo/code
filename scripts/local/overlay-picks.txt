@@ -18,12 +18,12 @@
 # c9a5a08091  fix/tui-rate-limit-refresh-scheduler
 # bac4c41b1e  fix/tui-rate-limit-refresh-scheduler
 
-# Replay-compatible local branch stack:
-eda8e469b7 # compat/thread-resume-shim
-a41cc7b2e6 # compat/thread-resume-shim
-d35eae36fd # feat/app-server-parity-apis
-4442c0391e # feat/app-server-parity-apis
-b9331a4ff9 # fix/app-server-detached-review-context
-fe6d661762 # fix/browser-handler-decode-error
-a7916c09e4 # fix/browser-handler-decode-error
-603b156895 # fix/browser-handler-decode-error
+# Pending manual re-port against current upstream line before re-enabling:
+# eda8e469b7  compat/thread-resume-shim
+# a41cc7b2e6  compat/thread-resume-shim
+# d35eae36fd  feat/app-server-parity-apis
+# 4442c0391e  feat/app-server-parity-apis
+# b9331a4ff9  fix/app-server-detached-review-context
+# fe6d661762  fix/browser-handler-decode-error
+# a7916c09e4  fix/browser-handler-decode-error
+# 603b156895  fix/browser-handler-decode-error
