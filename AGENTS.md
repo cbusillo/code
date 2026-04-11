@@ -56,6 +56,17 @@ Examples:
 - `fix(core/codex): handle SIGINT in on_exec_command_begin to avoid orphaned child`
 - `docs(agents): clarify commit-message expectations`
 
+## Local Overlay Workflow
+
+- The canonical local-carry branch is `local/cbusillo-overlay`. Treat it as the source of truth for the `code` binary installed on this machine.
+- Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
+- Use `just local-overlay-update` only from a clean `local/*` branch. It fetches `upstream/main`, merges it into the current overlay branch, replays any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release binary.
+- Commits already on `local/cbusillo-overlay` persist automatically across future upstream merges. They do not need to be duplicated in `scripts/local/overlay-picks.txt`.
+- If you make a new local fix that should remain part of the carried overlay, commit it onto `local/cbusillo-overlay` first. Do not leave important local changes only as an unmerged side branch.
+- Add a commit SHA to `scripts/local/overlay-picks.txt` only for a patch that intentionally lives outside the overlay branch and still needs to be cherry-picked in during `just local-overlay-update`. Keep the list ordered and comment each entry with the source branch or purpose.
+- Old side branches are archival context, not the runtime source of truth. They do not need to merge cleanly as branches; only the specific carried commits must cherry-pick cleanly onto the current overlay branch.
+- If a legacy pick no longer cherry-picks cleanly, leave it commented out in `scripts/local/overlay-picks.txt`, manually re-port the fix against current upstream, commit the new port on `local/cbusillo-overlay`, then replace the old SHA in the manifest if you still want automatic replay.
+
 ## How to Git Push
 
 ### Merge-and-Push Policy (Do Not Rebase)

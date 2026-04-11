@@ -1027,7 +1027,17 @@ impl CodexMessageProcessor {
         request_id: RequestId,
         params: ThreadResumeParams,
     ) {
-        let unsupported_history = params.history.is_some();
+        if params.history.is_some() {
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: "thread/resume.history is not supported by the Every Code app-server"
+                    .to_string(),
+                data: None,
+            };
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
+
         let thread_id = params.thread_id.clone();
         let catalog_thread_id = match ConversationId::from_string(&thread_id) {
             Ok(conversation_id) => self
@@ -1059,14 +1069,9 @@ impl CodexMessageProcessor {
         ) {
             Some(path) => path,
             None => {
-                let message = if unsupported_history {
-                    "thread/resume.history is not supported by the Every Code app-server without a rollout path"
-                } else {
-                    "thread not found"
-                };
                 let error = JSONRPCErrorError {
                     code: INVALID_REQUEST_ERROR_CODE,
-                    message: message.to_string(),
+                    message: "thread not found".to_string(),
                     data: None,
                 };
                 self.outgoing.send_error(request_id, error).await;
@@ -1122,7 +1127,7 @@ impl CodexMessageProcessor {
             }) => {
                 self.remember_conversation_config(conversation_id, &config).await;
                 let canonical_thread_id = thread_resume_canonical_thread_id(
-                    &thread_id,
+                    conversation_id,
                     &rollout_path,
                     catalog_entry.as_ref(),
                 );
@@ -1342,7 +1347,44 @@ impl CodexMessageProcessor {
                 let mut config = source_config.clone().unwrap_or_else(|| (*self.config).clone());
                 if source_config.is_none() {
                     let catalog = SessionCatalog::new(self.config.code_home.clone());
-                    if let Ok(Some(entry)) = catalog.find_by_id(&resolved_thread_id.to_string()).await {
+                    let catalog_entry = match catalog.find_by_id(&resolved_thread_id.to_string()).await {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            self.outgoing
+                                .send_error(
+                                    request_id,
+                                    JSONRPCErrorError {
+                                        code: INTERNAL_ERROR_CODE,
+                                        message: format!(
+                                            "failed to resolve detached review thread: {err}"
+                                        ),
+                                        data: None,
+                                    },
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+                    if catalog_entry.is_none()
+                        && self
+                            .conversation_manager
+                            .get_conversation(resolved_thread_id)
+                            .await
+                            .is_err()
+                    {
+                        self.outgoing
+                            .send_error(
+                                request_id,
+                                JSONRPCErrorError {
+                                    code: INVALID_REQUEST_ERROR_CODE,
+                                    message: format!("thread not found: {thread_id}"),
+                                    data: None,
+                                },
+                            )
+                            .await;
+                        return;
+                    }
+                    if let Some(entry) = catalog_entry {
                         config.cwd = entry.cwd_real;
                     }
                 }
@@ -1891,14 +1933,14 @@ fn thread_resume_rollout_path(
 }
 
 fn thread_resume_canonical_thread_id(
-    requested_thread_id: &str,
+    resumed_conversation_id: ConversationId,
     rollout_path: &std::path::Path,
     entry: Option<&code_core::SessionIndexEntry>,
 ) -> String {
     conversation_id_from_rollout_path(rollout_path)
         .map(|conversation_id| conversation_id.to_string())
         .or_else(|| entry.map(|item| item.session_id.to_string()))
-        .unwrap_or_else(|| requested_thread_id.to_string())
+        .unwrap_or_else(|| resumed_conversation_id.to_string())
 }
 
 fn thread_resume_response_thread(
@@ -2607,6 +2649,8 @@ impl IntoWireAuthMode for code_app_server_protocol::AuthMode {
 mod tests {
     use super::*;
     use code_app_server_protocol::AuthMode;
+    use code_app_server_protocol::ReviewDelivery;
+    use code_app_server_protocol::ReviewTarget;
     use code_core::auth::CodexAuth;
     use code_core::auth::RefreshTokenError;
     use code_core::config::ConfigOverrides;
@@ -2673,6 +2717,16 @@ mod tests {
             ),
             outgoing_rx,
         )
+    }
+
+    async fn expect_error_message(
+        outgoing_rx: &mut mpsc::UnboundedReceiver<crate::outgoing_message::OutgoingMessage>,
+    ) -> String {
+        let message = outgoing_rx.recv().await.expect("error response should be sent");
+        match message {
+            crate::outgoing_message::OutgoingMessage::Error(err) => err.error.message,
+            other => panic!("expected error response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2778,6 +2832,57 @@ mod tests {
                 requires_openai_auth: Some(true),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn thread_resume_v2_rejects_history_even_with_path() {
+        let (processor, mut outgoing_rx) = make_processor_for_tests();
+
+        processor
+            .thread_resume_v2(
+                RequestId::Integer(7),
+                ThreadResumeParams {
+                    thread_id: Uuid::new_v4().to_string(),
+                    history: Some(Vec::new()),
+                    path: Some(std::path::PathBuf::from("/tmp/rollout.jsonl")),
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                },
+            )
+            .await;
+
+        let message = expect_error_message(&mut outgoing_rx).await;
+        assert_eq!(
+            message,
+            "thread/resume.history is not supported by the Every Code app-server"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_start_v2_detached_rejects_unknown_source_thread() {
+        let (processor, mut outgoing_rx) = make_processor_for_tests();
+        let unknown_thread_id = Uuid::new_v4().to_string();
+
+        processor
+            .review_start_v2(
+                RequestId::Integer(8),
+                ReviewStartParams {
+                    thread_id: unknown_thread_id.clone(),
+                    target: ReviewTarget::UncommittedChanges,
+                    delivery: Some(ReviewDelivery::Detached),
+                },
+            )
+            .await;
+
+        let message = expect_error_message(&mut outgoing_rx).await;
+        assert_eq!(message, format!("thread not found: {unknown_thread_id}"));
     }
 
     #[test]
@@ -2926,6 +3031,9 @@ mod tests {
 
     #[test]
     fn thread_resume_canonical_thread_id_prefers_rollout_path() {
+        let resumed_conversation_id =
+            ConversationId::from_string("33333333-3333-4333-8333-333333333333")
+                .expect("valid uuid");
         let entry = SessionIndexEntry {
             session_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111")
                 .expect("valid uuid"),
@@ -2950,7 +3058,7 @@ mod tests {
         };
 
         let canonical_thread_id = thread_resume_canonical_thread_id(
-            &entry.session_id.to_string(),
+            resumed_conversation_id,
             std::path::Path::new(
                 "/tmp/rollout-2026-04-03T09-10-00Z-22222222-2222-4222-8222-222222222222.jsonl",
             ),

@@ -2,28 +2,20 @@
 #
 # Format:
 #   <commit-sha>  # optional note
+#
+# Workflow:
+# - Commits already present on local/cbusillo-overlay survive future upstream
+#   merges automatically; do not list them again here.
+# - Commit new local fixes onto local/cbusillo-overlay first.
+# - Add a SHA here only if the fix intentionally lives outside the overlay
+#   branch and should be auto-replayed during future `just local-overlay-update`
+#   runs.
+# - If an old carried fix stops cherry-picking cleanly, keep it commented out,
+#   manually re-port it to current upstream, then replace the SHA here with the
+#   new ported commit once it is known-good.
 
-# Manual re-port candidates from an older history line:
-# 1c94c7b88b  code-config-aware-validation
-# e1dc4118a0  code-config-aware-validation
-# 8a839d645e  code-python-runtime-exec
-# 9ea1edf982  code-python-runtime-validation
-# 8c4fa5ec80  feat/update-provider-model-presets-only
-# f7cf0c18ab  feat/update-provider-model-presets-only
-# 05302c9211  fix/exec-detach-noninteractive-clean-pr
-# 4a791d540b  fix/exec-detach-noninteractive-clean-pr
-# 6003754085  fix/exec-detach-noninteractive-clean-pr
-# 4c789762e5  fix/tui-defer-1m-toggle-until-close
-# c6aeb65b62  fix/tui-defer-1m-toggle-until-close
-# c9a5a08091  fix/tui-rate-limit-refresh-scheduler
-# bac4c41b1e  fix/tui-rate-limit-refresh-scheduler
-
-# Pending manual re-port against current upstream line before re-enabling:
-# eda8e469b7  compat/thread-resume-shim
-# a41cc7b2e6  compat/thread-resume-shim
-# d35eae36fd  feat/app-server-parity-apis
-# 4442c0391e  feat/app-server-parity-apis
-# b9331a4ff9  fix/app-server-detached-review-context
-# fe6d661762  fix/browser-handler-decode-error
-# a7916c09e4  fix/browser-handler-decode-error
-# 603b156895  fix/browser-handler-decode-error
+# Current state:
+# - The previously reviewed legacy backlog is now either already present on
+#   local/cbusillo-overlay or manually re-ported there.
+# - Leave this file empty until a future patch intentionally lives outside the
+#   overlay branch and must be auto-replayed after `just local-overlay-update`.
