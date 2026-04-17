@@ -25,6 +25,8 @@ use code_app_server_protocol::ThreadItem;
 use code_app_server_protocol::ThreadResumeParams;
 use code_app_server_protocol::ThreadResumeResponse;
 use code_app_server_protocol::Turn;
+use code_app_server_protocol::TurnStartParams;
+use code_app_server_protocol::TurnStartResponse;
 use code_app_server_protocol::TurnStatus;
 use code_app_server_protocol::UserInput as V2UserInput;
 use code_app_server_protocol::ToolRequestUserInputOption;
@@ -140,6 +142,7 @@ use code_protocol::mcp_protocol::LogoutChatGptResponse;
 use code_protocol::account::PlanType;
 use code_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use code_protocol::protocol::RateLimitWindow as CoreRateLimitWindow;
+use code_protocol::config_types::ModeKind;
 
 // Removed deprecated ChatGPT login support scaffolding
 
@@ -1459,6 +1462,129 @@ impl CodexMessageProcessor {
         }
     }
 
+    pub(crate) async fn turn_start_v2(&self, request_id: RequestId, params: TurnStartParams) {
+        let TurnStartParams {
+            thread_id,
+            mut input,
+            cwd: _,
+            approval_policy: _,
+            sandbox_policy: _,
+            model: _,
+            effort: _,
+            summary: _,
+            personality: _,
+            output_schema,
+            collaboration_mode,
+        } = params;
+        let resolved_thread_id = match ConversationId::from_string(&thread_id) {
+            Ok(conversation_id) => self.resolve_conversation_id_alias(conversation_id).await,
+            Err(_) => {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INVALID_REQUEST_ERROR_CODE,
+                            message: format!("invalid thread id: {thread_id}"),
+                            data: None,
+                        },
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let conversation = match self
+            .conversation_manager
+            .get_conversation(resolved_thread_id)
+            .await
+        {
+            Ok(conversation) => conversation,
+            Err(_) => {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INVALID_REQUEST_ERROR_CODE,
+                            message: format!("thread not found: {thread_id}"),
+                            data: None,
+                        },
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let is_plan_mode = collaboration_mode
+            .as_ref()
+            .is_some_and(|mode| mode.mode == ModeKind::Plan);
+        if is_plan_mode {
+            let Some(first_text_index) = input
+                .iter()
+                .position(|item| matches!(item, V2UserInput::Text { .. }))
+            else {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INVALID_REQUEST_ERROR_CODE,
+                            message: "turn/start plan mode requires text input".to_string(),
+                            data: None,
+                        },
+                    )
+                    .await;
+                return;
+            };
+
+            let V2UserInput::Text {
+                text,
+                text_elements: _,
+            } = &input[first_text_index]
+            else {
+                unreachable!("first text index is known to reference text input")
+            };
+            input[first_text_index] = V2UserInput::Text {
+                text: format_turn_start_plan_input(text),
+                text_elements: Vec::new(),
+            };
+        }
+        let core_input = input
+            .clone()
+            .into_iter()
+            .map(v2_user_input_to_core_input)
+            .collect();
+        let turn_id = match conversation
+            .submit(Op::UserInput {
+                items: core_input,
+                final_output_json_schema: output_schema,
+            })
+            .await
+        {
+            Ok(turn_id) => turn_id,
+            Err(err) => {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!("failed to start turn: {err}"),
+                            data: None,
+                        },
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        self.outgoing
+            .send_response(
+                request_id,
+                TurnStartResponse {
+                    turn: build_user_turn(turn_id, input),
+                },
+            )
+            .await;
+    }
+
     async fn archive_conversation(
         &self,
         request_id: RequestId,
@@ -2138,6 +2264,41 @@ fn build_review_turn(turn_id: String, display_text: &str) -> Turn {
         items,
         error: None,
         status: TurnStatus::InProgress,
+    }
+}
+
+fn build_user_turn(turn_id: String, input: Vec<V2UserInput>) -> Turn {
+    Turn {
+        id: turn_id.clone(),
+        items: vec![ThreadItem::UserMessage {
+            id: turn_id,
+            content: input,
+        }],
+        error: None,
+        status: TurnStatus::InProgress,
+    }
+}
+
+fn format_turn_start_plan_input(task: &str) -> String {
+    format!(
+        "Please propose a plan for the task below.\n\nPlan mode requirements:\n- Do not edit files or make repository changes.\n- Do not start subagents unless the user explicitly asks for multi-agent planning.\n- You may inspect repository context with read-only commands if needed.\n- Keep the plan focused, include validation, and call out risks or open questions.\n- Wait for confirmation before implementation.\n\nTask:\n{task}"
+    )
+}
+
+fn v2_user_input_to_core_input(input: V2UserInput) -> CoreInputItem {
+    match input {
+        V2UserInput::Text {
+            text,
+            text_elements: _,
+        } => CoreInputItem::Text { text },
+        V2UserInput::Image { url } => CoreInputItem::Image { image_url: url },
+        V2UserInput::LocalImage { path } => CoreInputItem::LocalImage { path },
+        V2UserInput::Skill { name, path } => CoreInputItem::Text {
+            text: format!("Skill: {name} ({})", path.display()),
+        },
+        V2UserInput::Mention { name, path } => CoreInputItem::Text {
+            text: format!("Mention: {name} ({path})"),
+        },
     }
 }
 
@@ -2884,6 +3045,48 @@ mod tests {
 
         let message = expect_error_message(&mut outgoing_rx).await;
         assert_eq!(message, format!("thread not found: {unknown_thread_id}"));
+    }
+
+    #[tokio::test]
+    async fn turn_start_v2_rejects_unknown_thread() {
+        let (processor, mut outgoing_rx) = make_processor_for_tests();
+        let unknown_thread_id = Uuid::new_v4().to_string();
+
+        processor
+            .turn_start_v2(
+                RequestId::Integer(9),
+                TurnStartParams {
+                    thread_id: unknown_thread_id.clone(),
+                    input: vec![V2UserInput::Text {
+                        text: "make a plan".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox_policy: None,
+                    model: None,
+                    effort: None,
+                    summary: None,
+                    personality: None,
+                    output_schema: None,
+                    collaboration_mode: None,
+                },
+            )
+            .await;
+
+        let message = expect_error_message(&mut outgoing_rx).await;
+        assert_eq!(message, format!("thread not found: {unknown_thread_id}"));
+    }
+
+    #[test]
+    fn turn_start_plan_formatter_does_not_invoke_subagents() {
+        let prompt = format_turn_start_plan_input("add a README note");
+
+        assert!(prompt.contains("add a README note"));
+        assert!(prompt.contains("Do not edit files"));
+        assert!(prompt.contains("Do not start subagents"));
+        assert!(!prompt.contains("agent {"));
+        assert!(!prompt.contains("Please perform /plan"));
     }
 
     #[test]
