@@ -1,7 +1,9 @@
+#![cfg(test)]
+
 use std::path::Path;
 
 use codex_app_server_protocol::AuthMode;
-use codex_login::AuthCredentialsStoreMode;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::load_auth_dot_json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +108,7 @@ mod tests {
                 account_id: Some("workspace-1".to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         };
         save_auth(codex_home, &auth, AuthCredentialsStoreMode::File)
             .expect("chatgpt auth should save");
@@ -152,6 +155,7 @@ mod tests {
                 openai_api_key: Some("sk-test".to_string()),
                 tokens: None,
                 last_refresh: None,
+                agent_identity: None,
             },
             AuthCredentialsStoreMode::File,
         )

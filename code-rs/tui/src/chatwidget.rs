@@ -185,6 +185,9 @@ use code_core::protocol::ReviewOutputEvent;
 use code_core::protocol::{ReviewContextMetadata, ReviewRequest};
 use code_core::protocol::PatchApplyBeginEvent;
 use code_core::protocol::PatchApplyEndEvent;
+use code_core::protocol::TaskLifecycleEvent;
+use code_core::protocol::TaskLifecyclePhase;
+use code_core::protocol::TaskOriginKind;
 use code_core::protocol::TaskCompleteEvent;
 use code_core::protocol::TokenUsage;
 use code_core::protocol::TurnDiffEvent;
@@ -1827,6 +1830,12 @@ struct PendingRequestUserInput {
     questions: Vec<code_protocol::request_user_input::RequestUserInputQuestion>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingTaskLifecycle {
+    origin: TaskOriginKind,
+    visible_to_user: bool,
+}
+
 #[derive(Clone)]
 struct RenderRequestSeed {
     history_id: HistoryId,
@@ -1916,6 +1925,8 @@ pub(crate) struct ChatWidget<'a> {
     pending_turn_origin: Option<TurnOrigin>,
     pending_request_user_input: Option<PendingRequestUserInput>,
     current_turn_origin: Option<TurnOrigin>,
+    pending_task_lifecycle: Option<PendingTaskLifecycle>,
+    current_task_lifecycle: Option<PendingTaskLifecycle>,
     // Tracks whether lingering running exec/tool cells have been cleared for the
     // current turn. Reset on TaskStarted; set after the first assistant message
     // (delta or final) arrives, which is more reliable than TaskComplete.
@@ -4174,9 +4185,20 @@ impl ChatWidget<'_> {
         {
             self.bottom_pane.set_task_running(false);
             self.bottom_pane.update_status_text(String::new());
-            self.auto_on_turn_complete();
             self.flush_deferred_auto_review_notice_if_idle();
         }
+    }
+
+    fn current_task_output_is_hidden(&self) -> bool {
+        self.current_task_lifecycle
+            .as_ref()
+            .map(|task| !task.visible_to_user)
+            .unwrap_or(false)
+    }
+
+    fn current_task_should_skip_auto_review(&self) -> bool {
+        self.current_task_output_is_hidden()
+            || matches!(self.current_turn_origin, Some(TurnOrigin::Developer))
     }
 
     fn foreground_activity_running_excluding_auto_review(&self) -> bool {
@@ -6904,6 +6926,8 @@ impl ChatWidget<'_> {
             pending_turn_origin: None,
             pending_request_user_input: None,
             current_turn_origin: None,
+            pending_task_lifecycle: None,
+            current_task_lifecycle: None,
             cleared_lingering_execs_this_turn: true,
             exec: ExecState {
                 running_commands: HashMap::new(),
@@ -7275,6 +7299,8 @@ impl ChatWidget<'_> {
             pending_turn_origin: None,
             pending_request_user_input: None,
             current_turn_origin: None,
+            pending_task_lifecycle: None,
+            current_task_lifecycle: None,
             cleared_lingering_execs_this_turn: true,
             exec: ExecState {
                 running_commands: HashMap::new(),
@@ -13837,7 +13863,43 @@ impl ChatWidget<'_> {
                 );
                 tools::web_search_begin(self, ev.call_id, ev.query, event.order.as_ref(), ok)
             }
+            EventMsg::TaskLifecycle(TaskLifecycleEvent {
+                phase,
+                origin,
+                visible_to_user,
+                last_agent_message,
+            }) => {
+                let lifecycle = PendingTaskLifecycle {
+                    origin,
+                    visible_to_user,
+                };
+                match phase {
+                    TaskLifecyclePhase::Started | TaskLifecyclePhase::AwaitingExternalInput => {
+                        self.pending_task_lifecycle = Some(lifecycle);
+                    }
+                    TaskLifecyclePhase::Quiescent => {
+                        self.current_task_lifecycle = Some(lifecycle);
+                        if self.auto_state.is_active() && !visible_to_user {
+                            if let Some(item) = last_agent_message
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|text| !text.is_empty())
+                                .and_then(|text| {
+                                    Self::auto_drive_make_assistant_message(text.to_string())
+                                })
+                            {
+                                self.auto_history.append_raw(std::slice::from_ref(&item));
+                            }
+                        }
+                        self.auto_on_turn_complete();
+                    }
+                }
+            }
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentMessage for current task");
+                    return;
+                }
                 // If the user requested an interrupt, ignore late final answers.
                 if self.stream_state.drop_streaming {
                     tracing::debug!("Ignoring AgentMessage after interrupt");
@@ -13951,6 +14013,10 @@ impl ChatWidget<'_> {
                 tools::web_search_complete(self, ev.call_id, ev.query, event.order.as_ref(), ok)
             }
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentMessageDelta for current task");
+                    return;
+                }
                 tracing::debug!("AgentMessageDelta: {:?}", delta);
                 // If the user requested an interrupt, ignore late deltas.
                 if self.stream_state.drop_streaming {
@@ -14000,6 +14066,10 @@ impl ChatWidget<'_> {
                     .update_status_text("responding".to_string());
             }
             EventMsg::AgentReasoning(AgentReasoningEvent { text }) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentReasoning for current task");
+                    return;
+                }
                 // Ignore late reasoning if we've dropped streaming due to interrupt.
                 if self.stream_state.drop_streaming {
                     tracing::debug!("Ignoring AgentReasoning after interrupt");
@@ -14057,6 +14127,10 @@ impl ChatWidget<'_> {
                 self.mark_needs_redraw();
             }
             EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentReasoningDelta for current task");
+                    return;
+                }
                 tracing::debug!("AgentReasoningDelta: {:?}", delta);
                 if self.stream_state.drop_streaming {
                     tracing::debug!("Ignoring Reasoning delta after interrupt");
@@ -14104,6 +14178,10 @@ impl ChatWidget<'_> {
                 self.bottom_pane.update_status_text("thinking".to_string());
             }
             EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {}) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentReasoningSectionBreak for current task");
+                    return;
+                }
                 // Insert section break in reasoning stream
                 let sink = AppEventHistorySink(self.app_event_tx.clone());
                 self.stream.insert_reasoning_section_break(&sink);
@@ -14136,7 +14214,12 @@ impl ChatWidget<'_> {
                 // after every tool call.
                 self.turn_sequence = self.turn_sequence.saturating_add(1);
                 self.turn_had_code_edits = false;
-                self.current_turn_origin = self.pending_turn_origin.take();
+                self.current_task_lifecycle = self.pending_task_lifecycle.take();
+                self.current_turn_origin = if self.current_task_output_is_hidden() {
+                    Some(TurnOrigin::Developer)
+                } else {
+                    self.pending_turn_origin.take()
+                };
                 self.cleared_lingering_execs_this_turn = false;
                 self.ensure_lingering_execs_cleared();
 
@@ -14240,8 +14323,8 @@ impl ChatWidget<'_> {
                 // Final re-check for idle state
                 self.maybe_hide_spinner();
                 self.maybe_trigger_auto_review();
-                self.auto_on_turn_complete();
                 self.emit_turn_complete_notification(last_agent_message);
+                self.current_task_lifecycle = None;
                 self.suppress_next_agent_hint = false;
                 self.mark_needs_redraw();
                 self.flush_history_snapshot_if_needed(true);
@@ -14250,6 +14333,10 @@ impl ChatWidget<'_> {
             EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
                 delta,
             }) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentReasoningRawContentDelta for current task");
+                    return;
+                }
                 if self.stream_state.drop_streaming {
                     tracing::debug!("Ignoring RawContent delta after interrupt");
                     self.stop_spinner();
@@ -14289,6 +14376,10 @@ impl ChatWidget<'_> {
                 );
             }
             EventMsg::AgentReasoningRawContent(AgentReasoningRawContentEvent { text }) => {
+                if self.current_task_output_is_hidden() {
+                    tracing::debug!("Suppressing hidden AgentReasoningRawContent for current task");
+                    return;
+                }
                 if self.stream_state.drop_streaming {
                     tracing::debug!("Ignoring AgentReasoningRawContent after interrupt");
                     self.stop_spinner();
@@ -35035,13 +35126,25 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
-    fn auto_drive_waits_for_turn_completion_before_updating_coordinator() {
+    fn auto_drive_waits_for_quiescent_lifecycle_before_updating_coordinator() {
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
         chat.auto_state.set_phase(AutoRunPhase::Active);
         chat.auto_state.on_prompt_submitted();
         chat.auto_state.set_coordinator_waiting(false);
+
+        chat.handle_code_event(Event {
+            id: "turn-1".to_string(),
+            event_seq: 0,
+            msg: EventMsg::TaskLifecycle(TaskLifecycleEvent {
+                phase: TaskLifecyclePhase::Started,
+                origin: TaskOriginKind::User,
+                visible_to_user: true,
+                last_agent_message: None,
+            }),
+            order: None,
+        });
 
         chat.handle_code_event(Event {
             id: "turn-1".to_string(),
@@ -35071,8 +35174,101 @@ use code_core::protocol::OrderMeta;
         });
 
         assert!(
+            chat.auto_state.is_waiting_for_response(),
+            "TaskComplete alone should not advance Auto Drive"
+        );
+
+        chat.handle_code_event(Event {
+            id: "turn-1".to_string(),
+            event_seq: 2,
+            msg: EventMsg::TaskLifecycle(TaskLifecycleEvent {
+                phase: TaskLifecyclePhase::Quiescent,
+                origin: TaskOriginKind::User,
+                visible_to_user: true,
+                last_agent_message: Some("First assistant update".to_string()),
+            }),
+            order: None,
+        });
+
+        assert!(
             !chat.auto_state.is_waiting_for_response(),
-            "TaskComplete should be the first point that advances Auto Drive"
+            "TaskLifecycle(quiescent) should be the first point that advances Auto Drive"
+        );
+    }
+
+    #[test]
+    fn hidden_out_of_turn_developer_turn_stays_out_of_visible_history() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.auto_state.on_prompt_submitted();
+        chat.auto_state.set_coordinator_waiting(false);
+
+        let before = chat.history_cells.len();
+
+        chat.handle_code_event(Event {
+            id: "hidden-turn".to_string(),
+            event_seq: 0,
+            msg: EventMsg::TaskLifecycle(TaskLifecycleEvent {
+                phase: TaskLifecyclePhase::Started,
+                origin: TaskOriginKind::OutOfTurnDeveloper,
+                visible_to_user: false,
+                last_agent_message: None,
+            }),
+            order: None,
+        });
+
+        chat.handle_code_event(Event {
+            id: "hidden-turn".to_string(),
+            event_seq: 0,
+            msg: EventMsg::TaskStarted,
+            order: None,
+        });
+
+        chat.handle_code_event(Event {
+            id: "hidden-turn".to_string(),
+            event_seq: 1,
+            msg: EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Background build passed cleanly.".to_string(),
+            }),
+            order: None,
+        });
+
+        assert_eq!(
+            chat.history_cells.len(),
+            before,
+            "hidden out-of-turn developer turns should not render visible assistant output"
+        );
+
+        chat.handle_code_event(Event {
+            id: "hidden-turn".to_string(),
+            event_seq: 2,
+            msg: EventMsg::TaskLifecycle(TaskLifecycleEvent {
+                phase: TaskLifecyclePhase::Quiescent,
+                origin: TaskOriginKind::OutOfTurnDeveloper,
+                visible_to_user: false,
+                last_agent_message: Some("Background build passed cleanly.".to_string()),
+            }),
+            order: None,
+        });
+
+        let hidden_observation_present = chat.auto_history.raw_snapshot().iter().any(|item| {
+            matches!(
+                item,
+                code_protocol::models::ResponseItem::Message { role, content, .. }
+                    if role == "assistant"
+                        && content.iter().any(|entry| matches!(
+                            entry,
+                            code_protocol::models::ContentItem::OutputText { text }
+                                if text.contains("Background build passed cleanly.")
+                        ))
+            )
+        });
+
+        assert!(
+            hidden_observation_present,
+            "hidden out-of-turn developer turns should still update Auto Drive history"
         );
     }
 
@@ -37117,7 +37313,7 @@ impl ChatWidget<'_> {
         if !self.turn_had_code_edits && self.pending_auto_review_range.is_none() {
             return;
         }
-        if matches!(self.current_turn_origin, Some(TurnOrigin::Developer)) {
+        if self.current_task_should_skip_auto_review() {
             return;
         }
 

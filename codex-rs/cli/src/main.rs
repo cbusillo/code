@@ -10,12 +10,12 @@ use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::LandlockCommand;
 use codex_cli::SeatbeltCommand;
 use codex_cli::WindowsCommand;
-use codex_cli::login::read_api_key_from_stdin;
-use codex_cli::login::run_login_status;
-use codex_cli::login::run_login_with_api_key;
-use codex_cli::login::run_login_with_chatgpt;
-use codex_cli::login::run_login_with_device_code;
-use codex_cli::login::run_logout;
+use codex_cli::read_api_key_from_stdin;
+use codex_cli::run_login_status;
+use codex_cli::run_login_with_api_key;
+use codex_cli::run_login_with_chatgpt;
+use codex_cli::run_login_with_device_code;
+use codex_cli::run_logout;
 use codex_cloud_tasks::Cli as CloudTasksCli;
 use codex_exec::Cli as ExecCli;
 use codex_exec::Command as ExecCommand;
@@ -27,7 +27,7 @@ use codex_state::state_db_path;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
-use codex_tui::update_action::UpdateAction;
+use codex_tui::UpdateAction;
 use codex_utils_cli::CliConfigOverrides;
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
@@ -38,12 +38,18 @@ use supports_color::Stream;
 mod app_cmd;
 #[cfg(target_os = "macos")]
 mod desktop_app;
+mod marketplace_cmd;
 mod mcp_cmd;
+mod responses_cmd;
 #[cfg(not(windows))]
 mod wsl_paths;
 
+use crate::marketplace_cmd::MarketplaceCli;
 use crate::mcp_cmd::McpCli;
+use crate::responses_cmd::ResponsesCommand;
+use crate::responses_cmd::run_responses_command;
 
+use codex_core::clear_memory_roots_contents;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::edit::ConfigEditsBuilder;
@@ -105,6 +111,9 @@ enum Subcommand {
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
 
+    /// Manage plugin marketplaces for Codex.
+    Marketplace(MarketplaceCli),
+
     /// Start Codex as an MCP server (stdio).
     McpServer,
 
@@ -146,9 +155,16 @@ enum Subcommand {
     #[clap(hide = true)]
     ResponsesApiProxy(ResponsesApiProxyArgs),
 
+    /// Internal: send one raw Responses API payload through Codex auth.
+    #[clap(hide = true)]
+    Responses(ResponsesCommand),
+
     /// Internal: relay stdio to a Unix domain socket.
     #[clap(hide = true, name = "stdio-to-uds")]
     StdioToUds(StdioToUdsCommand),
+
+    /// [EXPERIMENTAL] Run the standalone exec-server service.
+    ExecServer(ExecServerCommand),
 
     /// Inspect feature flags.
     Features(FeaturesCli),
@@ -346,7 +362,7 @@ struct AppServerCommand {
     subcommand: Option<AppServerSubcommand>,
 
     /// Transport endpoint URL. Supported values: `stdio://` (default),
-    /// `ws://IP:PORT`.
+    /// `ws://IP:PORT`, `off`.
     #[arg(
         long = "listen",
         value_name = "URL",
@@ -374,6 +390,17 @@ struct AppServerCommand {
 
     #[command(flatten)]
     auth: codex_app_server::AppServerWebsocketAuthArgs,
+}
+
+#[derive(Debug, Parser)]
+struct ExecServerCommand {
+    /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default).
+    #[arg(
+        long = "listen",
+        value_name = "URL",
+        default_value = "ws://127.0.0.1:0"
+    )]
+    listen: String,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -438,14 +465,13 @@ fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<Stri
         ..
     } = exit_info;
 
-    if token_usage.is_zero() {
-        return Vec::new();
+    let mut lines = Vec::new();
+    if !token_usage.is_zero() {
+        lines.push(format!(
+            "{}",
+            codex_protocol::protocol::FinalOutput::from(token_usage)
+        ));
     }
-
-    let mut lines = vec![format!(
-        "{}",
-        codex_protocol::protocol::FinalOutput::from(token_usage)
-    )];
 
     if let Some(resume_cmd) =
         codex_core::util::resume_command(thread_name.as_deref(), conversation_id)
@@ -491,10 +517,19 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     let status = {
         #[cfg(windows)]
         {
-            // On Windows, run via cmd.exe so .CMD/.BAT are correctly resolved (PATHEXT semantics).
-            std::process::Command::new("cmd")
-                .args(["/C", &cmd_str])
-                .status()?
+            if action == UpdateAction::StandaloneWindows {
+                let (cmd, args) = action.command_args();
+                // Run the standalone PowerShell installer with PowerShell
+                // itself. Routing this through `cmd.exe /C` would parse
+                // PowerShell metacharacters like `|` before PowerShell sees
+                // the installer command.
+                std::process::Command::new(cmd).args(args).status()?
+            } else {
+                // On Windows, run via cmd.exe so .CMD/.BAT are correctly resolved (PATHEXT semantics).
+                std::process::Command::new("cmd")
+                    .args(["/C", &cmd_str])
+                    .status()?
+            }
         }
         #[cfg(not(windows))]
         {
@@ -691,6 +726,18 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             prepend_config_flags(&mut mcp_cli.config_overrides, root_config_overrides.clone());
             mcp_cli.run().await?;
         }
+        Some(Subcommand::Marketplace(mut marketplace_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "marketplace",
+            )?;
+            prepend_config_flags(
+                &mut marketplace_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            marketplace_cli.run().await?;
+        }
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
                 subcommand,
@@ -883,7 +930,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     &mut seatbelt_cli.config_overrides,
                     root_config_overrides.clone(),
                 );
-                codex_cli::debug_sandbox::run_command_under_seatbelt(
+                codex_cli::run_command_under_seatbelt(
                     seatbelt_cli,
                     arg0_paths.codex_linux_sandbox_exe.clone(),
                 )
@@ -899,7 +946,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     &mut landlock_cli.config_overrides,
                     root_config_overrides.clone(),
                 );
-                codex_cli::debug_sandbox::run_command_under_landlock(
+                codex_cli::run_command_under_landlock(
                     landlock_cli,
                     arg0_paths.codex_linux_sandbox_exe.clone(),
                 )
@@ -915,7 +962,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     &mut windows_cli.config_overrides,
                     root_config_overrides.clone(),
                 );
-                codex_cli::debug_sandbox::run_command_under_windows(
+                codex_cli::run_command_under_windows(
                     windows_cli,
                     arg0_paths.codex_linux_sandbox_exe.clone(),
                 )
@@ -985,6 +1032,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             tokio::task::spawn_blocking(move || codex_responses_api_proxy::run_main(args))
                 .await??;
         }
+        Some(Subcommand::Responses(ResponsesCommand {})) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "responses",
+            )?;
+            run_responses_command(root_config_overrides).await?;
+        }
         Some(Subcommand::StdioToUds(cmd)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -994,6 +1049,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             let socket_path = cmd.socket_path;
             tokio::task::spawn_blocking(move || codex_stdio_to_uds::run(socket_path.as_path()))
                 .await??;
+        }
+        Some(Subcommand::ExecServer(cmd)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "exec-server",
+            )?;
+            run_exec_server_command(cmd, &arg0_paths).await?;
         }
         Some(Subcommand::Features(FeaturesCli { sub })) => match sub {
             FeaturesSubcommand::List => {
@@ -1063,6 +1126,23 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_exec_server_command(
+    cmd: ExecServerCommand,
+    arg0_paths: &Arg0DispatchPaths,
+) -> anyhow::Result<()> {
+    let codex_self_exe = arg0_paths
+        .codex_self_exe
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Codex executable path is not configured"))?;
+    let runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+        codex_self_exe,
+        arg0_paths.codex_linux_sandbox_exe.clone(),
+    )?;
+    codex_exec_server::run_main(&cmd.listen, runtime_paths)
+        .await
+        .map_err(anyhow::Error::from_boxed)
 }
 
 async fn enable_feature_in_config(interactive: &TuiCli, feature: &str) -> anyhow::Result<()> {
@@ -1173,7 +1253,7 @@ async fn run_debug_prompt_input_command(
         });
     }
 
-    let prompt_input = codex_core::prompt_debug::build_prompt_input(config, input).await?;
+    let prompt_input = codex_core::build_prompt_input(config, input).await?;
     println!("{}", serde_json::to_string_pretty(&prompt_input)?);
 
     Ok(())
@@ -1199,31 +1279,21 @@ async fn run_debug_clear_memories_command(
         let state_db =
             StateRuntime::init(config.sqlite_home.clone(), config.model_provider_id.clone())
                 .await?;
-        state_db.reset_memory_data_for_fresh_start().await?;
+        state_db.clear_memory_data().await?;
         cleared_state_db = true;
     }
 
-    let memory_root = config.codex_home.join("memories");
-    let removed_memory_root = match tokio::fs::remove_dir_all(&memory_root).await {
-        Ok(()) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => return Err(err.into()),
-    };
+    clear_memory_roots_contents(&config.codex_home).await?;
 
     let mut message = if cleared_state_db {
         format!("Cleared memory state from {}.", state_path.display())
     } else {
         format!("No state db found at {}.", state_path.display())
     };
-
-    if removed_memory_root {
-        message.push_str(&format!(" Removed {}.", memory_root.display()));
-    } else {
-        message.push_str(&format!(
-            " No memory directory found at {}.",
-            memory_root.display()
-        ));
-    }
+    message.push_str(&format!(
+        " Cleared memory directories under {}.",
+        config.codex_home.display()
+    ));
 
     println!("{message}");
 
@@ -1611,6 +1681,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn responses_subcommand_is_hidden_from_help_but_parses() {
+        let help = MultitoolCli::command().render_help().to_string();
+        assert!(!help.contains("responses"));
+
+        let cli = MultitoolCli::try_parse_from(["codex", "responses"]).expect("parse");
+        assert!(matches!(cli.subcommand, Some(Subcommand::Responses(_))));
+    }
+
     fn sample_exit_info(conversation_id: Option<&str>, thread_name: Option<&str>) -> AppExitInfo {
         let token_usage = TokenUsage {
             output_tokens: 2,
@@ -1994,6 +2073,12 @@ mod tests {
     }
 
     #[test]
+    fn app_server_listen_off_parses() {
+        let app_server = app_server_from_args(["codex", "app-server", "--listen", "off"].as_ref());
+        assert_eq!(app_server.listen, codex_app_server::AppServerTransport::Off);
+    }
+
+    #[test]
     fn app_server_listen_invalid_url_fails_to_parse() {
         let parse_result =
             MultitoolCli::try_parse_from(["codex", "app-server", "--listen", "http://foo"]);
@@ -2117,6 +2202,19 @@ mod tests {
         assert_eq!(
             overrides,
             vec!["features.use_linux_sandbox_bwrap=true".to_string(),]
+        );
+    }
+
+    #[test]
+    fn feature_toggles_accept_removed_image_detail_original_flag() {
+        let toggles = FeatureToggles {
+            enable: vec!["image_detail_original".to_string()],
+            disable: Vec::new(),
+        };
+        let overrides = toggles.to_overrides().expect("valid features");
+        assert_eq!(
+            overrides,
+            vec!["features.image_detail_original=true".to_string(),]
         );
     }
 

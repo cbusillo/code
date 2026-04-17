@@ -14,10 +14,10 @@ codex *args:
 exec *args:
     cargo run --bin codex -- exec "$@"
 
-# Start codex-exec-server and run codex-tui.
+# Start `codex exec-server` and run codex-tui.
 [no-cd]
 tui-with-exec-server *args:
-    ./scripts/run_tui_with_exec_server.sh "$@"
+    {{ justfile_directory() }}/scripts/run_tui_with_exec_server.sh "$@"
 
 # Run the CLI version of the file-search crate.
 file-search *args:
@@ -59,7 +59,7 @@ bazel-lock-update:
 
 [no-cd]
 bazel-lock-check:
-    ./scripts/check-module-bazel-lock.sh
+    {{ justfile_directory() }}/scripts/check-module-bazel-lock.sh
 
 [no-cd]
 local-code-rebuild:
@@ -74,11 +74,11 @@ bazel-test:
 
 [no-cd]
 bazel-clippy:
-    bazel_targets="$(./scripts/list-bazel-clippy-targets.sh)" && bazel build --config=clippy -- ${bazel_targets}
+    bazel_targets="$({{ justfile_directory() }}/scripts/list-bazel-clippy-targets.sh)" && bazel build --config=clippy -- ${bazel_targets}
 
 [no-cd]
 bazel-argument-comment-lint:
-    bazel build --config=argument-comment-lint -- $(./tools/argument-comment-lint/list-bazel-targets.sh)
+    bazel build --config=argument-comment-lint -- $({{ justfile_directory() }}/tools/argument-comment-lint/list-bazel-targets.sh)
 
 bazel-remote-test:
     bazel test --test_tag_filters=-argument-comment-lint //... --config=remote --platforms=//:rbe --keep_going

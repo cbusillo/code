@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::watch;
 
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::AuthMode as ApiAuthMode;
@@ -20,7 +21,7 @@ use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 
 use super::external_bearer::BearerTokenRefresher;
-pub use crate::auth::storage::AuthCredentialsStoreMode;
+pub use crate::auth::storage::AgentIdentityAuthRecord;
 pub use crate::auth::storage::AuthDotJson;
 use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::create_auth_storage;
@@ -30,6 +31,7 @@ use crate::token_data::TokenData;
 use crate::token_data::parse_chatgpt_jwt_claims;
 use crate::token_data::parse_jwt_expiration;
 use codex_client::CodexHttpClient;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::KnownPlan as InternalKnownPlan;
 use codex_protocol::auth::PlanType as InternalPlanType;
@@ -60,6 +62,7 @@ pub struct ChatgptAuth {
 #[derive(Debug, Clone)]
 pub struct ChatgptAuthTokens {
     state: ChatgptAuthState,
+    storage: Arc<dyn AuthStorageBackend>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,14 +207,13 @@ impl CodexAuth {
             client,
         };
 
+        let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
         match auth_mode {
-            ApiAuthMode::Chatgpt => {
-                let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
-                Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
-            }
-            ApiAuthMode::ChatgptAuthTokens => {
-                Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens { state }))
-            }
+            ApiAuthMode::Chatgpt => Ok(Self::Chatgpt(ChatgptAuth { state, storage })),
+            ApiAuthMode::ChatgptAuthTokens => Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens {
+                state,
+                storage,
+            })),
             ApiAuthMode::ApiKey => unreachable!("api key mode is handled above"),
         }
     }
@@ -291,6 +293,12 @@ impl CodexAuth {
         self.get_current_token_data().and_then(|t| t.account_id)
     }
 
+    /// Returns false if `is_chatgpt_auth()` is false or the token omits the FedRAMP claim.
+    pub fn is_fedramp_account(&self) -> bool {
+        self.get_current_token_data()
+            .is_some_and(|t| t.id_token.is_fedramp_account())
+    }
+
     /// Returns `None` if `is_chatgpt_auth()` is false.
     pub fn get_account_email(&self) -> Option<String> {
         self.get_current_token_data().and_then(|t| t.id_token.email)
@@ -314,6 +322,7 @@ impl CodexAuth {
             InternalKnownPlan::Go => AccountPlanType::Go,
             InternalKnownPlan::Plus => AccountPlanType::Plus,
             InternalKnownPlan::Pro => AccountPlanType::Pro,
+            InternalKnownPlan::ProLite => AccountPlanType::ProLite,
             InternalKnownPlan::Team => AccountPlanType::Team,
             InternalKnownPlan::SelfServeBusinessUsageBased => {
                 AccountPlanType::SelfServeBusinessUsageBased
@@ -351,6 +360,52 @@ impl CodexAuth {
         self.get_current_auth_json().and_then(|t| t.tokens)
     }
 
+    pub fn get_agent_identity(&self, workspace_id: &str) -> Option<AgentIdentityAuthRecord> {
+        self.get_current_auth_json()
+            .and_then(|auth| auth.agent_identity)
+            .filter(|identity| identity.workspace_id == workspace_id)
+    }
+
+    pub fn set_agent_identity(&self, record: AgentIdentityAuthRecord) -> std::io::Result<()> {
+        let (state, storage) = match self {
+            Self::Chatgpt(auth) => (&auth.state, &auth.storage),
+            Self::ChatgptAuthTokens(auth) => (&auth.state, &auth.storage),
+            Self::ApiKey(_) => return Ok(()),
+        };
+        let mut guard = state
+            .auth_dot_json
+            .lock()
+            .map_err(|_| std::io::Error::other("failed to lock auth state"))?;
+        let mut auth = guard
+            .clone()
+            .ok_or_else(|| std::io::Error::other("auth data is not available"))?;
+        auth.agent_identity = Some(record);
+        storage.save(&auth)?;
+        *guard = Some(auth);
+        Ok(())
+    }
+
+    pub fn remove_agent_identity(&self) -> std::io::Result<bool> {
+        let (state, storage) = match self {
+            Self::Chatgpt(auth) => (&auth.state, &auth.storage),
+            Self::ChatgptAuthTokens(auth) => (&auth.state, &auth.storage),
+            Self::ApiKey(_) => return Ok(false),
+        };
+        let mut guard = state
+            .auth_dot_json
+            .lock()
+            .map_err(|_| std::io::Error::other("failed to lock auth state"))?;
+        let Some(mut auth) = guard.clone() else {
+            return Ok(false);
+        };
+        let removed = auth.agent_identity.take().is_some();
+        if removed {
+            storage.save(&auth)?;
+            *guard = Some(auth);
+        }
+        Ok(removed)
+    }
+
     /// Consider this private to integration tests.
     pub fn create_dummy_chatgpt_auth_for_testing() -> Self {
         let auth_dot_json = AuthDotJson {
@@ -363,6 +418,7 @@ impl CodexAuth {
                 account_id: Some("account_id".to_string()),
             }),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         };
 
         let client = create_client();
@@ -438,6 +494,7 @@ pub fn login_with_api_key(
         openai_api_key: Some(api_key.to_string()),
         tokens: None,
         last_refresh: None,
+        agent_identity: None,
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
@@ -811,6 +868,7 @@ impl AuthDotJson {
             openai_api_key: None,
             tokens: Some(tokens),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         })
     }
 
@@ -1106,6 +1164,24 @@ pub struct AuthManager {
     forced_chatgpt_workspace_id: RwLock<Option<String>>,
     refresh_lock: AsyncMutex<()>,
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
+    auth_state_tx: watch::Sender<()>,
+}
+
+/// Configuration view required to construct a shared [`AuthManager`].
+///
+/// Implementations should return the auth-related config values for the
+/// already-resolved runtime configuration. The primary implementation is
+/// `codex_core::config::Config`, but this trait keeps `codex-login` independent
+/// from `codex-core`.
+pub trait AuthManagerConfig {
+    /// Returns the Codex home directory used for auth storage.
+    fn codex_home(&self) -> PathBuf;
+
+    /// Returns the CLI auth credential storage mode for auth loading.
+    fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode;
+
+    /// Returns the workspace ID that ChatGPT auth should be restricted to, if any.
+    fn forced_chatgpt_workspace_id(&self) -> Option<String>;
 }
 
 impl Debug for AuthManager {
@@ -1137,6 +1213,7 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
+        let (auth_state_tx, _) = watch::channel(());
         let managed_auth = load_auth(
             &codex_home,
             enable_codex_api_key_env,
@@ -1155,11 +1232,13 @@ impl AuthManager {
             forced_chatgpt_workspace_id: RwLock::new(None),
             refresh_lock: AsyncMutex::new(()),
             external_auth: RwLock::new(None),
+            auth_state_tx,
         }
     }
 
     /// Create an AuthManager with a specific CodexAuth, for testing only.
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
+        let (auth_state_tx, _) = watch::channel(());
         let cached = CachedAuth {
             auth: Some(auth),
             permanent_refresh_failure: None,
@@ -1173,11 +1252,13 @@ impl AuthManager {
             forced_chatgpt_workspace_id: RwLock::new(None),
             refresh_lock: AsyncMutex::new(()),
             external_auth: RwLock::new(None),
+            auth_state_tx,
         })
     }
 
     /// Create an AuthManager with a specific CodexAuth and codex home, for testing only.
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
+        let (auth_state_tx, _) = watch::channel(());
         let cached = CachedAuth {
             auth: Some(auth),
             permanent_refresh_failure: None,
@@ -1190,10 +1271,12 @@ impl AuthManager {
             forced_chatgpt_workspace_id: RwLock::new(None),
             refresh_lock: AsyncMutex::new(()),
             external_auth: RwLock::new(None),
+            auth_state_tx,
         })
     }
 
     pub fn external_bearer_only(config: ModelProviderAuthInfo) -> Arc<Self> {
+        let (auth_state_tx, _) = watch::channel(());
         Arc::new(Self {
             codex_home: PathBuf::from("non-existent"),
             inner: RwLock::new(CachedAuth {
@@ -1207,6 +1290,7 @@ impl AuthManager {
             external_auth: RwLock::new(Some(
                 Arc::new(BearerTokenRefresher::new(config)) as Arc<dyn ExternalAuth>
             )),
+            auth_state_tx,
         })
     }
 
@@ -1346,6 +1430,7 @@ impl AuthManager {
             }
             tracing::info!("Reloaded auth, changed: {changed}");
             guard.auth = new_auth;
+            self.auth_state_tx.send_replace(());
             changed
         } else {
             false
@@ -1355,18 +1440,23 @@ impl AuthManager {
     pub fn set_external_auth(&self, external_auth: Arc<dyn ExternalAuth>) {
         if let Ok(mut guard) = self.external_auth.write() {
             *guard = Some(external_auth);
+            self.auth_state_tx.send_replace(());
         }
     }
 
     pub fn clear_external_auth(&self) {
         if let Ok(mut guard) = self.external_auth.write() {
             *guard = None;
+            self.auth_state_tx.send_replace(());
         }
     }
 
     pub fn set_forced_chatgpt_workspace_id(&self, workspace_id: Option<String>) {
-        if let Ok(mut guard) = self.forced_chatgpt_workspace_id.write() {
+        if let Ok(mut guard) = self.forced_chatgpt_workspace_id.write()
+            && *guard != workspace_id
+        {
             *guard = workspace_id;
+            self.auth_state_tx.send_replace(());
         }
     }
 
@@ -1375,6 +1465,10 @@ impl AuthManager {
             .read()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    pub fn subscribe_auth_state(&self) -> watch::Receiver<()> {
+        self.auth_state_tx.subscribe()
     }
 
     pub fn has_external_auth(&self) -> bool {
@@ -1404,19 +1498,18 @@ impl AuthManager {
         ))
     }
 
-    pub fn shared_with_external_auth(
-        codex_home: PathBuf,
+    /// Convenience constructor returning an `Arc` wrapper from resolved config.
+    pub fn shared_from_config(
+        config: &impl AuthManagerConfig,
         enable_codex_api_key_env: bool,
-        auth_credentials_store_mode: AuthCredentialsStoreMode,
-        external_auth: Arc<dyn ExternalAuth>,
     ) -> Arc<Self> {
-        let manager = Self::shared(
-            codex_home,
+        let auth_manager = Self::shared(
+            config.codex_home(),
             enable_codex_api_key_env,
-            auth_credentials_store_mode,
+            config.cli_auth_credentials_store_mode(),
         );
-        manager.set_external_auth(external_auth);
-        manager
+        auth_manager.set_forced_chatgpt_workspace_id(config.forced_chatgpt_workspace_id());
+        auth_manager
     }
 
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
@@ -1621,8 +1714,14 @@ impl AuthManager {
                 ),
             )));
         }
-        let auth_dot_json =
+        let mut auth_dot_json =
             AuthDotJson::from_external_tokens(&refreshed).map_err(RefreshTokenError::Transient)?;
+        if let Some(previous_auth) = self
+            .auth_cached()
+            .and_then(|auth| auth.get_current_auth_json())
+        {
+            auth_dot_json.agent_identity = previous_auth.agent_identity;
+        }
         save_auth(
             &self.codex_home,
             &auth_dot_json,

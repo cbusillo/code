@@ -27,6 +27,9 @@ use crate::account_switching::RateLimitSwitchState;
 use crate::agent_tool::current_agent_spawn_depth;
 use crate::agent_tool::external_agent_command_exists;
 use crate::protocol::McpListToolsResponseEvent;
+use crate::protocol::TaskLifecycleEvent;
+use crate::protocol::TaskLifecyclePhase;
+use crate::protocol::TaskOriginKind;
 use code_app_server_protocol::AuthMode as AppAuthMode;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
@@ -76,6 +79,8 @@ pub(super) struct AgentTask {
     pub(super) sub_id: String,
     handle: AbortHandle,
     kind: AgentTaskKind,
+    pub(super) origin: TaskOriginKind,
+    pub(super) visible_to_user: bool,
 }
 
 impl AgentTask {
@@ -84,13 +89,17 @@ impl AgentTask {
         turn_context: Arc<TurnContext>,
         sub_id: String,
         input: Vec<InputItem>,
+        origin: TaskOriginKind,
+        visible_to_user: bool,
     ) -> Self {
         let handle = {
             let sess_clone = Arc::clone(&sess);
             let tc_clone = Arc::clone(&turn_context);
             let sub_clone = sub_id.clone();
+            let origin_clone = origin;
+            let visible_clone = visible_to_user;
             tokio::spawn(async move {
-                run_agent(sess_clone, tc_clone, sub_clone, input).await;
+                run_agent(sess_clone, tc_clone, sub_clone, input, origin_clone, visible_clone).await;
             })
             .abort_handle()
         };
@@ -99,6 +108,8 @@ impl AgentTask {
             sub_id,
             handle,
             kind: AgentTaskKind::Regular,
+            origin,
+            visible_to_user,
         }
     }
 
@@ -128,6 +139,8 @@ impl AgentTask {
             sub_id,
             handle,
             kind: AgentTaskKind::Compact,
+            origin: TaskOriginKind::ManualCompact,
+            visible_to_user: false,
         }
     }
 
@@ -142,7 +155,15 @@ impl AgentTask {
             let tc_clone = Arc::clone(&turn_context);
             let sub_clone = sub_id.clone();
             tokio::spawn(async move {
-                run_agent(sess_clone, tc_clone, sub_clone, input).await;
+                run_agent(
+                    sess_clone,
+                    tc_clone,
+                    sub_clone,
+                    input,
+                    TaskOriginKind::Review,
+                    false,
+                )
+                .await;
             })
             .abort_handle()
         };
@@ -151,6 +172,8 @@ impl AgentTask {
             sub_id,
             handle,
             kind: AgentTaskKind::Review,
+            origin: TaskOriginKind::Review,
+            visible_to_user: false,
         }
     }
 
@@ -277,7 +300,14 @@ pub(super) async fn submission_loop(
                     let sentinel_input = vec![InputItem::Text {
                         text: PENDING_ONLY_SENTINEL.to_string(),
                     }];
-                    let agent = AgentTask::spawn(Arc::clone(&sess), turn_context, sub_id, sentinel_input);
+                    let agent = AgentTask::spawn(
+                        Arc::clone(&sess),
+                        turn_context,
+                        sub_id,
+                        sentinel_input,
+                        TaskOriginKind::OutOfTurnDeveloper,
+                        false,
+                    );
                     sess.set_task(agent);
                 }
             }
@@ -945,6 +975,7 @@ pub(super) async fn submission_loop(
                     sub.id.clone(),
                     items,
                     final_output_json_schema,
+                    TaskOriginKind::User,
                 )
                 .await;
             }
@@ -970,7 +1001,14 @@ pub(super) async fn submission_loop(
                 } else {
                     // No task running: treat this as immediate user input without aborting.
                     sess.cleanup_old_status_items().await;
-                    spawn_user_turn(Arc::clone(sess), sub.id.clone(), items, None).await;
+                    spawn_user_turn(
+                        Arc::clone(sess),
+                        sub.id.clone(),
+                        items,
+                        None,
+                        TaskOriginKind::QueuedUser,
+                    )
+                    .await;
                 }
             }
             Op::ExecApproval {
@@ -2191,13 +2229,14 @@ async fn spawn_user_turn(
     sub_id: String,
     items: Vec<InputItem>,
     final_output_json_schema: Option<serde_json::Value>,
+    origin: TaskOriginKind,
 ) {
     maybe_run_auto_context_compaction(&sess, &sub_id, &items).await;
     let turn_context = match final_output_json_schema {
         Some(schema) => sess.make_turn_context_with_schema(Some(schema)),
         None => sess.make_turn_context(),
     };
-    let agent = AgentTask::spawn(Arc::clone(&sess), turn_context, sub_id, items);
+    let agent = AgentTask::spawn(Arc::clone(&sess), turn_context, sub_id, items, origin, true);
     sess.set_task(agent);
 }
 
@@ -2317,8 +2356,27 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
 ///   back to the model in the next turn.
 /// - If the model sends only an assistant message, we record it in the
 ///   conversation history and consider the agent complete.
-async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: String, input: Vec<InputItem>) {
+async fn run_agent(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+    sub_id: String,
+    input: Vec<InputItem>,
+    origin: TaskOriginKind,
+    visible_to_user: bool,
+) {
     if input.is_empty() {
+        return;
+    }
+    let lifecycle = sess.make_event(
+        &sub_id,
+        EventMsg::TaskLifecycle(TaskLifecycleEvent {
+            phase: TaskLifecyclePhase::Started,
+            origin,
+            visible_to_user,
+            last_agent_message: None,
+        }),
+    );
+    if sess.tx_event.send(lifecycle).await.is_err() {
         return;
     }
     let event = sess.make_event(&sub_id, EventMsg::TaskStarted);
@@ -2567,12 +2625,17 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
                         }
                         (
                             ResponseItem::CustomToolCall { .. },
-                            Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
+                            Some(ResponseInputItem::CustomToolCallOutput {
+                                call_id,
+                                name,
+                                output,
+                            }),
                         ) => {
                             items_to_record_in_conversation_history.push(item.clone());
                             items_to_record_in_conversation_history.push(
                                 ResponseItem::CustomToolCallOutput {
                                     call_id: call_id.clone(),
+                                    name: name.clone(),
                                     output: output.clone(),
                                 },
                             );
@@ -2768,6 +2831,17 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
     }
 
     sess.remove_task(&sub_id);
+    let lifecycle = sess.make_event(
+        &sub_id,
+        EventMsg::TaskLifecycle(TaskLifecycleEvent {
+            phase: TaskLifecyclePhase::Quiescent,
+            origin,
+            visible_to_user,
+            last_agent_message: last_task_message.clone(),
+        }),
+    );
+    sess.tx_event.send(lifecycle).await.ok();
+
     let event = sess.make_event(
         &sub_id,
         EventMsg::TaskComplete(TaskCompleteEvent {
@@ -2785,7 +2859,11 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
     if let Some(action) = sess.take_follow_up_turn_action() {
         match action {
             FollowUpTurnAction::PostTurnPendingInput => {
-                sess.start_internal_pending_only_turn(POST_TURN_PENDING_ONLY_SENTINEL)
+                sess.start_internal_pending_only_turn(
+                    POST_TURN_PENDING_ONLY_SENTINEL,
+                    TaskOriginKind::PostTurn,
+                    false,
+                )
                     .await;
             }
             FollowUpTurnAction::ManualCompact(compact_sub_id) => {
@@ -2801,7 +2879,11 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
                 );
             }
             FollowUpTurnAction::PendingInput => {
-                sess.start_internal_pending_only_turn(PENDING_ONLY_SENTINEL)
+                sess.start_internal_pending_only_turn(
+                    PENDING_ONLY_SENTINEL,
+                    TaskOriginKind::PendingInput,
+                    false,
+                )
                     .await;
             }
             FollowUpTurnAction::QueuedUserInput(queued) => {
@@ -2810,7 +2892,14 @@ async fn run_agent(sess: Arc<Session>, turn_context: Arc<TurnContext>, sub_id: S
                     sess_clone.cleanup_old_status_items().await;
                     let submission_id = queued.submission_id;
                     let items = queued.core_items;
-                    spawn_user_turn(sess_clone, submission_id, items, None).await;
+                    spawn_user_turn(
+                        sess_clone,
+                        submission_id,
+                        items,
+                        None,
+                        TaskOriginKind::QueuedUser,
+                    )
+                    .await;
                 });
             }
         }
@@ -3897,6 +3986,7 @@ async fn try_run_turn(
             })
             .map(|call_id| ResponseItem::CustomToolCallOutput {
                 call_id: call_id.clone(),
+                name: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
             })
             .collect::<Vec<_>>()
@@ -4663,6 +4753,19 @@ async fn handle_request_user_input(
         }),
     )
     .await;
+
+    if let Some(task) = sess.task_lifecycle(&ctx.sub_id) {
+        let lifecycle = sess.make_event(
+            &ctx.sub_id,
+            EventMsg::TaskLifecycle(TaskLifecycleEvent {
+                phase: TaskLifecyclePhase::AwaitingExternalInput,
+                origin: task.origin,
+                visible_to_user: task.visible_to_user,
+                last_agent_message: None,
+            }),
+        );
+        sess.tx_event.send(lifecycle).await.ok();
+    }
 
     let response = match rx_response.await {
         Ok(response) => response,
@@ -7548,6 +7651,7 @@ fn to_exec_params(params: ShellToolCallParams, sess: &Session) -> ExecParams {
         .and_then(|p| p.requires_escalated_permissions().then_some(true));
     ExecParams {
         command: params.command,
+        shell_script: None,
         cwd: sess.resolve_path(params.workdir.clone()),
         timeout_ms,
         env: create_env(&sess.shell_environment_policy),
@@ -7561,39 +7665,20 @@ fn to_exec_params_from_shell_command(params: ShellCommandToolCallParams, sess: &
     let with_escalated_permissions = params
         .sandbox_permissions
         .and_then(|p| p.requires_escalated_permissions().then_some(true));
-    let command = sess
-        .user_shell
-        .format_default_shell_invocation(vec![params.command.clone()])
-        .unwrap_or_else(|| default_shell_command(params.command));
+    let use_login_shell = params.login.unwrap_or(true);
 
     ExecParams {
-        command,
+        command: vec![params.command.clone()],
+        shell_script: Some(crate::exec::DeferredShellScript {
+            command: params.command,
+            use_login_shell,
+        }),
         cwd: sess.resolve_path(params.workdir.clone()),
         timeout_ms,
         env: create_env(&sess.shell_environment_policy),
         with_escalated_permissions,
         justification: params.justification,
     }
-}
-
-#[cfg(unix)]
-fn default_shell_command(command: String) -> Vec<String> {
-    vec!["sh".to_string(), "-lc".to_string(), command]
-}
-
-#[cfg(target_os = "windows")]
-fn default_shell_command(command: String) -> Vec<String> {
-    vec![
-        "powershell.exe".to_string(),
-        "-NoProfile".to_string(),
-        "-Command".to_string(),
-        command,
-    ]
-}
-
-#[cfg(all(not(unix), not(target_os = "windows")))]
-fn default_shell_command(command: String) -> Vec<String> {
-    vec![command]
 }
 
 fn resolve_agent_read_only(
@@ -9693,12 +9778,12 @@ async fn handle_container_exec_with_params(
     }
 
 
-    // If the argv is a shell wrapper, analyze and optionally strip `confirm:`.
+    // If the command is a shell script, analyze and optionally strip `confirm:`.
     let mut params = params;
     let seq_hint_for_exec = seq_hint;
     let otel_event_manager = sess.client.get_otel_event_manager();
     let tool_name = "local_shell";
-    if let Some((script_index, script)) = extract_shell_script_from_wrapper(&params.command) {
+    if let Some((script_index, script)) = extract_shell_script(&params.command) {
         let trimmed = script.trim_start();
         let confirm_prefixes = ["confirm:", "CONFIRM:"];
         let has_confirm_prefix = confirm_prefixes
@@ -9866,8 +9951,8 @@ async fn handle_container_exec_with_params(
         };
     }
 
-    // If no shell wrapper, perform a lightweight argv inspection for sensitive git commands.
-    if extract_shell_script_from_wrapper(&params.command).is_none() {
+    // If no shell script is present, perform a lightweight argv inspection for sensitive git commands.
+    if extract_shell_script(&params.command).is_none() {
         let joined = params.command.join(" ");
         if !sess.confirm_guard.is_empty() {
             if let Some(pattern) = sess.confirm_guard.matched_pattern(&joined) {
@@ -11187,7 +11272,14 @@ async fn enqueue_agent_completion_wake(
         let sentinel_input = vec![InputItem::Text {
             text: PENDING_ONLY_SENTINEL.to_string(),
         }];
-        let agent = AgentTask::spawn(Arc::clone(sess), turn_context, sub_id, sentinel_input);
+        let agent = AgentTask::spawn(
+            Arc::clone(sess),
+            turn_context,
+            sub_id,
+            sentinel_input,
+            TaskOriginKind::OutOfTurnDeveloper,
+            false,
+        );
         sess.set_task(agent);
     }
 }
@@ -12786,20 +12878,8 @@ async fn handle_browser_history(sess: &Session, ctx: &ToolCallCtx, arguments: St
     .await
 }
 
-fn extract_shell_script_from_wrapper(argv: &[String]) -> Option<(usize, String)> {
-    // Return (index_of_script, script) if argv matches: <shell> (-lc|-c) <script>
-    if argv.len() == 3 {
-        let shell = std::path::Path::new(&argv[0])
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        let is_shell = matches!(shell, "bash" | "sh" | "zsh");
-        let is_flag = matches!(argv[1].as_str(), "-lc" | "-c");
-        if is_shell && is_flag {
-            return Some((2, argv[2].clone()));
-        }
-    }
-    None
+fn extract_shell_script(argv: &[String]) -> Option<(usize, String)> {
+    crate::util::extract_shell_script(argv).map(|(index, script)| (index, script.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12809,7 +12889,7 @@ struct CatWriteSuggestion {
 }
 
 fn detect_cat_write(argv: &[String]) -> Option<CatWriteSuggestion> {
-    if let Some((_, script)) = extract_shell_script_from_wrapper(argv) {
+    if let Some((_, script)) = extract_shell_script(argv) {
         if script_contains_cat_write(&script) {
             return Some(CatWriteSuggestion {
                 label: "original_script",
@@ -12979,7 +13059,7 @@ struct PythonWriteSuggestion {
 }
 
 fn detect_python_write(argv: &[String]) -> Option<PythonWriteSuggestion> {
-    if let Some((_, script)) = extract_shell_script_from_wrapper(argv) {
+    if let Some((_, script)) = extract_shell_script(argv) {
         if script_contains_python_write(&script) {
             return Some(PythonWriteSuggestion {
                 label: "original_script",
@@ -13063,7 +13143,7 @@ struct RedundantCdSuggestion {
 
 fn detect_redundant_cd(argv: &[String], cwd: &Path) -> Option<RedundantCdSuggestion> {
     let normalized_cwd = normalize_path(cwd);
-    if let Some((script_index, script)) = extract_shell_script_from_wrapper(argv) {
+    if let Some((script_index, script)) = extract_shell_script(argv) {
         if let Some(suggestion) = detect_redundant_cd_in_shell(
             argv,
             script_index,
@@ -13255,6 +13335,16 @@ mod command_guard_detection_tests {
     }
 
     #[test]
+    fn detects_raw_shell_script_redundant_cd() {
+        let cwd = PathBuf::from("/tmp/project");
+        let argv = vec!["cd /tmp/project && ls".to_string()];
+
+        let suggestion = detect_redundant_cd(&argv, &cwd).expect("should flag redundant cd");
+        assert_eq!(suggestion.label, "original_script");
+        assert_eq!(suggestion.suggested, vec!["ls".to_string()]);
+    }
+
+    #[test]
     fn ignores_cd_to_different_directory() {
         let cwd = PathBuf::from("/tmp/project");
         let argv = vec![
@@ -13283,6 +13373,19 @@ mod command_guard_detection_tests {
         let argv = vec![
             "bash".to_string(),
             "-lc".to_string(),
+            "cat <<'EOF' > code-rs/git-tooling/Cargo.toml\n[package]\nname = \"demo\"\nEOF".to_string(),
+        ];
+
+        let suggestion = detect_cat_write(&argv).expect("should flag cat write");
+        assert_eq!(suggestion.label, "original_script");
+        assert!(suggestion
+            .original_value
+            .contains("cat <<'EOF' > code-rs/git-tooling/Cargo.toml"));
+    }
+
+    #[test]
+    fn detects_raw_shell_script_cat_heredoc_write() {
+        let argv = vec![
             "cat <<'EOF' > code-rs/git-tooling/Cargo.toml\n[package]\nname = \"demo\"\nEOF".to_string(),
         ];
 

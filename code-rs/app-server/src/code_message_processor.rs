@@ -1809,6 +1809,7 @@ impl CodexMessageProcessor {
 
         let exec_params = exec::ExecParams {
             command: params.command,
+            shell_script: None,
             cwd,
             timeout_ms: params.timeout_ms,
             env,

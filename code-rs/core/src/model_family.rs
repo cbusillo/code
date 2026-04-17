@@ -103,6 +103,12 @@ pub struct ModelFamily {
     /// Responses API.
     pub supports_parallel_tool_calls: bool,
 
+    /// Additional speed tiers advertised by the backend for this model.
+    pub additional_speed_tiers: Vec<String>,
+
+    /// Whether the backend says this model supports the native search tool.
+    pub supports_search_tool: bool,
+
     /// Prefer websocket transport for this model when supported by the provider.
     pub prefer_websockets: bool,
 
@@ -175,6 +181,8 @@ macro_rules! model_family {
             default_reasoning_effort: None,
             default_reasoning_summary: ReasoningSummary::Auto,
             supports_parallel_tool_calls: false,
+            additional_speed_tiers: Vec::new(),
+            supports_search_tool: false,
             prefer_websockets: false,
             uses_local_shell_tool: false,
             apply_patch_tool_type: None,
@@ -460,6 +468,8 @@ pub fn derive_default_model_family(model: &str) -> ModelFamily {
         default_reasoning_effort: None,
         default_reasoning_summary: ReasoningSummary::Auto,
         supports_parallel_tool_calls: false,
+        additional_speed_tiers: Vec::new(),
+        supports_search_tool: false,
         prefer_websockets: false,
         uses_local_shell_tool: false,
         apply_patch_tool_type: None,

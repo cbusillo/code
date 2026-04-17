@@ -111,6 +111,7 @@ pub(crate) async fn execute_user_shell_command(
         // freshly reinjected context before the summary/replacement history is applied.
         let event = EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: turn_context.sub_id.clone(),
+            started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
             model_context_window: turn_context.model_context_window(),
             collaboration_mode_kind: turn_context.collaboration_mode.mode,
         });
@@ -123,11 +124,16 @@ pub(crate) async fn execute_user_shell_command(
     let use_login_shell = true;
     let session_shell = session.user_shell();
     let display_command = session_shell.derive_exec_args(&command, use_login_shell);
+    let exec_env_map = create_env(
+        &turn_context.shell_environment_policy,
+        Some(session.conversation_id),
+    );
     let exec_command = maybe_wrap_shell_lc_with_snapshot(
         &display_command,
         session_shell.as_ref(),
-        turn_context.cwd.as_path(),
+        &turn_context.cwd,
         &turn_context.shell_environment_policy.r#set,
+        &exec_env_map,
     );
 
     let call_id = Uuid::new_v4().to_string();
@@ -143,7 +149,7 @@ pub(crate) async fn execute_user_shell_command(
                 process_id: None,
                 turn_id: turn_context.sub_id.clone(),
                 command: display_command.clone(),
-                cwd: cwd.to_path_buf(),
+                cwd: cwd.clone(),
                 parsed_cmd: parsed_cmd.clone(),
                 source: ExecCommandSource::UserShell,
                 interaction_input: None,
@@ -154,12 +160,12 @@ pub(crate) async fn execute_user_shell_command(
     let sandbox_policy = SandboxPolicy::DangerFullAccess;
     let exec_env = ExecRequest {
         command: exec_command.clone(),
-        cwd: cwd.to_path_buf(),
-        env: create_env(
-            &turn_context.shell_environment_policy,
-            Some(session.conversation_id),
-        ),
-        network: turn_context.network.clone(),
+        cwd: cwd.clone(),
+        env: exec_env_map,
+        exec_server_env_config: None,
+        // `/shell` is the explicit full-access escape hatch, so it must not
+        // inherit a managed proxy from the surrounding session or turn.
+        network: None,
         // TODO(zhao-oai): Now that we have ExecExpiration::Cancellation, we
         // should use that instead of an "arbitrarily large" timeout here.
         expiration: USER_SHELL_TIMEOUT_MS.into(),
@@ -173,7 +179,7 @@ pub(crate) async fn execute_user_shell_command(
         sandbox_policy: sandbox_policy.clone(),
         file_system_sandbox_policy: FileSystemSandboxPolicy::from(&sandbox_policy),
         network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),
-        windows_restricted_token_filesystem_overlay: None,
+        windows_sandbox_filesystem_overrides: None,
         arg0: None,
     };
 
@@ -214,7 +220,7 @@ pub(crate) async fn execute_user_shell_command(
                         process_id: None,
                         turn_id: turn_context.sub_id.clone(),
                         command: display_command.clone(),
-                        cwd: cwd.to_path_buf(),
+                        cwd: cwd.clone(),
                         parsed_cmd: parsed_cmd.clone(),
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
@@ -238,7 +244,7 @@ pub(crate) async fn execute_user_shell_command(
                         process_id: None,
                         turn_id: turn_context.sub_id.clone(),
                         command: display_command.clone(),
-                        cwd: cwd.to_path_buf(),
+                        cwd: cwd.clone(),
                         parsed_cmd: parsed_cmd.clone(),
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
@@ -282,7 +288,7 @@ pub(crate) async fn execute_user_shell_command(
                         process_id: None,
                         turn_id: turn_context.sub_id.clone(),
                         command: display_command,
-                        cwd: cwd.to_path_buf(),
+                        cwd,
                         parsed_cmd,
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,

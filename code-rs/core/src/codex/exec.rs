@@ -238,10 +238,21 @@ pub struct ExecInvokeArgs<'a> {
     pub stdout_stream: Option<StdoutStream>,
 }
 
+fn materialize_shell_script(user_shell: &crate::shell::Shell, mut params: ExecParams) -> ExecParams {
+    if let Some(shell_script) = params.shell_script.take() {
+        params.command = user_shell
+            .shell_script_invocation_or_default(shell_script.command, shell_script.use_login_shell);
+    }
+    params
+}
+
 pub(super) fn maybe_run_with_user_profile(mut params: ExecParams, sess: &Session) -> ExecParams {
     maybe_apply_python_runtime_env(&mut params);
 
-    if sess.shell_environment_policy.use_profile {
+    let had_shell_script = params.shell_script.is_some();
+    params = materialize_shell_script(&sess.user_shell, params);
+
+    if !had_shell_script && sess.shell_environment_policy.use_profile {
         let maybe_command = sess
             .user_shell
             .format_default_shell_invocation(params.command.clone());
@@ -882,6 +893,7 @@ impl Session {
 
         let exec_params = ExecParams {
             command: hook.command.clone(),
+            shell_script: None,
             cwd: hook.resolved_cwd(self.get_cwd()),
             timeout_ms: hook.timeout_ms,
             env,
@@ -971,6 +983,7 @@ impl Session {
 
         let exec_params = ExecParams {
             command: command.command.clone(),
+            shell_script: None,
             cwd: command.resolved_cwd(self.get_cwd()),
             timeout_ms: command.timeout_ms,
             env,
@@ -1020,12 +1033,29 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_needs_python_runtime, extract_primary_command_token, maybe_apply_python_runtime_env,
+        command_needs_python_runtime, extract_primary_command_token, materialize_shell_script,
+        maybe_apply_python_runtime_env,
     };
+    use crate::exec::DeferredShellScript;
     use crate::exec::ExecParams;
+    use crate::shell::BashShell;
+    use crate::shell::Shell;
     use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn base_params(command: &str) -> ExecParams {
+        ExecParams {
+            command: vec![command.to_string()],
+            shell_script: None,
+            cwd: PathBuf::from("/tmp"),
+            timeout_ms: None,
+            env: HashMap::new(),
+            with_escalated_permissions: None,
+            justification: None,
+        }
+    }
 
     #[test]
     fn detects_python_family_commands() {
@@ -1059,6 +1089,7 @@ mod tests {
 
         let mut params = ExecParams {
             command: vec!["python".to_string(), "script.py".to_string()],
+            shell_script: None,
             cwd: cwd.clone(),
             timeout_ms: None,
             env: HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]),
@@ -1086,6 +1117,7 @@ mod tests {
         let original_env = HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
         let mut params = ExecParams {
             command: vec!["node".to_string(), "app.js".to_string()],
+            shell_script: None,
             cwd,
             timeout_ms: None,
             env: original_env.clone(),
@@ -1096,5 +1128,54 @@ mod tests {
         maybe_apply_python_runtime_env(&mut params);
 
         assert_eq!(params.env, original_env);
+    }
+
+    #[test]
+    fn materialize_shell_script_uses_plain_shell_argv_until_exec() {
+        let shell = Shell::Bash(BashShell {
+            shell_path: "/bin/bash".to_string(),
+            bashrc_path: "/home/test/.bashrc".to_string(),
+        });
+        let command = "apply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH";
+        let mut params = base_params(command);
+        params.shell_script = Some(DeferredShellScript {
+            command: command.to_string(),
+            use_login_shell: true,
+        });
+
+        let materialized = materialize_shell_script(&shell, params);
+
+        assert_eq!(
+            materialized.command,
+            vec![
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                command.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn materialize_shell_script_honors_login_false() {
+        let shell = Shell::Bash(BashShell {
+            shell_path: "/bin/bash".to_string(),
+            bashrc_path: "/home/test/.bashrc".to_string(),
+        });
+        let mut params = base_params("printf hello");
+        params.shell_script = Some(DeferredShellScript {
+            command: "printf hello".to_string(),
+            use_login_shell: false,
+        });
+
+        let materialized = materialize_shell_script(&shell, params);
+
+        assert_eq!(
+            materialized.command,
+            vec![
+                "/bin/bash".to_string(),
+                "-c".to_string(),
+                "printf hello".to_string(),
+            ]
+        );
     }
 }

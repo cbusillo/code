@@ -506,7 +506,9 @@ impl ModelClient {
         let base_shell_type = tools_config.shell_type.clone();
         let base_uses_native_shell = matches!(
             &base_shell_type,
-            ConfigShellToolType::LocalShell | ConfigShellToolType::StreamableShell
+            ConfigShellToolType::LocalShell
+                | ConfigShellToolType::StreamableShell
+                | ConfigShellToolType::ShellCommand { .. }
         );
 
         tools_config.shell_type = match sandbox_policy.clone() {

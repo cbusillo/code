@@ -1458,6 +1458,7 @@ dependencies = [
  "code-protocol",
  "eventsource-stream",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
@@ -1468,6 +1469,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

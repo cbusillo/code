@@ -121,6 +121,7 @@ pub struct WebSearchUserLocation {
 pub enum ConfigShellToolType {
     DefaultShell,
     ShellWithRequest { sandbox_policy: SandboxPolicy },
+    ShellCommand { sandbox_policy: SandboxPolicy },
     LocalShell,
     StreamableShell,
 }
@@ -172,10 +173,17 @@ impl ToolsConfig {
             ConfigShellToolType::StreamableShell
         } else if model_family.uses_local_shell_tool {
             ConfigShellToolType::LocalShell
+        } else if model_family.uses_shell_command_tool {
+            ConfigShellToolType::ShellCommand {
+                sandbox_policy: sandbox_policy.clone(),
+            }
         } else {
             ConfigShellToolType::DefaultShell
         };
-        if matches!(approval_policy, AskForApproval::OnRequest) && !use_streamable_shell_tool {
+        if matches!(approval_policy, AskForApproval::OnRequest)
+            && !use_streamable_shell_tool
+            && !matches!(shell_type, ConfigShellToolType::ShellCommand { .. })
+        {
             shell_type = ConfigShellToolType::ShellWithRequest {
                 sandbox_policy: sandbox_policy.clone(),
             }
@@ -537,6 +545,114 @@ fn create_shell_tool() -> OpenAiTool {
     OpenAiTool::Function(ResponsesApiTool {
         name: "shell".to_string(),
         description: "Runs a shell command and returns its output. Output streams live to the UI. Long-running commands may be backgrounded after an initial window. Use `wait` to await background tasks. Optional `timeout` can set a hard kill if needed.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["command".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_shell_command_tool(sandbox_policy: &SandboxPolicy) -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "command".to_string(),
+        JsonSchema::String {
+            description: Some("The shell script to execute in the user's default shell".to_string()),
+            allowed_values: None,
+        },
+    );
+    properties.insert(
+        "workdir".to_string(),
+        JsonSchema::String {
+            description: Some("The working directory to execute the command in".to_string()),
+            allowed_values: None,
+        },
+    );
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::Number {
+            description: Some("The timeout for the command in milliseconds".to_string()),
+        },
+    );
+    properties.insert(
+        "login".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Whether to run the shell with login shell semantics".to_string()),
+        },
+    );
+    properties.insert(
+        "prefix_rule".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String {
+                description: None,
+                allowed_values: None,
+            }),
+            description: Some("Suggests a command prefix to persist for future sessions".to_string()),
+        },
+    );
+
+    if matches!(sandbox_policy, SandboxPolicy::WorkspaceWrite { .. }) {
+        properties.insert(
+            "sandbox_permissions".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Sandbox permissions for the command. Use \"with_additional_permissions\" to request additional sandboxed filesystem, network, or macOS permissions (preferred), or \"require_escalated\" to request running without sandbox restrictions; defaults to \"use_default\"."
+                        .to_string(),
+                ),
+                allowed_values: Some(vec![
+                    "use_default".to_string(),
+                    "with_additional_permissions".to_string(),
+                    "require_escalated".to_string(),
+                ]),
+            },
+        );
+        properties.insert(
+            "justification".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Only set if sandbox_permissions is \"require_escalated\". 1-sentence explanation of why we want to run this command."
+                        .to_string(),
+                ),
+                allowed_values: None,
+            },
+        );
+        properties.insert(
+            "additional_permissions".to_string(),
+            create_additional_permissions_schema(),
+        );
+    }
+
+    let description = match sandbox_policy {
+        SandboxPolicy::WorkspaceWrite {
+            writable_roots,
+            network_access,
+            ..
+        } => {
+            let mut description =
+                "Runs a shell command and returns its output. Long-running commands may be backgrounded after an initial window. Use `wait` to await background tasks.".to_string();
+            if !writable_roots.is_empty() {
+                description.push_str("\n\nWritable roots:\n");
+                for root in writable_roots {
+                    description.push_str(&format!("- {}\n", root.display()));
+                }
+            }
+            if !network_access {
+                description.push_str(
+                    "\nCommands that require network access should request additional permissions.",
+                );
+            }
+            description
+        }
+        SandboxPolicy::ReadOnly | SandboxPolicy::DangerFullAccess => {
+            "Runs a shell command and returns its output. Long-running commands may be backgrounded after an initial window. Use `wait` to await background tasks.".to_string()
+        }
+    };
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "shell_command".to_string(),
+        description,
         strict: false,
         parameters: JsonSchema::Object {
             properties,
@@ -1051,6 +1167,9 @@ pub fn get_openai_tools(
         }
         ConfigShellToolType::ShellWithRequest { sandbox_policy } => {
             tools.push(create_shell_tool_for_sandbox(sandbox_policy));
+        }
+        ConfigShellToolType::ShellCommand { sandbox_policy } => {
+            tools.push(create_shell_command_tool(sandbox_policy));
         }
         ConfigShellToolType::LocalShell => {
             tools.push(OpenAiTool::LocalShell {});
@@ -1601,6 +1720,38 @@ mod tests {
             &[
                 "shell",
                 "update_plan",
+                "request_user_input",
+                "browser",
+                "agent",
+                "wait",
+                "kill",
+                "gh_run_wait",
+                "code_bridge",
+                "web_search",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_get_openai_tools_shell_command_model() {
+        let model_family = find_family_for_model("gpt-5.4").expect("gpt-5.4 should be a valid model family");
+        let mut config = ToolsConfig::new(
+            &model_family,
+            AskForApproval::Never,
+            SandboxPolicy::ReadOnly,
+            false,
+            false,
+            true,
+            /*use_experimental_streamable_shell_tool*/ false,
+            false,
+        );
+        apply_default_agent_models(&mut config);
+        let tools = get_openai_tools(&config, Some(HashMap::new()), false, false, &[]);
+
+        assert_eq_tool_names(
+            &tools,
+            &[
+                "shell_command",
                 "request_user_input",
                 "browser",
                 "agent",

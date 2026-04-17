@@ -96,6 +96,7 @@ pub struct Client {
     bearer_token: Option<String>,
     user_agent: Option<HeaderValue>,
     chatgpt_account_id: Option<String>,
+    chatgpt_account_is_fedramp: bool,
     path_style: PathStyle,
 }
 
@@ -121,6 +122,7 @@ impl Client {
             bearer_token: None,
             user_agent: None,
             chatgpt_account_id: None,
+            chatgpt_account_is_fedramp: false,
             path_style,
         })
     }
@@ -139,6 +141,11 @@ impl Client {
 
     pub fn with_chatgpt_account_id(mut self, account_id: impl Into<String>) -> Self {
         self.chatgpt_account_id = Some(account_id.into());
+        self
+    }
+
+    pub fn with_fedramp_routing_header(mut self) -> Self {
+        self.chatgpt_account_is_fedramp = true;
         self
     }
 
@@ -165,6 +172,11 @@ impl Client {
             && let Ok(hv) = HeaderValue::from_str(acc)
         {
             h.insert(name, hv);
+        }
+        if self.chatgpt_account_is_fedramp
+            && let Ok(name) = HeaderName::from_bytes(b"X-OpenAI-Fedramp")
+        {
+            h.insert(name, HeaderValue::from_static("true"));
         }
         h
     }

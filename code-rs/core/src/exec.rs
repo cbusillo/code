@@ -89,11 +89,18 @@ pub(crate) const MAX_EXEC_OUTPUT_DELTAS_PER_CALL: usize = 2_048;
 #[derive(Clone, Debug)]
 pub struct ExecParams {
     pub command: Vec<String>,
+    pub shell_script: Option<DeferredShellScript>,
     pub cwd: PathBuf,
     pub timeout_ms: Option<u64>,
     pub env: HashMap<String, String>,
     pub with_escalated_permissions: Option<bool>,
     pub justification: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredShellScript {
+    pub command: String,
+    pub use_login_shell: bool,
 }
 
 impl ExecParams {

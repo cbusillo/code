@@ -1,5 +1,7 @@
 use super::*;
+use crate::protocol::TaskOriginKind;
 use serde_json::Value;
+use crate::util::extract_shell_script;
 use code_protocol::dynamic_tools::DynamicToolResponse;
 use code_protocol::dynamic_tools::DynamicToolSpec;
 use super::streaming::{
@@ -74,32 +76,10 @@ fn semantic_tokens(command: &[String]) -> Option<Vec<String>> {
     if command.is_empty() {
         return None;
     }
-    if let Some(tokens) = shell_script_tokens(command) {
-        return Some(tokens);
+    if let Some((_, script)) = extract_shell_script(command) {
+        return Some(shlex_split(script).unwrap_or_else(|| vec![script.to_string()]));
     }
     Some(command.to_vec())
-}
-
-fn shell_script_tokens(command: &[String]) -> Option<Vec<String>> {
-    if command.len() == 3 && is_shell_wrapper(&command[0], &command[1]) {
-        if let Some(tokens) = shlex_split(&command[2]) {
-            return Some(tokens);
-        }
-        return Some(vec![command[2].clone()]);
-    }
-    None
-}
-
-fn is_shell_wrapper(shell: &str, flag: &str) -> bool {
-    let file_name = Path::new(shell)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(shell)
-        .to_ascii_lowercase();
-    matches!(
-        file_name.as_str(),
-        "bash" | "sh" | "zsh" | "ksh" | "fish" | "dash"
-    ) && matches!(flag, "-lc" | "-c")
 }
 
 #[derive(Clone)]
@@ -349,7 +329,14 @@ pub(super) fn is_connectivity_error(err: &CodexErr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_connectivity_error;
-    use super::{FollowUpTurnAction, QueuedUserInput, State, take_follow_up_turn_action};
+    use super::{
+        ApprovedCommandMatchKind,
+        ApprovedCommandPattern,
+        FollowUpTurnAction,
+        QueuedUserInput,
+        State,
+        take_follow_up_turn_action,
+    };
     use crate::error::CodexErr;
     use code_protocol::models::{ContentItem, ResponseInputItem};
 
@@ -424,6 +411,17 @@ mod tests {
         assert!(matches!(second, FollowUpTurnAction::QueuedUserInput(_)));
         assert!(state.pending_user_input.is_empty());
     }
+
+    #[test]
+    fn approved_command_prefix_matches_raw_shell_script_tokens() {
+        let pattern = ApprovedCommandPattern::new(
+            vec!["git".to_string(), "status".to_string()],
+            ApprovedCommandMatchKind::Prefix,
+            None,
+        );
+
+        assert!(pattern.matches(&["git status --short".to_string()]));
+    }
 }
 
 #[derive(Debug)]
@@ -436,6 +434,12 @@ pub(super) struct BackgroundExecState {
     pub(super) task_handle: Option<tokio::task::JoinHandle<()>>,
     pub(super) order_meta_for_end: crate::protocol::OrderMeta,
     pub(super) sub_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TaskLifecycleInfo {
+    pub(super) origin: TaskOriginKind,
+    pub(super) visible_to_user: bool,
 }
 
 /// Context for an initialized model agent
@@ -1025,7 +1029,12 @@ impl Session {
         state.current_task = Some(agent);
     }
 
-    pub(super) async fn start_internal_pending_only_turn(self: &Arc<Self>, sentinel: &str) -> bool {
+    pub(super) async fn start_internal_pending_only_turn(
+        self: &Arc<Self>,
+        sentinel: &str,
+        origin: TaskOriginKind,
+        visible_to_user: bool,
+    ) -> bool {
         let should_start = {
             let state = self.state.lock().unwrap();
             state.current_task.is_none()
@@ -1041,13 +1050,25 @@ impl Session {
         let sentinel_input = vec![InputItem::Text {
             text: sentinel.to_string(),
         }];
-        let agent = AgentTask::spawn(Arc::clone(self), turn_context, sub_id, sentinel_input);
+        let agent = AgentTask::spawn(
+            Arc::clone(self),
+            turn_context,
+            sub_id,
+            sentinel_input,
+            origin,
+            visible_to_user,
+        );
         self.set_task(agent);
         true
     }
 
     pub async fn start_pending_only_turn_if_idle(self: &Arc<Self>) -> bool {
-        self.start_internal_pending_only_turn(PENDING_ONLY_SENTINEL).await
+        self.start_internal_pending_only_turn(
+            PENDING_ONLY_SENTINEL,
+            TaskOriginKind::PendingInput,
+            false,
+        )
+        .await
     }
 
     pub async fn start_post_turn_pending_only_turn_if_idle(self: &Arc<Self>) -> bool {
@@ -1066,7 +1087,11 @@ impl Session {
             return false;
         }
 
-        self.start_internal_pending_only_turn(POST_TURN_PENDING_ONLY_SENTINEL)
+        self.start_internal_pending_only_turn(
+            POST_TURN_PENDING_ONLY_SENTINEL,
+            TaskOriginKind::PostTurn,
+            false,
+        )
             .await
     }
 
@@ -1098,6 +1123,18 @@ impl Session {
 
     pub fn has_running_task(&self) -> bool {
         self.state.lock().unwrap().current_task.is_some()
+    }
+
+    pub(super) fn task_lifecycle(&self, sub_id: &str) -> Option<TaskLifecycleInfo> {
+        let state = self.state.lock().unwrap();
+        let task = state.current_task.as_ref()?;
+        if task.sub_id != sub_id {
+            return None;
+        }
+        Some(TaskLifecycleInfo {
+            origin: task.origin,
+            visible_to_user: task.visible_to_user,
+        })
     }
 
     pub fn queue_user_input(&self, queued: QueuedUserInput) {

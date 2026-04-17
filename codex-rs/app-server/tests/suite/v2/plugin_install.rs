@@ -25,7 +25,7 @@ use codex_app_server_protocol::PluginAuthPolicy;
 use codex_app_server_protocol::PluginInstallParams;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::RequestId;
-use codex_login::AuthCredentialsStoreMode;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
@@ -51,7 +51,9 @@ use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+// Plugin install tests wait on connector discovery after the install response path
+// starts, which is noticeably slower on Windows CI.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[tokio::test]
 async fn plugin_install_rejects_relative_marketplace_paths() -> Result<()> {

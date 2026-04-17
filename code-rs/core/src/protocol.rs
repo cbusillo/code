@@ -624,6 +624,7 @@ pub struct RecordedEvent {
 pub fn event_msg_to_protocol(msg: &EventMsg) -> Option<code_protocol::protocol::EventMsg> {
     match msg {
         EventMsg::ReplayHistory(_) => None,
+        EventMsg::TaskLifecycle(_) => None,
         EventMsg::TokenCount(payload) => {
             let info = convert_value(&payload.info)?;
             let rate_limits = payload
@@ -826,6 +827,10 @@ pub enum EventMsg {
     /// Agent has started a task
     TaskStarted,
 
+    /// Core-owned lifecycle signal for a task, including provenance and
+    /// whether the resulting output should be shown in the visible thread.
+    TaskLifecycle(TaskLifecycleEvent),
+
     /// Agent has completed all actions
     TaskComplete(TaskCompleteEvent),
 
@@ -973,6 +978,34 @@ pub struct WarningEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TaskCompleteEvent {
+    pub last_agent_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLifecyclePhase {
+    Started,
+    AwaitingExternalInput,
+    Quiescent,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOriginKind {
+    User,
+    QueuedUser,
+    PendingInput,
+    PostTurn,
+    OutOfTurnDeveloper,
+    Review,
+    ManualCompact,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TaskLifecycleEvent {
+    pub phase: TaskLifecyclePhase,
+    pub origin: TaskOriginKind,
+    pub visible_to_user: bool,
     pub last_agent_message: Option<String>,
 }
 

@@ -7,6 +7,14 @@
 
 - (none)
 
+## [0.6.93] - 2026-04-17
+
+- TUI/Core: add task lifecycle visibility routing so task progress is surfaced consistently. (63ea56db)
+- Auth: atomically persist auth files to prevent partial writes and corrupted credentials. (9891471e)
+- Core: route FedRAMP auth and model metadata for correct environment-specific model behavior. (06a11b66)
+- Shell/Exec: normalize raw shell script handling and preserve scripts plus crash traces in exec output. (bfd6bd70, ba3e507e)
+- App Server: sync response item schema fixtures to keep protocol integrations stable. (ac03b67a)
+
 ## [0.6.92] - 2026-04-05
 
 - TUI: enable Wayland clipboard image paste so screenshot paste works reliably on Linux Wayland sessions. (fbe95ad8)

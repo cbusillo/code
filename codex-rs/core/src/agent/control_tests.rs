@@ -5,10 +5,8 @@ use crate::agent::agent_status_from_event;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
-use crate::config_loader::LoaderOverrides;
 use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
 use assert_matches::assert_matches;
-use chrono::Utc;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
@@ -25,6 +23,9 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_thread_store::ArchiveThreadParams;
+use codex_thread_store::LocalThreadStore;
+use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::Duration;
@@ -36,15 +37,9 @@ async fn test_config_with_cli_overrides(
     cli_overrides: Vec<(String, TomlValue)>,
 ) -> (TempDir, Config) {
     let home = TempDir::new().expect("create temp dir");
-    let config = ConfigBuilder::default()
+    let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(home.path().to_path_buf())
         .cli_overrides(cli_overrides)
-        .loader_overrides(LoaderOverrides {
-            #[cfg(target_os = "macos")]
-            managed_preferences_base64: Some(String::new()),
-            macos_managed_config_requirements_base64: Some(String::new()),
-            ..LoaderOverrides::default()
-        })
         .build()
         .await
         .expect("load default test config");
@@ -98,7 +93,7 @@ impl AgentControlHarness {
         let manager = ThreadManager::with_models_provider_and_home_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
-            config.codex_home.clone(),
+            config.codex_home.to_path_buf(),
             std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
                 /*exec_server_url*/ None,
             )),
@@ -193,7 +188,9 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
             sleep(Duration::from_millis(25)).await;
         }
     };
-    timeout(Duration::from_secs(2), wait).await.is_ok()
+    // CI can take several seconds to schedule the detached completion watcher,
+    // especially on slower Windows runners.
+    timeout(Duration::from_secs(10), wait).await.is_ok()
 }
 
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
@@ -201,7 +198,12 @@ async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str
         .inject_user_message_without_turn(message.to_string())
         .await;
     thread.codex.session.ensure_rollout_materialized().await;
-    thread.codex.session.flush_rollout().await;
+    thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("test thread rollout should flush");
 }
 
 async fn wait_for_live_thread_spawn_children(
@@ -263,6 +265,7 @@ async fn get_status_returns_not_found_without_manager() {
 async fn on_event_updates_status_from_task_started() {
     let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: "turn-1".to_string(),
+        started_at: None,
         model_context_window: None,
         collaboration_mode_kind: ModeKind::Default,
     }));
@@ -274,6 +277,8 @@ async fn on_event_updates_status_from_task_complete() {
     let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: "turn-1".to_string(),
         last_agent_message: Some("done".to_string()),
+        completed_at: None,
+        duration_ms: None,
     }));
     let expected = AgentStatus::Completed(Some("done".to_string()));
     assert_eq!(status, Some(expected));
@@ -295,6 +300,8 @@ async fn on_event_updates_status_from_turn_aborted() {
     let status = agent_status_from_event(&EventMsg::TurnAborted(TurnAbortedEvent {
         turn_id: Some("turn-1".to_string()),
         reason: TurnAbortReason::Interrupted,
+        completed_at: None,
+        duration_ms: None,
     }));
 
     let expected = AgentStatus::Interrupted;
@@ -427,6 +434,7 @@ async fn send_input_submits_user_message() {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
         },
     );
     let captured = harness
@@ -573,6 +581,7 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
         },
     );
     let captured = harness
@@ -624,7 +633,12 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .session
         .ensure_rollout_materialized()
         .await;
-    parent_thread.codex.session.flush_rollout().await;
+    parent_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
 
     let child_thread_id = harness
         .control
@@ -680,6 +694,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
+            responsesapi_client_metadata: None,
         },
     );
     let captured = harness
@@ -820,7 +835,12 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
         .session
         .ensure_rollout_materialized()
         .await;
-    parent_thread.codex.session.flush_rollout().await;
+    parent_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
 
     let child_thread_id = harness
         .control
@@ -889,7 +909,7 @@ async fn spawn_agent_respects_max_threads_limit() {
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
-        config.codex_home.clone(),
+        config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
         )),
@@ -943,7 +963,7 @@ async fn spawn_agent_releases_slot_after_shutdown() {
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
-        config.codex_home.clone(),
+        config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
         )),
@@ -988,7 +1008,7 @@ async fn spawn_agent_limit_shared_across_clones() {
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
-        config.codex_home.clone(),
+        config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
         )),
@@ -1035,7 +1055,7 @@ async fn resume_agent_respects_max_threads_limit() {
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
-        config.codex_home.clone(),
+        config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
         )),
@@ -1093,7 +1113,7 @@ async fn resume_agent_releases_slot_after_resume_failure() {
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
-        config.codex_home.clone(),
+        config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
         )),
@@ -1207,6 +1227,8 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
                 last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1291,6 +1313,8 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
                 last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
             }),
         )
         .await;
@@ -1486,7 +1510,7 @@ async fn resume_thread_subagent_restores_stored_nickname_and_role() {
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
-        config.codex_home.clone(),
+        config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
         )),
@@ -1638,38 +1662,18 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
         .await
         .expect("child thread should exist");
     persist_thread_for_tree_resume(&child_thread, "persist before archiving").await;
-    let rollout_path = child_thread
-        .rollout_path()
-        .expect("thread should have rollout path");
-    let state_db = child_thread
-        .state_db()
-        .expect("thread should have state db handle");
-
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should succeed");
-
-    let archived_root = harness
-        .config
-        .codex_home
-        .join(crate::ARCHIVED_SESSIONS_SUBDIR);
-    tokio::fs::create_dir_all(&archived_root)
+    let store = LocalThreadStore::new(codex_rollout::RolloutConfig::from_view(&harness.config));
+    store
+        .archive_thread(ArchiveThreadParams {
+            thread_id: child_thread_id,
+        })
         .await
-        .expect("archived root should exist");
-    let archived_rollout_path = archived_root.join(
-        rollout_path
-            .file_name()
-            .expect("rollout file name should be present"),
-    );
-    tokio::fs::rename(&rollout_path, &archived_rollout_path)
-        .await
-        .expect("rollout should move to archived path");
-    state_db
-        .mark_archived(child_thread_id, archived_rollout_path.as_path(), Utc::now())
-        .await
-        .expect("state db archive update should succeed");
+        .expect("child thread should archive");
 
     let resumed_thread_id = harness
         .control
@@ -1683,6 +1687,132 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("resumed child shutdown should succeed");
+}
+
+#[tokio::test]
+async fn list_agent_subtree_thread_ids_includes_anonymous_and_closed_descendants() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let worker_path = AgentPath::root().join("worker").expect("worker path");
+    let reviewer_path = AgentPath::root().join("reviewer").expect("reviewer path");
+
+    let worker_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello worker"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(worker_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("worker spawn should succeed");
+    let worker_child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello worker child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: Some(
+                    worker_path
+                        .join("child")
+                        .expect("worker child path should be valid"),
+                ),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("worker child spawn should succeed");
+    let no_path_child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello anonymous child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("no-path child spawn should succeed");
+    let no_path_grandchild_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello anonymous grandchild"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: no_path_child_thread_id,
+                depth: 3,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("no-path grandchild spawn should succeed");
+    let _reviewer_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello reviewer"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(reviewer_path),
+                agent_nickname: None,
+                agent_role: Some("reviewer".to_string()),
+            })),
+        )
+        .await
+        .expect("reviewer spawn should succeed");
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(no_path_grandchild_thread_id)
+        .await
+        .expect("no-path grandchild shutdown should succeed");
+
+    let mut worker_subtree_thread_ids = harness
+        .manager
+        .list_agent_subtree_thread_ids(worker_thread_id)
+        .await
+        .expect("worker subtree thread ids should load");
+    worker_subtree_thread_ids.sort_by_key(ToString::to_string);
+    let mut expected_worker_subtree_thread_ids = vec![
+        worker_thread_id,
+        worker_child_thread_id,
+        no_path_child_thread_id,
+        no_path_grandchild_thread_id,
+    ];
+    expected_worker_subtree_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        worker_subtree_thread_ids,
+        expected_worker_subtree_thread_ids
+    );
+
+    let mut no_path_child_subtree_thread_ids = harness
+        .manager
+        .list_agent_subtree_thread_ids(no_path_child_thread_id)
+        .await
+        .expect("no-path subtree thread ids should load");
+    no_path_child_subtree_thread_ids.sort_by_key(ToString::to_string);
+    let mut expected_no_path_child_subtree_thread_ids =
+        vec![no_path_child_thread_id, no_path_grandchild_thread_id];
+    expected_no_path_child_subtree_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        no_path_child_subtree_thread_ids,
+        expected_no_path_child_subtree_thread_ids
+    );
 }
 
 #[tokio::test]

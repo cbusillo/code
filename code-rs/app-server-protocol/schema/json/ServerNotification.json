@@ -5423,6 +5423,12 @@
             "call_id": {
               "type": "string"
             },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "output": {
               "$ref": "#/definitions/FunctionCallOutputPayload"
             },

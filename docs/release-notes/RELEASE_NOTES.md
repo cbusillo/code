@@ -1,14 +1,14 @@
-## @just-every/code v0.6.92
+## @just-every/code v0.6.93
 
-This release improves cross-platform reliability, remote session behavior, and core model/tooling correctness.
+This release improves task visibility, hardens auth persistence, and tightens shell/app-server reliability.
 
 ### Changes
 
-- TUI: enable Wayland clipboard image paste so screenshot paste works reliably on Linux Wayland sessions.
-- Core: align model/provider behavior by syncing remote model parity and updating Copilot/GPT-5.4 mini agent flags.
-- Remote: forward `--cd` consistently across remote start/resume/fork/list flows so session directory targeting works as expected.
-- Core/TUI: fix MCP tool listing for hyphenated server names and prevent stale `/copy` output after commentary-only turns.
-- Platform: improve macOS stability by preventing sandbox HTTP-client panics and filtering malloc diagnostics from composer input.
+- TUI/Core: add task lifecycle visibility routing so task progress is surfaced consistently.
+- Auth: atomically persist auth files to prevent partial writes and corrupted credentials.
+- Core: route FedRAMP auth and model metadata for correct environment-specific model behavior.
+- Shell/Exec: normalize raw shell script handling and preserve scripts plus crash traces in exec output.
+- App Server: sync response item schema fixtures to keep protocol integrations stable.
 
 ### Install
 
@@ -17,4 +17,4 @@ npm install -g @just-every/code@latest
 code
 ```
 
-Compare: https://github.com/just-every/code/compare/v0.6.91...v0.6.92
+Compare: https://github.com/just-every/code/compare/v0.6.92...v0.6.93

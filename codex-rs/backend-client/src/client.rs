@@ -104,6 +104,7 @@ pub struct Client {
     bearer_token: Option<String>,
     user_agent: Option<HeaderValue>,
     chatgpt_account_id: Option<String>,
+    chatgpt_account_is_fedramp: bool,
     path_style: PathStyle,
 }
 
@@ -129,6 +130,7 @@ impl Client {
             bearer_token: None,
             user_agent: None,
             chatgpt_account_id: None,
+            chatgpt_account_is_fedramp: false,
             path_style,
         })
     }
@@ -140,6 +142,9 @@ impl Client {
             .with_bearer_token(token);
         if let Some(account_id) = auth.get_account_id() {
             client = client.with_chatgpt_account_id(account_id);
+        }
+        if auth.is_fedramp_account() {
+            client = client.with_fedramp_routing_header();
         }
         Ok(client)
     }
@@ -158,6 +163,11 @@ impl Client {
 
     pub fn with_chatgpt_account_id(mut self, account_id: impl Into<String>) -> Self {
         self.chatgpt_account_id = Some(account_id.into());
+        self
+    }
+
+    pub fn with_fedramp_routing_header(mut self) -> Self {
+        self.chatgpt_account_is_fedramp = true;
         self
     }
 
@@ -184,6 +194,11 @@ impl Client {
             && let Ok(hv) = HeaderValue::from_str(acc)
         {
             h.insert(name, hv);
+        }
+        if self.chatgpt_account_is_fedramp
+            && let Ok(name) = HeaderName::from_bytes(b"X-OpenAI-Fedramp")
+        {
+            h.insert(name, HeaderValue::from_static("true"));
         }
         h
     }
@@ -473,6 +488,7 @@ impl Client {
             crate::types::PlanType::Go => AccountPlanType::Go,
             crate::types::PlanType::Plus => AccountPlanType::Plus,
             crate::types::PlanType::Pro => AccountPlanType::Pro,
+            crate::types::PlanType::ProLite => AccountPlanType::ProLite,
             crate::types::PlanType::Team => AccountPlanType::Team,
             crate::types::PlanType::SelfServeBusinessUsageBased => {
                 AccountPlanType::SelfServeBusinessUsageBased
@@ -486,7 +502,8 @@ impl Client {
             crate::types::PlanType::Guest
             | crate::types::PlanType::FreeWorkspace
             | crate::types::PlanType::Quorum
-            | crate::types::PlanType::K12 => AccountPlanType::Unknown,
+            | crate::types::PlanType::K12
+            | crate::types::PlanType::Unknown => AccountPlanType::Unknown,
         }
     }
 
@@ -503,6 +520,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_backend_openapi_models::models::AdditionalRateLimitDetails;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -536,7 +554,7 @@ mod tests {
                 }))),
                 ..Default::default()
             }))),
-            additional_rate_limits: Some(Some(vec![crate::types::AdditionalRateLimitDetails {
+            additional_rate_limits: Some(Some(vec![AdditionalRateLimitDetails {
                 limit_name: "codex_other".to_string(),
                 metered_feature: "codex_other".to_string(),
                 rate_limit: Some(Some(Box::new(crate::types::RateLimitStatusDetails {
@@ -596,7 +614,7 @@ mod tests {
         let payload = RateLimitStatusPayload {
             plan_type: crate::types::PlanType::Plus,
             rate_limit: None,
-            additional_rate_limits: Some(Some(vec![crate::types::AdditionalRateLimitDetails {
+            additional_rate_limits: Some(Some(vec![AdditionalRateLimitDetails {
                 limit_name: "codex_other".to_string(),
                 metered_feature: "codex_other".to_string(),
                 rate_limit: None,

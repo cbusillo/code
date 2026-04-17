@@ -15,8 +15,8 @@ use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginSource;
 use codex_app_server_protocol::PluginSummary;
 use codex_app_server_protocol::RequestId;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
-use codex_login::AuthCredentialsStoreMode;
 use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -30,7 +30,8 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 use wiremock::matchers::query_param;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+// These tests start full app-server processes and can also run plugin startup warmers.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const TEST_CURATED_PLUGIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const STARTUP_REMOTE_PLUGIN_SYNC_MARKER_FILE: &str = ".tmp/app-server-remote-plugin-sync-v1";
 
