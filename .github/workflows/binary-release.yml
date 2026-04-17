@@ -33,9 +33,15 @@ jobs:
       - chris-testing
     timeout-minutes: 180
     env:
-      CARGO_HOME: ${{ github.workspace }}/.cargo-home
-      RUSTUP_HOME: ${{ github.workspace }}/.cargo-home/rustup
-      CARGO_TARGET_DIR: ${{ github.workspace }}/code-rs/target
+      CODE_RELEASE_CACHE: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}
+      CARGO_HOME: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/cargo-home
+      RUSTUP_HOME: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/rustup-home
+      CARGO_TARGET_DIR: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/target
+      SCCACHE_DIR: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/sccache
+      SCCACHE_CACHE_SIZE: "20G"
+      SCCACHE_IDLE_TIMEOUT: "1800"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
 
     steps:
       - name: Check out repository
@@ -108,41 +114,76 @@ jobs:
           )
           echo "channel=${toolchain}" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare persistent Rust cache dirs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME" "$RUSTUP_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR"
+          df -h "$CODE_RELEASE_CACHE"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
         with:
-          prefix-key: v1-binary-release
-          shared-key: binary-release-${{ steps.rust_toolchain.outputs.channel }}-${{ runner.os }}-${{ runner.arch }}
-          workspaces: |
-            code-rs -> target
-          cache-targets: true
-          cache-workspace-crates: true
-          cache-on-failure: true
+          version: v0.10.0
+
+      - name: Enable local sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          sccache --zero-stats || true
+
+      - name: Rust cache diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version --verbose
+          cargo --version --verbose
+          echo "CODE_RELEASE_CACHE=$CODE_RELEASE_CACHE"
+          echo "CARGO_HOME=$CARGO_HOME"
+          echo "RUSTUP_HOME=$RUSTUP_HOME"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+          echo "SCCACHE_DIR=$SCCACHE_DIR"
+          echo "RUSTC_WRAPPER=${RUSTC_WRAPPER:-}"
+          for path in "$CARGO_HOME" "$RUSTUP_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR"; do
+            du -sh "$path" 2>/dev/null || true
+          done
+          sccache --show-stats || true
 
       - name: Prefetch Rust dependencies
         working-directory: code-rs
+        shell: bash
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-        run: cargo fetch --locked
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          cargo fetch --locked
+          end=$(date +%s)
+          echo "cargo fetch took $((end - start))s"
 
       - name: Build release binary
         working-directory: code-rs
         shell: bash
         run: |
           set -euo pipefail
+          start=$(date +%s)
           cargo build --release --locked --bin code
+          end=$(date +%s)
+          echo "cargo build --release took $((end - start))s"
+          sccache --show-stats || true
 
       - name: Smoke test release binary
         shell: bash
         run: |
           set -euo pipefail
-          code-rs/target/release/code --version
-          code-rs/target/release/code completion bash > /dev/null
+          "$CARGO_TARGET_DIR/release/code" --version
+          "$CARGO_TARGET_DIR/release/code" completion bash > /dev/null
 
       - name: Prepare release assets
         shell: bash
@@ -151,7 +192,7 @@ jobs:
 
           artifact="${{ steps.meta.outputs.artifact }}"
           mkdir -p dist
-          cp code-rs/target/release/code "dist/${artifact}"
+          cp "$CARGO_TARGET_DIR/release/code" "dist/${artifact}"
 
           tar -C dist -czf "dist/${artifact}.tar.gz" "${artifact}"
           if command -v zstd >/dev/null 2>&1; then
