@@ -33,11 +33,11 @@ jobs:
       - chris-testing
     timeout-minutes: 180
     env:
-      CODE_RELEASE_CACHE: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}
-      CARGO_HOME: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/cargo-home
-      RUSTUP_HOME: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/rustup-home
-      CARGO_TARGET_DIR: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/target
-      SCCACHE_DIR: /opt/actions-runners/code/cache/binary-release/${{ runner.os }}-${{ runner.arch }}/sccache
+      CODE_RELEASE_CACHE: /opt/actions-runners/code/cache/binary-release
+      CARGO_HOME: /opt/actions-runners/code/cache/binary-release/cargo-home
+      RUSTUP_HOME: /opt/actions-runners/code/cache/binary-release/rustup-home
+      CARGO_TARGET_DIR: /opt/actions-runners/code/cache/binary-release/target
+      SCCACHE_DIR: /opt/actions-runners/code/cache/binary-release/sccache
       SCCACHE_CACHE_SIZE: "20G"
       SCCACHE_IDLE_TIMEOUT: "1800"
       CARGO_INCREMENTAL: "0"
