@@ -1,0 +1,189 @@
+name: Binary Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to create or update, for example overlay-v0.6.93.1
+        required: true
+      release_name:
+        description: Optional display name for the GitHub release
+        required: false
+        default: ""
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: true
+        type: boolean
+        default: true
+  push:
+    tags:
+      - overlay-v*
+
+concurrency:
+  group: binary-release-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build_and_publish:
+    runs-on:
+      - self-hosted
+      - chris-testing
+    timeout-minutes: 180
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      RUSTUP_HOME: ${{ github.workspace }}/.cargo-home/rustup
+      CARGO_TARGET_DIR: ${{ github.workspace }}/code-rs/target
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            prerelease=false
+            release_name="Code ${tag}"
+          else
+            tag="${{ inputs.release_tag }}"
+            prerelease="${{ inputs.prerelease }}"
+            release_name="${{ inputs.release_name }}"
+            if [[ -z "${release_name}" ]]; then
+              release_name="Code ${tag}"
+            fi
+          fi
+
+          runner_os=$(uname -s)
+          runner_arch=$(uname -m)
+
+          if [[ "${runner_os}" != "Linux" ]]; then
+            echo "Binary Release only supports Linux self-hosted runners; got ${runner_os}" >&2
+            exit 1
+          fi
+
+          case "${runner_arch}" in
+            x86_64|amd64)
+              artifact_arch="x64"
+              ;;
+            aarch64|arm64)
+              artifact_arch="arm64"
+              ;;
+            *)
+              echo "Unsupported runner architecture: ${runner_arch}" >&2
+              exit 1
+              ;;
+          esac
+
+          artifact="code-linux-${artifact_arch}"
+
+          {
+            echo "tag=${tag}"
+            echo "release_name=${release_name}"
+            echo "prerelease=${prerelease}"
+            echo "artifact=${artifact}"
+            echo "runner_arch=${runner_arch}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read Rust toolchain channel
+        id: rust_toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path("code-rs/rust-toolchain.toml").read_text())
+          print(data["toolchain"]["channel"])
+          PY
+          )
+          echo "channel=${toolchain}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-binary-release
+          shared-key: binary-release-${{ steps.rust_toolchain.outputs.channel }}-${{ runner.os }}-${{ runner.arch }}
+          workspaces: |
+            code-rs -> target
+          cache-targets: true
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prefetch Rust dependencies
+        working-directory: code-rs
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: cargo fetch --locked
+
+      - name: Build release binary
+        working-directory: code-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin code
+
+      - name: Smoke test release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          code-rs/target/release/code --version
+          code-rs/target/release/code completion bash > /dev/null
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact="${{ steps.meta.outputs.artifact }}"
+          mkdir -p dist
+          cp code-rs/target/release/code "dist/${artifact}"
+
+          tar -C dist -czf "dist/${artifact}.tar.gz" "${artifact}"
+          if command -v zstd >/dev/null 2>&1; then
+            zstd -T0 -19 --force -o "dist/${artifact}.zst" "dist/${artifact}"
+          fi
+          sha256sum dist/* > dist/SHA256SUMS.txt
+          rm -f "dist/${artifact}"
+
+          {
+            echo "Built from branch ${GITHUB_REF_NAME}"
+            echo ""
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Runner architecture: ${{ steps.meta.outputs.runner_arch }}"
+            echo "Artifact base name: ${artifact}"
+          } > dist/RELEASE_NOTES.txt
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-release-${{ steps.meta.outputs.tag }}
+          path: dist/
+          compression-level: 0
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          body_path: dist/RELEASE_NOTES.txt
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
