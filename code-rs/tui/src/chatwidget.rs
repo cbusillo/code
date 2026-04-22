@@ -14483,8 +14483,9 @@ impl ChatWidget<'_> {
                 // Final re-check for idle state
                 self.maybe_hide_spinner();
                 self.maybe_trigger_auto_review();
+                let remote_assistant_message = last_agent_message.clone();
                 self.emit_turn_complete_notification(last_agent_message);
-                self.remote_inbox_send_turn_complete();
+                self.remote_inbox_send_turn_complete(remote_assistant_message);
                 self.current_task_lifecycle = None;
                 self.suppress_next_agent_hint = false;
                 self.mark_needs_redraw();
@@ -30002,9 +30003,9 @@ Have we met every part of this goal and is there no further work to do?"#
         }
     }
 
-    fn remote_inbox_send_turn_complete(&self) {
+    fn remote_inbox_send_turn_complete(&self, assistant_message: Option<String>) {
         if let Some(client) = &self.remote_inbox_client {
-            client.send_turn_complete();
+            client.send_turn_complete(assistant_message);
         }
     }
 

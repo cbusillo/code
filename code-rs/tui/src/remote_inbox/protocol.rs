@@ -34,6 +34,8 @@ pub(crate) struct SessionStatusEvent {
     pub session_id: String,
     pub session_epoch: String,
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

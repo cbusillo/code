@@ -58,32 +58,42 @@ impl Drop for RemoteInboxClientHandle {
 
 impl RemoteInboxClientHandle {
     pub(crate) fn send_turn_started(&self) {
-        self.send_status(ClientMessage::StatusChanged(self.status_event(Some(
-            "Turn started".to_string(),
-        ))));
+        self.send_status(ClientMessage::StatusChanged(self.status_event(
+            Some("Turn started".to_string()),
+            None,
+        )));
     }
 
-    pub(crate) fn send_turn_complete(&self) {
-        self.send_status(ClientMessage::TurnComplete(self.status_event(Some(
-            "Turn complete. Replies here will start the next turn.".to_string(),
-        ))));
+    pub(crate) fn send_turn_complete(&self, assistant_message: Option<String>) {
+        self.send_status(ClientMessage::TurnComplete(self.status_event(
+            Some("Turn complete. Replies here will start the next turn.".to_string()),
+            assistant_message,
+        )));
     }
 
     pub(crate) fn send_error(&self, message: &str) {
-        self.send_status(ClientMessage::Error(self.status_event(Some(message.to_string()))));
+        self.send_status(ClientMessage::Error(
+            self.status_event(Some(message.to_string()), None),
+        ));
     }
 
     pub(crate) fn send_turn_aborted(&self) {
-        self.send_status(ClientMessage::StatusChanged(self.status_event(Some(
-            "Turn aborted".to_string(),
-        ))));
+        self.send_status(ClientMessage::StatusChanged(self.status_event(
+            Some("Turn aborted".to_string()),
+            None,
+        )));
     }
 
-    fn status_event(&self, message: Option<String>) -> SessionStatusEvent {
+    fn status_event(
+        &self,
+        message: Option<String>,
+        assistant_message: Option<String>,
+    ) -> SessionStatusEvent {
         SessionStatusEvent {
             session_id: self.session_id.clone(),
             session_epoch: self.session_epoch.clone(),
             message,
+            assistant_message,
         }
     }
 
