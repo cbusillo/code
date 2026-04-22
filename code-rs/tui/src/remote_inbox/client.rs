@@ -26,6 +26,7 @@ use crate::remote_inbox::protocol::RemoteApprovalDecisionAck;
 use crate::remote_inbox::protocol::RemoteApprovalDecisionReject;
 use crate::remote_inbox::protocol::RemoteApprovalRequest;
 use crate::remote_inbox::protocol::RemoteCommandKind;
+use crate::remote_inbox::protocol::RemoteUserMessage;
 use crate::remote_inbox::protocol::ServerMessage;
 use crate::remote_inbox::protocol::SessionHeartbeat;
 use crate::remote_inbox::protocol::SessionHello;
@@ -67,6 +68,17 @@ impl RemoteInboxClientHandle {
             Some("Turn started".to_string()),
             None,
         )));
+    }
+
+    pub(crate) fn send_user_message(&self, message: &str) {
+        if message.trim().is_empty() {
+            return;
+        }
+        self.send_status(ClientMessage::UserMessage(RemoteUserMessage {
+            session_id: self.session_id.clone(),
+            session_epoch: self.session_epoch.clone(),
+            message: message.to_string(),
+        }));
     }
 
     pub(crate) fn send_turn_complete(&self, assistant_message: Option<String>) {

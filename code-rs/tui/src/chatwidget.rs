@@ -6596,6 +6596,7 @@ impl ChatWidget<'_> {
         const IMAGE_EXTENSIONS: &[&str] = &[
             ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".tiff", ".tif",
         ];
+        let remote_inbox_text = Some(text.clone());
         // We keep a visible copy of the original (normalized) text for history
         let mut display_text = text.clone();
         let mut ordered_items: Vec<InputItem> = Vec::new();
@@ -6716,6 +6717,8 @@ impl ChatWidget<'_> {
             display_text,
             ordered_items,
             suppress_persistence: false,
+            mirror_to_remote: true,
+            remote_inbox_text,
         }
     }
 
@@ -13719,10 +13722,12 @@ impl ChatWidget<'_> {
         message: UserMessage,
         dispatched_text: Option<String>,
     ) {
+        let remote_inbox_message_text = message.remote_inbox_message_text().map(str::to_string);
         let UserMessage {
             display_text,
             ordered_items,
             suppress_persistence,
+            ..
         } = message;
 
         let combined_message_text =
@@ -13734,6 +13739,10 @@ impl ChatWidget<'_> {
             let _ = self.history_insert_plain_state_with_key(state, key, "prompt");
             self.pending_user_prompts_for_next_turn =
                 self.pending_user_prompts_for_next_turn.saturating_add(1);
+        }
+
+        if let Some(remote_inbox_message_text) = remote_inbox_message_text.as_deref() {
+            self.remote_inbox_send_user_message(remote_inbox_message_text);
         }
 
         self.flush_pending_agent_notes();
@@ -29806,7 +29815,10 @@ Have we met every part of this goal and is there no further work to do?"#
         if text.is_empty() {
             return;
         }
-        self.submit_user_message(text.into());
+        let mut message: UserMessage = text.into();
+        message.mirror_to_remote = true;
+        message.remote_inbox_text = Some(message.display_text.clone());
+        self.submit_user_message(message);
     }
 
     /// Submit a message where the user sees `display` in history, but the
@@ -29814,6 +29826,23 @@ Have we met every part of this goal and is there no further work to do?"#
     /// slash commands selected via the popup where expansion happens before
     /// reaching the normal composer pipeline.
     pub(crate) fn submit_prompt_with_display(&mut self, display: String, prompt: String) {
+        self.submit_prompt_with_display_and_remote_mirror(display, prompt, true);
+    }
+
+    pub(crate) fn submit_prompt_with_display_without_remote_mirror(
+        &mut self,
+        display: String,
+        prompt: String,
+    ) {
+        self.submit_prompt_with_display_and_remote_mirror(display, prompt, false);
+    }
+
+    fn submit_prompt_with_display_and_remote_mirror(
+        &mut self,
+        display: String,
+        prompt: String,
+        mirror_to_remote: bool,
+    ) {
         if display.is_empty() && prompt.is_empty() {
             return;
         }
@@ -29823,10 +29852,13 @@ Have we met every part of this goal and is there no further work to do?"#
         if !prompt.trim().is_empty() {
             ordered.push(InputItem::Text { text: prompt });
         }
+        let remote_inbox_text = mirror_to_remote.then(|| display.clone());
         let msg = UserMessage {
             display_text: display,
             ordered_items: ordered,
             suppress_persistence: false,
+            mirror_to_remote,
+            remote_inbox_text,
         };
         self.submit_user_message(msg);
     }
@@ -29847,10 +29879,13 @@ Have we met every part of this goal and is there no further work to do?"#
         ordered.push(InputItem::Text {
             text: visible.clone(),
         });
+        let remote_inbox_text = Some(visible.clone());
         let msg = UserMessage {
             display_text: visible,
             ordered_items: ordered,
             suppress_persistence: false,
+            mirror_to_remote: true,
+            remote_inbox_text,
         };
         self.submit_user_message(msg);
     }
@@ -29910,6 +29945,8 @@ Have we met every part of this goal and is there no further work to do?"#
             display_text: String::new(),
             ordered_items: ordered,
             suppress_persistence: false,
+            mirror_to_remote: false,
+            remote_inbox_text: None,
         };
         let mut cache = String::new();
         if !preface_cache.trim().is_empty() {
@@ -29999,7 +30036,7 @@ Have we met every part of this goal and is there no further work to do?"#
             None => format!("Remote reply from Discord:\n{text}"),
         };
         tracing::info!(command_id, "submitting remote inbox reply");
-        self.submit_prompt_with_display(display, text);
+        self.submit_prompt_with_display_without_remote_mirror(display, text);
         Ok(())
     }
 
@@ -30023,6 +30060,12 @@ Have we met every part of this goal and is there no further work to do?"#
     fn remote_inbox_send_turn_started(&self) {
         if let Some(client) = &self.remote_inbox_client {
             client.send_turn_started();
+        }
+    }
+
+    fn remote_inbox_send_user_message(&self, message: &str) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_user_message(message);
         }
     }
 

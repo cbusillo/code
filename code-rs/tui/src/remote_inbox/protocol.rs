@@ -7,6 +7,7 @@ use code_core::protocol::ReviewDecision;
 pub(crate) enum ClientMessage {
     Hello(SessionHello),
     Heartbeat(SessionHeartbeat),
+    UserMessage(RemoteUserMessage),
     StatusChanged(SessionStatusEvent),
     TurnComplete(SessionStatusEvent),
     Error(SessionStatusEvent),
@@ -31,6 +32,13 @@ pub(crate) struct SessionHello {
 pub(crate) struct SessionHeartbeat {
     pub session_id: String,
     pub session_epoch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RemoteUserMessage {
+    pub session_id: String,
+    pub session_epoch: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
