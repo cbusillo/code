@@ -155,6 +155,15 @@ pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
 
 const DEFAULT_RESPONSES_ORIGINATOR_HEADER: &str = "code_cli_rs";
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+pub struct RemoteInboxConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub bridge_url: Option<String>,
+    pub token: Option<String>,
+    pub host_label: Option<String>,
+}
+
 fn normalize_auto_drive_routing_reasoning_levels(
     levels: &[ReasoningEffort],
 ) -> Vec<ReasoningEffort> {
@@ -421,6 +430,9 @@ pub struct Config {
 
     /// Collection of settings that are specific to the TUI.
     pub tui: Tui,
+
+    /// Optional remote inbox bridge used by local companion UIs.
+    pub remote_inbox: RemoteInboxConfig,
 
     /// Shared Auto Drive defaults.
     pub auto_drive: AutoDriveSettings,
@@ -762,6 +774,9 @@ pub struct ConfigToml {
 
     /// Collection of settings that are specific to the TUI.
     pub tui: Option<Tui>,
+
+    /// Optional remote inbox bridge used by local companion UIs.
+    pub remote_inbox: Option<RemoteInboxConfig>,
 
     /// Auto Drive behavioral defaults.
     pub auto_drive: Option<AutoDriveSettings>,
@@ -1677,6 +1692,7 @@ impl Config {
             history,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             tui: cfg.tui.clone().unwrap_or_default(),
+            remote_inbox: cfg.remote_inbox.unwrap_or_default(),
             auto_drive,
             auto_drive_use_chat_model,
             code_linux_sandbox_exe,

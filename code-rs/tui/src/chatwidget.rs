@@ -2069,6 +2069,7 @@ pub(crate) struct ChatWidget<'a> {
     perf_state: PerfState,
     // Current session id (from SessionConfigured)
     session_id: Option<uuid::Uuid>,
+    remote_inbox_client: Option<crate::remote_inbox::RemoteInboxClientHandle>,
 
     // Pending diagnostics integration
     next_cli_text_format: Option<TextFormat>,
@@ -7168,6 +7169,7 @@ impl ChatWidget<'_> {
                 pending_scroll_rows: Cell::new(0),
             },
             session_id: None,
+            remote_inbox_client: None,
             active_task_ids: HashSet::new(),
             queued_user_messages: std::collections::VecDeque::new(),
             pending_dispatched_user_messages: std::collections::VecDeque::new(),
@@ -7558,6 +7560,7 @@ impl ChatWidget<'_> {
                 pending_scroll_rows: Cell::new(0),
             },
             session_id: None,
+            remote_inbox_client: None,
             active_task_ids: HashSet::new(),
             queued_user_messages: std::collections::VecDeque::new(),
             pending_dispatched_user_messages: std::collections::VecDeque::new(),
@@ -13896,6 +13899,7 @@ impl ChatWidget<'_> {
                 self.remove_connecting_mcp_notice();
                 // Record session id for potential future fork/backtrack features
                 self.session_id = Some(event.session_id);
+                self.start_remote_inbox_if_needed(event.session_id);
                 self.bottom_pane
                     .set_history_metadata(event.history_log_id, event.history_entry_count);
                 // Record session information at the top of the conversation.
@@ -14406,6 +14410,7 @@ impl ChatWidget<'_> {
                 self.bottom_pane
                     .update_status_text("waiting for model".to_string());
                 self.ensure_spinner_for_activity("task-started");
+                self.remote_inbox_send_turn_started();
                 tracing::info!("[order] EventMsg::TaskStarted id={}", id);
 
                 // Capture a baseline snapshot for this turn so background auto review only
@@ -14479,6 +14484,7 @@ impl ChatWidget<'_> {
                 self.maybe_hide_spinner();
                 self.maybe_trigger_auto_review();
                 self.emit_turn_complete_notification(last_agent_message);
+                self.remote_inbox_send_turn_complete();
                 self.current_task_lifecycle = None;
                 self.suppress_next_agent_hint = false;
                 self.mark_needs_redraw();
@@ -14672,6 +14678,7 @@ impl ChatWidget<'_> {
                 self.request_redraw();
             }
             EventMsg::Error(ErrorEvent { message }) => {
+                self.remote_inbox_send_error(&message);
                 self.on_error(message);
             }
             EventMsg::PlanUpdate(update) => {
@@ -16020,6 +16027,7 @@ impl ChatWidget<'_> {
             EventMsg::UserMessage(_) => {}
             EventMsg::TurnAborted(_) => {
                 self.pending_request_user_input = None;
+                self.remote_inbox_send_turn_aborted();
             }
             EventMsg::ConversationPath(_) => {}
             EventMsg::EnteredReviewMode(review_request) => {
@@ -29951,6 +29959,67 @@ Have we met every part of this goal and is there no further work to do?"#
         self.session_id
     }
 
+    fn start_remote_inbox_if_needed(&mut self, session_id: uuid::Uuid) {
+        if self.remote_inbox_client.is_some() || !self.config.remote_inbox.enabled {
+            return;
+        }
+
+        let session = crate::remote_inbox::RemoteInboxSession::new(
+            session_id.to_string(),
+            chrono::Utc::now().timestamp_millis().to_string(),
+            self.config.cwd.clone(),
+        );
+        self.remote_inbox_client = crate::remote_inbox::spawn_remote_inbox_client(
+            self.config.remote_inbox.clone(),
+            session,
+            self.app_event_tx.clone(),
+        );
+    }
+
+    pub(crate) fn on_remote_inbox_reply(
+        &mut self,
+        command_id: String,
+        text: String,
+        issued_by: Option<String>,
+    ) -> Result<(), String> {
+        if text.trim().is_empty() {
+            tracing::warn!(command_id, "ignoring empty remote inbox reply");
+            return Err("remote inbox reply was empty".to_string());
+        }
+
+        let display = match issued_by.as_deref().filter(|value| !value.trim().is_empty()) {
+            Some(issued_by) => format!("Remote reply from Discord ({issued_by}):\n{text}"),
+            None => format!("Remote reply from Discord:\n{text}"),
+        };
+        tracing::info!(command_id, "submitting remote inbox reply");
+        self.submit_prompt_with_display(display, text);
+        Ok(())
+    }
+
+    fn remote_inbox_send_turn_started(&self) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_turn_started();
+        }
+    }
+
+    fn remote_inbox_send_turn_complete(&self) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_turn_complete();
+        }
+    }
+
+    fn remote_inbox_send_error(&self, message: &str) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_error(message);
+        }
+    }
+
+    fn remote_inbox_send_turn_aborted(&self) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_turn_aborted();
+        }
+    }
+
     fn insert_resume_placeholder(&mut self) {
         if self.resume_placeholder_visible {
             return;
@@ -30914,6 +30983,7 @@ fn maybe_run_rate_limit_refresh(
 
 impl Drop for ChatWidget<'_> {
     fn drop(&mut self) {
+        self.remote_inbox_client.take();
         self.cancel_rate_limit_refresh_task();
     }
 }

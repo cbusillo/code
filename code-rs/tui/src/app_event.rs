@@ -43,6 +43,7 @@ use code_protocol::request_user_input::RequestUserInputResponse;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
+use tokio::sync::oneshot;
 use crate::cloud_tasks_service::CloudEnvironment;
 use crate::resume::discovery::ResumeCandidate;
 
@@ -189,6 +190,14 @@ pub(crate) enum AppEvent {
     RequestUserInputAnswer {
         turn_id: String,
         response: RequestUserInputResponse,
+    },
+
+    /// Submit text received from a remote inbox bridge as a visible user turn.
+    RemoteInboxReply {
+        command_id: String,
+        text: String,
+        issued_by: Option<String>,
+        response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
     },
 
     AutoCoordinatorDecision {

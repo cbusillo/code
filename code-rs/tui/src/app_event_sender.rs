@@ -46,6 +46,7 @@ impl AppEventSender {
                 | AppEvent::MouseEvent(_)
                 | AppEvent::Paste(_)
                 | AppEvent::RequestRedraw
+                | AppEvent::RemoteInboxReply { .. }
                 | AppEvent::Redraw
                 | AppEvent::ExitRequest
                 | AppEvent::SetTerminalTitle { .. }

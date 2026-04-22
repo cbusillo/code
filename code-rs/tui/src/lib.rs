@@ -84,6 +84,7 @@ mod markdown;
 mod markdown_render;
 mod markdown_renderer;
 mod memory_citation;
+mod remote_inbox;
 mod remote_model_presets;
 mod markdown_stream;
 mod syntax_highlight;

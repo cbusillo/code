@@ -1,0 +1,77 @@
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ClientMessage {
+    Hello(SessionHello),
+    Heartbeat(SessionHeartbeat),
+    StatusChanged(SessionStatusEvent),
+    TurnComplete(SessionStatusEvent),
+    Error(SessionStatusEvent),
+    CommandAck(CommandAck),
+    CommandReject(CommandReject),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SessionHello {
+    pub session_id: String,
+    pub session_epoch: String,
+    pub host_label: String,
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub pid: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SessionHeartbeat {
+    pub session_id: String,
+    pub session_epoch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SessionStatusEvent {
+    pub session_id: String,
+    pub session_epoch: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CommandAck {
+    pub command_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CommandReject {
+    pub command_id: Option<String>,
+    pub session_id: String,
+    pub session_epoch: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ServerMessage {
+    Command(RemoteCommand),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RemoteCommand {
+    pub command_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+    pub kind: RemoteCommandKind,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub issued_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemoteCommandKind {
+    Reply,
+    StatusRequest,
+}

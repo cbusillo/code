@@ -936,6 +936,19 @@ impl App<'_> {
                         widget.on_request_user_input_answer(turn_id, response);
                     }
                 }
+                AppEvent::RemoteInboxReply {
+                    command_id,
+                    text,
+                    issued_by,
+                    response_tx,
+                } => {
+                    let result = if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.on_remote_inbox_reply(command_id, text, issued_by)
+                    } else {
+                        Err("chat widget is not active".to_string())
+                    };
+                    let _ = response_tx.0.send(result);
+                }
                 AppEvent::AutoCoordinatorDecision {
                     seq,
                     status,
