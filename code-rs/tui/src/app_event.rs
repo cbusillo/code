@@ -8,6 +8,7 @@ use code_core::protocol::Event;
 use code_core::protocol::OrderMeta;
 use code_core::protocol::ValidationGroup;
 use code_core::protocol::ApprovedCommandMatchKind;
+use code_core::protocol::ReviewDecision;
 use code_core::protocol::TokenUsage;
 use code_core::git_info::CommitLogEntry;
 use code_core::protocol::ReviewContextMetadata;
@@ -197,6 +198,13 @@ pub(crate) enum AppEvent {
         command_id: String,
         text: String,
         issued_by: Option<String>,
+        response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
+    },
+
+    /// Resolve a local approval prompt from a remote inbox bridge.
+    RemoteInboxApprovalDecision {
+        approval_id: String,
+        decision: ReviewDecision,
         response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
     },
 

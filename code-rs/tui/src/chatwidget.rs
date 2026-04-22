@@ -5795,6 +5795,7 @@ impl ChatWidget<'_> {
     fn handle_exec_approval_now(&mut self, _id: String, ev: ExecApprovalRequestEvent) {
         // Use approval_id when present, otherwise fall back to call_id.
         let approval_id = ev.effective_approval_id();
+        let remote_ev = ev.clone();
         let ticket = self.make_background_before_next_output_ticket();
         self.bottom_pane
             .push_approval_request(ApprovalRequest::Exec {
@@ -5802,6 +5803,7 @@ impl ChatWidget<'_> {
                 command: ev.command,
                 reason: ev.reason,
             }, ticket);
+        self.remote_inbox_send_exec_approval_request(&remote_ev);
     }
 
     /// Handle apply patch approval request immediately
@@ -29997,6 +29999,23 @@ Have we met every part of this goal and is there no further work to do?"#
         Ok(())
     }
 
+    pub(crate) fn on_remote_inbox_approval_decision(
+        &mut self,
+        approval_id: String,
+        decision: code_core::protocol::ReviewDecision,
+    ) -> Result<(), String> {
+        if self
+            .bottom_pane
+            .resolve_approval_decision(&approval_id, decision)
+        {
+            tracing::info!(approval_id, "accepted remote inbox approval decision");
+            Ok(())
+        } else {
+            tracing::warn!(approval_id, "rejected remote inbox approval decision");
+            Err("approval request is no longer active".to_string())
+        }
+    }
+
     fn remote_inbox_send_turn_started(&self) {
         if let Some(client) = &self.remote_inbox_client {
             client.send_turn_started();
@@ -30018,6 +30037,12 @@ Have we met every part of this goal and is there no further work to do?"#
     fn remote_inbox_send_turn_aborted(&self) {
         if let Some(client) = &self.remote_inbox_client {
             client.send_turn_aborted();
+        }
+    }
+
+    fn remote_inbox_send_exec_approval_request(&self, request: &ExecApprovalRequestEvent) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_exec_approval_request(request);
         }
     }
 

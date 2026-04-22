@@ -251,6 +251,24 @@ impl UserApprovalWidget<'_> {
         self.send_decision_with_feedback(decision, String::new())
     }
 
+    pub(crate) fn approval_id(&self) -> Option<&str> {
+        match &self.approval_request {
+            ApprovalRequest::Exec { id, .. } | ApprovalRequest::ApplyPatch { id, .. } => {
+                Some(id.as_str())
+            }
+            ApprovalRequest::TerminalCommand { .. } => None,
+        }
+    }
+
+    pub(crate) fn decide_remotely(&mut self, approval_id: &str, decision: ReviewDecision) -> bool {
+        if self.done || self.approval_id() != Some(approval_id) {
+            return false;
+        }
+
+        self.send_decision_with_feedback(decision, "decided from Discord".to_string());
+        true
+    }
+
     fn send_decision_with_feedback(&mut self, decision: ReviewDecision, feedback: String) {
         if let ApprovalRequest::TerminalCommand { id, .. } = &self.approval_request {
             let approved = matches!(decision, ReviewDecision::Approved | ReviewDecision::ApprovedForSession);

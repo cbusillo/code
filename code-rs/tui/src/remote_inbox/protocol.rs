@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use code_core::protocol::ReviewDecision;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -9,6 +10,9 @@ pub(crate) enum ClientMessage {
     StatusChanged(SessionStatusEvent),
     TurnComplete(SessionStatusEvent),
     Error(SessionStatusEvent),
+    ApprovalRequest(RemoteApprovalRequest),
+    ApprovalDecisionAck(RemoteApprovalDecisionAck),
+    ApprovalDecisionReject(RemoteApprovalDecisionReject),
     CommandAck(CommandAck),
     CommandReject(CommandReject),
 }
@@ -53,10 +57,38 @@ pub(crate) struct CommandReject {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RemoteApprovalRequest {
+    pub approval_id: String,
+    pub call_id: String,
+    pub turn_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RemoteApprovalDecisionAck {
+    pub approval_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RemoteApprovalDecisionReject {
+    pub approval_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ServerMessage {
     Command(RemoteCommand),
+    ApprovalDecision(RemoteApprovalDecision),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,4 +108,12 @@ pub(crate) struct RemoteCommand {
 pub(crate) enum RemoteCommandKind {
     Reply,
     StatusRequest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RemoteApprovalDecision {
+    pub approval_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+    pub decision: ReviewDecision,
 }

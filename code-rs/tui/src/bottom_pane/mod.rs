@@ -747,6 +747,26 @@ impl BottomPane<'_> {
         self.request_redraw()
     }
 
+    pub(crate) fn resolve_approval_decision(
+        &mut self,
+        approval_id: &str,
+        decision: code_core::protocol::ReviewDecision,
+    ) -> bool {
+        let Some(view) = self.active_view.as_mut() else {
+            return false;
+        };
+
+        let resolved = view.resolve_approval_decision(approval_id, decision);
+        if resolved {
+            if view.is_complete() {
+                self.active_view = None;
+                self.active_view_kind = ActiveViewKind::None;
+            }
+            self.request_redraw();
+        }
+        resolved
+    }
+
     /// Show the model selection UI
     pub fn show_model_selection(
         &mut self,

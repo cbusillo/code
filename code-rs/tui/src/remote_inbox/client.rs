@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use code_core::config::RemoteInboxConfig;
+use code_core::protocol::ExecApprovalRequestEvent;
 use futures::SinkExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -21,6 +22,9 @@ use crate::app_event_sender::AppEventSender;
 use crate::remote_inbox::protocol::ClientMessage;
 use crate::remote_inbox::protocol::CommandAck;
 use crate::remote_inbox::protocol::CommandReject;
+use crate::remote_inbox::protocol::RemoteApprovalDecisionAck;
+use crate::remote_inbox::protocol::RemoteApprovalDecisionReject;
+use crate::remote_inbox::protocol::RemoteApprovalRequest;
 use crate::remote_inbox::protocol::RemoteCommandKind;
 use crate::remote_inbox::protocol::ServerMessage;
 use crate::remote_inbox::protocol::SessionHeartbeat;
@@ -30,6 +34,7 @@ use crate::remote_inbox::protocol::SessionStatusEvent;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const REPLY_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PROCESSED_COMMAND_IDS: usize = 1024;
 
 type PendingReplyFuture = Pin<Box<dyn Future<Output = PendingReplyResult> + Send>>;
@@ -82,6 +87,19 @@ impl RemoteInboxClientHandle {
             Some("Turn aborted".to_string()),
             None,
         )));
+    }
+
+    pub(crate) fn send_exec_approval_request(&self, request: &ExecApprovalRequestEvent) {
+        self.send_status(ClientMessage::ApprovalRequest(RemoteApprovalRequest {
+            approval_id: request.effective_approval_id(),
+            call_id: request.call_id.clone(),
+            turn_id: request.turn_id.clone(),
+            session_id: self.session_id.clone(),
+            session_epoch: self.session_epoch.clone(),
+            command: request.command.clone(),
+            cwd: request.cwd.display().to_string(),
+            reason: request.reason.clone(),
+        }));
     }
 
     fn status_event(
@@ -407,6 +425,95 @@ where
                             command_id: command.command_id,
                             session_id: session.session_id.clone(),
                             session_epoch: session.session_epoch.clone(),
+                        }),
+                    )
+                    .await?;
+                }
+            }
+        }
+        ServerMessage::ApprovalDecision(decision) => {
+            if decision.session_id != session.session_id
+                || decision.session_epoch != session.session_epoch
+            {
+                send_json(
+                    write,
+                    &ClientMessage::ApprovalDecisionReject(RemoteApprovalDecisionReject {
+                        approval_id: decision.approval_id,
+                        session_id: session.session_id.clone(),
+                        session_epoch: session.session_epoch.clone(),
+                        reason: "approval decision targets a different session".to_string(),
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let approval_id = decision.approval_id.clone();
+            let accepted = app_event_tx.send_with_result(AppEvent::RemoteInboxApprovalDecision {
+                approval_id: approval_id.clone(),
+                decision: decision.decision,
+                response_tx: Redacted(response_tx),
+            });
+            if !accepted {
+                send_json(
+                    write,
+                    &ClientMessage::ApprovalDecisionReject(RemoteApprovalDecisionReject {
+                        approval_id,
+                        session_id: session.session_id.clone(),
+                        session_epoch: session.session_epoch.clone(),
+                        reason: "app event channel is closed".to_string(),
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+
+            match tokio::time::timeout(APPROVAL_DECISION_TIMEOUT, response_rx).await {
+                Ok(Ok(Ok(()))) => {
+                    send_json(
+                        write,
+                        &ClientMessage::ApprovalDecisionAck(RemoteApprovalDecisionAck {
+                            approval_id,
+                            session_id: session.session_id.clone(),
+                            session_epoch: session.session_epoch.clone(),
+                        }),
+                    )
+                    .await?;
+                }
+                Ok(Ok(Err(reason))) => {
+                    send_json(
+                        write,
+                        &ClientMessage::ApprovalDecisionReject(RemoteApprovalDecisionReject {
+                            approval_id,
+                            session_id: session.session_id.clone(),
+                            session_epoch: session.session_epoch.clone(),
+                            reason,
+                        }),
+                    )
+                    .await?;
+                }
+                Ok(Err(_)) => {
+                    send_json(
+                        write,
+                        &ClientMessage::ApprovalDecisionReject(RemoteApprovalDecisionReject {
+                            approval_id,
+                            session_id: session.session_id.clone(),
+                            session_epoch: session.session_epoch.clone(),
+                            reason: "remote approval decision acceptance was canceled".to_string(),
+                        }),
+                    )
+                    .await?;
+                }
+                Err(_) => {
+                    send_json(
+                        write,
+                        &ClientMessage::ApprovalDecisionReject(RemoteApprovalDecisionReject {
+                            approval_id,
+                            session_id: session.session_id.clone(),
+                            session_epoch: session.session_epoch.clone(),
+                            reason: "timed out waiting for app to accept approval decision"
+                                .to_string(),
                         }),
                     )
                     .await?;

@@ -1,5 +1,6 @@
 use crate::chatwidget::BackgroundOrderTicket;
 use crate::user_approval_widget::ApprovalRequest;
+use code_core::protocol::ReviewDecision;
 use crossterm::event::KeyEvent;
 use std::any::Any;
 use ratatui::buffer::Buffer;
@@ -80,6 +81,15 @@ pub(crate) trait BottomPaneView<'a> {
         ticket: BackgroundOrderTicket,
     ) -> Option<(ApprovalRequest, BackgroundOrderTicket)> {
         Some((request, ticket))
+    }
+
+    /// Resolve a pending approval from a non-keyboard source.
+    fn resolve_approval_decision(
+        &mut self,
+        _approval_id: &str,
+        _decision: ReviewDecision,
+    ) -> bool {
+        false
     }
 
     /// Handle pasted text while this view is active. Return whether a redraw

@@ -949,6 +949,18 @@ impl App<'_> {
                     };
                     let _ = response_tx.0.send(result);
                 }
+                AppEvent::RemoteInboxApprovalDecision {
+                    approval_id,
+                    decision,
+                    response_tx,
+                } => {
+                    let result = if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.on_remote_inbox_approval_decision(approval_id, decision)
+                    } else {
+                        Err("chat widget is not active".to_string())
+                    };
+                    let _ = response_tx.0.send(result);
+                }
                 AppEvent::AutoCoordinatorDecision {
                     seq,
                     status,

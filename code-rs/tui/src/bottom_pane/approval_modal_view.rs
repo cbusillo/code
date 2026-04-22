@@ -1,4 +1,5 @@
 use crossterm::event::KeyEvent;
+use code_core::protocol::ReviewDecision;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::WidgetRef;
@@ -50,6 +51,19 @@ impl ApprovalModalView<'_> {
             }
         }
     }
+
+    pub fn resolve_approval_decision(
+        &mut self,
+        approval_id: &str,
+        decision: ReviewDecision,
+    ) -> bool {
+        if self.current.decide_remotely(approval_id, decision) {
+            self.maybe_advance();
+            return true;
+        }
+
+        false
+    }
 }
 
 impl<'a> BottomPaneView<'a> for ApprovalModalView<'a> {
@@ -83,5 +97,13 @@ impl<'a> BottomPaneView<'a> for ApprovalModalView<'a> {
     ) -> Option<(ApprovalRequest, BackgroundOrderTicket)> {
         self.enqueue_request(req, ticket);
         None
+    }
+
+    fn resolve_approval_decision(
+        &mut self,
+        approval_id: &str,
+        decision: ReviewDecision,
+    ) -> bool {
+        ApprovalModalView::resolve_approval_decision(self, approval_id, decision)
     }
 }
