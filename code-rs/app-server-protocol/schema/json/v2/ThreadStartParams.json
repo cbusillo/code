@@ -59,6 +59,12 @@
         "inputSchema": true,
         "name": {
           "type": "string"
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

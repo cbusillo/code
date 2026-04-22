@@ -381,6 +381,8 @@ pub struct ToolsV2 {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct DynamicToolSpec {
+    #[ts(optional)]
+    pub namespace: Option<String>,
     pub name: String,
     pub description: String,
     pub input_schema: JsonValue,
@@ -2689,6 +2691,15 @@ pub enum ThreadItem {
     ImageView { id: String, path: String },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    ImageGeneration {
+        id: String,
+        status: String,
+        revised_prompt: Option<String>,
+        result: String,
+        saved_path: Option<AbsolutePathBuf>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     EnteredReviewMode { id: String, review: String },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -2765,6 +2776,13 @@ impl From<CoreTurnItem> for ThreadItem {
                 id: search.id,
                 query: search.query,
                 action: Some(WebSearchAction::from(search.action)),
+            },
+            CoreTurnItem::ImageGeneration(image) => ThreadItem::ImageGeneration {
+                id: image.id,
+                status: image.status,
+                revised_prompt: image.revised_prompt,
+                result: image.result,
+                saved_path: image.saved_path,
             },
             CoreTurnItem::ContextCompaction(compaction) => {
                 ThreadItem::ContextCompaction { id: compaction.id }
@@ -3252,6 +3270,8 @@ pub struct DynamicToolCallParams {
     pub thread_id: String,
     pub turn_id: String,
     pub call_id: String,
+    #[ts(optional = nullable)]
+    pub namespace: Option<String>,
     pub tool: String,
     pub arguments: JsonValue,
 }

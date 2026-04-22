@@ -46,6 +46,7 @@ impl NetworkSandboxPolicy {
     Debug,
     Clone,
     Copy,
+    Hash,
     PartialEq,
     Eq,
     PartialOrd,
@@ -74,7 +75,7 @@ impl FileSystemAccessMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind")]
 pub enum FileSystemSpecialPath {
@@ -117,7 +118,7 @@ impl FileSystemSpecialPath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 pub struct FileSystemSandboxEntry {
     pub path: FileSystemPath,
     pub access: FileSystemAccessMode,
@@ -138,6 +139,9 @@ pub enum FileSystemSandboxKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct FileSystemSandboxPolicy {
     pub kind: FileSystemSandboxKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub glob_scan_max_depth: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<FileSystemSandboxEntry>,
 }
@@ -236,7 +240,7 @@ impl ReadDenyMatcher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type")]
 pub enum FileSystemPath {
@@ -257,6 +261,7 @@ impl Default for FileSystemSandboxPolicy {
     fn default() -> Self {
         Self {
             kind: FileSystemSandboxKind::Restricted,
+            glob_scan_max_depth: None,
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
                     value: FileSystemSpecialPath::Root,
@@ -271,6 +276,7 @@ impl FileSystemSandboxPolicy {
     pub fn unrestricted() -> Self {
         Self {
             kind: FileSystemSandboxKind::Unrestricted,
+            glob_scan_max_depth: None,
             entries: Vec::new(),
         }
     }
@@ -278,6 +284,7 @@ impl FileSystemSandboxPolicy {
     pub fn external_sandbox() -> Self {
         Self {
             kind: FileSystemSandboxKind::ExternalSandbox,
+            glob_scan_max_depth: None,
             entries: Vec::new(),
         }
     }
@@ -285,6 +292,7 @@ impl FileSystemSandboxPolicy {
     pub fn restricted(entries: Vec<FileSystemSandboxEntry>) -> Self {
         Self {
             kind: FileSystemSandboxKind::Restricted,
+            glob_scan_max_depth: None,
             entries,
         }
     }
@@ -317,6 +325,7 @@ impl FileSystemSandboxPolicy {
         if !matches!(rebuilt.kind, FileSystemSandboxKind::Restricted) {
             return rebuilt;
         }
+        rebuilt.glob_scan_max_depth = existing.glob_scan_max_depth;
 
         for deny_entry in existing
             .entries
@@ -747,13 +756,14 @@ impl FileSystemSandboxPolicy {
             FileSystemSandboxKind::Restricted => {
                 let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
                 let mut include_platform_defaults = false;
-                let mut has_full_disk_read_access = false;
-                let mut has_full_disk_write_access = false;
+                let has_full_disk_read_access = self.has_full_disk_read_access();
+                let has_full_disk_write_access = self.has_full_disk_write_access();
                 let mut workspace_root_writable = false;
                 let mut writable_roots = Vec::new();
                 let mut readable_roots = Vec::new();
                 let mut tmpdir_writable = false;
                 let mut slash_tmp_writable = false;
+                let mut unbridgeable_root_write = false;
 
                 for entry in &self.entries {
                     match &entry.path {
@@ -772,10 +782,15 @@ impl FileSystemSandboxPolicy {
                         FileSystemPath::Special { value } => match value {
                             FileSystemSpecialPath::Root => match entry.access {
                                 FileSystemAccessMode::None => {}
-                                FileSystemAccessMode::Read => has_full_disk_read_access = true,
+                                FileSystemAccessMode::Read => {
+                                    if !has_full_disk_read_access
+                                        && let Some(cwd) = cwd_absolute.as_ref()
+                                    {
+                                        readable_roots.push(absolute_root_path_for_cwd(cwd));
+                                    }
+                                }
                                 FileSystemAccessMode::Write => {
-                                    has_full_disk_read_access = true;
-                                    has_full_disk_write_access = true;
+                                    unbridgeable_root_write = true;
                                 }
                             },
                             FileSystemSpecialPath::Minimal => {
@@ -870,7 +885,11 @@ impl FileSystemSandboxPolicy {
                         exclude_tmpdir_env_var: !tmpdir_writable,
                         exclude_slash_tmp: !slash_tmp_writable,
                     }
-                } else if !writable_roots.is_empty() || tmpdir_writable || slash_tmp_writable {
+                } else if unbridgeable_root_write
+                    || !writable_roots.is_empty()
+                    || tmpdir_writable
+                    || slash_tmp_writable
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "permissions profile requests filesystem writes outside the workspace root, which is not supported until the runtime enforces FileSystemSandboxPolicy directly",
@@ -2078,6 +2097,11 @@ mod tests {
         );
         assert!(
             policy.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, cwd.path(),)
+        );
+        assert!(
+            policy
+                .to_legacy_sandbox_policy(NetworkSandboxPolicy::Restricted, cwd.path())
+                .is_err()
         );
     }
 

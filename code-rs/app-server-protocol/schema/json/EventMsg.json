@@ -1201,6 +1201,70 @@
           "type": "object"
         },
         {
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "image_generation_begin"
+              ],
+              "title": "ImageGenerationBeginEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call_id",
+            "type"
+          ],
+          "title": "ImageGenerationBeginEventMsg",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string"
+            },
+            "revised_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "saved_path": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "image_generation_end"
+              ],
+              "title": "ImageGenerationEndEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call_id",
+            "result",
+            "status",
+            "type"
+          ],
+          "title": "ImageGenerationEndEventMsg",
+          "type": "object"
+        },
+        {
           "description": "Notification that the server is about to execute a command.",
           "properties": {
             "call_id": {
@@ -1588,6 +1652,12 @@
             "arguments": true,
             "callId": {
               "type": "string"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tool": {
               "type": "string"
@@ -5322,6 +5392,50 @@
             "id": {
               "type": "string"
             },
+            "result": {
+              "type": "string"
+            },
+            "revised_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "saved_path": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AbsolutePathBuf"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "ImageGeneration"
+              ],
+              "title": "ImageGenerationTurnItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "result",
+            "status",
+            "type"
+          ],
+          "title": "ImageGenerationTurnItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
             "type": {
               "enum": [
                 "ContextCompaction"
@@ -6300,6 +6414,70 @@
       "type": "object"
     },
     {
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "image_generation_begin"
+          ],
+          "title": "ImageGenerationBeginEventMsgType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "type"
+      ],
+      "title": "ImageGenerationBeginEventMsg",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "revised_prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "saved_path": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "image_generation_end"
+          ],
+          "title": "ImageGenerationEndEventMsgType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "result",
+        "status",
+        "type"
+      ],
+      "title": "ImageGenerationEndEventMsg",
+      "type": "object"
+    },
+    {
       "description": "Notification that the server is about to execute a command.",
       "properties": {
         "call_id": {
@@ -6687,6 +6865,12 @@
         "arguments": true,
         "callId": {
           "type": "string"
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tool": {
           "type": "string"

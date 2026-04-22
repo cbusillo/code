@@ -474,6 +474,13 @@ impl ModelClient {
             } else {
                 AuthMode::ApiKey
             }));
+        let image_generation_auth_allowed = self
+            .auth_manager
+            .as_ref()
+            .and_then(|manager| manager.auth().map(|auth| auth.mode))
+            .is_some_and(|mode| matches!(mode, AuthMode::Chatgpt));
+        tools_config.image_gen_tool = model_family.supports_image_generation
+            && image_generation_auth_allowed;
         let supports_pro_only_models = self
             .auth_manager
             .as_ref()

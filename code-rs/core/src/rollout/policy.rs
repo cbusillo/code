@@ -70,7 +70,8 @@ pub(crate) fn should_persist_response_item_for_memories(item: &RolloutItem) -> b
 pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
     !matches!(
         ev,
-        EventMsg::AgentMessageDelta(_)
+        EventMsg::ImageGenerationBegin(_)
+            | EventMsg::AgentMessageDelta(_)
             | EventMsg::AgentReasoningDelta(_)
             | EventMsg::AgentReasoningRawContentDelta(_)
     )

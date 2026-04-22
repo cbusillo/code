@@ -49,7 +49,6 @@ use crate::request_permissions::RequestPermissionsEvent;
 use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
-use codex_git_utils::GitSha;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -67,6 +66,7 @@ pub use crate::approvals::ExecPolicyAmendment;
 pub use crate::approvals::GuardianAssessmentAction;
 pub use crate::approvals::GuardianAssessmentDecisionSource;
 pub use crate::approvals::GuardianAssessmentEvent;
+pub use crate::approvals::GuardianAssessmentOutcome;
 pub use crate::approvals::GuardianAssessmentStatus;
 pub use crate::approvals::GuardianCommandSource;
 pub use crate::approvals::GuardianRiskLevel;
@@ -102,6 +102,17 @@ pub const COLLABORATION_MODE_CLOSE_TAG: &str = "</collaboration_mode>";
 pub const REALTIME_CONVERSATION_OPEN_TAG: &str = "<realtime_conversation>";
 pub const REALTIME_CONVERSATION_CLOSE_TAG: &str = "</realtime_conversation>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
+#[serde(transparent)]
+#[ts(type = "string")]
+pub struct GitSha(pub String);
+
+impl GitSha {
+    pub fn new(sha: &str) -> Self {
+        Self(sha.to_string())
+    }
+}
 
 /// Submission Queue Entry - requests from user
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -319,6 +330,12 @@ pub struct RealtimeHandoffRequested {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct RealtimeNoopRequested {
+    pub call_id: String,
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct RealtimeInputAudioSpeechStarted {
     pub item_id: Option<String>,
 }
@@ -358,6 +375,7 @@ pub enum RealtimeEvent {
         item_id: String,
     },
     HandoffRequested(RealtimeHandoffRequested),
+    NoopRequested(RealtimeNoopRequested),
     Error(String),
 }
 
@@ -1536,6 +1554,9 @@ pub enum EventMsg {
     /// `ExecCommandBegin` so front‑ends can show progress indicators.
     PatchApplyBegin(PatchApplyBeginEvent),
 
+    /// Latest model-generated structured changes for an `apply_patch` call.
+    PatchApplyUpdated(PatchApplyUpdatedEvent),
+
     /// Notification that a patch application has finished.
     PatchApplyEnd(PatchApplyEndEvent),
 
@@ -1607,6 +1628,7 @@ pub enum EventMsg {
 #[serde(rename_all = "snake_case")]
 pub enum HookEventName {
     PreToolUse,
+    PermissionRequest,
     PostToolUse,
     SessionStart,
     UserPromptSubmit,
@@ -2186,6 +2208,18 @@ pub struct RateLimitSnapshot {
     pub secondary: Option<RateLimitWindow>,
     pub credits: Option<CreditsSnapshot>,
     pub plan_type: Option<crate::account::PlanType>,
+    pub rate_limit_reached_type: Option<RateLimitReachedType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum RateLimitReachedType {
+    RateLimitReached,
+    WorkspaceOwnerCreditsDepleted,
+    WorkspaceMemberCreditsDepleted,
+    WorkspaceOwnerUsageLimitReached,
+    WorkspaceMemberUsageLimitReached,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
@@ -2407,6 +2441,9 @@ pub struct DynamicToolCallResponseEvent {
     pub call_id: String,
     /// Turn ID that this dynamic tool call belongs to.
     pub turn_id: String,
+    /// Dynamic tool namespace, when one was provided.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Dynamic tool name.
     pub tool: String,
     /// Dynamic tool call arguments.
@@ -2696,6 +2733,9 @@ impl SessionSource {
         match self {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_path, .. }) => {
                 agent_path.clone()
+            }
+            SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => {
+                Some(AgentPath::morpheus())
             }
             _ => None,
         }
@@ -3227,6 +3267,14 @@ pub struct PatchApplyBeginEvent {
     /// If true, there was no ApplyPatchApprovalRequest for this patch.
     pub auto_approved: bool,
     /// The changes to be applied.
+    pub changes: HashMap<PathBuf, FileChange>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct PatchApplyUpdatedEvent {
+    /// Identifier for the originating `apply_patch` tool call.
+    pub call_id: String,
+    /// Structured file changes parsed from the model-generated patch input so far.
     pub changes: HashMap<PathBuf, FileChange>,
 }
 

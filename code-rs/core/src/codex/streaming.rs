@@ -52,6 +52,7 @@ const SEARCH_TOOL_DEVELOPER_INSTRUCTIONS: &str =
 const TOOL_SEARCH_TOOL_NAME: &str = "tool_search";
 const LEGACY_SEARCH_TOOL_BM25_TOOL_NAME: &str = "search_tool_bm25";
 const CODEX_APPS_TOOL_PREFIX: &str = "mcp__codex_apps__";
+const GENERATED_IMAGE_ARTIFACTS_DIR: &str = "generated_images";
 const AUTO_CONTEXT_JUDGE_MIN_TOKENS: u64 = 150_000;
 const AUTO_CONTEXT_FORCE_COMPACT_MARGIN_TOKENS: u64 = 20_000;
 const AUTO_CONTEXT_ESTIMATED_BYTES_PER_TOKEN: u64 = 4;
@@ -704,6 +705,12 @@ pub(super) async fn submission_loop(
                     } else {
                         AppAuthMode::ApiKey
                     }));
+                let image_generation_auth_allowed = auth_manager
+                    .as_ref()
+                    .and_then(|manager| manager.auth().map(|auth| auth.mode))
+                    .is_some_and(|mode| matches!(mode, AppAuthMode::Chatgpt));
+                tools_config.image_gen_tool = config.model_family.supports_image_generation
+                    && image_generation_auth_allowed;
                 let supports_pro_only_models = auth_manager
                     .as_ref()
                     .is_some_and(|manager| manager.supports_pro_only_models());
@@ -4349,6 +4356,7 @@ async fn handle_response_item(
         }
         ResponseItem::FunctionCall {
             name,
+            namespace,
             arguments,
             call_id,
             ..
@@ -4359,6 +4367,7 @@ async fn handle_response_item(
                     sess,
                     turn_diff_tracker,
                     sub_id.to_string(),
+                    namespace,
                     name,
                     arguments,
                     call_id,
@@ -4465,11 +4474,161 @@ async fn handle_response_item(
             }
             None
         }
-        ResponseItem::ImageGenerationCall { .. } => None,
+        ResponseItem::ImageGenerationCall {
+            id,
+            status,
+            revised_prompt,
+            result,
+        } => {
+            handle_image_generation_call(
+                sess,
+                sub_id,
+                id,
+                status,
+                revised_prompt,
+                result,
+                seq_hint,
+                output_index,
+                attempt_req,
+            )
+            .await;
+            None
+        }
         ResponseItem::GhostSnapshot { .. } => None,
         ResponseItem::Other => None,
     };
     Ok(output)
+}
+
+async fn handle_image_generation_call(
+    sess: &Session,
+    sub_id: &str,
+    call_id: String,
+    status: String,
+    revised_prompt: Option<String>,
+    result: String,
+    seq_hint: Option<u64>,
+    output_index: Option<u32>,
+    attempt_req: u64,
+) {
+    let order = crate::protocol::OrderMeta {
+        request_ordinal: attempt_req,
+        output_index,
+        sequence_number: seq_hint,
+    };
+    let begin = sess.make_event_with_order(
+        sub_id,
+        EventMsg::ImageGenerationBegin(crate::protocol::ImageGenerationBeginEvent {
+            call_id: call_id.clone(),
+        }),
+        order.clone(),
+        seq_hint,
+    );
+    sess.send_event(begin).await;
+
+    let saved_path = match save_image_generation_result(
+        sess.client.code_home(),
+        &sess.session_uuid().to_string(),
+        &call_id,
+        &result,
+    )
+    .await
+    {
+        Ok(path) => {
+            let image_output_dir = path
+                .as_path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| sess.client.code_home().to_path_buf());
+            let text = format!(
+                "Generated images are saved under {}. This image was saved to {}.\nIf you need to use a generated image at another path, copy it and leave the original in place unless the user explicitly asks you to delete it.",
+                image_output_dir.display(),
+                path.display()
+            );
+            let message = ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText { text }],
+                end_turn: None,
+                phase: None,
+            };
+            sess.record_conversation_items(&[message]).await;
+            Some(path)
+        }
+        Err(err) => {
+            let expected_path = image_generation_artifact_path(
+                sess.client.code_home(),
+                &sess.session_uuid().to_string(),
+                &call_id,
+            );
+            warn!(
+                "failed to save image generation result to {}: {err}",
+                expected_path.display()
+            );
+            None
+        }
+    };
+
+    let end = sess.make_event_with_order(
+        sub_id,
+        EventMsg::ImageGenerationEnd(crate::protocol::ImageGenerationEndEvent {
+            call_id,
+            status,
+            revised_prompt,
+            result,
+            saved_path,
+        }),
+        order,
+        seq_hint,
+    );
+    sess.send_event(end).await;
+}
+
+fn image_generation_artifact_path(code_home: &Path, session_id: &str, call_id: &str) -> PathBuf {
+    fn sanitize(value: &str) -> String {
+        let sanitized: String = value
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if sanitized.is_empty() {
+            "generated_image".to_string()
+        } else {
+            sanitized
+        }
+    }
+
+    code_home
+        .join(GENERATED_IMAGE_ARTIFACTS_DIR)
+        .join(sanitize(session_id))
+        .join(format!("{}.png", sanitize(call_id)))
+}
+
+async fn save_image_generation_result(
+    code_home: &Path,
+    session_id: &str,
+    call_id: &str,
+    result: &str,
+) -> std::result::Result<code_utils_absolute_path::AbsolutePathBuf, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(result.trim().as_bytes())
+        .map_err(|err| format!("invalid image generation payload: {err}"))?;
+    let path = image_generation_artifact_path(code_home, session_id, call_id);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|err| err.to_string())?;
+    code_utils_absolute_path::AbsolutePathBuf::from_absolute_path(path)
+        .map_err(|err| err.to_string())
 }
 
 fn web_search_query(query: &Option<String>, queries: &Option<Vec<String>>) -> Option<String> {
@@ -4590,6 +4749,7 @@ async fn handle_function_call(
     sess: &Session,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
+    namespace: Option<String>,
     name: String,
     arguments: String,
     call_id: String,
@@ -4664,8 +4824,8 @@ async fn handle_function_call(
             .await
         }
         _ => {
-            if sess.is_dynamic_tool(&name) {
-                return handle_dynamic_tool_call(sess, &ctx, name, arguments).await;
+            if sess.is_dynamic_tool(namespace.as_deref(), &name) {
+                return handle_dynamic_tool_call(sess, &ctx, namespace, name, arguments).await;
             }
             match sess.mcp_connection_manager.parse_tool_name(&name) {
                 Some((server, tool_name)) => {
@@ -4803,6 +4963,7 @@ async fn handle_request_user_input(
 async fn handle_dynamic_tool_call(
     sess: &Session,
     ctx: &ToolCallCtx,
+    namespace: Option<String>,
     tool_name: String,
     arguments: String,
 ) -> ResponseInputItem {
@@ -4839,6 +5000,7 @@ async fn handle_dynamic_tool_call(
         EventMsg::DynamicToolCallRequest(code_protocol::dynamic_tools::DynamicToolCallRequest {
             call_id: ctx.call_id.clone(),
             turn_id: ctx.sub_id.clone(),
+            namespace,
             tool: tool_name,
             arguments: args,
         }),
@@ -13941,8 +14103,10 @@ mod tests {
         custom_tool_event_result_text,
         ContextFallbackCandidate,
         format_exec_output_with_limit,
+        image_generation_artifact_path,
         is_context_overflow_stream_error,
         is_usage_limit_stream_error,
+        save_image_generation_result,
         spark_fallback_model,
         TRUNCATION_MARKER,
     };
@@ -13963,6 +14127,40 @@ mod tests {
             duration: Duration::from_secs(1),
             timed_out: false,
         }
+    }
+
+    #[test]
+    fn image_generation_artifact_path_sanitizes_session_and_call_ids() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = image_generation_artifact_path(dir.path(), "session/../1", "../ig?..123");
+
+        assert_eq!(
+            path,
+            dir.path()
+                .join("generated_images")
+                .join("session____1")
+                .join("___ig___123.png")
+        );
+    }
+
+    #[tokio::test]
+    async fn save_image_generation_result_writes_png_payload() {
+        let dir = TempDir::new().expect("tempdir");
+        let saved_path = save_image_generation_result(dir.path(), "session-1", "ig_123", "Zm9v")
+            .await
+            .expect("image should save");
+
+        assert_eq!(std::fs::read(saved_path.as_path()).expect("saved file"), b"foo");
+    }
+
+    #[tokio::test]
+    async fn save_image_generation_result_rejects_non_standard_base64() {
+        let dir = TempDir::new().expect("tempdir");
+        let err = save_image_generation_result(dir.path(), "session-1", "ig_123", "_-8")
+            .await
+            .expect_err("invalid payload should fail");
+
+        assert!(err.contains("invalid image generation payload"));
     }
 
     #[test]

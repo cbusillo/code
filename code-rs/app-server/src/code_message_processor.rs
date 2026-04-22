@@ -12,36 +12,15 @@ use code_app_server_protocol::GetAccountResponse;
 use code_app_server_protocol::LoginAccountParams;
 use code_app_server_protocol::LoginAccountResponse;
 use code_app_server_protocol::LogoutAccountResponse;
-use code_app_server_protocol::Model as V2Model;
-use code_app_server_protocol::ModelListParams;
-use code_app_server_protocol::ModelListResponse;
-use code_app_server_protocol::ModelUpgradeInfo;
-use code_app_server_protocol::ReasoningEffortOption;
-use code_app_server_protocol::ReviewStartParams;
-use code_app_server_protocol::ReviewStartResponse;
-use code_app_server_protocol::ReviewTarget as V2ReviewTarget;
-use code_app_server_protocol::Thread;
-use code_app_server_protocol::ThreadItem;
-use code_app_server_protocol::ThreadResumeParams;
-use code_app_server_protocol::ThreadResumeResponse;
-use code_app_server_protocol::Turn;
-use code_app_server_protocol::TurnStartParams;
-use code_app_server_protocol::TurnStartResponse;
-use code_app_server_protocol::TurnStatus;
-use code_app_server_protocol::UserInput as V2UserInput;
 use code_app_server_protocol::ToolRequestUserInputOption;
 use code_app_server_protocol::ToolRequestUserInputParams;
 use code_app_server_protocol::ToolRequestUserInputQuestion;
 use code_app_server_protocol::ToolRequestUserInputResponse;
-use code_common::model_presets::all_model_presets;
-use code_common::model_presets::model_preset_available_for_auth;
-use code_app_server_protocol::AuthMode;
 use code_core::AuthManager;
 use code_core::CodexConversation;
 use code_core::ConversationManager;
 use code_core::NewConversation;
 use code_core::RolloutRecorder;
-use code_core::SessionCatalog;
 use code_core::Cursor;
 use code_core::config::Config;
 use code_core::config::ConfigOverrides;
@@ -58,7 +37,6 @@ use code_core::protocol::ExecApprovalRequestEvent;
 use code_protocol::mcp_protocol::FuzzyFileSearchParams;
 use code_protocol::mcp_protocol::FuzzyFileSearchResponse;
 use code_protocol::protocol::ReviewDecision;
-use code_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use mcp_types::JSONRPCErrorError;
 use mcp_types::RequestId;
 use code_login::CLIENT_ID;
@@ -71,7 +49,6 @@ use tokio::time::Duration;
 use tokio::time::timeout;
 use tracing::error;
 use uuid::Uuid;
-use chrono::DateTime;
 
 use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
@@ -142,7 +119,6 @@ use code_protocol::mcp_protocol::LogoutChatGptResponse;
 use code_protocol::account::PlanType;
 use code_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use code_protocol::protocol::RateLimitWindow as CoreRateLimitWindow;
-use code_protocol::config_types::ModeKind;
 
 // Removed deprecated ChatGPT login support scaffolding
 
@@ -169,8 +145,6 @@ pub struct CodexMessageProcessor {
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     // Queue of pending interrupt requests per conversation. We reply when TurnAborted arrives.
     pending_interrupts: Arc<Mutex<HashMap<Uuid, Vec<RequestId>>>>,
-    conversation_configs: Arc<Mutex<HashMap<ConversationId, Config>>>,
-    resumed_conversation_aliases: Arc<Mutex<HashMap<ConversationId, ConversationId>>>,
     #[allow(dead_code)]
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
@@ -192,37 +166,8 @@ impl CodexMessageProcessor {
             conversation_listeners: HashMap::new(),
             active_login: Arc::new(Mutex::new(None)),
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
-            conversation_configs: Arc::new(Mutex::new(HashMap::new())),
-            resumed_conversation_aliases: Arc::new(Mutex::new(HashMap::new())),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    async fn resolve_conversation_id_alias(
-        &self,
-        conversation_id: ConversationId,
-    ) -> ConversationId {
-        self.resumed_conversation_aliases
-            .lock()
-            .await
-            .get(&conversation_id)
-            .copied()
-            .unwrap_or(conversation_id)
-    }
-
-    async fn conversation_config(&self, conversation_id: ConversationId) -> Option<Config> {
-        self.conversation_configs
-            .lock()
-            .await
-            .get(&conversation_id)
-            .cloned()
-    }
-
-    async fn remember_conversation_config(&self, conversation_id: ConversationId, config: &Config) {
-        self.conversation_configs
-            .lock()
-            .await
-            .insert(conversation_id, config.clone());
     }
 
     pub async fn process_request(&mut self, request: ClientRequest) {
@@ -599,11 +544,7 @@ impl CodexMessageProcessor {
     }
 
     async fn process_new_conversation(&self, request_id: RequestId, params: NewConversationParams) {
-        let config = match derive_config_from_params(
-            params,
-            None,
-            self.code_linux_sandbox_exe.clone(),
-        ) {
+        let config = match derive_config_from_params(params, self.code_linux_sandbox_exe.clone()) {
             Ok(config) => config,
             Err(err) => {
                 let error = JSONRPCErrorError {
@@ -616,17 +557,13 @@ impl CodexMessageProcessor {
             }
         };
 
-        match self
-            .conversation_manager
-            .new_conversation(config.clone())
-            .await
-        {
-            Ok(NewConversation {
-                conversation_id,
-                session_configured,
-                ..
-            }) => {
-                self.remember_conversation_config(conversation_id, &config).await;
+        match self.conversation_manager.new_conversation(config).await {
+            Ok(conversation_id) => {
+                let NewConversation {
+                    conversation_id,
+                    session_configured,
+                    ..
+                } = conversation_id;
                 let response = NewConversationResponse {
                     conversation_id,
                     model: session_configured.model,
@@ -652,7 +589,6 @@ impl CodexMessageProcessor {
             conversation_id,
             items,
         } = params;
-        let conversation_id = self.resolve_conversation_id_alias(conversation_id).await;
         let Ok(conversation) = self
             .conversation_manager
             .get_conversation(conversation_id)
@@ -746,7 +682,6 @@ impl CodexMessageProcessor {
         params: InterruptConversationParams,
     ) {
         let InterruptConversationParams { conversation_id } = params;
-        let conversation_id = self.resolve_conversation_id_alias(conversation_id).await;
         let Ok(conversation) = self
             .conversation_manager
             .get_conversation(conversation_id)
@@ -774,7 +709,6 @@ impl CodexMessageProcessor {
         params: AddConversationListenerParams,
     ) {
         let AddConversationListenerParams { conversation_id } = params;
-        let conversation_id = self.resolve_conversation_id_alias(conversation_id).await;
         let Ok(conversation) = self
             .conversation_manager
             .get_conversation(conversation_id)
@@ -971,11 +905,7 @@ impl CodexMessageProcessor {
 
     async fn resume_conversation(&self, request_id: RequestId, params: ResumeConversationParams) {
         let overrides = params.overrides.unwrap_or_default();
-        let config = match derive_config_from_params(
-            overrides,
-            None,
-            self.code_linux_sandbox_exe.clone(),
-        ) {
+        let config = match derive_config_from_params(overrides, self.code_linux_sandbox_exe.clone()) {
             Ok(config) => config,
             Err(err) => {
                 let error = JSONRPCErrorError {
@@ -991,7 +921,7 @@ impl CodexMessageProcessor {
         match self
             .conversation_manager
             .resume_conversation_from_rollout(
-                config.clone(),
+                config,
                 params.path,
                 Arc::clone(&self.auth_manager),
             )
@@ -1002,7 +932,6 @@ impl CodexMessageProcessor {
                 session_configured,
                 ..
             }) => {
-                self.remember_conversation_config(conversation_id, &config).await;
                 self.outgoing
                     .send_response(
                         request_id,
@@ -1025,575 +954,6 @@ impl CodexMessageProcessor {
         }
     }
 
-    pub(crate) async fn thread_resume_v2(
-        &self,
-        request_id: RequestId,
-        params: ThreadResumeParams,
-    ) {
-        if params.history.is_some() {
-            let error = JSONRPCErrorError {
-                code: INVALID_REQUEST_ERROR_CODE,
-                message: "thread/resume.history is not supported by the Every Code app-server"
-                    .to_string(),
-                data: None,
-            };
-            self.outgoing.send_error(request_id, error).await;
-            return;
-        }
-
-        let thread_id = params.thread_id.clone();
-        let explicit_path = params.path.clone();
-        let catalog_thread_id = match ConversationId::from_string(&thread_id) {
-            Ok(conversation_id) => self
-                .resolve_conversation_id_alias(conversation_id)
-                .await
-                .to_string(),
-            Err(_) => thread_id.clone(),
-        };
-        let catalog = SessionCatalog::new(self.config.code_home.clone());
-
-        let catalog_entry = if thread_resume_should_lookup_catalog(explicit_path.as_deref()) {
-            match catalog.find_by_id(&catalog_thread_id).await {
-                Ok(entry) => entry,
-                Err(err) => {
-                    let error = JSONRPCErrorError {
-                        code: INTERNAL_ERROR_CODE,
-                        message: format!("failed to resolve thread: {err}"),
-                        data: None,
-                    };
-                    self.outgoing.send_error(request_id, error).await;
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-
-        let rollout_path = match thread_resume_rollout_path(
-            explicit_path.clone(),
-            catalog_entry
-                .as_ref()
-                .map(|entry| catalog.entry_rollout_path(entry)),
-        ) {
-            Some(path) => path,
-            None => {
-                let error = JSONRPCErrorError {
-                    code: INVALID_REQUEST_ERROR_CODE,
-                    message: "thread not found".to_string(),
-                    data: None,
-                };
-                self.outgoing.send_error(request_id, error).await;
-                return;
-            }
-        };
-
-        let overrides = NewConversationParams {
-            model: params.model.clone(),
-            profile: None,
-            cwd: params.cwd.clone(),
-            approval_policy: params
-                .approval_policy
-                .clone()
-                .map(|approval_policy| approval_policy.to_core()),
-            sandbox: params.sandbox.map(|sandbox| sandbox.to_core()),
-            config: params.config.clone(),
-            base_instructions: params.base_instructions.clone(),
-            include_plan_tool: None,
-            dynamic_tools: None,
-            include_apply_patch_tool: None,
-        };
-        let config = match derive_config_from_params(
-            overrides,
-            params.model_provider.clone(),
-            self.code_linux_sandbox_exe.clone(),
-        ) {
-            Ok(config) => config,
-            Err(err) => {
-                let error = JSONRPCErrorError {
-                    code: INVALID_REQUEST_ERROR_CODE,
-                    message: format!("error deriving config: {err}"),
-                    data: None,
-                };
-                self.outgoing.send_error(request_id, error).await;
-                return;
-            }
-        };
-
-        match self
-            .conversation_manager
-            .resume_conversation_from_rollout(
-                config.clone(),
-                rollout_path.clone(),
-                Arc::clone(&self.auth_manager),
-            )
-            .await
-        {
-            Ok(NewConversation {
-                conversation_id,
-                session_configured: _,
-                ..
-            }) => {
-                self.remember_conversation_config(conversation_id, &config).await;
-                let canonical_thread_id = thread_resume_canonical_thread_id(
-                    conversation_id,
-                    &rollout_path,
-                    catalog_entry.as_ref(),
-                );
-                let thread = thread_resume_response_thread(
-                    &canonical_thread_id,
-                    catalog_entry.as_ref(),
-                    &config,
-                    rollout_path,
-                );
-                self.outgoing
-                    .send_response(
-                        request_id,
-                        ThreadResumeResponse {
-                            thread,
-                            model: config.model.clone(),
-                            model_provider: config.model_provider_id.clone(),
-                            cwd: config.cwd.clone(),
-                            approval_policy: map_ask_for_approval_to_wire(config.approval_policy).into(),
-                            sandbox: map_sandbox_policy_to_wire(config.sandbox_policy.clone()).into(),
-                            reasoning_effort: Some(config.model_reasoning_effort.into()),
-                        },
-                    )
-                    .await;
-
-                if let Ok(requested_conversation_id) = ConversationId::from_string(&thread_id)
-                    && thread_resume_should_record_alias(
-                        explicit_path.as_deref(),
-                        &requested_conversation_id,
-                        &conversation_id,
-                    )
-                {
-                    self.resumed_conversation_aliases
-                        .lock()
-                        .await
-                        .insert(requested_conversation_id, conversation_id);
-                }
-            }
-            Err(err) => {
-                let error = JSONRPCErrorError {
-                    code: INTERNAL_ERROR_CODE,
-                    message: format!("error resuming thread: {err}"),
-                    data: None,
-                };
-                self.outgoing.send_error(request_id, error).await;
-            }
-        }
-    }
-
-    pub(crate) async fn model_list_v2(&self, request_id: RequestId, params: ModelListParams) {
-        let ModelListParams {
-            limit,
-            cursor,
-            include_hidden,
-        } = params;
-        let (auth_mode, supports_pro_only_models) =
-            model_picker_auth_state(&self.config, &self.auth_manager);
-        let mut models: Vec<V2Model> = all_model_presets()
-            .iter()
-            .filter(|preset| {
-                model_preset_available_for_auth(preset, auth_mode, supports_pro_only_models)
-            })
-            .filter(|preset| include_hidden.unwrap_or(false) || preset.show_in_picker)
-            .cloned()
-            .map(model_preset_to_v2_model)
-            .collect();
-
-        mark_default_model(&mut models);
-
-        let total = models.len();
-        if total == 0 {
-            self.outgoing
-                .send_response(
-                    request_id,
-                    ModelListResponse {
-                        data: Vec::new(),
-                        next_cursor: None,
-                    },
-                )
-                .await;
-            return;
-        }
-
-        let effective_limit = limit.unwrap_or(total as u32).max(1) as usize;
-        let effective_limit = effective_limit.min(total);
-        let start = match cursor {
-            Some(cursor) => match cursor.parse::<usize>() {
-                Ok(index) => index,
-                Err(_) => {
-                    self.outgoing
-                        .send_error(
-                            request_id,
-                            JSONRPCErrorError {
-                                code: INVALID_REQUEST_ERROR_CODE,
-                                message: format!("invalid cursor: {cursor}"),
-                                data: None,
-                            },
-                        )
-                        .await;
-                    return;
-                }
-            },
-            None => 0,
-        };
-
-        if start > total {
-            self.outgoing
-                .send_error(
-                    request_id,
-                    JSONRPCErrorError {
-                        code: INVALID_REQUEST_ERROR_CODE,
-                        message: format!("cursor {start} exceeds total models {total}"),
-                        data: None,
-                    },
-                )
-                .await;
-            return;
-        }
-
-        let end = start.saturating_add(effective_limit).min(total);
-        let next_cursor = if end < total {
-            Some(end.to_string())
-        } else {
-            None
-        };
-
-        self.outgoing
-            .send_response(
-                request_id,
-                ModelListResponse {
-                    data: models[start..end].to_vec(),
-                    next_cursor,
-                },
-            )
-            .await;
-    }
-
-    pub(crate) async fn review_start_v2(&self, request_id: RequestId, params: ReviewStartParams) {
-        let ReviewStartParams {
-            thread_id,
-            target,
-            delivery,
-        } = params;
-        let resolved_thread_id = match ConversationId::from_string(&thread_id) {
-            Ok(conversation_id) => self.resolve_conversation_id_alias(conversation_id).await,
-            Err(_) => {
-                self.outgoing
-                    .send_error(
-                        request_id,
-                        JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("invalid thread id: {thread_id}"),
-                            data: None,
-                        },
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        let (review_request, display_text) = match review_request_from_target(target) {
-            Ok(value) => value,
-            Err(err) => {
-                self.outgoing.send_error(request_id, err).await;
-                return;
-            }
-        };
-
-        let delivery = delivery.unwrap_or(code_app_server_protocol::ReviewDelivery::Inline);
-        match delivery {
-            code_app_server_protocol::ReviewDelivery::Inline => {
-                let conversation = match self
-                    .conversation_manager
-                    .get_conversation(resolved_thread_id)
-                    .await
-                {
-                    Ok(conversation) => conversation,
-                    Err(_) => {
-                        self.outgoing
-                            .send_error(
-                                request_id,
-                                JSONRPCErrorError {
-                                    code: INVALID_REQUEST_ERROR_CODE,
-                                    message: format!("thread not found: {thread_id}"),
-                                    data: None,
-                                },
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                let turn_id = match conversation.submit(Op::Review { review_request }).await {
-                    Ok(turn_id) => turn_id,
-                    Err(err) => {
-                        self.outgoing
-                            .send_error(
-                                request_id,
-                                JSONRPCErrorError {
-                                    code: INTERNAL_ERROR_CODE,
-                                    message: format!("failed to start review: {err}"),
-                                    data: None,
-                                },
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                self.outgoing
-                    .send_response(
-                        request_id,
-                        ReviewStartResponse {
-                            turn: build_review_turn(turn_id, &display_text),
-                            review_thread_id: thread_id,
-                        },
-                    )
-                    .await;
-            }
-            code_app_server_protocol::ReviewDelivery::Detached => {
-                let source_config = self.conversation_config(resolved_thread_id).await;
-                let mut config = source_config.clone().unwrap_or_else(|| (*self.config).clone());
-                if source_config.is_none() {
-                    let catalog = SessionCatalog::new(self.config.code_home.clone());
-                    let catalog_entry = match catalog.find_by_id(&resolved_thread_id.to_string()).await {
-                        Ok(entry) => entry,
-                        Err(err) => {
-                            self.outgoing
-                                .send_error(
-                                    request_id,
-                                    JSONRPCErrorError {
-                                        code: INTERNAL_ERROR_CODE,
-                                        message: format!(
-                                            "failed to resolve detached review thread: {err}"
-                                        ),
-                                        data: None,
-                                    },
-                                )
-                                .await;
-                            return;
-                        }
-                    };
-                    if catalog_entry.is_none()
-                        && self
-                            .conversation_manager
-                            .get_conversation(resolved_thread_id)
-                            .await
-                            .is_err()
-                    {
-                        self.outgoing
-                            .send_error(
-                                request_id,
-                                JSONRPCErrorError {
-                                    code: INVALID_REQUEST_ERROR_CODE,
-                                    message: format!("thread not found: {thread_id}"),
-                                    data: None,
-                                },
-                            )
-                            .await;
-                        return;
-                    }
-                    if let Some(entry) = catalog_entry {
-                        config.cwd = entry.cwd_real;
-                    }
-                }
-
-                let NewConversation {
-                    conversation_id,
-                    ..
-                } = match self.conversation_manager.new_conversation(config.clone()).await {
-                    Ok(conversation) => conversation,
-                    Err(err) => {
-                        self.outgoing
-                            .send_error(
-                                request_id,
-                                JSONRPCErrorError {
-                                    code: INTERNAL_ERROR_CODE,
-                                    message: format!("failed to create detached review thread: {err}"),
-                                    data: None,
-                                },
-                            )
-                            .await;
-                        return;
-                    }
-                };
-                self.remember_conversation_config(conversation_id, &config).await;
-                let conversation = match self
-                    .conversation_manager
-                    .get_conversation(conversation_id)
-                    .await
-                {
-                    Ok(conversation) => conversation,
-                    Err(err) => {
-                        self.outgoing
-                            .send_error(
-                                request_id,
-                                JSONRPCErrorError {
-                                    code: INTERNAL_ERROR_CODE,
-                                    message: format!("failed to load detached review thread: {err}"),
-                                    data: None,
-                                },
-                            )
-                            .await;
-                        return;
-                    }
-                };
-                let turn_id = match conversation.submit(Op::Review { review_request }).await {
-                    Ok(turn_id) => turn_id,
-                    Err(err) => {
-                        self.outgoing
-                            .send_error(
-                                request_id,
-                                JSONRPCErrorError {
-                                    code: INTERNAL_ERROR_CODE,
-                                    message: format!("failed to start detached review: {err}"),
-                                    data: None,
-                                },
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                self.outgoing
-                    .send_response(
-                        request_id,
-                        ReviewStartResponse {
-                            turn: build_review_turn(turn_id, &display_text),
-                            review_thread_id: conversation_id.to_string(),
-                        },
-                    )
-                    .await;
-            }
-        }
-    }
-
-    pub(crate) async fn turn_start_v2(&self, request_id: RequestId, params: TurnStartParams) {
-        let TurnStartParams {
-            thread_id,
-            mut input,
-            cwd: _,
-            approval_policy: _,
-            sandbox_policy: _,
-            model: _,
-            effort: _,
-            summary: _,
-            personality: _,
-            output_schema,
-            collaboration_mode,
-        } = params;
-        let resolved_thread_id = match ConversationId::from_string(&thread_id) {
-            Ok(conversation_id) => self.resolve_conversation_id_alias(conversation_id).await,
-            Err(_) => {
-                self.outgoing
-                    .send_error(
-                        request_id,
-                        JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("invalid thread id: {thread_id}"),
-                            data: None,
-                        },
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        let conversation = match self
-            .conversation_manager
-            .get_conversation(resolved_thread_id)
-            .await
-        {
-            Ok(conversation) => conversation,
-            Err(_) => {
-                self.outgoing
-                    .send_error(
-                        request_id,
-                        JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("thread not found: {thread_id}"),
-                            data: None,
-                        },
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        let is_plan_mode = collaboration_mode
-            .as_ref()
-            .is_some_and(|mode| mode.mode == ModeKind::Plan);
-        if is_plan_mode {
-            let Some(first_text_index) = input
-                .iter()
-                .position(|item| matches!(item, V2UserInput::Text { .. }))
-            else {
-                self.outgoing
-                    .send_error(
-                        request_id,
-                        JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: "turn/start plan mode requires text input".to_string(),
-                            data: None,
-                        },
-                    )
-                    .await;
-                return;
-            };
-
-            let V2UserInput::Text {
-                text,
-                text_elements: _,
-            } = &input[first_text_index]
-            else {
-                unreachable!("first text index is known to reference text input")
-            };
-            input[first_text_index] = V2UserInput::Text {
-                text: format_turn_start_plan_input(text),
-                text_elements: Vec::new(),
-            };
-        }
-        let core_input = input
-            .clone()
-            .into_iter()
-            .map(v2_user_input_to_core_input)
-            .collect();
-        let turn_id = match conversation
-            .submit(Op::UserInput {
-                items: core_input,
-                final_output_json_schema: output_schema,
-            })
-            .await
-        {
-            Ok(turn_id) => turn_id,
-            Err(err) => {
-                self.outgoing
-                    .send_error(
-                        request_id,
-                        JSONRPCErrorError {
-                            code: INTERNAL_ERROR_CODE,
-                            message: format!("failed to start turn: {err}"),
-                            data: None,
-                        },
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        self.outgoing
-            .send_response(
-                request_id,
-                TurnStartResponse {
-                    turn: build_user_turn(turn_id, input),
-                },
-            )
-            .await;
-    }
-
     async fn archive_conversation(
         &self,
         request_id: RequestId,
@@ -1603,7 +963,6 @@ impl CodexMessageProcessor {
             conversation_id,
             rollout_path,
         } = params;
-        let conversation_id = self.resolve_conversation_id_alias(conversation_id).await;
 
         if self
             .conversation_manager
@@ -2055,274 +1414,6 @@ impl CodexMessageProcessor {
     }
 }
 
-fn parse_rfc3339_timestamp_seconds(value: &str) -> i64 {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.timestamp())
-        .unwrap_or_default()
-}
-
-fn thread_resume_rollout_path(
-    explicit_path: Option<PathBuf>,
-    catalog_path: Option<PathBuf>,
-) -> Option<PathBuf> {
-    explicit_path.or(catalog_path)
-}
-
-fn thread_resume_should_lookup_catalog(explicit_path: Option<&std::path::Path>) -> bool {
-    explicit_path.is_none()
-}
-
-fn thread_resume_should_record_alias(
-    explicit_path: Option<&std::path::Path>,
-    requested_conversation_id: &ConversationId,
-    resumed_conversation_id: &ConversationId,
-) -> bool {
-    explicit_path.is_none() && requested_conversation_id != resumed_conversation_id
-}
-
-fn thread_resume_canonical_thread_id(
-    resumed_conversation_id: ConversationId,
-    rollout_path: &std::path::Path,
-    entry: Option<&code_core::SessionIndexEntry>,
-) -> String {
-    conversation_id_from_rollout_path(rollout_path)
-        .map(|conversation_id| conversation_id.to_string())
-        .or_else(|| entry.map(|item| item.session_id.to_string()))
-        .unwrap_or_else(|| resumed_conversation_id.to_string())
-}
-
-fn thread_resume_response_thread(
-    thread_id: &str,
-    entry: Option<&code_core::SessionIndexEntry>,
-    config: &Config,
-    rollout_path: PathBuf,
-) -> Thread {
-    let created_at = entry
-        .map(|item| parse_rfc3339_timestamp_seconds(&item.created_at))
-        .unwrap_or_default();
-    let updated_at = entry
-        .map(|item| parse_rfc3339_timestamp_seconds(&item.last_event_at))
-        .unwrap_or(created_at);
-
-    Thread {
-        id: thread_id.to_string(),
-        preview: entry
-            .and_then(|item| item.last_user_snippet.clone())
-            .unwrap_or_default(),
-        model_provider: entry
-            .and_then(|item| item.model_provider.clone())
-            .unwrap_or_else(|| config.model_provider_id.clone()),
-        created_at,
-        updated_at,
-        path: Some(rollout_path),
-        cwd: entry
-            .map(|item| item.cwd_real.clone())
-            .unwrap_or_else(|| config.cwd.clone()),
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
-        source: entry
-            .map(|item| item.session_source.clone().into())
-            .unwrap_or(code_app_server_protocol::SessionSource::AppServer),
-        git_info: entry.map(|item| code_app_server_protocol::GitInfo {
-            sha: None,
-            branch: item.git_branch.clone(),
-            origin_url: None,
-        }),
-        turns: Vec::new(),
-    }
-}
-
-fn model_picker_auth_state(
-    config: &Config,
-    auth_manager: &AuthManager,
-) -> (Option<AuthMode>, bool) {
-    let preferred_auth_mode = if config.using_chatgpt_auth {
-        AuthMode::Chatgpt
-    } else {
-        AuthMode::ApiKey
-    };
-    let auth_mode = auth_manager
-        .auth()
-        .map(|auth| auth.mode)
-        .or(Some(preferred_auth_mode));
-    let supports_pro_only_models = auth_manager.supports_pro_only_models();
-    (auth_mode, supports_pro_only_models)
-}
-
-fn model_preset_to_v2_model(preset: code_common::model_presets::ModelPreset) -> V2Model {
-    V2Model {
-        id: preset.id.clone(),
-        model: preset.model,
-        upgrade: preset.upgrade.as_ref().map(|upgrade| upgrade.id.clone()),
-        upgrade_info: preset.upgrade.map(|upgrade| ModelUpgradeInfo {
-            model: upgrade.id,
-            upgrade_copy: None,
-            model_link: None,
-            migration_markdown: None,
-        }),
-        availability_nux: None,
-        display_name: preset.display_name,
-        description: preset.description,
-        hidden: !preset.show_in_picker,
-        supported_reasoning_efforts: preset
-            .supported_reasoning_efforts
-            .into_iter()
-            .map(|preset| ReasoningEffortOption {
-                reasoning_effort: preset.effort.into(),
-                description: preset.description,
-            })
-            .collect(),
-        default_reasoning_effort: preset.default_reasoning_effort.into(),
-        input_modalities: code_protocol::openai_models::default_input_modalities(),
-        supports_personality: false,
-        is_default: preset.is_default,
-    }
-}
-
-fn mark_default_model(models: &mut [V2Model]) {
-    for model in models.iter_mut() {
-        model.is_default = false;
-    }
-    if let Some(model) = models.iter_mut().find(|model| !model.hidden) {
-        model.is_default = true;
-    } else if let Some(model) = models.first_mut() {
-        model.is_default = true;
-    }
-}
-
-fn review_request_from_target(
-    target: V2ReviewTarget,
-) -> Result<(core_protocol::ReviewRequest, String), JSONRPCErrorError> {
-    fn invalid_request(message: String) -> JSONRPCErrorError {
-        JSONRPCErrorError {
-            code: INVALID_REQUEST_ERROR_CODE,
-            message,
-            data: None,
-        }
-    }
-
-    let (target, prompt, hint) = match target {
-        V2ReviewTarget::UncommittedChanges => (
-            CoreReviewTarget::UncommittedChanges,
-            "Review the current workspace changes and highlight bugs, regressions, risky patterns, and missing tests before merge.".to_string(),
-            "current workspace changes".to_string(),
-        ),
-        V2ReviewTarget::BaseBranch { branch } => {
-            let branch = branch.trim().to_string();
-            if branch.is_empty() {
-                return Err(invalid_request("branch must not be empty".to_string()));
-            }
-            (
-                CoreReviewTarget::BaseBranch {
-                    branch: branch.clone(),
-                },
-                format!(
-                    "Review the changes between the current branch and base branch {branch} and highlight bugs, regressions, risky patterns, and missing tests before merge."
-                ),
-                format!("base branch {branch}"),
-            )
-        }
-        V2ReviewTarget::Commit { sha, title } => {
-            let sha = sha.trim().to_string();
-            if sha.is_empty() {
-                return Err(invalid_request("sha must not be empty".to_string()));
-            }
-            let title = title.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-            let short_sha: String = sha.chars().take(12).collect();
-            let prompt = match title.as_deref() {
-                Some(title) => format!(
-                    "Review the changes introduced by commit {sha} ({title}) and highlight bugs, regressions, risky patterns, and missing tests before merge."
-                ),
-                None => format!(
-                    "Review the changes introduced by commit {sha} and highlight bugs, regressions, risky patterns, and missing tests before merge."
-                ),
-            };
-            (
-                CoreReviewTarget::Commit { sha, title },
-                prompt,
-                format!("commit {short_sha}"),
-            )
-        }
-        V2ReviewTarget::Custom { instructions } => {
-            let instructions = instructions.trim().to_string();
-            if instructions.is_empty() {
-                return Err(invalid_request("instructions must not be empty".to_string()));
-            }
-            (
-                CoreReviewTarget::Custom {
-                    instructions: instructions.clone(),
-                },
-                instructions.clone(),
-                instructions,
-            )
-        }
-    };
-
-    Ok((
-        core_protocol::ReviewRequest {
-            target,
-            user_facing_hint: Some(hint.clone()),
-            prompt,
-        },
-        hint,
-    ))
-}
-
-fn build_review_turn(turn_id: String, display_text: &str) -> Turn {
-    let items = if display_text.is_empty() {
-        Vec::new()
-    } else {
-        vec![ThreadItem::UserMessage {
-            id: turn_id.clone(),
-            content: vec![V2UserInput::Text {
-                text: display_text.to_string(),
-                text_elements: Vec::new(),
-            }],
-        }]
-    };
-
-    Turn {
-        id: turn_id,
-        items,
-        error: None,
-        status: TurnStatus::InProgress,
-    }
-}
-
-fn build_user_turn(turn_id: String, input: Vec<V2UserInput>) -> Turn {
-    Turn {
-        id: turn_id.clone(),
-        items: vec![ThreadItem::UserMessage {
-            id: turn_id,
-            content: input,
-        }],
-        error: None,
-        status: TurnStatus::InProgress,
-    }
-}
-
-fn format_turn_start_plan_input(task: &str) -> String {
-    format!(
-        "Please propose a plan for the task below.\n\nPlan mode requirements:\n- Do not edit files or make repository changes.\n- Do not start subagents unless the user explicitly asks for multi-agent planning.\n- You may inspect repository context with read-only commands if needed.\n- Keep the plan focused, include validation, and call out risks or open questions.\n- Wait for confirmation before implementation.\n\nTask:\n{task}"
-    )
-}
-
-fn v2_user_input_to_core_input(input: V2UserInput) -> CoreInputItem {
-    match input {
-        V2UserInput::Text {
-            text,
-            text_elements: _,
-        } => CoreInputItem::Text { text },
-        V2UserInput::Image { url } => CoreInputItem::Image { image_url: url },
-        V2UserInput::LocalImage { path } => CoreInputItem::LocalImage { path },
-        V2UserInput::Skill { name, path } => CoreInputItem::Text {
-            text: format!("Skill: {name} ({})", path.display()),
-        },
-        V2UserInput::Mention { name, path } => CoreInputItem::Text {
-            text: format!("Mention: {name} ({path})"),
-        },
-    }
-}
-
 impl CodexMessageProcessor {
     // Minimal compatibility layer: translate SendUserTurn into our current
     // flow by submitting only the user items. We intentionally do not attempt
@@ -2339,7 +1430,6 @@ impl CodexMessageProcessor {
             items,
             ..
         } = params;
-        let conversation_id = self.resolve_conversation_id_alias(conversation_id).await;
 
         let Ok(conversation) = self
             .conversation_manager
@@ -2475,6 +1565,7 @@ async fn apply_bespoke_event_handling(
                 conversation_id,
                 turn_id: request.turn_id,
                 call_id: call_id.clone(),
+                namespace: request.namespace,
                 tool: request.tool,
                 arguments: request.arguments,
             };
@@ -2535,7 +1626,6 @@ async fn apply_bespoke_event_handling(
 
 fn derive_config_from_params(
     params: NewConversationParams,
-    model_provider: Option<String>,
     code_linux_sandbox_exe: Option<PathBuf>,
 ) -> std::io::Result<Config> {
     let NewConversationParams {
@@ -2557,7 +1647,7 @@ fn derive_config_from_params(
         cwd: cwd.map(PathBuf::from),
         approval_policy: approval_policy.map(map_ask_for_approval_from_wire),
         sandbox_mode,
-        model_provider,
+        model_provider: None,
         code_linux_sandbox_exe,
         base_instructions,
         include_plan_tool,
@@ -2832,12 +1922,9 @@ impl IntoWireAuthMode for code_app_server_protocol::AuthMode {
 mod tests {
     use super::*;
     use code_app_server_protocol::AuthMode;
-    use code_app_server_protocol::ReviewDelivery;
-    use code_app_server_protocol::ReviewTarget;
     use code_core::auth::CodexAuth;
     use code_core::auth::RefreshTokenError;
     use code_core::config::ConfigOverrides;
-    use code_core::SessionIndexEntry;
     use code_protocol::mcp_protocol::RemoveConversationListenerParams;
     use code_protocol::protocol::SessionSource;
     use mcp_types::RequestId;
@@ -2900,16 +1987,6 @@ mod tests {
             ),
             outgoing_rx,
         )
-    }
-
-    async fn expect_error_message(
-        outgoing_rx: &mut mpsc::UnboundedReceiver<crate::outgoing_message::OutgoingMessage>,
-    ) -> String {
-        let message = outgoing_rx.recv().await.expect("error response should be sent");
-        match message {
-            crate::outgoing_message::OutgoingMessage::Error(err) => err.error.message,
-            other => panic!("expected error response, got {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -3017,99 +2094,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn thread_resume_v2_rejects_history_even_with_path() {
-        let (processor, mut outgoing_rx) = make_processor_for_tests();
-
-        processor
-            .thread_resume_v2(
-                RequestId::Integer(7),
-                ThreadResumeParams {
-                    thread_id: Uuid::new_v4().to_string(),
-                    history: Some(Vec::new()),
-                    path: Some(std::path::PathBuf::from("/tmp/rollout.jsonl")),
-                    model: None,
-                    model_provider: None,
-                    cwd: None,
-                    approval_policy: None,
-                    sandbox: None,
-                    config: None,
-                    base_instructions: None,
-                    developer_instructions: None,
-                    personality: None,
-                },
-            )
-            .await;
-
-        let message = expect_error_message(&mut outgoing_rx).await;
-        assert_eq!(
-            message,
-            "thread/resume.history is not supported by the Every Code app-server"
-        );
-    }
-
-    #[tokio::test]
-    async fn review_start_v2_detached_rejects_unknown_source_thread() {
-        let (processor, mut outgoing_rx) = make_processor_for_tests();
-        let unknown_thread_id = Uuid::new_v4().to_string();
-
-        processor
-            .review_start_v2(
-                RequestId::Integer(8),
-                ReviewStartParams {
-                    thread_id: unknown_thread_id.clone(),
-                    target: ReviewTarget::UncommittedChanges,
-                    delivery: Some(ReviewDelivery::Detached),
-                },
-            )
-            .await;
-
-        let message = expect_error_message(&mut outgoing_rx).await;
-        assert_eq!(message, format!("thread not found: {unknown_thread_id}"));
-    }
-
-    #[tokio::test]
-    async fn turn_start_v2_rejects_unknown_thread() {
-        let (processor, mut outgoing_rx) = make_processor_for_tests();
-        let unknown_thread_id = Uuid::new_v4().to_string();
-
-        processor
-            .turn_start_v2(
-                RequestId::Integer(9),
-                TurnStartParams {
-                    thread_id: unknown_thread_id.clone(),
-                    input: vec![V2UserInput::Text {
-                        text: "make a plan".to_string(),
-                        text_elements: Vec::new(),
-                    }],
-                    cwd: None,
-                    approval_policy: None,
-                    sandbox_policy: None,
-                    model: None,
-                    effort: None,
-                    summary: None,
-                    personality: None,
-                    output_schema: None,
-                    collaboration_mode: None,
-                },
-            )
-            .await;
-
-        let message = expect_error_message(&mut outgoing_rx).await;
-        assert_eq!(message, format!("thread not found: {unknown_thread_id}"));
-    }
-
-    #[test]
-    fn turn_start_plan_formatter_does_not_invoke_subagents() {
-        let prompt = format_turn_start_plan_input("add a README note");
-
-        assert!(prompt.contains("add a README note"));
-        assert!(prompt.contains("Do not edit files"));
-        assert!(prompt.contains("Do not start subagents"));
-        assert!(!prompt.contains("agent {"));
-        assert!(!prompt.contains("Please perform /plan"));
-    }
-
     #[test]
     fn parse_plan_type_is_case_insensitive() {
         assert_eq!(parse_plan_type(Some("Pro".to_string())), PlanType::Pro);
@@ -3197,248 +2181,6 @@ mod tests {
             vec!["selected".to_string()]
         );
     }
-
-    #[test]
-    fn thread_resume_response_thread_uses_catalog_metadata() {
-        let config =
-            Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default())
-                .expect("load default config");
-        let entry = SessionIndexEntry {
-            session_id: Uuid::new_v4(),
-            rollout_path: std::path::PathBuf::from("sessions/test.jsonl"),
-            snapshot_path: None,
-            created_at: "2026-04-03T10:00:00.000Z".to_string(),
-            last_event_at: "2026-04-03T10:05:00.000Z".to_string(),
-            cwd_real: std::path::PathBuf::from("/tmp/test-thread"),
-            cwd_display: "/tmp/test-thread".to_string(),
-            git_project_root: None,
-            git_branch: Some("main".to_string()),
-            model_provider: Some("openai".to_string()),
-            session_source: SessionSource::Mcp,
-            message_count: 3,
-            user_message_count: 1,
-            last_user_snippet: Some("resume me".to_string()),
-            nickname: None,
-            sync_origin_device: None,
-            sync_version: 0,
-            archived: false,
-            deleted: false,
-        };
-
-        let thread = thread_resume_response_thread(
-            &entry.session_id.to_string(),
-            Some(&entry),
-            &config,
-            std::path::PathBuf::from("/tmp/test.jsonl"),
-        );
-
-        assert_eq!(thread.id, entry.session_id.to_string());
-        assert_eq!(thread.preview, "resume me");
-        assert_eq!(thread.model_provider, "openai");
-        assert_eq!(thread.cwd, std::path::PathBuf::from("/tmp/test-thread"));
-        assert_eq!(thread.path, Some(std::path::PathBuf::from("/tmp/test.jsonl")));
-        assert_eq!(thread.source, code_app_server_protocol::SessionSource::AppServer);
-        assert_eq!(thread.git_info.and_then(|info| info.branch), Some("main".to_string()));
-        assert_eq!(thread.created_at, 1_775_210_400);
-        assert_eq!(thread.updated_at, 1_775_210_700);
-    }
-
-    #[test]
-    fn thread_resume_rollout_path_prefers_explicit_path() {
-        let explicit_path = std::path::PathBuf::from("/tmp/explicit.jsonl");
-        let catalog_path = std::path::PathBuf::from("/tmp/catalog.jsonl");
-
-        let rollout_path =
-            thread_resume_rollout_path(Some(explicit_path.clone()), Some(catalog_path));
-
-        assert_eq!(rollout_path, Some(explicit_path));
-    }
-
-    #[test]
-    fn thread_resume_skips_catalog_lookup_when_path_is_explicit() {
-        assert!(!thread_resume_should_lookup_catalog(Some(std::path::Path::new(
-            "/tmp/explicit.jsonl",
-        ))));
-        assert!(thread_resume_should_lookup_catalog(None));
-    }
-
-    #[test]
-    fn thread_resume_does_not_record_alias_for_explicit_path() {
-        let requested_conversation_id = ConversationId::from_string(
-            "11111111-1111-4111-8111-111111111111",
-        )
-        .expect("valid uuid");
-        let resumed_conversation_id = ConversationId::from_string(
-            "22222222-2222-4222-8222-222222222222",
-        )
-        .expect("valid uuid");
-
-        assert!(!thread_resume_should_record_alias(
-            Some(std::path::Path::new("/tmp/explicit.jsonl")),
-            &requested_conversation_id,
-            &resumed_conversation_id,
-        ));
-    }
-
-    #[test]
-    fn thread_resume_records_alias_for_thread_id_resume() {
-        let requested_conversation_id = ConversationId::from_string(
-            "11111111-1111-4111-8111-111111111111",
-        )
-        .expect("valid uuid");
-        let resumed_conversation_id = ConversationId::from_string(
-            "22222222-2222-4222-8222-222222222222",
-        )
-        .expect("valid uuid");
-
-        assert!(thread_resume_should_record_alias(
-            None,
-            &requested_conversation_id,
-            &resumed_conversation_id,
-        ));
-        assert!(!thread_resume_should_record_alias(
-            None,
-            &resumed_conversation_id,
-            &resumed_conversation_id,
-        ));
-    }
-
-    #[test]
-    fn thread_resume_canonical_thread_id_prefers_rollout_path() {
-        let resumed_conversation_id =
-            ConversationId::from_string("33333333-3333-4333-8333-333333333333")
-                .expect("valid uuid");
-        let entry = SessionIndexEntry {
-            session_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111")
-                .expect("valid uuid"),
-            rollout_path: std::path::PathBuf::from("sessions/wrong.jsonl"),
-            snapshot_path: None,
-            created_at: "2026-04-03T10:00:00.000Z".to_string(),
-            last_event_at: "2026-04-03T10:05:00.000Z".to_string(),
-            cwd_real: std::path::PathBuf::from("/tmp/test-thread"),
-            cwd_display: "/tmp/test-thread".to_string(),
-            git_project_root: None,
-            git_branch: Some("main".to_string()),
-            model_provider: Some("openai".to_string()),
-            session_source: SessionSource::Mcp,
-            message_count: 3,
-            user_message_count: 1,
-            last_user_snippet: Some("resume me".to_string()),
-            nickname: None,
-            sync_origin_device: None,
-            sync_version: 0,
-            archived: false,
-            deleted: false,
-        };
-
-        let canonical_thread_id = thread_resume_canonical_thread_id(
-            resumed_conversation_id,
-            std::path::Path::new(
-                "/tmp/rollout-2026-04-03T09-10-00Z-22222222-2222-4222-8222-222222222222.jsonl",
-            ),
-            Some(&entry),
-        );
-
-        assert_eq!(canonical_thread_id, "22222222-2222-4222-8222-222222222222");
-    }
-
-    #[test]
-    fn derive_config_from_params_applies_model_provider_override() {
-        let params = NewConversationParams {
-            model: None,
-            profile: None,
-            cwd: None,
-            approval_policy: None,
-            sandbox: None,
-            config: None,
-            base_instructions: None,
-            include_plan_tool: None,
-            include_apply_patch_tool: None,
-            dynamic_tools: None,
-        };
-
-        let config = derive_config_from_params(params, Some("oss".to_string()), None)
-            .expect("derive config with model provider override");
-
-        assert_eq!(config.model_provider_id, "oss");
-    }
-
-    #[test]
-    fn mark_default_model_prefers_visible_models() {
-        let mut models = vec![
-            V2Model {
-                id: "hidden".to_string(),
-                model: "hidden".to_string(),
-                upgrade: None,
-                upgrade_info: None,
-                availability_nux: None,
-                display_name: "Hidden".to_string(),
-                description: String::new(),
-                hidden: true,
-                supported_reasoning_efforts: Vec::new(),
-                default_reasoning_effort: code_protocol::config_types::ReasoningEffort::Minimal,
-                input_modalities: code_protocol::openai_models::default_input_modalities(),
-                supports_personality: false,
-                is_default: true,
-            },
-            V2Model {
-                id: "visible".to_string(),
-                model: "visible".to_string(),
-                upgrade: None,
-                upgrade_info: None,
-                availability_nux: None,
-                display_name: "Visible".to_string(),
-                description: String::new(),
-                hidden: false,
-                supported_reasoning_efforts: Vec::new(),
-                default_reasoning_effort: code_protocol::config_types::ReasoningEffort::Minimal,
-                input_modalities: code_protocol::openai_models::default_input_modalities(),
-                supports_personality: false,
-                is_default: false,
-            },
-        ];
-
-        mark_default_model(&mut models);
-
-        assert!(!models[0].is_default);
-        assert!(models[1].is_default);
-    }
-
-    #[test]
-    fn review_request_from_target_builds_workspace_prompt() {
-        let (request, display_text) = review_request_from_target(V2ReviewTarget::UncommittedChanges)
-            .expect("workspace review target should be accepted");
-
-        assert_eq!(display_text, "current workspace changes");
-        assert_eq!(
-            request.user_facing_hint.as_deref(),
-            Some("current workspace changes")
-        );
-        assert!(request.prompt.contains("current workspace changes"));
-    }
-
-    #[test]
-    fn review_request_from_target_rejects_empty_custom_instructions() {
-        let error = review_request_from_target(V2ReviewTarget::Custom {
-            instructions: "   ".to_string(),
-        })
-        .expect_err("empty instructions should be rejected");
-
-        assert_eq!(error.message, "instructions must not be empty");
-    }
-
-    #[test]
-    fn conversation_id_from_rollout_path_parses_hyphenated_uuid_suffix() {
-        let conversation_id = conversation_id_from_rollout_path(std::path::Path::new(
-            "/tmp/rollout-2026-04-03T09-10-00Z-22222222-2222-4222-8222-222222222222.jsonl",
-        ))
-        .expect("conversation id should parse from rollout path");
-
-        assert_eq!(
-            conversation_id.to_string(),
-            "22222222-2222-4222-8222-222222222222"
-        );
-    }
 }
 
 impl IntoWireAuthMode for code_protocol::mcp_protocol::AuthMode {
@@ -3484,35 +2226,6 @@ fn map_ask_for_approval_to_wire(a: core_protocol::AskForApproval) -> code_protoc
             })
         }
         core_protocol::AskForApproval::Never => code_protocol::protocol::AskForApproval::Never,
-    }
-}
-
-fn map_sandbox_policy_to_wire(
-    policy: core_protocol::SandboxPolicy,
-) -> code_protocol::protocol::SandboxPolicy {
-    match policy {
-        core_protocol::SandboxPolicy::DangerFullAccess => {
-            code_protocol::protocol::SandboxPolicy::DangerFullAccess
-        }
-        core_protocol::SandboxPolicy::ReadOnly => code_protocol::protocol::SandboxPolicy::ReadOnly,
-        core_protocol::SandboxPolicy::WorkspaceWrite {
-            writable_roots,
-            network_access,
-            exclude_tmpdir_env_var,
-            exclude_slash_tmp,
-            allow_git_writes,
-        } => code_protocol::protocol::SandboxPolicy::WorkspaceWrite {
-            writable_roots: writable_roots
-                .into_iter()
-                .filter_map(|path| {
-                    code_utils_absolute_path::AbsolutePathBuf::from_absolute_path(path).ok()
-                })
-                .collect(),
-            network_access,
-            exclude_tmpdir_env_var,
-            exclude_slash_tmp,
-            allow_git_writes,
-        },
     }
 }
 
@@ -3630,10 +2343,8 @@ fn rate_limit_snapshot_from_event(
 
 fn conversation_id_from_rollout_path(path: &std::path::Path) -> Option<ConversationId> {
     let stem = path.file_stem()?.to_str()?;
-
-    stem.match_indices('-')
-        .rev()
-        .find_map(|(index, _)| ConversationId::from_string(&stem[index + 1..]).ok())
+    let (_, id) = stem.rsplit_once('-')?;
+    ConversationId::from_string(id).ok()
 }
 
 fn snippet_from_rollout_tail(tail: &[serde_json::Value]) -> Option<String> {

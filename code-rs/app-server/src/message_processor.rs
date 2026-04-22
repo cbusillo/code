@@ -30,11 +30,7 @@ use code_app_server_protocol::ExternalAgentConfigImportParams;
 use code_app_server_protocol::GetAccountParams;
 use code_app_server_protocol::LoginAccountParams;
 use code_app_server_protocol::MergeStrategy;
-use code_app_server_protocol::ModelListParams;
-use code_app_server_protocol::ReviewStartParams;
-use code_app_server_protocol::ThreadResumeParams;
 use code_app_server_protocol::ToolsV2;
-use code_app_server_protocol::TurnStartParams;
 use code_app_server_protocol::AskForApproval as V2AskForApproval;
 use code_app_server_protocol::WriteStatus;
 use code_protocol::config_types::Verbosity;
@@ -277,10 +273,6 @@ impl MessageProcessor {
         let is_v2_request = matches!(
             request.method.as_str(),
             "config/read"
-                | "review/start"
-                | "turn/start"
-                | "model/list"
-                | "thread/resume"
                 | "configRequirements/read"
                 | "config/value/write"
                 | "config/batchWrite"
@@ -303,86 +295,6 @@ impl MessageProcessor {
         }
 
         match request.method.as_str() {
-            "review/start" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ReviewStartParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid review/start params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                self.code_message_processor
-                    .review_start_v2(request_id, params)
-                    .await;
-                true
-            }
-            "model/list" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ModelListParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid model/list params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                self.code_message_processor
-                    .model_list_v2(request_id, params)
-                    .await;
-                true
-            }
-            "turn/start" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: TurnStartParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid turn/start params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                self.code_message_processor
-                    .turn_start_v2(request_id, params)
-                    .await;
-                true
-            }
-            "thread/resume" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ThreadResumeParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid thread/resume params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                self.code_message_processor
-                    .thread_resume_v2(request_id, params)
-                    .await;
-                true
-            }
             "config/read" => {
                 let params_value = request.params.clone().unwrap_or_else(|| json!({}));
                 let params: ConfigReadParams = match serde_json::from_value(params_value) {

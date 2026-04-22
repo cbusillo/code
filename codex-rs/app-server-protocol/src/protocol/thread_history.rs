@@ -468,6 +468,7 @@ impl ThreadHistoryBuilder {
     ) {
         let item = ThreadItem::DynamicToolCall {
             id: payload.call_id.clone(),
+            namespace: payload.namespace.clone(),
             tool: payload.tool.clone(),
             arguments: payload.arguments.clone(),
             status: DynamicToolCallStatus::InProgress,
@@ -491,6 +492,7 @@ impl ThreadHistoryBuilder {
         let duration_ms = i64::try_from(payload.duration.as_millis()).ok();
         let item = ThreadItem::DynamicToolCall {
             id: payload.call_id.clone(),
+            namespace: payload.namespace.clone(),
             tool: payload.tool.clone(),
             arguments: payload.arguments.clone(),
             status,
@@ -991,8 +993,15 @@ impl ThreadHistoryBuilder {
     }
 
     fn new_turn(&mut self, id: Option<String>) -> PendingTurn {
+        let id = id.unwrap_or_else(|| {
+            if self.next_rollout_index == 0 {
+                Uuid::now_v7().to_string()
+            } else {
+                format!("rollout-{}", self.current_rollout_index)
+            }
+        });
         PendingTurn {
-            id: id.unwrap_or_else(|| Uuid::now_v7().to_string()),
+            id,
             items: Vec::new(),
             error: None,
             status: TurnStatus::Completed,
@@ -1640,8 +1649,8 @@ mod tests {
             .collect::<Vec<_>>();
         let turns = build_turns_from_rollout_items(&items);
         assert_eq!(turns.len(), 2);
-        assert!(Uuid::parse_str(&turns[0].id).is_ok());
-        assert!(Uuid::parse_str(&turns[1].id).is_ok());
+        assert_eq!(turns[0].id, "rollout-0");
+        assert_eq!(turns[1].id, "rollout-5");
         assert_ne!(turns[0].id, turns[1].id);
         assert_eq!(turns[0].status, TurnStatus::Completed);
         assert_eq!(turns[1].status, TurnStatus::Completed);
@@ -1966,6 +1975,7 @@ mod tests {
                 codex_protocol::dynamic_tools::DynamicToolCallRequest {
                     call_id: "dyn-1".into(),
                     turn_id: "turn-1".into(),
+                    namespace: Some("codex_app".into()),
                     tool: "lookup_ticket".into(),
                     arguments: serde_json::json!({"id":"ABC-123"}),
                 },
@@ -1973,6 +1983,7 @@ mod tests {
             EventMsg::DynamicToolCallResponse(DynamicToolCallResponseEvent {
                 call_id: "dyn-1".into(),
                 turn_id: "turn-1".into(),
+                namespace: Some("codex_app".into()),
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
                 content_items: vec![CoreDynamicToolCallOutputContentItem::InputText {
@@ -1995,6 +2006,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::DynamicToolCall {
                 id: "dyn-1".into(),
+                namespace: Some("codex_app".into()),
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
                 status: DynamicToolCallStatus::Completed,

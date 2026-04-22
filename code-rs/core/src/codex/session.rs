@@ -570,8 +570,10 @@ impl Session {
         self.approval_policy
     }
 
-    pub(crate) fn is_dynamic_tool(&self, name: &str) -> bool {
-        self.dynamic_tools.iter().any(|tool| tool.name == name)
+    pub(crate) fn is_dynamic_tool(&self, namespace: Option<&str>, name: &str) -> bool {
+        self.dynamic_tools
+            .iter()
+            .any(|tool| tool.name == name && tool.namespace.as_deref() == namespace)
     }
 
     fn next_background_sequence(&self, sub_id: &str) -> u64 {

@@ -176,6 +176,8 @@ use code_core::protocol::ExecOutputStream;
 use code_core::protocol::EnvironmentContextDeltaEvent;
 use code_core::protocol::EnvironmentContextFullEvent;
 use code_core::protocol::InputItem;
+use code_core::protocol::ImageGenerationBeginEvent;
+use code_core::protocol::ImageGenerationEndEvent;
 use code_core::protocol::McpServerFailure;
 use code_core::protocol::McpServerFailurePhase;
 use code_core::protocol::SessionConfiguredEvent;
@@ -3116,6 +3118,75 @@ fn image_record_from_path(path: &Path) -> Option<ImageRecord> {
     })
 }
 
+fn image_generation_replay_artifact_path(
+    code_home: &Path,
+    session_id: uuid::Uuid,
+    call_id: &str,
+) -> PathBuf {
+    fn sanitize(value: &str) -> String {
+        let sanitized: String = value
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if sanitized.is_empty() {
+            "generated_image".to_string()
+        } else {
+            sanitized
+        }
+    }
+
+    code_home
+        .join("generated_images")
+        .join(sanitize(&session_id.to_string()))
+        .join(format!("{}.png", sanitize(call_id)))
+}
+
+fn ensure_replayed_image_generation_artifact(
+    code_home: &Path,
+    session_id: Option<uuid::Uuid>,
+    call_id: &str,
+    result: &str,
+) -> Option<PathBuf> {
+    let session_id = session_id?;
+    let path = image_generation_replay_artifact_path(code_home, session_id, call_id);
+    if path.exists() {
+        return Some(path);
+    }
+    if result.starts_with("data:") {
+        return None;
+    }
+    let bytes = match BASE64_STANDARD.decode(result.trim().as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!("failed to decode replayed image generation result: {err}");
+            return None;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                "failed to create generated image replay dir {}: {err}",
+                parent.display()
+            );
+            return None;
+        }
+    }
+    if let Err(err) = std::fs::write(&path, bytes) {
+        tracing::warn!(
+            "failed to write replayed image generation artifact {}: {err}",
+            path.display()
+        );
+        return None;
+    }
+    Some(path)
+}
+
 fn image_view_path_from_params(params: &serde_json::Value, cwd: &Path) -> Option<PathBuf> {
     let path = params.get("path").and_then(|value| value.as_str())?;
     let trimmed = path.trim();
@@ -4869,6 +4940,31 @@ impl ChatWidget<'_> {
                     "background",
                     None,
                 );
+            }
+            ResponseItem::ImageGenerationCall { id, status, result, .. } => {
+                let key = self.next_internal_key();
+                let path = ensure_replayed_image_generation_artifact(
+                    &self.config.code_home,
+                    self.session_id,
+                    &id,
+                    &result,
+                );
+                if let Some(record) = path.as_ref().and_then(|path| image_record_from_path(path)) {
+                    let cell = Box::new(history_cell::ImageOutputCell::from_record(record));
+                    let _ = self.history_insert_with_key_global(cell, key);
+                } else {
+                    let state = history_cell::plain_message_state_from_lines(
+                        vec![Line::from(format!(
+                            "Image generation result `{id}` replayed with status `{status}`."
+                        ))],
+                        HistoryCellType::Notice,
+                    );
+                    let _ = self.history_insert_plain_state_with_key(
+                        state,
+                        key,
+                        "image-generation-replay",
+                    );
+                }
             }
             _ => {
                 // Ignore other item kinds for replay (tool calls, etc.)
@@ -13863,6 +13959,14 @@ impl ChatWidget<'_> {
                 );
                 tools::web_search_begin(self, ev.call_id, ev.query, event.order.as_ref(), ok)
             }
+            EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent { call_id }) => {
+                self.ensure_spinner_for_activity("image-generation-begin");
+                tracing::info!(
+                    "[order] ImageGenerationBegin call_id={} seq={}",
+                    call_id,
+                    event.event_seq
+                );
+            }
             EventMsg::TaskLifecycle(TaskLifecycleEvent {
                 phase,
                 origin,
@@ -14011,6 +14115,57 @@ impl ChatWidget<'_> {
                     }
                 };
                 tools::web_search_complete(self, ev.call_id, ev.query, event.order.as_ref(), ok)
+            }
+            EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
+                call_id: _,
+                status,
+                revised_prompt: _,
+                result: _,
+                saved_path,
+            }) => {
+                let ok = match event.order.as_ref() {
+                    Some(om) => self.provider_order_key_from_order_meta(om),
+                    None => {
+                        tracing::warn!("missing OrderMeta on ImageGenerationEnd; using synthetic key");
+                        self.next_internal_key()
+                    }
+                };
+
+                if let Some(path) = saved_path.as_ref() {
+                    if let Some(record) = image_record_from_path(path.as_path()) {
+                        let cell = Box::new(history_cell::ImageOutputCell::from_record(record));
+                        let _ = self.history_insert_with_key_global(cell, ok);
+                    } else {
+                        let state = history_cell::plain_message_state_from_lines(
+                            vec![Line::from(format!(
+                                "Generated image saved to {}",
+                                path.display()
+                            ))],
+                            HistoryCellType::Notice,
+                        );
+                        let _ = self.history_insert_plain_state_with_key(
+                            state,
+                            ok,
+                            "image-generation",
+                        );
+                    }
+                } else {
+                    let state = history_cell::plain_message_state_from_lines(
+                        vec![Line::from(format!(
+                            "Image generation finished with status `{status}`, but the image could not be saved."
+                        ))],
+                        HistoryCellType::Notice,
+                    );
+                    let _ = self.history_insert_plain_state_with_key(
+                        state,
+                        ok,
+                        "image-generation",
+                    );
+                }
+
+                self.bottom_pane
+                    .update_status_text("responding".to_string());
+                self.maybe_hide_spinner();
             }
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
                 if self.current_task_output_is_hidden() {

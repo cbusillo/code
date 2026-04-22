@@ -7,6 +7,14 @@
 
 - (none)
 
+## [0.6.94] - 2026-04-22
+
+- TUI: add `/side` conversations and improve resume context with clearer parent thread status and titles. (95dafbc7, 0dc503ba, b8e78e88, fa8943fe, 43a69c50)
+- TUI: let you change reasoning level temporarily, show bash mode, and queue slash or shell input while commands run. (e502f0b5, ef071cf8, b7fec543, 917a85b0)
+- Plugins: refresh `/plugins` with a tabbed marketplace, inline enablement toggles, and broader manifest/source support. (f017a238, 06f8ec54, 37161bc7, 0e111e08, 26d9894a, cce60023)
+- Core: handle image generation outputs with higher-detail resizing defaults and add a built-in Amazon Bedrock provider. (58cb8a63, 53b15703, 120bbf46, cefcfe43)
+- Sandbox: improve Windows exec support and make permission globs and profile intersections behave more reliably. (8612714a, 799e5041, f8562bd4, 0d0abe83)
+
 ## [0.6.93] - 2026-04-17
 
 - TUI/Core: add task lifecycle visibility routing so task progress is surfaced consistently. (63ea56db)

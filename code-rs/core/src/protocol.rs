@@ -41,6 +41,8 @@ pub use code_protocol::protocol::ReviewLineRange;
 pub use code_protocol::protocol::ReviewOutputEvent;
 pub use code_protocol::protocol::{ReviewContextMetadata, ReviewRequest};
 pub use code_protocol::protocol::GitInfo;
+pub use code_protocol::protocol::ImageGenerationBeginEvent;
+pub use code_protocol::protocol::ImageGenerationEndEvent;
 pub use code_protocol::protocol::RolloutItem;
 pub use code_protocol::protocol::RolloutLine;
 pub use code_protocol::protocol::ConversationPathResponseEvent;
@@ -884,6 +886,12 @@ pub enum EventMsg {
     WebSearchBegin(WebSearchBeginEvent),
     /// Native web search call completed
     WebSearchComplete(WebSearchCompleteEvent),
+
+    /// Model requested native image generation.
+    ImageGenerationBegin(ImageGenerationBeginEvent),
+
+    /// Native image generation call completed.
+    ImageGenerationEnd(ImageGenerationEndEvent),
 
     /// Custom tool call events for non-MCP tools (browser, agent, etc)
     CustomToolCallBegin(CustomToolCallBeginEvent),
