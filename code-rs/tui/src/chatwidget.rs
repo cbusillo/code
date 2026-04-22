@@ -158,6 +158,7 @@ use code_core::protocol::AgentReasoningRawContentDeltaEvent;
 use code_core::protocol::AgentReasoningRawContentEvent;
 use code_core::protocol::AgentReasoningSectionBreakEvent;
 use code_core::protocol::AgentStatusUpdateEvent;
+use code_core::protocol::AutoContextPhase;
 use code_core::protocol::ApplyPatchApprovalRequestEvent;
 use code_core::protocol::BackgroundEventEvent;
 use code_core::protocol::BrowserScreenshotUpdateEvent;
@@ -14674,6 +14675,9 @@ impl ChatWidget<'_> {
                 self.update_stream_token_usage_metadata();
             }
             EventMsg::AutoContextCheck(event) => {
+                if matches!(event.phase, Some(AutoContextPhase::Compacting)) {
+                    self.remote_inbox_send_compaction_started();
+                }
                 self.bottom_pane.set_auto_context_phase(event.phase);
             }
             EventMsg::Warning(WarningEvent { message }) => {
@@ -30037,6 +30041,12 @@ Have we met every part of this goal and is there no further work to do?"#
     fn remote_inbox_send_turn_aborted(&self) {
         if let Some(client) = &self.remote_inbox_client {
             client.send_turn_aborted();
+        }
+    }
+
+    fn remote_inbox_send_compaction_started(&self) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_compaction_started();
         }
     }
 

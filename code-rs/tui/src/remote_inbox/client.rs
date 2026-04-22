@@ -89,6 +89,13 @@ impl RemoteInboxClientHandle {
         )));
     }
 
+    pub(crate) fn send_compaction_started(&self) {
+        self.send_status(ClientMessage::StatusChanged(self.status_event(
+            Some("Compacting context".to_string()),
+            None,
+        )));
+    }
+
     pub(crate) fn send_exec_approval_request(&self, request: &ExecApprovalRequestEvent) {
         self.send_status(ClientMessage::ApprovalRequest(RemoteApprovalRequest {
             approval_id: request.effective_approval_id(),
