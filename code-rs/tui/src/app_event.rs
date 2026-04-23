@@ -37,6 +37,7 @@ use code_git_tooling::{GhostCommit, GitToolingError};
 use code_cloud_tasks_client::{ApplyOutcome, CloudTaskError, CreatedTask, TaskSummary};
 
 use crate::app::ChatWidgetArgs;
+use crate::chatwidget::message::UserMessage;
 use crate::chrome_launch::ChromeLaunchOption;
 use crate::slash_command::SlashCommand;
 use code_protocol::models::ResponseItem;
@@ -94,6 +95,19 @@ pub(crate) enum TerminalAfter {
 pub(crate) enum GitInitResume {
     SubmitText { text: String },
     DispatchCommand { command: SlashCommand, command_text: String },
+}
+
+#[derive(Debug)]
+pub(crate) struct SwitchCwdPrompt {
+    pub message: UserMessage,
+}
+
+impl From<String> for SwitchCwdPrompt {
+    fn from(text: String) -> Self {
+        Self {
+            message: UserMessage::from(text),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,7 +291,7 @@ pub(crate) enum AppEvent {
     /// Switch to a new working directory by rebuilding the chat widget with
     /// the same configuration but a different `cwd`. Optionally submits an
     /// initial prompt once the new session is ready.
-    SwitchCwd(std::path::PathBuf, Option<String>),
+    SwitchCwd(std::path::PathBuf, Option<SwitchCwdPrompt>),
 
     /// Resume picker data finished loading
     ResumePickerLoaded {

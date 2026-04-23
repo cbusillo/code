@@ -81,7 +81,7 @@ mod settings_overlay;
 mod limits_overlay;
 mod interrupts;
 mod layout_scroll;
-mod message;
+pub(crate) mod message;
 mod perf;
 mod rate_limit_refresh;
 mod streaming;
@@ -933,6 +933,7 @@ use crate::app_event::{
     BackgroundPlacement,
     GitInitResume,
     ModelSelectionKind,
+    SwitchCwdPrompt,
     TerminalAfter,
     TerminalCommandGate,
     TerminalLaunch,
@@ -11860,7 +11861,7 @@ impl ChatWidget<'_> {
                 self.send_background_tail_ordered(msg);
                 self.app_event_tx.send(AppEvent::SwitchCwd(
                     fallback_root,
-                    Some(message.display_text.clone()),
+                    Some(SwitchCwdPrompt { message }),
                 ));
                 return;
             }
@@ -29870,24 +29871,18 @@ Have we met every part of this goal and is there no further work to do?"#
         if visible.is_empty() {
             return;
         }
-        use crate::chatwidget::message::UserMessage;
-        use code_core::protocol::InputItem;
-        let mut ordered = Vec::new();
-        if !preface.trim().is_empty() {
-            ordered.push(InputItem::Text { text: preface });
+        self.submit_user_message_with_preface(UserMessage::from(visible), preface);
+    }
+
+    fn submit_user_message_with_preface(&mut self, mut message: UserMessage, preface: String) {
+        if message.display_text.is_empty() && message.ordered_items.is_empty() {
+            return;
         }
-        ordered.push(InputItem::Text {
-            text: visible.clone(),
-        });
-        let remote_inbox_text = Some(visible.clone());
-        let msg = UserMessage {
-            display_text: visible,
-            ordered_items: ordered,
-            suppress_persistence: false,
-            mirror_to_remote: true,
-            remote_inbox_text,
-        };
-        self.submit_user_message(msg);
+        use code_core::protocol::InputItem;
+        if !preface.trim().is_empty() {
+            message.ordered_items.insert(0, InputItem::Text { text: preface });
+        }
+        self.submit_user_message(message);
     }
 
     pub(crate) fn submit_hidden_text_message_with_preface(
@@ -31269,6 +31264,33 @@ use code_core::protocol::OrderMeta;
             }
             other => panic!("expected QueueUserInput, got {other:?}"),
         }
+        assert_no_user_input_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn prefaced_replay_preserves_remote_inbox_no_mirror_payload() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let message = UserMessage {
+            display_text: "Remote reply from Discord:\nrun the focused test".to_string(),
+            ordered_items: vec![InputItem::Text {
+                text: "run the focused test".to_string(),
+            }],
+            suppress_persistence: false,
+            mirror_to_remote: false,
+            remote_inbox_text: None,
+        };
+
+        chat.submit_user_message_with_preface(message, "internal cwd switch note".to_string());
+
+        assert!(history_contains_text(chat, "Remote reply from Discord:"));
+        assert!(history_contains_text(chat, "run the focused test"));
+        assert_eq!(
+            expect_immediate_user_input(&mut code_op_rx),
+            "internal cwd switch note\nrun the focused test"
+        );
         assert_no_user_input_ops_pending(&mut code_op_rx);
     }
 
@@ -40611,7 +40633,7 @@ impl ChatWidget<'_> {
 
             // Switch cwd and optionally submit the task
             // Prefix the auto-submitted task so it's obvious it started in the new branch
-            let initial_prompt = task_opt.map(|s| format!("[branch created] {}", s));
+            let initial_prompt = task_opt.map(|s| format!("[branch created] {}", s).into());
             let _ = tx.send(AppEvent::SwitchCwd(worktree, initial_prompt));
         });
     }
@@ -40856,7 +40878,7 @@ impl ChatWidget<'_> {
     pub(crate) fn switch_cwd(
         &mut self,
         new_cwd: std::path::PathBuf,
-        initial_prompt: Option<String>,
+        initial_prompt: Option<SwitchCwdPrompt>,
     ) {
         let previous_cwd = self.config.cwd.clone();
         self.config.cwd = new_cwd.clone();
@@ -40934,9 +40956,9 @@ impl ChatWidget<'_> {
         self.submit_configure_session_op();
 
         if let Some(prompt) = initial_prompt {
-            if !prompt.is_empty() {
+            if !prompt.message.display_text.is_empty() || !prompt.message.ordered_items.is_empty() {
                 let preface = "[internal] When you finish this task, ask the user if they want any changes. If they are happy, offer to merge the branch back into the repository's default branch and delete the worktree. Use '/merge' (or an equivalent git worktree remove + switch) rather than deleting the folder directly so the UI can switch back cleanly. Wait for explicit confirmation before merging.".to_string();
-                self.submit_text_message_with_preface(prompt, preface);
+                self.submit_user_message_with_preface(prompt.message, preface);
             }
         }
 
