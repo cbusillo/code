@@ -31202,6 +31202,17 @@ use code_core::protocol::OrderMeta;
         }
     }
 
+    fn assert_no_user_input_ops_pending(code_op_rx: &mut UnboundedReceiver<Op>) {
+        loop {
+            match code_op_rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+                Ok(Op::AddToHistory { .. }) => continue,
+                Ok(op) => panic!("expected no pending user input ops, got {op:?}"),
+                Err(err) => panic!("expected no pending user input ops, got {err:?}"),
+            }
+        }
+    }
+
     fn history_contains_text(chat: &ChatWidget<'_>, needle: &str) -> bool {
         chat.history_cells.iter().any(|cell| {
             cell.display_lines_trimmed().iter().any(|line| {
@@ -31210,6 +31221,71 @@ use code_core::protocol::OrderMeta;
                     .any(|span| span.content.contains(needle))
             })
         })
+    }
+
+    #[test]
+    fn remote_inbox_reply_creates_visible_history_and_sends_raw_prompt() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+
+        chat.on_remote_inbox_reply(
+            "cmd-1".to_string(),
+            "please check the logs".to_string(),
+            Some("123".to_string()),
+        )
+        .expect("remote reply should be accepted");
+
+        assert!(history_contains_text(chat, "Remote reply from Discord (123):"));
+        assert!(history_contains_text(chat, "please check the logs"));
+        assert_eq!(expect_immediate_user_input(&mut code_op_rx), "please check the logs");
+        assert_no_user_input_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_reply_during_active_turn_uses_queue_op() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        chat.bottom_pane.set_task_running(true);
+
+        chat.on_remote_inbox_reply(
+            "cmd-2".to_string(),
+            "next turn from Discord".to_string(),
+            None,
+        )
+        .expect("remote reply should be queued");
+
+        assert!(history_contains_text(chat, "Remote reply from Discord:"));
+        assert!(history_contains_text(chat, "next turn from Discord"));
+        match code_op_rx.try_recv().expect("queued user input op") {
+            Op::QueueUserInput { items } => {
+                assert_eq!(
+                    ChatWidget::combined_input_text(&items).as_deref(),
+                    Some("next turn from Discord")
+                );
+            }
+            other => panic!("expected QueueUserInput, got {other:?}"),
+        }
+        assert_no_user_input_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_reply_rejects_empty_text() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let before = chat.history_cells.len();
+
+        let err = chat
+            .on_remote_inbox_reply("cmd-3".to_string(), "   ".to_string(), None)
+            .expect_err("empty remote replies should be rejected");
+
+        assert_eq!(err, "remote inbox reply was empty");
+        assert_eq!(chat.history_cells.len(), before);
+        assert_no_code_ops_pending(&mut code_op_rx);
     }
 
     #[test]

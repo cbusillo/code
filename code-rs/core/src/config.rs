@@ -1946,6 +1946,52 @@ persistence = "none"
     }
 
     #[test]
+    fn remote_inbox_config_parses_and_resolves_defaults() -> std::io::Result<()> {
+        let cfg = toml::from_str::<ConfigToml>(
+            r#"
+[remote_inbox]
+enabled = true
+bridge_url = "ws://127.0.0.1:8787/every-code/connect"
+token = "shared-secret"
+host_label = "Mac Studio"
+"#,
+        )
+        .expect("remote inbox config should deserialize");
+
+        assert_eq!(
+            cfg.remote_inbox,
+            Some(RemoteInboxConfig {
+                enabled: true,
+                bridge_url: Some("ws://127.0.0.1:8787/every-code/connect".to_string()),
+                token: Some("shared-secret".to_string()),
+                host_label: Some("Mac Studio".to_string()),
+            })
+        );
+
+        let code_home = TempDir::new()?;
+        let resolved = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            code_home.path().to_path_buf(),
+        )?;
+        assert_eq!(resolved.remote_inbox.enabled, true);
+        assert_eq!(
+            resolved.remote_inbox.bridge_url.as_deref(),
+            Some("ws://127.0.0.1:8787/every-code/connect")
+        );
+        assert_eq!(resolved.remote_inbox.token.as_deref(), Some("shared-secret"));
+        assert_eq!(resolved.remote_inbox.host_label.as_deref(), Some("Mac Studio"));
+
+        let default_resolved = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            code_home.path().to_path_buf(),
+        )?;
+        assert_eq!(default_resolved.remote_inbox, RemoteInboxConfig::default());
+        Ok(())
+    }
+
+    #[test]
     fn auto_upgrade_enabled_accepts_string_boolean() {
         let cfg_true = r#"auto_upgrade_enabled = "true""#;
         let parsed_true = toml::from_str::<ConfigToml>(cfg_true)

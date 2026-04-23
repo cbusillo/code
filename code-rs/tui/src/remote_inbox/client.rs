@@ -645,3 +645,173 @@ impl ProcessedCommandIds {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::mpsc;
+    use std::task::Context;
+    use std::task::Poll;
+
+    use futures::Sink;
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        messages: Vec<Message>,
+    }
+
+    impl Sink<Message> for RecordingSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.get_mut().messages.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn test_session() -> RemoteInboxSession {
+        RemoteInboxSession {
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            cwd: "/tmp/project".to_string(),
+            branch: Some("main".to_string()),
+            pid: 42,
+        }
+    }
+
+    fn app_event_sender() -> (AppEventSender, mpsc::Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (AppEventSender::new(tx), rx)
+    }
+
+    fn command_message(command_id: &str) -> String {
+        json!({
+            "type": "command",
+            "command_id": command_id,
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "reply",
+            "text": "remote text",
+            "issued_by": "123",
+        })
+        .to_string()
+    }
+
+    fn sent_payload(sink: &RecordingSink, index: usize) -> serde_json::Value {
+        let text = sink.messages[index].to_text().expect("text message");
+        serde_json::from_str(text).expect("json message")
+    }
+
+    #[tokio::test]
+    async fn reply_command_sends_app_event_and_rejects_duplicate_while_pending() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+        let mut sink = RecordingSink::default();
+        let mut processed_command_ids = ProcessedCommandIds::default();
+        let mut pending_reply_command_ids = HashSet::new();
+        let mut pending_reply_acceptances = FuturesUnordered::<PendingReplyFuture>::new();
+
+        handle_text_message(
+            &command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_reply_command_ids,
+            &mut pending_reply_acceptances,
+        )
+        .await
+        .expect("first command handled");
+
+        let event = app_event_rx.try_recv().expect("remote inbox event");
+        assert!(matches!(
+            event,
+            AppEvent::RemoteInboxReply { command_id, text, issued_by, .. }
+                if command_id == "cmd-1"
+                    && text == "remote text"
+                    && issued_by.as_deref() == Some("123")
+        ));
+        assert!(pending_reply_command_ids.contains("cmd-1"));
+        assert_eq!(sink.messages.len(), 0);
+
+        handle_text_message(
+            &command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_reply_command_ids,
+            &mut pending_reply_acceptances,
+        )
+        .await
+        .expect("duplicate command handled");
+
+        assert_eq!(
+            sent_payload(&sink, 0),
+            json!({
+                "type": "command_reject",
+                "command_id": "cmd-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "reason": "reply command is already pending acceptance",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn processed_duplicate_command_is_acknowledged_without_resubmitting() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+        let mut sink = RecordingSink::default();
+        let mut processed_command_ids = ProcessedCommandIds::default();
+        processed_command_ids.insert("cmd-1".to_string());
+        let mut pending_reply_command_ids = HashSet::new();
+        let mut pending_reply_acceptances = FuturesUnordered::<PendingReplyFuture>::new();
+
+        handle_text_message(
+            &command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_reply_command_ids,
+            &mut pending_reply_acceptances,
+        )
+        .await
+        .expect("processed duplicate handled");
+
+        assert_eq!(
+            sent_payload(&sink, 0),
+            json!({
+                "type": "command_ack",
+                "command_id": "cmd-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+            })
+        );
+        assert!(app_event_rx.try_recv().is_err());
+    }
+}

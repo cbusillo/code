@@ -125,3 +125,100 @@ pub(crate) struct RemoteApprovalDecision {
     pub session_epoch: String,
     pub decision: ReviewDecision,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn serializes_client_messages_with_snake_case_tags() {
+        let message = ClientMessage::Hello(SessionHello {
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            host_label: "Mac Studio".to_string(),
+            cwd: "/tmp/project".to_string(),
+            branch: Some("main".to_string()),
+            pid: 42,
+        });
+
+        let value = serde_json::to_value(message).expect("serialize hello");
+        assert_eq!(
+            value,
+            json!({
+                "type": "hello",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "host_label": "Mac Studio",
+                "cwd": "/tmp/project",
+                "branch": "main",
+                "pid": 42,
+            })
+        );
+    }
+
+    #[test]
+    fn omits_empty_assistant_message_from_status_events() {
+        let message = ClientMessage::TurnComplete(SessionStatusEvent {
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            message: Some("done".to_string()),
+            assistant_message: None,
+        });
+
+        let value = serde_json::to_value(message).expect("serialize status");
+        assert_eq!(
+            value,
+            json!({
+                "type": "turn_complete",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "message": "done",
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_reply_command_from_bridge() {
+        let parsed: ServerMessage = serde_json::from_value(json!({
+            "type": "command",
+            "command_id": "cmd-1",
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "reply",
+            "text": "ship it",
+            "issued_by": "123",
+        }))
+        .expect("deserialize command");
+
+        let ServerMessage::Command(command) = parsed else {
+            panic!("expected command message");
+        };
+        assert_eq!(command.command_id, "cmd-1");
+        assert_eq!(command.session_id, "session-1");
+        assert_eq!(command.session_epoch, "epoch-1");
+        assert_eq!(command.kind, RemoteCommandKind::Reply);
+        assert_eq!(command.text.as_deref(), Some("ship it"));
+        assert_eq!(command.issued_by.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn deserializes_approval_decision_from_bridge() {
+        let parsed: ServerMessage = serde_json::from_value(json!({
+            "type": "approval_decision",
+            "approval_id": "approval-1",
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "decision": "approved",
+        }))
+        .expect("deserialize approval decision");
+
+        let ServerMessage::ApprovalDecision(decision) = parsed else {
+            panic!("expected approval decision message");
+        };
+        assert_eq!(decision.approval_id, "approval-1");
+        assert_eq!(decision.session_id, "session-1");
+        assert_eq!(decision.session_epoch, "epoch-1");
+        assert_eq!(decision.decision, ReviewDecision::Approved);
+    }
+}
