@@ -57,18 +57,23 @@ pub fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> O
     if text.is_empty() && image_paths.is_empty() {
         None
     } else {
+        let mut display_parts: Vec<String> = Vec::new();
         let mut ordered: Vec<InputItem> = Vec::new();
         if !text.trim().is_empty() {
             ordered.push(InputItem::Text { text: text.clone() });
+            display_parts.push(text.clone());
         }
         for path in image_paths {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-            ordered.push(InputItem::Text { text: format!("[image: {}]", filename) });
+            let marker = format!("[image: {}]", filename);
+            ordered.push(InputItem::Text { text: marker.clone() });
             ordered.push(InputItem::LocalImage { path });
+            display_parts.push(marker);
         }
-        let remote_inbox_text = Some(text.clone());
+        let display_text = display_parts.join("\n");
+        let remote_inbox_text = Some(display_text.clone());
         Some(UserMessage {
-            display_text: text,
+            display_text,
             ordered_items: ordered,
             suppress_persistence: false,
             mirror_to_remote: true,
@@ -102,5 +107,35 @@ mod tests {
             .expect("initial prompt should create a message");
 
         assert_eq!(message.remote_inbox_message_text(), Some("hello Discord"));
+    }
+
+    #[test]
+    fn image_only_initial_user_message_mirrors_image_marker() {
+        let message = create_initial_user_message(
+            String::new(),
+            vec![PathBuf::from("/tmp/screenshot.png")],
+        )
+        .expect("image-only initial prompt should create a message");
+
+        assert_eq!(message.display_text, "[image: screenshot.png]");
+        assert_eq!(
+            message.remote_inbox_message_text(),
+            Some("[image: screenshot.png]")
+        );
+    }
+
+    #[test]
+    fn initial_user_message_mirrors_text_and_image_markers() {
+        let message = create_initial_user_message(
+            "describe this".to_string(),
+            vec![PathBuf::from("/tmp/screenshot.png")],
+        )
+        .expect("initial prompt with image should create a message");
+
+        assert_eq!(message.display_text, "describe this\n[image: screenshot.png]");
+        assert_eq!(
+            message.remote_inbox_message_text(),
+            Some("describe this\n[image: screenshot.png]")
+        );
     }
 }

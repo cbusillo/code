@@ -6596,7 +6596,6 @@ impl ChatWidget<'_> {
         const IMAGE_EXTENSIONS: &[&str] = &[
             ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".tiff", ".tif",
         ];
-        let remote_inbox_text = Some(text.clone());
         // We keep a visible copy of the original (normalized) text for history
         let mut display_text = text.clone();
         let mut ordered_items: Vec<InputItem> = Vec::new();
@@ -6712,6 +6711,7 @@ impl ChatWidget<'_> {
             _lines_tmp.pop();
         }
         display_text = _lines_tmp.join("\n");
+        let remote_inbox_text = Some(display_text.clone());
 
         UserMessage {
             display_text,
@@ -31286,6 +31286,22 @@ use code_core::protocol::OrderMeta;
         assert_eq!(err, "remote inbox reply was empty");
         assert_eq!(chat.history_cells.len(), before);
         assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn image_prompt_remote_mirror_uses_normalized_display_text() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+
+        let message = chat.parse_message_with_images(
+            "\r\n  please inspect this  \r\n\r\n".to_string(),
+        );
+
+        assert_eq!(message.display_text, "  please inspect this");
+        assert_eq!(
+            message.remote_inbox_message_text(),
+            Some("  please inspect this")
+        );
     }
 
     #[test]
