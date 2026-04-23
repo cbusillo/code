@@ -3,8 +3,6 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use code_core::config::RemoteInboxConfig;
@@ -41,7 +39,6 @@ const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PROCESSED_COMMAND_IDS: usize = 1024;
 
 type PendingCommandFuture = Pin<Box<dyn Future<Output = PendingCommandResult> + Send>>;
-type LatestStatusSnapshot = Arc<Mutex<Option<ClientMessage>>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteInboxSession {
@@ -57,7 +54,6 @@ pub(crate) struct RemoteInboxClientHandle {
     status_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     session_id: String,
     session_epoch: String,
-    latest_status_snapshot: LatestStatusSnapshot,
 }
 
 impl Drop for RemoteInboxClientHandle {
@@ -139,12 +135,6 @@ impl RemoteInboxClientHandle {
     }
 
     fn send_status(&self, message: ClientMessage) {
-        if is_replayable_status_snapshot(&message) {
-            match self.latest_status_snapshot.lock() {
-                Ok(mut latest) => *latest = Some(message.clone()),
-                Err(err) => tracing::warn!("failed to store remote inbox status snapshot: {err}"),
-            }
-        }
         if let Err(err) = self.status_tx.send(message) {
             tracing::warn!("failed to queue remote inbox status event: {err}");
         }
@@ -168,8 +158,6 @@ pub(crate) fn spawn_remote_inbox_client(
     let session_id = session.session_id.clone();
     let session_epoch = session.session_epoch.clone();
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
-    let latest_status_snapshot = Arc::new(Mutex::new(None));
-    let client_latest_status_snapshot = latest_status_snapshot.clone();
     let handle = tokio::spawn(async move {
         let mut processed_command_ids = ProcessedCommandIds::default();
         loop {
@@ -180,7 +168,6 @@ pub(crate) fn spawn_remote_inbox_client(
                 &app_event_tx,
                 &mut processed_command_ids,
                 &mut status_rx,
-                &client_latest_status_snapshot,
             )
             .await
             {
@@ -194,7 +181,6 @@ pub(crate) fn spawn_remote_inbox_client(
         status_tx,
         session_id,
         session_epoch,
-        latest_status_snapshot,
     })
 }
 
@@ -222,7 +208,6 @@ async fn connect_once(
     app_event_tx: &AppEventSender,
     processed_command_ids: &mut ProcessedCommandIds,
     status_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ClientMessage>,
-    latest_status_snapshot: &LatestStatusSnapshot,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut request = bridge_url.into_client_request()?;
     if let Some(token) = config.token.as_deref().filter(|token| !token.trim().is_empty()) {
@@ -250,7 +235,6 @@ async fn connect_once(
         }),
     )
     .await?;
-    send_latest_status_snapshot_if_idle(&mut write, status_rx, latest_status_snapshot).await?;
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
@@ -331,41 +315,6 @@ async fn connect_once(
     }
 
     Ok(())
-}
-
-async fn send_latest_status_snapshot_if_idle<S>(
-    write: &mut S,
-    status_rx: &tokio::sync::mpsc::UnboundedReceiver<ClientMessage>,
-    latest_status_snapshot: &LatestStatusSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: futures::Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
-    if !status_rx.is_empty() {
-        return Ok(());
-    }
-    let latest_status = match latest_status_snapshot.lock() {
-        Ok(latest) => latest.clone(),
-        Err(err) => {
-            tracing::warn!("failed to load remote inbox status snapshot: {err}");
-            None
-        }
-    };
-    if let Some(message) = latest_status {
-        send_json(write, &message).await?;
-    }
-    Ok(())
-}
-
-fn is_replayable_status_snapshot(message: &ClientMessage) -> bool {
-    matches!(
-        message,
-        ClientMessage::StatusChanged(_)
-            | ClientMessage::TurnComplete(_)
-            | ClientMessage::Error(_)
-            | ClientMessage::ApprovalRequest(_)
-    )
 }
 
 async fn handle_text_message<S>(
@@ -820,15 +769,6 @@ mod tests {
         serde_json::from_str(text).expect("json message")
     }
 
-    fn status_event(message: &str, assistant_message: Option<&str>) -> SessionStatusEvent {
-        SessionStatusEvent {
-            session_id: "session-1".to_string(),
-            session_epoch: "epoch-1".to_string(),
-            message: Some(message.to_string()),
-            assistant_message: assistant_message.map(str::to_string),
-        }
-    }
-
     #[tokio::test]
     async fn reply_command_sends_app_event_and_rejects_duplicate_while_pending() {
         let session = test_session();
@@ -914,71 +854,6 @@ mod tests {
         ));
         assert!(pending_command_ids.contains("cmd-1"));
         assert_eq!(sink.messages.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn latest_status_snapshot_replays_when_reconnect_has_no_queued_status() {
-        let (_status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel();
-        let latest_status_snapshot = Arc::new(Mutex::new(Some(ClientMessage::TurnComplete(
-            status_event("Turn complete", Some("Done.")),
-        ))));
-        let mut sink = RecordingSink::default();
-
-        send_latest_status_snapshot_if_idle(&mut sink, &status_rx, &latest_status_snapshot)
-            .await
-            .expect("snapshot sent");
-
-        assert_eq!(
-            sent_payload(&sink, 0),
-            json!({
-                "type": "turn_complete",
-                "session_id": "session-1",
-                "session_epoch": "epoch-1",
-                "message": "Turn complete",
-                "assistant_message": "Done.",
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn latest_status_snapshot_waits_when_reconnect_has_queued_status() {
-        let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel();
-        status_tx
-            .send(ClientMessage::StatusChanged(status_event("Turn started", None)))
-            .expect("queue status");
-        let latest_status_snapshot = Arc::new(Mutex::new(Some(ClientMessage::TurnComplete(
-            status_event("Turn complete", Some("Done.")),
-        ))));
-        let mut sink = RecordingSink::default();
-
-        send_latest_status_snapshot_if_idle(&mut sink, &status_rx, &latest_status_snapshot)
-            .await
-            .expect("snapshot skipped");
-
-        assert!(sink.messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn send_turn_complete_updates_latest_status_snapshot() {
-        let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
-        let latest_status_snapshot = Arc::new(Mutex::new(None));
-        let handle = RemoteInboxClientHandle {
-            handle: tokio::spawn(async {}),
-            status_tx,
-            session_id: "session-1".to_string(),
-            session_epoch: "epoch-1".to_string(),
-            latest_status_snapshot: latest_status_snapshot.clone(),
-        };
-
-        handle.send_turn_complete(Some("Done.".to_string()));
-
-        let queued = status_rx.recv().await.expect("queued status");
-        assert!(matches!(queued, ClientMessage::TurnComplete(_)));
-        let latest = latest_status_snapshot
-            .lock()
-            .expect("latest status snapshot")
-            .clone();
-        assert!(matches!(latest, Some(ClientMessage::TurnComplete(_))));
     }
 
     #[tokio::test]
