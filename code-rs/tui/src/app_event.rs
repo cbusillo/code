@@ -215,6 +215,13 @@ pub(crate) enum AppEvent {
         response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
     },
 
+    /// Continue the active session autonomously from a remote inbox bridge.
+    RemoteInboxContinueAutonomously {
+        command_id: String,
+        issued_by: Option<String>,
+        response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
+    },
+
     /// Resolve a local approval prompt from a remote inbox bridge.
     RemoteInboxApprovalDecision {
         approval_id: String,

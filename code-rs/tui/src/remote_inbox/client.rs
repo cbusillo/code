@@ -34,11 +34,11 @@ use crate::remote_inbox::protocol::SessionStatusEvent;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
-const REPLY_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+const COMMAND_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PROCESSED_COMMAND_IDS: usize = 1024;
 
-type PendingReplyFuture = Pin<Box<dyn Future<Output = PendingReplyResult> + Send>>;
+type PendingCommandFuture = Pin<Box<dyn Future<Output = PendingCommandResult> + Send>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteInboxSession {
@@ -237,8 +237,8 @@ async fn connect_once(
     .await?;
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
-    let mut pending_reply_acceptances = FuturesUnordered::<PendingReplyFuture>::new();
-    let mut pending_reply_command_ids = HashSet::new();
+    let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
+    let mut pending_command_ids = HashSet::new();
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
@@ -268,20 +268,20 @@ async fn connect_once(
                         app_event_tx,
                         &mut write,
                         processed_command_ids,
-                        &mut pending_reply_command_ids,
-                        &mut pending_reply_acceptances,
+                        &mut pending_command_ids,
+                        &mut pending_command_acceptances,
                     )
                     .await?;
                 } else if message.is_close() {
                     break;
                 }
             }
-            pending_result = pending_reply_acceptances.next(), if !pending_reply_acceptances.is_empty() => {
+            pending_result = pending_command_acceptances.next(), if !pending_command_acceptances.is_empty() => {
                 if let Some(result) = pending_result {
-                    pending_reply_command_ids.remove(&result.command_id);
+                    pending_command_ids.remove(&result.command_id);
 
                     match result.outcome {
-                        PendingReplyOutcome::Accepted => {
+                        PendingCommandOutcome::Accepted => {
                             processed_command_ids.insert(result.command_id.clone());
                             send_json(
                                 &mut write,
@@ -293,7 +293,7 @@ async fn connect_once(
                             )
                             .await?;
                         }
-                        PendingReplyOutcome::Rejected { reason, cache_command_id } => {
+                        PendingCommandOutcome::Rejected { reason, cache_command_id } => {
                             if cache_command_id {
                                 processed_command_ids.insert(result.command_id.clone());
                             }
@@ -323,8 +323,8 @@ async fn handle_text_message<S>(
     app_event_tx: &AppEventSender,
     write: &mut S,
     processed_command_ids: &mut ProcessedCommandIds,
-    pending_reply_command_ids: &mut HashSet<String>,
-    pending_reply_acceptances: &mut FuturesUnordered<PendingReplyFuture>,
+    pending_command_ids: &mut HashSet<String>,
+    pending_command_acceptances: &mut FuturesUnordered<PendingCommandFuture>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: futures::Sink<Message> + Unpin,
@@ -373,7 +373,7 @@ where
                 return Ok(());
             }
 
-            if pending_reply_command_ids.contains(&command.command_id) {
+            if pending_command_ids.contains(&command.command_id) {
                 tracing::info!(
                     command_id = command.command_id,
                     "rejecting duplicate pending remote inbox command"
@@ -384,7 +384,7 @@ where
                         command_id: Some(command.command_id),
                         session_id: session.session_id.clone(),
                         session_epoch: session.session_epoch.clone(),
-                        reason: "reply command is already pending acceptance".to_string(),
+                        reason: "command is already pending acceptance".to_string(),
                     }),
                 )
                 .await?;
@@ -429,8 +429,40 @@ where
                         return Ok(());
                     }
 
-                    pending_reply_command_ids.insert(command_id.clone());
-                    pending_reply_acceptances.push(wait_for_reply_acceptance(
+                    pending_command_ids.insert(command_id.clone());
+                    pending_command_acceptances.push(wait_for_command_acceptance(
+                        command_id,
+                        session.session_id.clone(),
+                        session.session_epoch.clone(),
+                        response_rx,
+                    ));
+                }
+                RemoteCommandKind::ContinueAutonomously => {
+                    let command_id = command.command_id.clone();
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    let accepted = app_event_tx.send_with_result(
+                        AppEvent::RemoteInboxContinueAutonomously {
+                            command_id: command_id.clone(),
+                            issued_by: command.issued_by,
+                            response_tx: Redacted(response_tx),
+                        },
+                    );
+                    if !accepted {
+                        send_json(
+                            write,
+                            &ClientMessage::CommandReject(CommandReject {
+                                command_id: Some(command_id),
+                                session_id: session.session_id.clone(),
+                                session_epoch: session.session_epoch.clone(),
+                                reason: "app event channel is closed".to_string(),
+                            }),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
+                    pending_command_ids.insert(command_id.clone());
+                    pending_command_acceptances.push(wait_for_command_acceptance(
                         command_id,
                         session.session_id.clone(),
                         session.session_epoch.clone(),
@@ -559,30 +591,30 @@ where
     Ok(())
 }
 
-fn wait_for_reply_acceptance(
+fn wait_for_command_acceptance(
     command_id: String,
     session_id: String,
     session_epoch: String,
     response_rx: tokio::sync::oneshot::Receiver<Result<(), String>>,
-) -> PendingReplyFuture {
+) -> PendingCommandFuture {
     Box::pin(async move {
-        let outcome = match tokio::time::timeout(REPLY_ACCEPT_TIMEOUT, response_rx).await {
-            Ok(Ok(Ok(()))) => PendingReplyOutcome::Accepted,
-            Ok(Ok(Err(reason))) => PendingReplyOutcome::Rejected {
+        let outcome = match tokio::time::timeout(COMMAND_ACCEPT_TIMEOUT, response_rx).await {
+            Ok(Ok(Ok(()))) => PendingCommandOutcome::Accepted,
+            Ok(Ok(Err(reason))) => PendingCommandOutcome::Rejected {
                 reason,
                 cache_command_id: false,
             },
-            Ok(Err(_)) => PendingReplyOutcome::Rejected {
-                reason: "remote inbox reply acceptance was canceled".to_string(),
+            Ok(Err(_)) => PendingCommandOutcome::Rejected {
+                reason: "remote inbox command acceptance was canceled".to_string(),
                 cache_command_id: false,
             },
-            Err(_) => PendingReplyOutcome::Rejected {
-                reason: "timed out waiting for app to accept reply".to_string(),
+            Err(_) => PendingCommandOutcome::Rejected {
+                reason: "timed out waiting for app to accept command".to_string(),
                 cache_command_id: true,
             },
         };
 
-        PendingReplyResult {
+        PendingCommandResult {
             command_id,
             session_id,
             session_epoch,
@@ -591,14 +623,14 @@ fn wait_for_reply_acceptance(
     })
 }
 
-struct PendingReplyResult {
+struct PendingCommandResult {
     command_id: String,
     session_id: String,
     session_epoch: String,
-    outcome: PendingReplyOutcome,
+    outcome: PendingCommandOutcome,
 }
 
-enum PendingReplyOutcome {
+enum PendingCommandOutcome {
     Accepted,
     Rejected {
         reason: String,
@@ -720,6 +752,18 @@ mod tests {
         .to_string()
     }
 
+    fn continue_command_message(command_id: &str) -> String {
+        json!({
+            "type": "command",
+            "command_id": command_id,
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "continue_autonomously",
+            "issued_by": "123",
+        })
+        .to_string()
+    }
+
     fn sent_payload(sink: &RecordingSink, index: usize) -> serde_json::Value {
         let text = sink.messages[index].to_text().expect("text message");
         serde_json::from_str(text).expect("json message")
@@ -731,8 +775,8 @@ mod tests {
         let (app_event_tx, app_event_rx) = app_event_sender();
         let mut sink = RecordingSink::default();
         let mut processed_command_ids = ProcessedCommandIds::default();
-        let mut pending_reply_command_ids = HashSet::new();
-        let mut pending_reply_acceptances = FuturesUnordered::<PendingReplyFuture>::new();
+        let mut pending_command_ids = HashSet::new();
+        let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
 
         handle_text_message(
             &command_message("cmd-1"),
@@ -740,8 +784,8 @@ mod tests {
             &app_event_tx,
             &mut sink,
             &mut processed_command_ids,
-            &mut pending_reply_command_ids,
-            &mut pending_reply_acceptances,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
         )
         .await
         .expect("first command handled");
@@ -754,7 +798,7 @@ mod tests {
                     && text == "remote text"
                     && issued_by.as_deref() == Some("123")
         ));
-        assert!(pending_reply_command_ids.contains("cmd-1"));
+        assert!(pending_command_ids.contains("cmd-1"));
         assert_eq!(sink.messages.len(), 0);
 
         handle_text_message(
@@ -763,8 +807,8 @@ mod tests {
             &app_event_tx,
             &mut sink,
             &mut processed_command_ids,
-            &mut pending_reply_command_ids,
-            &mut pending_reply_acceptances,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
         )
         .await
         .expect("duplicate command handled");
@@ -776,9 +820,40 @@ mod tests {
                 "command_id": "cmd-1",
                 "session_id": "session-1",
                 "session_epoch": "epoch-1",
-                "reason": "reply command is already pending acceptance",
+                "reason": "command is already pending acceptance",
             })
         );
+    }
+
+    #[tokio::test]
+    async fn continue_command_sends_app_event() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+        let mut sink = RecordingSink::default();
+        let mut processed_command_ids = ProcessedCommandIds::default();
+        let mut pending_command_ids = HashSet::new();
+        let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
+
+        handle_text_message(
+            &continue_command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
+        )
+        .await
+        .expect("command handled");
+
+        let event = app_event_rx.try_recv().expect("remote inbox event");
+        assert!(matches!(
+            event,
+            AppEvent::RemoteInboxContinueAutonomously { command_id, issued_by, .. }
+                if command_id == "cmd-1" && issued_by.as_deref() == Some("123")
+        ));
+        assert!(pending_command_ids.contains("cmd-1"));
+        assert_eq!(sink.messages.len(), 0);
     }
 
     #[tokio::test]
@@ -788,8 +863,8 @@ mod tests {
         let mut sink = RecordingSink::default();
         let mut processed_command_ids = ProcessedCommandIds::default();
         processed_command_ids.insert("cmd-1".to_string());
-        let mut pending_reply_command_ids = HashSet::new();
-        let mut pending_reply_acceptances = FuturesUnordered::<PendingReplyFuture>::new();
+        let mut pending_command_ids = HashSet::new();
+        let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
 
         handle_text_message(
             &command_message("cmd-1"),
@@ -797,8 +872,8 @@ mod tests {
             &app_event_tx,
             &mut sink,
             &mut processed_command_ids,
-            &mut pending_reply_command_ids,
-            &mut pending_reply_acceptances,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
         )
         .await
         .expect("processed duplicate handled");

@@ -30035,6 +30035,78 @@ Have we met every part of this goal and is there no further work to do?"#
         Ok(())
     }
 
+    pub(crate) fn on_remote_inbox_continue_autonomously(
+        &mut self,
+        command_id: String,
+        issued_by: Option<String>,
+    ) -> Result<(), String> {
+        if self.pending_request_user_input.is_some() {
+            tracing::warn!(
+                command_id,
+                issued_by,
+                "rejecting remote autonomous continuation while waiting for user input"
+            );
+            return Err("session is waiting for requested user input".to_string());
+        }
+
+        if self.bottom_pane.has_active_modal_view() {
+            tracing::warn!(
+                command_id,
+                issued_by,
+                "rejecting remote autonomous continuation while a modal is active"
+            );
+            return Err("session is waiting on a modal or approval".to_string());
+        }
+
+        if self.auto_state.is_active() {
+            if self.auto_state.is_paused_manual() {
+                return Err("Auto Drive is paused for manual editing".to_string());
+            }
+            if self.auto_state.is_waiting_for_response() {
+                return Err("Auto Drive is already waiting for the assistant".to_string());
+            }
+            if self.auto_state.awaiting_review() {
+                return Err("Auto Drive is waiting on review".to_string());
+            }
+            if self.auto_state.in_transient_recovery() {
+                return Err("Auto Drive is waiting to retry after a transient error".to_string());
+            }
+            if !self.auto_state.awaiting_coordinator_submit() {
+                return Err("Auto Drive is already running".to_string());
+            }
+
+            tracing::info!(command_id, issued_by, "continuing Auto Drive from remote inbox");
+            let effects = self.auto_state.update_continue_mode(AutoContinueMode::Immediate);
+            self.auto_apply_controller_effects(effects);
+            if self.auto_state.awaiting_coordinator_submit() {
+                self.auto_submit_prompt();
+            }
+            return Ok(());
+        }
+
+        let full_auto_enabled = matches!(
+            (&self.config.sandbox_policy, self.config.approval_policy),
+            (SandboxPolicy::DangerFullAccess, AskForApproval::Never)
+        );
+        if !full_auto_enabled {
+            return Err("switch to Full Auto before remote Auto Drive".to_string());
+        }
+        if !self.auto_can_bootstrap_from_history() {
+            return Err("no prior session history to continue".to_string());
+        }
+
+        tracing::info!(command_id, issued_by, "starting Auto Drive from remote inbox");
+        if !self.auto_start_bootstrap_from_history() {
+            return Err("failed to start Auto Drive".to_string());
+        }
+        let effects = self.auto_state.update_continue_mode(AutoContinueMode::Immediate);
+        self.auto_apply_controller_effects(effects);
+        if self.auto_state.awaiting_coordinator_submit() {
+            self.auto_submit_prompt();
+        }
+        Ok(())
+    }
+
     pub(crate) fn on_remote_inbox_approval_decision(
         &mut self,
         approval_id: String,
@@ -31307,6 +31379,47 @@ use code_core::protocol::OrderMeta;
 
         assert_eq!(err, "remote inbox reply was empty");
         assert_eq!(chat.history_cells.len(), before);
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_continue_submits_ready_auto_drive_prompt() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+
+        chat.auto_state.continue_mode = AutoContinueMode::Manual;
+        chat.auto_state.goal = Some("Ship feature".to_string());
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+        chat.schedule_auto_cli_prompt(9, "echo ready".to_string());
+
+        chat.on_remote_inbox_continue_autonomously(
+            "cmd-continue".to_string(),
+            Some("123".to_string()),
+        )
+        .expect("remote continue should be accepted");
+
+        assert_eq!(chat.auto_state.continue_mode, AutoContinueMode::Immediate);
+        assert!(chat.auto_state.is_waiting_for_response());
+        assert_eq!(expect_immediate_user_input(&mut code_op_rx), "echo ready");
+        assert_no_user_input_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_continue_rejects_running_auto_drive() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+
+        chat.auto_state.goal = Some("Ship feature".to_string());
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+
+        let err = chat
+            .on_remote_inbox_continue_autonomously("cmd-continue".to_string(), None)
+            .expect_err("remote continue should be rejected while Auto Drive is running");
+
+        assert_eq!(err, "Auto Drive is already running");
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 

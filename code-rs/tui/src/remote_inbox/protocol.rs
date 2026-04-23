@@ -115,6 +115,7 @@ pub(crate) struct RemoteCommand {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RemoteCommandKind {
     Reply,
+    ContinueAutonomously,
     StatusRequest,
 }
 
@@ -199,6 +200,28 @@ mod tests {
         assert_eq!(command.session_epoch, "epoch-1");
         assert_eq!(command.kind, RemoteCommandKind::Reply);
         assert_eq!(command.text.as_deref(), Some("ship it"));
+        assert_eq!(command.issued_by.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn deserializes_continue_autonomously_command_from_bridge() {
+        let parsed: ServerMessage = serde_json::from_value(json!({
+            "type": "command",
+            "command_id": "cmd-1",
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "continue_autonomously",
+            "issued_by": "123",
+        }))
+        .expect("deserialize command");
+
+        let ServerMessage::Command(command) = parsed else {
+            panic!("expected command message");
+        };
+        assert_eq!(command.command_id, "cmd-1");
+        assert_eq!(command.session_id, "session-1");
+        assert_eq!(command.session_epoch, "epoch-1");
+        assert_eq!(command.kind, RemoteCommandKind::ContinueAutonomously);
         assert_eq!(command.issued_by.as_deref(), Some("123"));
     }
 
