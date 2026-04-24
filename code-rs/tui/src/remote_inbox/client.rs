@@ -560,6 +560,20 @@ where
                         response_rx,
                     ));
                 }
+                RemoteCommandKind::EndSession => {
+                    send_json(
+                        write,
+                        &ClientMessage::CommandAck(CommandAck {
+                            command_id: command.command_id,
+                            session_id: session.session_id.clone(),
+                            session_epoch: session.session_epoch.clone(),
+                        }),
+                    )
+                    .await?;
+                    if !app_event_tx.send_with_result(AppEvent::ExitRequest) {
+                        tracing::warn!("failed to queue exit request after remote end_session command");
+                    }
+                }
                 RemoteCommandKind::RequestUserInputResponse => {
                     let Some(turn_id) = command.turn_id.filter(|turn_id| !turn_id.trim().is_empty()) else {
                         send_json(
@@ -918,6 +932,18 @@ mod tests {
         .to_string()
     }
 
+    fn end_session_command_message(command_id: &str) -> String {
+        json!({
+            "type": "command",
+            "command_id": command_id,
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "end_session",
+            "issued_by": "123",
+        })
+        .to_string()
+    }
+
     fn request_user_input_response_command_message(command_id: &str) -> String {
         json!({
             "type": "command",
@@ -1035,6 +1061,40 @@ mod tests {
         ));
         assert!(pending_command_ids.contains("cmd-1"));
         assert_eq!(sink.messages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn end_session_command_acks_and_requests_exit() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+        let mut sink = RecordingSink::default();
+        let mut processed_command_ids = ProcessedCommandIds::default();
+        let mut pending_command_ids = HashSet::new();
+        let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
+
+        handle_text_message(
+            &end_session_command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
+        )
+        .await
+        .expect("command handled");
+
+        assert!(matches!(app_event_rx.try_recv(), Ok(AppEvent::ExitRequest)));
+        assert!(pending_command_ids.is_empty());
+        assert_eq!(
+            sent_payload(&sink, 0),
+            json!({
+                "type": "command_ack",
+                "command_id": "cmd-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+            })
+        );
     }
 
     #[tokio::test]
