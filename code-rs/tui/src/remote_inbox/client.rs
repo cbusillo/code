@@ -560,6 +560,36 @@ where
                         response_rx,
                     ));
                 }
+                RemoteCommandKind::PauseCurrentTurn => {
+                    let command_id = command.command_id.clone();
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    let accepted = app_event_tx.send_with_result(AppEvent::RemoteInboxPauseCurrentTurn {
+                        command_id: command_id.clone(),
+                        issued_by: command.issued_by,
+                        response_tx: Redacted(response_tx),
+                    });
+                    if !accepted {
+                        send_json(
+                            write,
+                            &ClientMessage::CommandReject(CommandReject {
+                                command_id: Some(command_id),
+                                session_id: session.session_id.clone(),
+                                session_epoch: session.session_epoch.clone(),
+                                reason: "app event channel is closed".to_string(),
+                            }),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
+                    pending_command_ids.insert(command_id.clone());
+                    pending_command_acceptances.push(wait_for_command_acceptance(
+                        command_id,
+                        session.session_id.clone(),
+                        session.session_epoch.clone(),
+                        response_rx,
+                    ));
+                }
                 RemoteCommandKind::EndSession => {
                     send_json(
                         write,
@@ -932,6 +962,18 @@ mod tests {
         .to_string()
     }
 
+    fn pause_command_message(command_id: &str) -> String {
+        json!({
+            "type": "command",
+            "command_id": command_id,
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "pause_current_turn",
+            "issued_by": "123",
+        })
+        .to_string()
+    }
+
     fn end_session_command_message(command_id: &str) -> String {
         json!({
             "type": "command",
@@ -1095,6 +1137,37 @@ mod tests {
                 "session_epoch": "epoch-1",
             })
         );
+    }
+
+    #[tokio::test]
+    async fn pause_current_turn_command_sends_app_event() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+        let mut sink = RecordingSink::default();
+        let mut processed_command_ids = ProcessedCommandIds::default();
+        let mut pending_command_ids = HashSet::new();
+        let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
+
+        handle_text_message(
+            &pause_command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
+        )
+        .await
+        .expect("command handled");
+
+        let event = app_event_rx.try_recv().expect("remote inbox event");
+        assert!(matches!(
+            event,
+            AppEvent::RemoteInboxPauseCurrentTurn { command_id, issued_by, .. }
+                if command_id == "cmd-1" && issued_by.as_deref() == Some("123")
+        ));
+        assert!(pending_command_ids.contains("cmd-1"));
+        assert_eq!(sink.messages.len(), 0);
     }
 
     #[tokio::test]

@@ -30138,6 +30138,25 @@ Have we met every part of this goal and is there no further work to do?"#
         Ok(())
     }
 
+    pub(crate) fn on_remote_inbox_pause_current_turn(
+        &mut self,
+        command_id: String,
+        issued_by: Option<String>,
+    ) -> Result<(), String> {
+        if !self.is_task_running() && !self.wait_running() {
+            tracing::warn!(
+                command_id,
+                issued_by,
+                "rejecting remote pause while no turn is active"
+            );
+            return Err("no active turn is running".to_string());
+        }
+
+        tracing::info!(command_id, issued_by, "interrupting active turn from remote inbox");
+        self.interrupt_running_task();
+        Ok(())
+    }
+
     pub(crate) fn on_remote_inbox_approval_decision(
         &mut self,
         approval_id: String,
@@ -31466,6 +31485,40 @@ use code_core::protocol::OrderMeta;
             .expect_err("remote continue should be rejected while Auto Drive is running");
 
         assert_eq!(err, "Auto Drive is already running");
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_pause_interrupts_running_turn() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+
+        chat.active_task_ids.insert("turn-1".to_string());
+        chat.bottom_pane.set_task_running(true);
+
+        chat.on_remote_inbox_pause_current_turn(
+            "cmd-pause".to_string(),
+            Some("123".to_string()),
+        )
+        .expect("remote pause should be accepted");
+
+        assert!(!chat.bottom_pane.is_task_running());
+        assert!(matches!(code_op_rx.try_recv(), Ok(Op::Interrupt)));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_pause_rejects_when_idle() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+
+        let err = chat
+            .on_remote_inbox_pause_current_turn("cmd-pause".to_string(), None)
+            .expect_err("remote pause should be rejected when idle");
+
+        assert_eq!(err, "no active turn is running");
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 

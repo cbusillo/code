@@ -222,6 +222,13 @@ pub(crate) enum AppEvent {
         response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
     },
 
+    /// Interrupt the active turn from a remote inbox bridge.
+    RemoteInboxPauseCurrentTurn {
+        command_id: String,
+        issued_by: Option<String>,
+        response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
+    },
+
     /// Submit a structured response to a pending request_user_input prompt
     /// from a remote inbox bridge.
     RemoteInboxRequestUserInputAnswer {

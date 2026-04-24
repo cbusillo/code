@@ -961,6 +961,18 @@ impl App<'_> {
                     };
                     let _ = response_tx.0.send(result);
                 }
+                AppEvent::RemoteInboxPauseCurrentTurn {
+                    command_id,
+                    issued_by,
+                    response_tx,
+                } => {
+                    let result = if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.on_remote_inbox_pause_current_turn(command_id, issued_by)
+                    } else {
+                        Err("chat widget is not active".to_string())
+                    };
+                    let _ = response_tx.0.send(result);
+                }
                 AppEvent::RemoteInboxRequestUserInputAnswer {
                     command_id,
                     turn_id,
