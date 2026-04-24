@@ -32244,6 +32244,7 @@ use code_core::protocol::OrderMeta;
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
         chat.config.tui.auto_review_enabled = true;
+        chat.auto_review_reviewed_marker = None;
         chat.turn_had_code_edits = true;
         chat.background_review = None;
 
@@ -32267,6 +32268,7 @@ use code_core::protocol::OrderMeta;
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
         chat.config.tui.auto_review_enabled = true;
+        chat.auto_review_reviewed_marker = None;
         chat.turn_had_code_edits = true;
         chat.background_review = None;
 
@@ -33619,6 +33621,7 @@ use code_core::protocol::OrderMeta;
     #[test]
     fn skipped_auto_review_with_findings_defers_to_next_turn() {
         let _rt = enter_test_runtime_guard();
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
@@ -33629,6 +33632,7 @@ use code_core::protocol::OrderMeta;
         });
 
         chat.config.tui.auto_review_enabled = true;
+        chat.auto_review_reviewed_marker = None;
         chat.turn_sequence = 1;
         chat.turn_had_code_edits = true;
         let pending_base = GhostCommit::new("base-skip".to_string(), None);
@@ -33690,6 +33694,7 @@ use code_core::protocol::OrderMeta;
     #[test]
     fn skipped_auto_review_clean_runs_immediately() {
         let _rt = enter_test_runtime_guard();
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
@@ -33700,6 +33705,7 @@ use code_core::protocol::OrderMeta;
         });
 
         chat.config.tui.auto_review_enabled = true;
+        chat.auto_review_reviewed_marker = None;
         chat.turn_sequence = 1;
         chat.turn_had_code_edits = true;
         let pending_base = GhostCommit::new("base-clean".to_string(), None);
@@ -33742,6 +33748,7 @@ use code_core::protocol::OrderMeta;
     #[test]
     fn multiple_skipped_auto_reviews_collapse_to_first_base() {
         let _rt = enter_test_runtime_guard();
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
@@ -33752,6 +33759,7 @@ use code_core::protocol::OrderMeta;
         });
 
         chat.config.tui.auto_review_enabled = true;
+        chat.auto_review_reviewed_marker = None;
         chat.turn_sequence = 1;
         chat.turn_had_code_edits = true;
         let first_base = GhostCommit::new("base-first".to_string(), None);
@@ -33805,6 +33813,7 @@ use code_core::protocol::OrderMeta;
     #[test]
     fn stale_background_review_is_reclaimed() {
         let _rt = enter_test_runtime_guard();
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
 
@@ -33815,6 +33824,7 @@ use code_core::protocol::OrderMeta;
         });
 
         chat.config.tui.auto_review_enabled = true;
+        chat.auto_review_reviewed_marker = None;
         chat.turn_had_code_edits = true;
         let base = GhostCommit::new("stale-base".to_string(), None);
         let stale_started = Instant::now()
