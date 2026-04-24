@@ -47,6 +47,7 @@ impl AppEventSender {
                 | AppEvent::Paste(_)
                 | AppEvent::RequestRedraw
                 | AppEvent::RemoteInboxApprovalDecision { .. }
+                | AppEvent::RemoteInboxRequestUserInputAnswer { .. }
                 | AppEvent::RemoteInboxReply { .. }
                 | AppEvent::Redraw
                 | AppEvent::ExitRequest

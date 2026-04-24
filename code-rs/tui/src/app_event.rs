@@ -222,6 +222,16 @@ pub(crate) enum AppEvent {
         response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
     },
 
+    /// Submit a structured response to a pending request_user_input prompt
+    /// from a remote inbox bridge.
+    RemoteInboxRequestUserInputAnswer {
+        command_id: String,
+        turn_id: String,
+        response: RequestUserInputResponse,
+        issued_by: Option<String>,
+        response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
+    },
+
     /// Resolve a local approval prompt from a remote inbox bridge.
     RemoteInboxApprovalDecision {
         approval_id: String,

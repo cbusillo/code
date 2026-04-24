@@ -11710,6 +11710,7 @@ impl ChatWidget<'_> {
         self.clear_composer();
         self.bottom_pane
             .update_status_text("waiting for model".to_string());
+        self.remote_inbox_send_waiting_for_model();
         self.request_redraw();
     }
 
@@ -11789,7 +11790,35 @@ impl ChatWidget<'_> {
         self.clear_composer();
         self.bottom_pane
             .update_status_text("waiting for model".to_string());
+        self.remote_inbox_send_waiting_for_model();
         self.request_redraw();
+    }
+
+    pub(crate) fn on_remote_inbox_request_user_input_answer(
+        &mut self,
+        command_id: String,
+        turn_id: String,
+        response: code_protocol::request_user_input::RequestUserInputResponse,
+        issued_by: Option<String>,
+    ) -> Result<(), String> {
+        let Some(pending) = self.pending_request_user_input.as_ref() else {
+            tracing::warn!(command_id, issued_by, "rejecting remote request_user_input answer with no active prompt");
+            return Err("session is not waiting for requested user input".to_string());
+        };
+        if pending.turn_id != turn_id {
+            tracing::warn!(
+                command_id,
+                issued_by,
+                expected_turn_id = pending.turn_id,
+                got_turn_id = turn_id,
+                "rejecting remote request_user_input answer for unexpected turn"
+            );
+            return Err("request_user_input turn does not match the active prompt".to_string());
+        }
+
+        tracing::info!(command_id, issued_by, turn_id, "accepting remote request_user_input answer");
+        self.on_request_user_input_answer(turn_id, response);
+        Ok(())
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
@@ -14781,6 +14810,7 @@ impl ChatWidget<'_> {
                     history_cell::plain_message_state_from_paragraphs(PlainMessageKind::Notice, role, lines);
                 let _ = self.history_insert_plain_state_with_key(state, key, "request_user_input");
                 self.restore_reasoning_in_progress_if_streaming();
+                self.remote_inbox_send_request_user_input(&ev);
 
                 if auto_answer {
                     use code_protocol::request_user_input::RequestUserInputAnswer;
@@ -14878,6 +14908,7 @@ impl ChatWidget<'_> {
                     self.bottom_pane
                         .update_status_text("waiting for model".to_string());
                     self.bottom_pane.set_task_running(true);
+                    self.remote_inbox_send_waiting_for_model();
                 } else {
                     self.pending_request_user_input = Some(PendingRequestUserInput {
                         turn_id: ev.turn_id.clone(),
@@ -30166,6 +30197,21 @@ Have we met every part of this goal and is there no further work to do?"#
         }
     }
 
+    fn remote_inbox_send_request_user_input(
+        &self,
+        request: &code_protocol::request_user_input::RequestUserInputEvent,
+    ) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_request_user_input(request);
+        }
+    }
+
+    fn remote_inbox_send_waiting_for_model(&self) {
+        if let Some(client) = &self.remote_inbox_client {
+            client.send_waiting_for_model();
+        }
+    }
+
     fn insert_resume_placeholder(&mut self) {
         if self.resume_placeholder_visible {
             return;
@@ -31420,6 +31466,175 @@ use code_core::protocol::OrderMeta;
             .expect_err("remote continue should be rejected while Auto Drive is running");
 
         assert_eq!(err, "Auto Drive is already running");
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_request_user_input_answer_submits_pending_response() {
+        use code_protocol::request_user_input::RequestUserInputAnswer;
+        use code_protocol::request_user_input::RequestUserInputQuestion;
+        use code_protocol::request_user_input::RequestUserInputResponse;
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        chat.pending_request_user_input = Some(PendingRequestUserInput {
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            anchor_key: chat.next_internal_key(),
+            questions: vec![RequestUserInputQuestion {
+                id: "mode".to_string(),
+                header: "Build mode".to_string(),
+                question: "Choose a mode".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: None,
+            }],
+        });
+
+        chat.on_remote_inbox_request_user_input_answer(
+            "cmd-1".to_string(),
+            "turn-1".to_string(),
+            RequestUserInputResponse {
+                answers: std::collections::HashMap::from([(
+                    "mode".to_string(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Safe".to_string()],
+                    },
+                )]),
+            },
+            Some("123".to_string()),
+        )
+        .expect("remote request_user_input answer should be accepted");
+
+        match code_op_rx.try_recv().expect("user input answer op") {
+            Op::UserInputAnswer { id, response } => {
+                assert_eq!(id, "turn-1");
+                assert_eq!(
+                    response
+                        .answers
+                        .get("mode")
+                        .and_then(|answer| answer.answers.first())
+                        .map(String::as_str),
+                    Some("Safe")
+                );
+            }
+            other => panic!("expected UserInputAnswer, got {other:?}"),
+        }
+        assert!(chat.pending_request_user_input.is_none());
+        assert!(history_contains_text(chat, "Safe"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn auto_drive_request_user_input_is_mirrored_before_auto_answer() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let (remote_inbox_client, mut status_rx) = crate::remote_inbox::test_remote_inbox_client_handle();
+        chat.remote_inbox_client = Some(remote_inbox_client);
+        chat.auto_state.goal = Some("Ship feature".to_string());
+        chat.auto_state.set_phase(AutoRunPhase::Active);
+
+        chat.handle_code_event(Event {
+            id: "turn-1".to_string(),
+            event_seq: 0,
+            msg: EventMsg::RequestUserInput(code_protocol::request_user_input::RequestUserInputEvent {
+                call_id: "call-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                questions: vec![code_protocol::request_user_input::RequestUserInputQuestion {
+                    id: "mode".to_string(),
+                    header: "Build mode".to_string(),
+                    question: "Choose a mode".to_string(),
+                    is_other: false,
+                    is_secret: false,
+                    options: Some(vec![
+                        code_protocol::request_user_input::RequestUserInputQuestionOption {
+                            label: "Safe (Recommended)".to_string(),
+                            description: "Run the full path".to_string(),
+                        },
+                        code_protocol::request_user_input::RequestUserInputQuestionOption {
+                            label: "Fast".to_string(),
+                            description: "Skip extra checks".to_string(),
+                        },
+                    ]),
+                }],
+            }),
+            order: None,
+        });
+
+        match status_rx.try_recv().expect("mirrored request user input") {
+            crate::remote_inbox::protocol::ClientMessage::RequestUserInput(request) => {
+                assert_eq!(request.call_id, "call-1");
+                assert_eq!(request.turn_id, "turn-1");
+            }
+            other => panic!("expected RequestUserInput, got {other:?}"),
+        }
+        match status_rx.try_recv().expect("waiting for model status") {
+            crate::remote_inbox::protocol::ClientMessage::StatusChanged(status) => {
+                assert_eq!(status.message.as_deref(), Some("Waiting for model"));
+            }
+            other => panic!("expected StatusChanged, got {other:?}"),
+        }
+
+        match code_op_rx.try_recv().expect("user input answer op") {
+            Op::UserInputAnswer { id, response } => {
+                assert_eq!(id, "turn-1");
+                assert_eq!(
+                    response
+                        .answers
+                        .get("mode")
+                        .and_then(|answer| answer.answers.first())
+                        .map(String::as_str),
+                    Some("Safe (Recommended)")
+                );
+            }
+            other => panic!("expected UserInputAnswer, got {other:?}"),
+        }
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_request_user_input_answer_rejects_unexpected_turn() {
+        use code_protocol::request_user_input::RequestUserInputAnswer;
+        use code_protocol::request_user_input::RequestUserInputQuestion;
+        use code_protocol::request_user_input::RequestUserInputResponse;
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        chat.pending_request_user_input = Some(PendingRequestUserInput {
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            anchor_key: chat.next_internal_key(),
+            questions: vec![RequestUserInputQuestion {
+                id: "mode".to_string(),
+                header: "Build mode".to_string(),
+                question: "Choose a mode".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: None,
+            }],
+        });
+
+        let err = chat
+            .on_remote_inbox_request_user_input_answer(
+                "cmd-1".to_string(),
+                "turn-2".to_string(),
+                RequestUserInputResponse {
+                    answers: std::collections::HashMap::from([(
+                        "mode".to_string(),
+                        RequestUserInputAnswer {
+                            answers: vec!["Safe".to_string()],
+                        },
+                    )]),
+                },
+                None,
+            )
+            .expect_err("mismatched turn should be rejected");
+
+        assert_eq!(err, "request_user_input turn does not match the active prompt");
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 

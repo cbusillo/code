@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde::Serialize;
 use code_core::protocol::ReviewDecision;
+use code_protocol::request_user_input::RequestUserInputQuestion;
+use code_protocol::request_user_input::RequestUserInputResponse;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -12,6 +14,7 @@ pub(crate) enum ClientMessage {
     TurnComplete(SessionStatusEvent),
     Error(SessionStatusEvent),
     ApprovalRequest(RemoteApprovalRequest),
+    RequestUserInput(RemoteRequestUserInput),
     ApprovalDecisionAck(RemoteApprovalDecisionAck),
     ApprovalDecisionReject(RemoteApprovalDecisionReject),
     CommandAck(CommandAck),
@@ -78,6 +81,15 @@ pub(crate) struct RemoteApprovalRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct RemoteRequestUserInput {
+    pub call_id: String,
+    pub turn_id: String,
+    pub session_id: String,
+    pub session_epoch: String,
+    pub questions: Vec<RequestUserInputQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct RemoteApprovalDecisionAck {
     pub approval_id: String,
     pub session_id: String,
@@ -108,6 +120,10 @@ pub(crate) struct RemoteCommand {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub response: Option<RequestUserInputResponse>,
+    #[serde(default)]
     pub issued_by: Option<String>,
 }
 
@@ -116,6 +132,7 @@ pub(crate) struct RemoteCommand {
 pub(crate) enum RemoteCommandKind {
     Reply,
     ContinueAutonomously,
+    RequestUserInputResponse,
     StatusRequest,
 }
 
@@ -180,6 +197,44 @@ mod tests {
     }
 
     #[test]
+    fn serializes_request_user_input_message() {
+        let message = ClientMessage::RequestUserInput(RemoteRequestUserInput {
+            call_id: "call-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            questions: vec![RequestUserInputQuestion {
+                id: "mode".to_string(),
+                header: "Build mode".to_string(),
+                question: "Choose a mode".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: Some(vec![]),
+            }],
+        });
+
+        let value = serde_json::to_value(message).expect("serialize request_user_input");
+        assert_eq!(
+            value,
+            json!({
+                "type": "request_user_input",
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "questions": [{
+                    "id": "mode",
+                    "header": "Build mode",
+                    "question": "Choose a mode",
+                    "isOther": false,
+                    "isSecret": false,
+                    "options": [],
+                }],
+            })
+        );
+    }
+
+    #[test]
     fn deserializes_reply_command_from_bridge() {
         let parsed: ServerMessage = serde_json::from_value(json!({
             "type": "command",
@@ -222,6 +277,42 @@ mod tests {
         assert_eq!(command.session_id, "session-1");
         assert_eq!(command.session_epoch, "epoch-1");
         assert_eq!(command.kind, RemoteCommandKind::ContinueAutonomously);
+        assert_eq!(command.issued_by.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn deserializes_request_user_input_response_command_from_bridge() {
+        let parsed: ServerMessage = serde_json::from_value(json!({
+            "type": "command",
+            "command_id": "cmd-1",
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "request_user_input_response",
+            "turn_id": "turn-1",
+            "response": {
+                "answers": {
+                    "mode": {"answers": ["Safe"]}
+                }
+            },
+            "issued_by": "123",
+        }))
+        .expect("deserialize request_user_input response command");
+
+        let ServerMessage::Command(command) = parsed else {
+            panic!("expected command message");
+        };
+        assert_eq!(command.command_id, "cmd-1");
+        assert_eq!(command.kind, RemoteCommandKind::RequestUserInputResponse);
+        assert_eq!(command.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            command
+                .response
+                .as_ref()
+                .and_then(|response| response.answers.get("mode"))
+                .and_then(|answer| answer.answers.first())
+                .map(String::as_str),
+            Some("Safe")
+        );
         assert_eq!(command.issued_by.as_deref(), Some("123"));
     }
 
