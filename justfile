@@ -71,6 +71,10 @@ local-code-rebuild:
 local-overlay-update:
     ./scripts/local/update-overlay-from-upstream.sh
 
+[no-cd]
+local-fork-health:
+    ./scripts/local/fork-health.sh
+
 bazel-test:
     bazel test --test_tag_filters=-argument-comment-lint //... --keep_going
 
