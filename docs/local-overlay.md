@@ -5,6 +5,14 @@ this machine. It carries fork-specific behavior on top of `upstream/main`
 (`just-every/code`). Treat `codex-rs/` as a read-only mirror and put editable
 Rust changes under `code-rs/`.
 
+Remote map:
+
+- `upstream`: `just-every/code`, the normal import source for overlay syncs.
+- `origin` / `fork`: `cbusillo/code`, where overlay branches and tags are
+  pushed.
+- `openai`: reference remote for `openai/codex`; do not use it for routine
+  overlay imports or pushes.
+
 ## Owned Differences
 
 - **Remote Inbox:** remote session control, request-user-input forwarding, and
@@ -29,8 +37,10 @@ just local-overlay-update
 ```
 
 After conflicts are resolved, preserve upstream fixes unless they contradict an
-owned overlay behavior above. Keep `scripts/local/overlay-picks.txt` empty unless
-a patch intentionally lives outside the overlay branch and must be replayed.
+owned overlay behavior above. During conflict resolution, prefer upstream unless
+the conflict touches one of those owned overlay areas. Keep
+`scripts/local/overlay-picks.txt` empty unless a patch intentionally lives
+outside the overlay branch and must be replayed.
 
 ## Release Cadence
 
@@ -49,17 +59,30 @@ Examples:
 - `overlay-v0.6.95.2` for a second local hotfix on the same upstream base
 - `overlay-v0.6.96.1` after the next upstream version bump
 
-Before pushing a release tag:
+Required release gate:
 
 ```sh
 git status --short --branch
 ./build-fast.sh
+```
+
+Install and smoke-check the local binary before tagging:
+
+```sh
 just local-code-rebuild
 code --version
 code exec -m gpt-5.5 --sandbox read-only --max-seconds 30 "Reply with exactly OK."
 ```
 
-Then push the branch and tag, and monitor `Binary Release`.
+Then push the overlay branch and tag to `origin`, and monitor `Binary Release`:
+
+```sh
+git tag overlay-v0.6.96.1
+git push origin local/cbusillo-overlay
+git push origin overlay-v0.6.96.1
+```
+
+Do not push overlay releases to `upstream` or `openai`.
 
 ## Fork Health
 

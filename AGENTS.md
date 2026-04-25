@@ -66,6 +66,7 @@ Examples:
 - Add a commit SHA to `scripts/local/overlay-picks.txt` only for a patch that intentionally lives outside the overlay branch and still needs to be cherry-picked in during `just local-overlay-update`. Keep the list ordered and comment each entry with the source branch or purpose.
 - Old side branches are archival context, not the runtime source of truth. They do not need to merge cleanly as branches; only the specific carried commits must cherry-pick cleanly onto the current overlay branch.
 - If a legacy pick no longer cherry-picks cleanly, leave it commented out in `scripts/local/overlay-picks.txt`, manually re-port the fix against current upstream, commit the new port on `local/cbusillo-overlay`, then replace the old SHA in the manifest if you still want automatic replay.
+- For overlay-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/local-overlay.md`.
 
 ## How to Git Push
 
