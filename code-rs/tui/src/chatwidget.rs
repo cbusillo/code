@@ -32231,7 +32231,7 @@ use code_core::protocol::OrderMeta;
         .expect("reload config");
 
         assert_eq!(reloaded.context_mode, Some(ContextMode::Disabled));
-        assert_eq!(reloaded.model_context_window, Some(272_000));
+        assert_eq!(reloaded.model_context_window, Some(400_000));
     }
 
     #[test]
