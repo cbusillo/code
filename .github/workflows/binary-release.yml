@@ -83,27 +83,24 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: metadata
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJson(matrix.runs_on) }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: linux-self-hosted
+            runs_on: '["self-hosted","Linux","X64","chris-testing"]'
             target: x86_64-unknown-linux-musl
             artifact: code-x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            artifact: code-aarch64-unknown-linux-musl
           - os: macos-14
+            runs_on: '["macos-14"]'
             target: x86_64-apple-darwin
             artifact: code-x86_64-apple-darwin
           - os: macos-14
+            runs_on: '["macos-14"]'
             target: aarch64-apple-darwin
             artifact: code-aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: code-x86_64-pc-windows-msvc.exe
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
       RUSTUP_HOME: ${{ github.workspace }}/.cargo-home/rustup
@@ -148,17 +145,14 @@ jobs:
           echo "SCCACHE_CACHE_SIZE=10G" >> "$GITHUB_ENV"
 
       - name: Linux (musl) tuning
-        if: contains(matrix.os, 'ubuntu') && contains(matrix.target, 'musl')
+        if: matrix.os == 'linux-self-hosted' && contains(matrix.target, 'musl')
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y musl-tools pkg-config zstd
           echo 'CC=musl-gcc' >> "$GITHUB_ENV"
-          case "${{ matrix.target }}" in
-            x86_64-unknown-linux-musl) echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV" ;;
-            aarch64-unknown-linux-musl) echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV" ;;
-          esac
+          echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
           echo 'PKG_CONFIG_ALLOW_CROSS=1' >> "$GITHUB_ENV"
           echo 'OPENSSL_STATIC=1' >> "$GITHUB_ENV"
           echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort' >> "$GITHUB_ENV"
@@ -175,18 +169,6 @@ jobs:
           echo 'CXX=sccache clang++' >> "$GITHUB_ENV"
           echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort' >> "$GITHUB_ENV"
 
-      - name: Windows tuning
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          "LIBGIT2_SYS_USE_SCHANNEL=1" >> $env:GITHUB_ENV
-          "CURL_SSL_BACKEND=schannel" >> $env:GITHUB_ENV
-          if (Get-Command lld-link -ErrorAction SilentlyContinue) {
-            "RUSTFLAGS=-Awarnings -Clinker=lld-link -C debuginfo=0 -C strip=symbols -C panic=abort -C link-arg=/OPT:REF -C link-arg=/OPT:ICF -C link-arg=/DEBUG:NONE" >> $env:GITHUB_ENV
-          } else {
-            "RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort -C link-arg=/OPT:REF -C link-arg=/OPT:ICF -C link-arg=/DEBUG:NONE" >> $env:GITHUB_ENV
-          }
-
       - name: Prefetch Rust dependencies
         working-directory: code-rs
         env:
@@ -202,8 +184,7 @@ jobs:
 
       - name: Smoke test release binary [Unix]
         if: |
-          (matrix.os == 'ubuntu-24.04' && matrix.target == 'x86_64-unknown-linux-musl') ||
-          (matrix.os == 'ubuntu-24.04-arm' && matrix.target == 'aarch64-unknown-linux-musl') ||
+          (matrix.os == 'linux-self-hosted' && matrix.target == 'x86_64-unknown-linux-musl') ||
           (startsWith(matrix.os, 'macos-') && matrix.target == 'aarch64-apple-darwin')
         shell: bash
         run: |
@@ -212,38 +193,14 @@ jobs:
           "$exe" --version
           "$exe" completion bash > /dev/null
 
-      - name: Smoke test release binary [Windows]
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $exe = "code-rs/target/${{ matrix.target }}/release/code.exe"
-          & $exe --version | Out-Null
-          & $exe completion bash | Out-Null
-
       - name: Prepare artifacts
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp "code-rs/target/${{ matrix.target }}/release/code.exe" "artifacts/${{ matrix.artifact }}"
-          else
-            cp "code-rs/target/${{ matrix.target }}/release/code" "artifacts/${{ matrix.artifact }}"
-          fi
-
-      - name: Compress artifacts (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          Get-ChildItem artifacts -File | ForEach-Object {
-            $src = $_.FullName
-            $dst = "$src.zip"
-            Compress-Archive -Path $src -DestinationPath $dst -Force
-            Remove-Item $src -Force
-          }
+          cp "code-rs/target/${{ matrix.target }}/release/code" "artifacts/${{ matrix.artifact }}"
 
       - name: Compress artifacts (*nix dual-format)
-        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           set -euo pipefail
