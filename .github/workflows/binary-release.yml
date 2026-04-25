@@ -86,17 +86,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=$({
-            git tag --list 'rust-v[0-9]*' | sed 's/^rust-v//'
-            git ls-remote --tags --refs https://github.com/openai/codex.git 'refs/tags/rust-v[0-9]*' \
-              | awk '{print $2}' \
-              | sed 's#^refs/tags/rust-v##'
-          } \
-            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.]+)?$' \
-            | sort -V \
-            | tail -n 1)
+          version=$(node -p "require('./codex-cli/package.json').version")
           if [[ -z "$version" ]]; then
-            echo "Unable to resolve embedded Code version from rust-v tags" >&2
+            echo "Unable to resolve embedded Code version from codex-cli/package.json" >&2
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
