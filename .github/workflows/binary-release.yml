@@ -91,8 +91,8 @@ jobs:
         include:
           - os: linux-self-hosted
             runs_on: '["self-hosted","Linux","X64","chris-testing"]'
-            target: x86_64-unknown-linux-musl
-            artifact: code-x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
+            artifact: code-linux-x64
           - os: macos-14
             runs_on: '["macos-14"]'
             target: x86_64-apple-darwin
@@ -144,17 +144,11 @@ jobs:
           echo "SCCACHE_IDLE_TIMEOUT=1800" >> "$GITHUB_ENV"
           echo "SCCACHE_CACHE_SIZE=10G" >> "$GITHUB_ENV"
 
-      - name: Linux (musl) tuning
-        if: matrix.os == 'linux-self-hosted' && contains(matrix.target, 'musl')
+      - name: Linux tuning
+        if: matrix.os == 'linux-self-hosted'
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config zstd
-          echo 'CC=musl-gcc' >> "$GITHUB_ENV"
-          echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
-          echo 'PKG_CONFIG_ALLOW_CROSS=1' >> "$GITHUB_ENV"
-          echo 'OPENSSL_STATIC=1' >> "$GITHUB_ENV"
           echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort' >> "$GITHUB_ENV"
 
       - name: macOS tuning
@@ -184,7 +178,7 @@ jobs:
 
       - name: Smoke test release binary [Unix]
         if: |
-          (matrix.os == 'linux-self-hosted' && matrix.target == 'x86_64-unknown-linux-musl') ||
+          (matrix.os == 'linux-self-hosted' && matrix.target == 'x86_64-unknown-linux-gnu') ||
           (startsWith(matrix.os, 'macos-') && matrix.target == 'aarch64-apple-darwin')
         shell: bash
         run: |
