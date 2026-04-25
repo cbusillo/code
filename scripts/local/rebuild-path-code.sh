@@ -6,11 +6,15 @@ code_rs_root="$repo_root/code-rs"
 release_bin="$code_rs_root/target/release/code"
 
 resolve_code_version() {
-	git -C "$repo_root" tag --list 'rust-v[0-9]*' |
-		grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.]+)?$' |
+	{
+		git -C "$repo_root" tag --list 'rust-v[0-9]*' | sed 's/^rust-v//'
+		git ls-remote --tags --refs https://github.com/openai/codex.git 'refs/tags/rust-v[0-9]*' 2>/dev/null |
+			awk '{print $2}' |
+			sed 's#^refs/tags/rust-v##'
+	} |
+		grep -E '^[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.]+)?$' |
 		sort -V |
-		tail -n 1 |
-		sed 's/^rust-v//'
+		tail -n 1
 }
 
 code_version="${CODE_VERSION:-$(resolve_code_version || true)}"
