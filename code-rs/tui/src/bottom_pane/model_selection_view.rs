@@ -698,19 +698,23 @@ impl ModelSelectionView {
             });
 
             let context_selected = matches!(self.entries().get(self.selected_index), Some(EntryKind::ContextMode));
-            let context_status = match self.current_context_mode {
-                Some(ContextMode::OneM) => "enabled",
-                Some(ContextMode::Auto) => "auto",
-                Some(ContextMode::Disabled) | None => "disabled",
-            };
             let context_available = self.supports_extended_context();
+            let context_status = if context_available {
+                match self.current_context_mode {
+                    Some(ContextMode::OneM) => "enabled",
+                    Some(ContextMode::Auto) => "auto",
+                    Some(ContextMode::Disabled) | None => "disabled",
+                }
+            } else {
+                "unavailable"
+            };
             let mut context_label_style = Style::default().fg(crate::colors::text());
             if context_selected {
                 context_label_style = context_label_style
                     .bg(crate::colors::selection())
                     .add_modifier(Modifier::BOLD);
             }
-            if self.current_context_mode.is_some() {
+            if context_available && self.current_context_mode.is_some() {
                 context_label_style = context_label_style.fg(crate::colors::success());
             }
             if !context_available {
@@ -945,15 +949,7 @@ impl ModelSelectionView {
     }
 
     fn compare_presets(a: &FlatPreset, b: &FlatPreset) -> Ordering {
-        let model_rank = Self::model_rank(&a.model).cmp(&Self::model_rank(&b.model));
-        if model_rank != Ordering::Equal {
-            return model_rank;
-        }
-
-        let model_name_rank = a
-            .model
-            .to_ascii_lowercase()
-            .cmp(&b.model.to_ascii_lowercase());
+        let model_name_rank = Self::compare_model_names(&a.model, &b.model);
         if model_name_rank != Ordering::Equal {
             return model_name_rank;
         }
@@ -966,37 +962,52 @@ impl ModelSelectionView {
         a.label.cmp(&b.label)
     }
 
-    fn model_rank(model: &str) -> u8 {
-        if model.eq_ignore_ascii_case("gpt-5.5") {
-            0
-        } else if model.eq_ignore_ascii_case("gpt-5.4") {
-            1
-        } else if model.eq_ignore_ascii_case("gpt-5.4-mini") {
-            2
-        } else if model.eq_ignore_ascii_case("gpt-5.3-codex") {
-            3
-        } else if model.eq_ignore_ascii_case("gpt-5.3-codex-spark") {
-            4
-        } else if model.eq_ignore_ascii_case("gpt-5.2-codex") {
-            5
-        } else if model.eq_ignore_ascii_case("gpt-5.2") {
-            6
-        } else if model.eq_ignore_ascii_case("gpt-5.1-codex-max") {
-            7
-        } else if model.eq_ignore_ascii_case("gpt-5.1-codex") {
-            8
-        } else if model.eq_ignore_ascii_case("gpt-5.1-codex-mini") {
-            9
-        } else if model.eq_ignore_ascii_case("gpt-5.1") {
-            10
-        } else {
-            11
+    fn compare_model_names(a: &str, b: &str) -> Ordering {
+        let a_lower = a.to_ascii_lowercase();
+        let b_lower = b.to_ascii_lowercase();
+        match (
+            Self::parse_model_version_components(&a_lower),
+            Self::parse_model_version_components(&b_lower),
+        ) {
+            (Some(a_components), Some(b_components)) => {
+                let component_rank = b_components.cmp(&a_components);
+                if component_rank != Ordering::Equal {
+                    return component_rank;
+                }
+                a_lower.cmp(&b_lower)
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => a_lower.cmp(&b_lower),
         }
+    }
+
+    fn parse_model_version_components(model: &str) -> Option<Vec<u32>> {
+        let canonical = model.rsplit('/').next().unwrap_or(model);
+        let mut components = Vec::new();
+
+        for segment in canonical.split('-') {
+            let first = segment.chars().next()?;
+            if !first.is_ascii_digit() {
+                continue;
+            }
+
+            for part in segment.split('.') {
+                if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
+                    return None;
+                }
+                components.push(part.parse().ok()?);
+            }
+
+            return (!components.is_empty()).then_some(components);
+        }
+
+        None
     }
 
     fn model_description(model: &str) -> Option<&'static str> {
         if model.eq_ignore_ascii_case("gpt-5.5") {
-            Some("Newest flagship model for reasoning, coding, and tool use.")
+            Some("Frontier model for complex coding, research, and real-world work.")
         } else if model.eq_ignore_ascii_case("gpt-5.4") {
             Some("Brings together flagship reasoning, coding, and tool use in a single frontier model.")
         } else if model.eq_ignore_ascii_case("gpt-5.4-mini") {
@@ -1211,6 +1222,17 @@ mod tests {
         rows
     }
 
+    fn sorted_model_order(view: &ModelSelectionView) -> Vec<String> {
+        let mut order = Vec::new();
+        for idx in view.sorted_indices() {
+            let model = view.flat_presets[idx].model.clone();
+            if order.last() != Some(&model) {
+                order.push(model);
+            }
+        }
+        order
+    }
+
     #[test]
     fn model_selection_scrolls_selected_model_into_view() {
         let presets = (0..12).map(|i| make_preset(&format!("model-{i:02}"))).collect();
@@ -1218,7 +1240,7 @@ mod tests {
 
         let mut view = ModelSelectionView::new(
             presets,
-            "model-00".to_string(),
+            "model-11".to_string(),
             ReasoningEffort::Low,
             None,
             None,
@@ -1227,7 +1249,22 @@ mod tests {
             AppEventSender::new(tx),
         );
 
-        for _ in 0..13 {
+        let last_model = sorted_model_order(&view)
+            .last()
+            .cloned()
+            .expect("at least one model");
+
+        for _ in 0..view.entries().len() {
+            let selected_entry = view
+                .entries()
+                .get(view.selected_index)
+                .copied()
+                .expect("selected entry");
+            if let EntryKind::Preset(idx) = selected_entry
+                && view.flat_presets[idx].model == last_model
+            {
+                break;
+            }
             let _ = view.handle_key_event_direct(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
 
@@ -1246,9 +1283,19 @@ mod tests {
             height,
         }, &mut buf);
 
-        let lines = buffer_body_lines(&buf, width, height);
-        let has_last_model = lines.iter().any(|line| line.contains("MODEL-11"));
-        assert!(has_last_model);
+        let selected_entry = view
+            .entries()
+            .get(view.selected_index)
+            .copied()
+            .expect("selected entry");
+
+        assert!(matches!(selected_entry, EntryKind::Preset(_)));
+        assert_eq!(view.flat_presets[match selected_entry {
+            EntryKind::Preset(idx) => idx,
+            _ => unreachable!("selected entry should be a preset"),
+        }]
+        .model, last_model);
+        assert!(view.scroll_top.get() > 0);
     }
 
     #[test]
@@ -1299,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_prioritizes_gpt_5_5_and_shows_fast_mode_toggle() {
+    fn model_selection_prioritizes_higher_versions_and_shows_fast_mode_toggle() {
         let mut gpt_5_5 = make_preset("gpt-5.5");
         gpt_5_5.supported_reasoning_efforts = vec![
             ReasoningEffortPreset {
@@ -1346,10 +1393,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let view = ModelSelectionView::new(
             presets,
-            "gpt-5.4".to_string(),
+            "gpt-5.5".to_string(),
             ReasoningEffort::Low,
             Some(ServiceTier::Fast),
-            Some(ContextMode::OneM),
+            None,
             false,
             ModelSelectionTarget::Session,
             AppEventSender::new(tx),
@@ -1370,15 +1417,29 @@ mod tests {
             height,
         }, &mut buf);
 
+        let order = sorted_model_order(&view);
+        assert_eq!(
+            order,
+            vec![
+                "gpt-5.5".to_string(),
+                "gpt-5.4".to_string(),
+                "gpt-5.4-mini".to_string(),
+                "gpt-5.3-codex".to_string(),
+                "gpt-5.3-codex-spark".to_string(),
+            ]
+        );
+
         let lines = buffer_body_lines(&buf, width, height);
         let visible = lines.join("\n");
         assert!(visible.contains("GPT-5.5"));
         assert!(visible.contains("GPT-5.4"));
         assert!(visible.contains("Mode Settings"));
         assert!(visible.contains("Fast Mode: enabled"));
-        assert!(visible.contains("1M Context: enabled"));
+        assert!(visible.contains("1M Context: unavailable"));
         assert!(visible.contains("Fast mode speeds up replies."));
-        assert!(visible.contains("1M Context is available on supported models."));
+        assert!(visible.contains(
+            "Unavailable for this model. Saved settings apply automatically on supported models."
+        ));
     }
 
     #[test]
@@ -1588,7 +1649,55 @@ mod tests {
         }, &mut buf);
 
         let lines = buffer_body_lines(&buf, width, height);
-        assert!(lines.iter().any(|line| line.contains("1M Context: auto")));
+        assert!(
+            lines.iter().any(|line| line.contains("1M Context: unavailable")),
+            "expected unsupported model to show unavailable context, got:\n{}",
+            lines.join("\n")
+        );
+        assert!(lines.iter().any(|line| {
+            line.contains("Unavailable for this model. Saved settings apply automatically on supported models.")
+        }));
+    }
+
+    #[test]
+    fn model_selection_marks_gpt_5_5_context_unavailable() {
+        let presets = vec![make_preset("gpt-5.5")];
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let view = ModelSelectionView::new(
+            presets,
+            "gpt-5.5".to_string(),
+            ReasoningEffort::Low,
+            None,
+            Some(ContextMode::OneM),
+            false,
+            ModelSelectionTarget::Session,
+            AppEventSender::new(tx),
+        );
+
+        let width = 100;
+        let height = 18;
+        let mut buf = ratatui::buffer::Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        });
+        view.render(
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            &mut buf,
+        );
+
+        let lines = buffer_body_lines(&buf, width, height);
+        assert!(
+            lines.iter().any(|line| line.contains("1M Context: unavailable")),
+            "expected gpt-5.5 to show unavailable context, got:\n{}",
+            lines.join("\n")
+        );
         assert!(lines.iter().any(|line| {
             line.contains("Unavailable for this model. Saved settings apply automatically on supported models.")
         }));

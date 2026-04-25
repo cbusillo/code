@@ -7,6 +7,7 @@ use code_app_server_protocol::AuthMode;
 use code_protocol::config_types::ReasoningSummary as ProtocolReasoningSummary;
 use code_protocol::config_types::Personality as ProtocolPersonality;
 use code_protocol::openai_models::ApplyPatchToolType as ProtocolApplyPatchToolType;
+use code_protocol::openai_models::InputModality;
 use code_protocol::openai_models::ModelInfo;
 use code_protocol::openai_models::ModelsResponse;
 use code_protocol::openai_models::ReasoningEffort as ProtocolReasoningEffort;
@@ -31,7 +32,6 @@ const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 const REMOTE_MODELS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_AUTO_BALANCED_MODEL: &str = "codex-auto-balanced";
-const IMAGE_GENERATION_TOOL: &str = "image_generation";
 
 #[derive(Debug, Default, Clone)]
 struct RemoteModelsState {
@@ -179,7 +179,7 @@ impl RemoteModelsManager {
         }
 
         if let Some(auth) = auth.as_ref()
-            && auth.mode.is_chatgpt()
+            && auth.uses_codex_backend()
             && let Some(account_id) = auth.get_account_id()
         {
             request = request.header("chatgpt-account-id", account_id);
@@ -317,13 +317,7 @@ impl RemoteModelsManager {
 
     fn models_url(&self, auth: &Option<CodexAuth>) -> crate::error::Result<Url> {
         let base_url = self.provider.base_url.clone().unwrap_or_else(|| {
-            if matches!(
-                auth,
-                Some(CodexAuth {
-                    mode: AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens,
-                    ..
-                })
-            ) {
+            if auth.as_ref().is_some_and(CodexAuth::uses_codex_backend) {
                 "https://chatgpt.com/backend-api/codex".to_string()
             } else {
                 "https://api.openai.com/v1".to_string()
@@ -420,10 +414,7 @@ fn apply_model_info_overrides_with_personality(
 
     family.web_search_tool_type = map_web_search_tool_type(info.web_search_tool_type);
     family.supports_image_detail_original = info.supports_image_detail_original;
-    family.supports_image_generation = info
-        .experimental_supported_tools
-        .iter()
-        .any(|tool| tool == IMAGE_GENERATION_TOOL);
+    family.supports_image_generation = supports_image_generation(info);
     family.additional_speed_tiers = info.additional_speed_tiers.clone();
     family.supports_search_tool = info.supports_search_tool;
 
@@ -445,9 +436,12 @@ fn apply_model_info_overrides_with_personality(
 
 #[cfg(test)]
 mod tests {
+    use super::apply_model_info_overrides_with_personality;
+    use super::derive_default_model_family;
     use super::find_remote_model_info;
     use code_protocol::config_types::ReasoningSummary;
     use code_protocol::openai_models::ConfigShellToolType;
+    use code_protocol::openai_models::InputModality;
     use code_protocol::openai_models::ModelInfo;
     use code_protocol::openai_models::ModelVisibility;
     use code_protocol::openai_models::TruncationPolicyConfig;
@@ -506,6 +500,28 @@ mod tests {
 
         assert!(find_remote_model_info(&models, "foo/bar/gpt-5.3-codex").is_none());
     }
+
+    #[test]
+    fn image_generation_support_tracks_image_input_modality() {
+        let mut family = derive_default_model_family("gpt-5.4");
+        family.supports_image_generation = false;
+        let mut info = model("gpt-5.4");
+        info.input_modalities = vec![InputModality::Text, InputModality::Image];
+
+        let family = apply_model_info_overrides_with_personality(&info, family, None);
+
+        assert!(family.supports_image_generation);
+
+        let mut text_only_info = info;
+        text_only_info.input_modalities = vec![InputModality::Text];
+        let text_only_family = apply_model_info_overrides_with_personality(
+            &text_only_info,
+            derive_default_model_family("gpt-5.4"),
+            None,
+        );
+
+        assert!(!text_only_family.supports_image_generation);
+    }
 }
 
 fn map_web_search_tool_type(tool_type: WebSearchToolType) -> WebSearchToolType {
@@ -513,6 +529,10 @@ fn map_web_search_tool_type(tool_type: WebSearchToolType) -> WebSearchToolType {
         WebSearchToolType::Text => WebSearchToolType::Text,
         WebSearchToolType::TextAndImage => WebSearchToolType::TextAndImage,
     }
+}
+
+fn supports_image_generation(info: &ModelInfo) -> bool {
+    info.input_modalities.contains(&InputModality::Image)
 }
 
 fn map_personality(personality: ConfigPersonality) -> ProtocolPersonality {

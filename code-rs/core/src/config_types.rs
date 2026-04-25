@@ -1500,6 +1500,7 @@ pub enum ServiceTier {
     /// Legacy compatibility value for older local config files.
     Standard,
     Fast,
+    Flex,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display)]

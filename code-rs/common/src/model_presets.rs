@@ -52,8 +52,9 @@ static PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
         ModelPreset {
             id: "gpt-5.5".to_string(),
             model: "gpt-5.5".to_string(),
-            display_name: "gpt-5.5".to_string(),
-            description: "Newest flagship model for reasoning, coding, and tool use.".to_string(),
+            display_name: "GPT-5.5".to_string(),
+            description: "Frontier model for complex coding, research, and real-world work."
+                .to_string(),
             default_reasoning_effort: ReasoningEffort::Medium,
             supported_reasoning_efforts: vec![
                 ReasoningEffortPreset {
@@ -66,7 +67,7 @@ static PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
                 },
                 ReasoningEffortPreset {
                     effort: ReasoningEffort::High,
-                    description: "Maximizes reasoning depth for complex problems".to_string(),
+                    description: "Greater reasoning depth for complex problems".to_string(),
                 },
                 ReasoningEffortPreset {
                     effort: ReasoningEffort::XHigh,
@@ -702,6 +703,12 @@ mod tests {
         assert!(presets.iter().any(|preset| preset.id == "gpt-5.5"));
         assert!(presets.iter().any(|preset| preset.id == "gpt-5.4"));
         assert!(presets.iter().any(|preset| preset.id == "gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn gpt_5_5_available_for_chatgpt_auth() {
+        let presets = builtin_model_presets(Some(AuthMode::Chatgpt), true);
+        assert!(presets.iter().any(|preset| preset.id == "gpt-5.5"));
     }
 
     #[test]

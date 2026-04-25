@@ -48,6 +48,7 @@ use code_core::plan_tool::{PlanItemArg, StepStatus, UpdatePlanArgs};
 use code_core::model_family::derive_default_model_family;
 use code_core::model_family::find_family_for_model;
 use code_core::model_family::resolve_context_mode_limits;
+use code_core::model_family::supports_extended_context;
 use code_core::account_usage::{
     self,
     RateLimitWarningScope,
@@ -23116,14 +23117,15 @@ Have we met every part of this goal and is there no further work to do?"#
     }
 
     fn curated_model_presets(presets: Vec<ModelPreset>) -> Vec<ModelPreset> {
-        const MODEL_PICKER_ORDER: [&str; 4] = [
+        const MODEL_PICKER_ORDER: [&str; 5] = [
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
             "gpt-5.3-codex",
+            "gpt-5.3-codex-spark",
         ];
 
-        let curated: Vec<ModelPreset> = MODEL_PICKER_ORDER
+        let mut curated: Vec<ModelPreset> = MODEL_PICKER_ORDER
             .into_iter()
             .filter_map(|model| {
                 presets.iter().find(|preset| {
@@ -23133,6 +23135,21 @@ Have we met every part of this goal and is there no further work to do?"#
             })
             .cloned()
             .collect();
+
+        let curated_slugs: std::collections::HashSet<String> = curated
+            .iter()
+            .flat_map(|preset| {
+                [
+                    preset.id.to_ascii_lowercase(),
+                    preset.model.to_ascii_lowercase(),
+                ]
+            })
+            .collect();
+
+        curated.extend(presets.iter().filter(|preset| {
+            !curated_slugs.contains(&preset.id.to_ascii_lowercase())
+                && !curated_slugs.contains(&preset.model.to_ascii_lowercase())
+        }).cloned());
 
         if curated.is_empty() { presets } else { curated }
     }
@@ -23559,6 +23576,7 @@ Have we met every part of this goal and is there no further work to do?"#
         let persisted_service_tier = match (profile.as_deref(), self.config.service_tier) {
             (Some(_), None) => Some("standard"),
             (_, Some(ServiceTier::Fast)) => Some("fast"),
+            (_, Some(ServiceTier::Flex)) => Some("flex"),
             (_, Some(ServiceTier::Standard)) => Some("standard"),
             (_, None) => None,
         };
@@ -23631,8 +23649,19 @@ Have we met every part of this goal and is there no further work to do?"#
         self.refresh_settings_overview_rows();
 
         let status = match self.config.context_mode {
-            Some(ContextMode::OneM) => "1M context enabled.".to_string(),
-            Some(ContextMode::Auto) => "Auto Context enabled.".to_string(),
+            Some(ContextMode::OneM) if supports_extended_context(&self.config.model) => {
+                "1M context enabled.".to_string()
+            }
+            Some(ContextMode::OneM) => {
+                "1M context is unavailable for this model and will only apply on supported models."
+                    .to_string()
+            }
+            Some(ContextMode::Auto) if supports_extended_context(&self.config.model) => {
+                "Auto Context enabled.".to_string()
+            }
+            Some(ContextMode::Auto) => {
+                "Auto Context will only expand on supported models.".to_string()
+            }
             Some(ContextMode::Disabled) | None => "Context mode disabled.".to_string(),
         };
         self.bottom_pane.flash_footer_notice(status);
@@ -32011,6 +32040,76 @@ use code_core::protocol::OrderMeta;
         let curated = ChatWidget::curated_model_presets(presets);
         let ids: Vec<&str> = curated.iter().map(|preset| preset.id.as_str()).collect();
         assert_eq!(ids, vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"]);
+    }
+
+    #[test]
+    fn builtin_model_presets_include_gpt_5_5() {
+        let presets = builtin_model_presets(Some(AuthMode::ChatGPT), true);
+        assert!(presets.iter().any(|preset| preset.id == "gpt-5.5"));
+    }
+
+    #[test]
+    fn curated_model_presets_appends_new_remote_models() {
+        let mut gpt_5_5 = builtin_model_presets(Some(AuthMode::ChatGPT), true)
+            .into_iter()
+            .find(|preset| preset.id == "gpt-5.4")
+            .expect("expected gpt-5.4 builtin preset");
+        gpt_5_5.id = "gpt-5.5".to_string();
+        gpt_5_5.model = "gpt-5.5".to_string();
+        gpt_5_5.display_name = "GPT-5.5".to_string();
+
+        let presets = vec![
+            gpt_5_5,
+            ModelPreset {
+                id: "gpt-5.4".to_string(),
+                model: "gpt-5.4".to_string(),
+                display_name: "gpt-5.4".to_string(),
+                description: "Frontier flagship model.".to_string(),
+                default_reasoning_effort: ReasoningEffort::Medium.into(),
+                supported_reasoning_efforts: vec![ReasoningEffortPreset {
+                    effort: ReasoningEffort::Medium.into(),
+                    description: "balanced".to_string(),
+                }],
+                supported_text_verbosity: &[TextVerbosity::Medium],
+                is_default: false,
+                upgrade: None,
+                pro_only: false,
+                show_in_picker: true,
+            },
+        ];
+
+        let curated = ChatWidget::curated_model_presets(presets);
+        let ids: Vec<&str> = curated.iter().map(|preset| preset.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-5.5", "gpt-5.4"]);
+    }
+
+    #[test]
+    fn curated_model_presets_deduplicates_alias_slugs() {
+        let canonical = ModelPreset {
+            id: "alias/gpt-5.5".to_string(),
+            model: "gpt-5.5".to_string(),
+            display_name: "GPT-5.5".to_string(),
+            description: "Frontier flagship model.".to_string(),
+            default_reasoning_effort: ReasoningEffort::Medium.into(),
+            supported_reasoning_efforts: vec![ReasoningEffortPreset {
+                effort: ReasoningEffort::Medium.into(),
+                description: "balanced".to_string(),
+            }],
+            supported_text_verbosity: &[TextVerbosity::Medium],
+            is_default: false,
+            upgrade: None,
+            pro_only: false,
+            show_in_picker: true,
+        };
+        let duplicate = ModelPreset {
+            id: "gpt-5.5".to_string(),
+            model: "gpt-5.5".to_string(),
+            ..canonical.clone()
+        };
+
+        let curated = ChatWidget::curated_model_presets(vec![canonical, duplicate]);
+        let ids: Vec<&str> = curated.iter().map(|preset| preset.id.as_str()).collect();
+        assert_eq!(ids, vec!["alias/gpt-5.5"]);
     }
 
     #[test]

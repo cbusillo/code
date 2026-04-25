@@ -46,6 +46,7 @@ pub(crate) async fn stream_chat_completions(
     model_slug: &str,
     client: &reqwest::Client,
     provider: &ModelProviderInfo,
+    responses_originator_header: &str,
     debug_logger: &Arc<Mutex<DebugLogger>>,
     auth_manager: Option<Arc<AuthManager>>,
     otel_event_manager: Option<OtelEventManager>,
@@ -396,6 +397,10 @@ pub(crate) async fn stream_chat_completions(
         let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
         let auth = provider.effective_auth(&base_auth).await?;
         let mut req_builder = provider.create_request_builder_with_auth(client, &auth).await?;
+        req_builder = req_builder.headers(crate::default_client::requested_model_headers(
+            Some(responses_originator_header),
+            model_slug,
+        ));
 
         if let Some(auth) = auth.as_ref() {
             if auth.mode.is_chatgpt() {
@@ -1115,6 +1120,9 @@ where
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag)))) => {
                     return Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag))));
+                }
+                Poll::Ready(Some(Ok(ResponseEvent::ResponseHeaders(headers)))) => {
+                    return Poll::Ready(Some(Ok(ResponseEvent::ResponseHeaders(headers))));
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::Completed {
                     response_id,

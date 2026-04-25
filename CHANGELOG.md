@@ -7,6 +7,14 @@
 
 - (none)
 
+## [0.6.95] - 2026-04-25
+
+- Models: add GPT-5.5 support and refresh model schema plus GPT agent defaults for more reliable model selection. (bd64cb7d, cea03ccf)
+- ChatGPT: align ChatGPT plan and service-tier behavior, and route backend auth through Codex auth plumbing for more consistent account handling. (dd4f2635, e5b7e04b)
+- Permissions: ship stable Auto Review controls, stricter approval flows, and persistent permission-profile state across TUI, protocol, and app-server sessions. (5e71da14, c6ab6018, 46142c3c, 6ca038bb, 5c239ad7)
+- TUI/Exec: fix interrupt and `/review` exit wedges, keep command output visible until streams fully close, and reduce turn interruption hangs. (3f8c06e4, 491a3058, 11806faf)
+- Plugins: expand remote plugin support with list/read/install flows, marketplace upgrade plumbing, and workspace-level plugin disable controls. (a978e411, 33cc135c, 0d6a90cd, bcc1caa9)
+
 ## [0.6.94] - 2026-04-22
 
 - TUI: add `/side` conversations and improve resume context with clearer parent thread status and titles. (95dafbc7, 0dc503ba, b8e78e88, fa8943fe, 43a69c50)

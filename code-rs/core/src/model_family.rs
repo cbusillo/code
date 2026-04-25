@@ -4,6 +4,7 @@ use crate::config_types::ReasoningEffort;
 use crate::config_types::ReasoningSummary;
 use crate::tool_apply_patch::ApplyPatchToolType;
 use code_protocol::openai_models::ConfigShellToolType;
+use code_protocol::openai_models::InputModality;
 use code_protocol::openai_models::ModelInfo;
 use code_protocol::openai_models::ModelsResponse;
 use code_protocol::openai_models::TruncationMode;
@@ -38,7 +39,6 @@ const CONTEXT_WINDOW_96K: u64 = 96_000;
 const CONTEXT_WINDOW_16K: u64 = 16_385;
 const CONTEXT_WINDOW_1M: u64 = 1_047_576;
 const MAX_OUTPUT_DEFAULT: u64 = 128_000;
-const IMAGE_GENERATION_TOOL: &str = "image_generation";
 
 static UPSTREAM_MODELS: Lazy<Vec<ModelInfo>> = Lazy::new(|| {
     serde_json::from_str::<ModelsResponse>(include_str!("../../../codex-rs/models-manager/models.json"))
@@ -226,10 +226,7 @@ fn apply_upstream_model_overrides(mut family: ModelFamily) -> ModelFamily {
     family.supports_parallel_tool_calls = model_info.supports_parallel_tool_calls;
     family.web_search_tool_type = model_info.web_search_tool_type;
     family.supports_image_detail_original = model_info.supports_image_detail_original;
-    family.supports_image_generation = model_info
-        .experimental_supported_tools
-        .iter()
-        .any(|tool| tool == IMAGE_GENERATION_TOOL);
+    family.supports_image_generation = supports_image_generation(model_info);
     family.uses_local_shell_tool = matches!(model_info.shell_type, ConfigShellToolType::Local);
     family.uses_shell_command_tool =
         matches!(model_info.shell_type, ConfigShellToolType::ShellCommand);
@@ -492,6 +489,22 @@ pub fn derive_default_model_family(model: &str) -> ModelFamily {
         supports_image_generation: false,
         base_instructions: BASE_INSTRUCTIONS.to_string(),
     })
+}
+
+fn supports_image_generation(model_info: &ModelInfo) -> bool {
+    model_info.input_modalities.contains(&InputModality::Image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_family_for_model;
+
+    #[test]
+    fn image_generation_support_tracks_image_input_modality() {
+        let family = find_family_for_model("gpt-5.4").expect("known upstream model");
+
+        assert!(family.supports_image_generation);
+    }
 }
 
 impl ModelFamily {

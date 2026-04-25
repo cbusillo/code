@@ -6,7 +6,9 @@
 
 use crate::config_types::AgentConfig;
 use code_app_server_protocol::AuthMode;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 const CLAUDE_ALLOWED_TOOLS: &str = "Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(git status:*), Bash(git log:*), Bash(find:*), Read, Grep, Glob, LS, WebFetch, TodoRead, TodoWrite, WebSearch";
 const CLOUD_MODEL_ENV_FLAG: &str = "CODE_ENABLE_CLOUD_AGENT_MODEL";
@@ -31,6 +33,7 @@ const QWEN_3_CODER_READ_ONLY: &[&str] = &[];
 const QWEN_3_CODER_WRITE: &[&str] = &["-y"];
 const CLOUD_GPT5_CODEX_READ_ONLY: &[&str] = &[];
 const CLOUD_GPT5_CODEX_WRITE: &[&str] = &[];
+const MODELS_MANIFEST: &str = include_str!("../../../codex-rs/models-manager/models.json");
 
 /// Canonical list of built-in agent model slugs used when no `[[agents]]`
 /// entries are configured. The ordering here controls priority for legacy
@@ -305,12 +308,170 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
     },
 ];
 
-pub fn agent_model_specs() -> &'static [AgentModelSpec] {
+static ALL_AGENT_MODEL_SPECS: LazyLock<Vec<AgentModelSpec>> =
+    LazyLock::new(build_agent_model_specs);
+
+#[derive(Debug, Deserialize)]
+struct ModelsManifest {
+    models: Vec<ManifestModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestModel {
+    slug: String,
+    display_name: String,
+    description: String,
+    visibility: String,
+    supported_in_api: bool,
+}
+
+fn build_agent_model_specs() -> Vec<AgentModelSpec> {
+    let mut specs = AGENT_MODEL_SPECS.to_vec();
+    specs.extend(dynamic_code_agent_specs());
+    specs
+}
+
+fn dynamic_code_agent_specs() -> Vec<AgentModelSpec> {
+    let Ok(manifest) = serde_json::from_str::<ModelsManifest>(MODELS_MANIFEST) else {
+        return Vec::new();
+    };
+
+    manifest
+        .models
+        .into_iter()
+        .filter(|model| model.supported_in_api)
+        .filter(|model| model.visibility.eq_ignore_ascii_case("list"))
+        .filter_map(|model| dynamic_code_agent_spec(model))
+        .collect()
+}
+
+fn dynamic_code_agent_spec(model: ManifestModel) -> Option<AgentModelSpec> {
+    let track = code_agent_track(&model.slug)?;
+    if static_agent_model_spec(&model.slug).is_some() {
+        return None;
+    }
+
+    let candidate_version = parse_model_version_components(&model.slug)?;
+    let highest_static_version = highest_static_code_track_version(track)?;
+    if candidate_version <= highest_static_version {
+        return None;
+    }
+
+    let slug = leak_str(format!("code-{}", model.slug));
+    let model_slug = leak_str(model.slug);
+    let description = leak_str(model.description);
+    let _display_name = leak_str(model.display_name);
+    let aliases = leak_str_slice(vec![model_slug]);
+    let model_args = leak_str_slice(vec!["--model", model_slug]);
+    let pro_only = matches!(track, CodeAgentTrack::CodexSpark);
+    let is_frontline = !matches!(track, CodeAgentTrack::Mini | CodeAgentTrack::CodexSpark);
+
+    Some(AgentModelSpec {
+        slug,
+        family: "code",
+        cli: "coder",
+        read_only_args: CODE_GPT5_READ_ONLY,
+        write_args: CODE_GPT5_WRITE,
+        model_args,
+        description,
+        enabled_by_default: true,
+        aliases,
+        gating_env: None,
+        is_frontline,
+        pro_only,
+    })
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CodeAgentTrack {
+    Base,
+    Mini,
+    Codex,
+    CodexSpark,
+}
+
+fn code_agent_track(model: &str) -> Option<CodeAgentTrack> {
+    let canonical = model.strip_prefix("code-").unwrap_or(model);
+    if !canonical.starts_with("gpt-") {
+        return None;
+    }
+
+    if canonical.contains("codex-spark") {
+        Some(CodeAgentTrack::CodexSpark)
+    } else if canonical.contains("codex") {
+        Some(CodeAgentTrack::Codex)
+    } else if canonical.ends_with("-mini") {
+        Some(CodeAgentTrack::Mini)
+    } else {
+        Some(CodeAgentTrack::Base)
+    }
+}
+
+fn highest_static_code_track_version(track: CodeAgentTrack) -> Option<Vec<u32>> {
     AGENT_MODEL_SPECS
+        .iter()
+        .filter(|spec| spec.family == "code")
+        .filter(|spec| code_agent_track(spec.slug) == Some(track))
+        .filter_map(|spec| parse_model_version_components(spec.slug))
+        .max()
+}
+
+fn parse_model_version_components(model: &str) -> Option<Vec<u32>> {
+    let canonical = model
+        .strip_prefix("code-")
+        .unwrap_or(model)
+        .rsplit('/')
+        .next()
+        .unwrap_or(model);
+    let mut components = Vec::new();
+
+    for segment in canonical.split('-') {
+        let first = segment.chars().next()?;
+        if !first.is_ascii_digit() {
+            continue;
+        }
+
+        for part in segment.split('.') {
+            if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
+                return None;
+            }
+            components.push(part.parse().ok()?);
+        }
+
+        return (!components.is_empty()).then_some(components);
+    }
+
+    None
+}
+
+fn leak_str(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+fn leak_str_slice(values: Vec<&'static str>) -> &'static [&'static str] {
+    Box::leak(values.into_boxed_slice())
+}
+
+fn static_agent_model_spec(identifier: &str) -> Option<&'static AgentModelSpec> {
+    let lower = identifier.to_ascii_lowercase();
+    AGENT_MODEL_SPECS
+        .iter()
+        .find(|spec| spec.slug.eq_ignore_ascii_case(&lower))
+        .or_else(|| {
+            AGENT_MODEL_SPECS.iter().find(|spec| {
+                spec.aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(&lower))
+            })
+        })
+}
+
+pub fn agent_model_specs() -> &'static [AgentModelSpec] {
+    ALL_AGENT_MODEL_SPECS.as_slice()
 }
 
 pub fn enabled_agent_model_specs() -> Vec<&'static AgentModelSpec> {
-    AGENT_MODEL_SPECS
+    agent_model_specs()
         .iter()
         .filter(|spec| spec.is_enabled())
         .collect()
@@ -329,7 +490,7 @@ pub fn enabled_agent_model_specs_for_auth(
     auth_mode: Option<AuthMode>,
     supports_pro_only_models: bool,
 ) -> Vec<&'static AgentModelSpec> {
-    AGENT_MODEL_SPECS
+    agent_model_specs()
         .iter()
         .filter(|spec| spec.is_enabled())
         .filter(|spec| agent_model_available_for_auth(spec, auth_mode, supports_pro_only_models))
@@ -354,11 +515,11 @@ pub fn filter_agent_model_names_for_auth(
 
 pub fn agent_model_spec(identifier: &str) -> Option<&'static AgentModelSpec> {
     let lower = identifier.to_ascii_lowercase();
-    AGENT_MODEL_SPECS
+    agent_model_specs()
         .iter()
         .find(|spec| spec.slug.eq_ignore_ascii_case(&lower))
         .or_else(|| {
-            AGENT_MODEL_SPECS.iter().find(|spec| {
+            agent_model_specs().iter().find(|spec| {
                 spec.aliases
                     .iter()
                     .any(|alias| alias.eq_ignore_ascii_case(&lower))
@@ -408,7 +569,7 @@ pub fn build_model_guide_description(active_agents: &[String]) -> String {
         }
     }
 
-    let lines: Vec<String> = AGENT_MODEL_SPECS
+    let lines: Vec<String> = agent_model_specs()
         .iter()
         .filter(|spec| canonical.contains(&spec.slug.to_ascii_lowercase()))
         .map(model_guide_line)
@@ -428,7 +589,7 @@ pub fn build_model_guide_description(active_agents: &[String]) -> String {
 }
 
 pub fn model_guide_markdown() -> String {
-    AGENT_MODEL_SPECS
+    agent_model_specs()
         .iter()
         .filter(|spec| spec.is_enabled())
         .map(model_guide_line)
@@ -440,7 +601,7 @@ pub fn model_guide_markdown_with_custom(configured_agents: &[AgentConfig]) -> Op
     let mut lines: Vec<String> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
 
-    for spec in AGENT_MODEL_SPECS.iter().filter(|spec| spec.is_enabled()) {
+    for spec in agent_model_specs().iter().filter(|spec| spec.is_enabled()) {
         let idx = lines.len();
         positions.insert(spec.slug.to_ascii_lowercase(), idx);
         lines.push(model_guide_line(spec));
@@ -620,5 +781,30 @@ mod tests {
         assert!(filtered.contains(&"code-gpt-5.3-codex".to_string()));
         assert!(!filtered.contains(&"code-gpt-5.3-codex-spark".to_string()));
         assert!(!filtered.contains(&"gpt-5.3-codex-spark".to_string()));
+    }
+
+    #[test]
+    fn dynamic_agent_specs_include_newer_manifest_models() {
+        let spec = agent_model_spec("gpt-5.5").expect("gpt-5.5 spec should be present");
+        assert_eq!(spec.slug, "code-gpt-5.5");
+        assert_eq!(spec.cli, "coder");
+        assert_eq!(
+            default_params_for("gpt-5.5", true),
+            CODE_GPT5_READ_ONLY
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dynamic_agent_specs_skip_older_manifest_models() {
+        let gpt_5_2 = agent_model_spec("gpt-5.2").expect("gpt-5.2 should resolve via upgrade alias");
+        assert_eq!(gpt_5_2.slug, "code-gpt-5.4");
+        assert!(
+            enabled_agent_model_specs()
+                .iter()
+                .all(|spec| spec.slug != "code-gpt-5.2")
+        );
     }
 }

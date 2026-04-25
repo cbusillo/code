@@ -439,10 +439,7 @@ impl ModelProviderInfo {
     }
 
     pub(crate) fn get_full_url(&self, auth: &Option<CodexAuth>) -> String {
-        let default_base_url = if auth
-            .as_ref()
-            .is_some_and(|auth| auth.mode.is_chatgpt())
-        {
+        let default_base_url = if auth.as_ref().is_some_and(CodexAuth::uses_codex_backend) {
             "https://chatgpt.com/backend-api/codex"
         } else {
             "https://api.openai.com/v1"

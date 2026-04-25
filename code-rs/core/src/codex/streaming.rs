@@ -74,6 +74,26 @@ const AUTO_CONTEXT_JUDGE_DEVELOPER_MESSAGE: &str = concat!(
     "only when nearby context appears genuinely essential to finishing the active thread correctly."
 );
 
+#[derive(Clone, Debug, Default)]
+struct ImageGenerationTurnMetadata {
+    requested_model: String,
+    latest_response_model: Option<String>,
+    response_headers: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+struct ImageGenerationSidecar<'a> {
+    call_id: &'a str,
+    status: &'a str,
+    revised_prompt: Option<&'a str>,
+    artifact_path: String,
+    requested_model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_response_model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_headers: Option<&'a serde_json::Value>,
+}
+
 /// A series of Turns in response to user input.
 pub(super) struct AgentTask {
     sess: Arc<Session>,
@@ -4015,6 +4035,7 @@ async fn try_run_turn(
         .clone()
         .unwrap_or_else(|| sess.client.get_model());
     let mut latest_response_model: Option<String> = None;
+    let mut latest_response_headers: Option<serde_json::Value> = None;
     let mut stream = match sess.client.clone().stream(&prompt).await {
         Ok(stream) => stream,
         Err(e) => {
@@ -4105,6 +4126,9 @@ async fn try_run_turn(
                 );
             }
             ResponseEvent::ServerReasoningIncluded(_included) => {}
+            ResponseEvent::ResponseHeaders(headers) => {
+                latest_response_headers = Some(headers);
+            }
             ResponseEvent::OutputItemDone { item, sequence_number, output_index } => {
                 let (item, rollout_ids) = crate::memories::sanitize_response_item(item);
                 if !rollout_ids.is_empty() {
@@ -4114,7 +4138,21 @@ async fn try_run_turn(
                     });
                 }
                 let response =
-                    handle_response_item(sess, turn_diff_tracker, sub_id, item.clone(), sequence_number, output_index, attempt_req).await?;
+                    handle_response_item(
+                        sess,
+                        turn_diff_tracker,
+                        sub_id,
+                        item.clone(),
+                        sequence_number,
+                        output_index,
+                        attempt_req,
+                        &ImageGenerationTurnMetadata {
+                            requested_model: requested_model.clone(),
+                            latest_response_model: latest_response_model.clone(),
+                            response_headers: latest_response_headers.clone(),
+                        },
+                    )
+                    .await?;
 
                 // Save into scratchpad so we can seed a retry if the stream drops later.
                 sess.scratchpad_push(&item, &response, &sub_id);
@@ -4300,6 +4338,7 @@ async fn handle_response_item(
     seq_hint: Option<u64>,
     output_index: Option<u32>,
     attempt_req: u64,
+    image_generation_metadata: &ImageGenerationTurnMetadata,
 ) -> CodexResult<Option<ResponseInputItem>> {
     debug!(?item, "Output item");
     let output = match item {
@@ -4490,6 +4529,7 @@ async fn handle_response_item(
                 seq_hint,
                 output_index,
                 attempt_req,
+                image_generation_metadata,
             )
             .await;
             None
@@ -4510,6 +4550,7 @@ async fn handle_image_generation_call(
     seq_hint: Option<u64>,
     output_index: Option<u32>,
     attempt_req: u64,
+    metadata: &ImageGenerationTurnMetadata,
 ) {
     let order = crate::protocol::OrderMeta {
         request_ordinal: attempt_req,
@@ -4568,6 +4609,22 @@ async fn handle_image_generation_call(
             None
         }
     };
+
+    if let Some(path) = saved_path.as_ref()
+        && let Err(err) = save_image_generation_sidecar(
+            path,
+            &call_id,
+            &status,
+            revised_prompt.as_deref(),
+            metadata,
+        )
+        .await
+    {
+        warn!(
+            "failed to save image generation metadata sidecar for {}: {err}",
+            path.display()
+        );
+    }
 
     let end = sess.make_event_with_order(
         sub_id,
@@ -4628,6 +4685,31 @@ async fn save_image_generation_result(
         .await
         .map_err(|err| err.to_string())?;
     code_utils_absolute_path::AbsolutePathBuf::from_absolute_path(path)
+        .map_err(|err| err.to_string())
+}
+
+async fn save_image_generation_sidecar(
+    artifact_path: &code_utils_absolute_path::AbsolutePathBuf,
+    call_id: &str,
+    status: &str,
+    revised_prompt: Option<&str>,
+    metadata: &ImageGenerationTurnMetadata,
+) -> std::result::Result<code_utils_absolute_path::AbsolutePathBuf, String> {
+    let sidecar_path = artifact_path.as_path().with_extension("metadata.json");
+    let sidecar = ImageGenerationSidecar {
+        call_id,
+        status,
+        revised_prompt,
+        artifact_path: artifact_path.display().to_string(),
+        requested_model: &metadata.requested_model,
+        latest_response_model: metadata.latest_response_model.as_deref(),
+        response_headers: metadata.response_headers.as_ref(),
+    };
+    let json = serde_json::to_vec_pretty(&sidecar).map_err(|err| err.to_string())?;
+    tokio::fs::write(&sidecar_path, json)
+        .await
+        .map_err(|err| err.to_string())?;
+    code_utils_absolute_path::AbsolutePathBuf::from_absolute_path(sidecar_path)
         .map_err(|err| err.to_string())
 }
 
@@ -14107,6 +14189,8 @@ mod tests {
         is_context_overflow_stream_error,
         is_usage_limit_stream_error,
         save_image_generation_result,
+        save_image_generation_sidecar,
+        ImageGenerationTurnMetadata,
         spark_fallback_model,
         TRUNCATION_MARKER,
     };
@@ -14151,6 +14235,44 @@ mod tests {
             .expect("image should save");
 
         assert_eq!(std::fs::read(saved_path.as_path()).expect("saved file"), b"foo");
+    }
+
+    #[tokio::test]
+    async fn save_image_generation_sidecar_writes_metadata() {
+        let dir = TempDir::new().expect("tempdir");
+        let saved_path = save_image_generation_result(dir.path(), "session-1", "ig_123", "Zm9v")
+            .await
+            .expect("image should save");
+        let metadata = ImageGenerationTurnMetadata {
+            requested_model: "gpt-5.4".to_string(),
+            latest_response_model: Some("gpt-5.4-2026-04-01".to_string()),
+            response_headers: Some(serde_json::json!({
+                "x-request-id": ["req_123"],
+            })),
+        };
+
+        let sidecar_path = save_image_generation_sidecar(
+            &saved_path,
+            "ig_123",
+            "completed",
+            Some("A tiny square"),
+            &metadata,
+        )
+        .await
+        .expect("metadata should save");
+
+        assert_eq!(
+            sidecar_path.as_path(),
+            saved_path.as_path().with_extension("metadata.json")
+        );
+        let sidecar: Value = serde_json::from_slice(
+            &std::fs::read(sidecar_path.as_path()).expect("sidecar file"),
+        )
+        .expect("sidecar json");
+        assert_eq!(sidecar["call_id"], "ig_123");
+        assert_eq!(sidecar["requested_model"], "gpt-5.4");
+        assert_eq!(sidecar["latest_response_model"], "gpt-5.4-2026-04-01");
+        assert_eq!(sidecar["response_headers"]["x-request-id"][0], "req_123");
     }
 
     #[tokio::test]

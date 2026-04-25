@@ -466,6 +466,7 @@ pub struct Config {
     /// Optional service tier preference for model requests.
     ///
     /// `Some(Fast)` sends `service_tier=priority` to the Responses API.
+    /// `Some(Flex)` sends `service_tier=flex` to the Responses API.
     /// `None` sends no override (legacy standard behavior).
     pub service_tier: Option<ServiceTier>,
 
@@ -1336,6 +1337,7 @@ impl Config {
 
         let service_tier = match config_profile.service_tier.or(cfg.service_tier) {
             Some(ServiceTier::Fast) => Some(ServiceTier::Fast),
+            Some(ServiceTier::Flex) => Some(ServiceTier::Flex),
             Some(ServiceTier::Standard) => None,
             None => None,
         };
@@ -3576,6 +3578,23 @@ mod agent_merge_tests {
         )?;
 
         assert_eq!(config.service_tier, Some(ServiceTier::Fast));
+        Ok(())
+    }
+
+    #[test]
+    fn service_tier_flex_preserves_override() -> anyhow::Result<()> {
+        let code_home = TempDir::new()?;
+        let cfg = toml::from_str::<ConfigToml>(r#"service_tier = "flex""#)?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(code_home.path().to_path_buf()),
+                ..Default::default()
+            },
+            code_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.service_tier, Some(ServiceTier::Flex));
         Ok(())
     }
 

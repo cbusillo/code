@@ -365,6 +365,17 @@ impl ModelClient {
         }
     }
 
+    fn apply_requested_model_headers(
+        &self,
+        req_builder: reqwest::RequestBuilder,
+        model: &str,
+    ) -> reqwest::RequestBuilder {
+        req_builder.headers(crate::default_client::requested_model_headers(
+            Some(self.config.responses_originator_header.as_str()),
+            model,
+        ))
+    }
+
     fn current_reasoning_param(
         &self,
         family: &ModelFamily,
@@ -631,6 +642,7 @@ impl ModelClient {
                     model_slug,
                     &self.client,
                     &self.provider,
+                    self.config.responses_originator_header.as_str(),
                     &self.debug_logger,
                     self.auth_manager.clone(),
                     self.otel_event_manager.clone(),
@@ -768,7 +780,8 @@ impl ModelClient {
                 include,
                 service_tier: match self.config.service_tier {
                     Some(ServiceTier::Fast) => Some("priority".to_string()),
-                    _ => None,
+                    Some(service_tier) => Some(service_tier.to_string()),
+                    None => None,
                 },
                 prompt_cache_key: Some(session_id_str.clone()),
             };
@@ -820,6 +833,7 @@ impl ModelClient {
                     url,
                 )
                 .await?;
+            req_builder = self.apply_requested_model_headers(req_builder, request_model);
 
             let has_beta_header = req_builder
                 .try_clone()
@@ -914,6 +928,15 @@ impl ModelClient {
             match connect {
                 Ok(Ok((mut ws_stream, response))) => {
                     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+
+                    let response_headers = header_map_to_json(response.headers());
+                    if tx_event
+                        .send(Ok(ResponseEvent::ResponseHeaders(response_headers)))
+                        .await
+                        .is_err()
+                    {
+                        debug!("receiver dropped response headers event");
+                    }
 
                     if let Some(value) = response
                         .headers()
@@ -1235,7 +1258,8 @@ impl ModelClient {
                 include,
                 service_tier: match self.config.service_tier {
                     Some(ServiceTier::Fast) => Some("priority".to_string()),
-                    _ => None,
+                    Some(service_tier) => Some(service_tier.to_string()),
+                    None => None,
                 },
                 // Use a stable per-process cache key (session id). With store=false this is inert.
                 prompt_cache_key: Some(session_id_str.clone()),
@@ -1282,6 +1306,7 @@ impl ModelClient {
                 .provider
                 .create_request_builder_with_auth(&self.client, &auth)
                 .await?;
+            req_builder = self.apply_requested_model_headers(req_builder, request_model);
 
             let has_beta_header = req_builder
                 .try_clone()
@@ -1386,11 +1411,21 @@ impl ModelClient {
                                 "x_request_id": resp.headers()
                                     .get("x-request-id")
                                     .and_then(|v| v.to_str().ok())
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
+                                "headers": header_map_to_json(resp.headers()),
                             }),
                         );
                     }
                     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+
+                    let response_headers = header_map_to_json(resp.headers());
+                    if tx_event
+                        .send(Ok(ResponseEvent::ResponseHeaders(response_headers)))
+                        .await
+                        .is_err()
+                    {
+                        debug!("receiver dropped response headers event");
+                    }
 
                     if let Some(snapshot) = parse_rate_limit_snapshot(resp.headers()) {
                         debug!(
@@ -1686,6 +1721,7 @@ impl ModelClient {
                                 "error",
                                 &serde_json::json!({
                                     "status": status.as_u16(),
+                                    "headers": header_map_to_json(&headers),
                                     "body": body_text
                                 }),
                             );
@@ -1905,6 +1941,7 @@ impl ModelClient {
                 .provider
                 .create_compact_request_builder_with_auth(&self.client, &auth)
                 .await?;
+            request = self.apply_requested_model_headers(request, model_slug);
 
             // Ensure Responses API beta header is present for compact calls. Mirror the
             // streaming path: use the public "responses=v1" header for the public OpenAI

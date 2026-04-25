@@ -2044,6 +2044,7 @@
           "enum": [
             "context_window_exceeded",
             "usage_limit_exceeded",
+            "cyber_policy",
             "internal_server_error",
             "unauthorized",
             "bad_request",
@@ -10974,6 +10975,7 @@
             "enum": [
               "contextWindowExceeded",
               "usageLimitExceeded",
+              "cyberPolicy",
               "internalServerError",
               "unauthorized",
               "badRequest",
