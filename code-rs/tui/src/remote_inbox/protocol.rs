@@ -120,6 +120,8 @@ pub(crate) struct RemoteCommand {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
     pub turn_id: Option<String>,
     #[serde(default)]
     pub response: Option<RequestUserInputResponse>,
@@ -332,6 +334,7 @@ mod tests {
             "session_id": "session-1",
             "session_epoch": "epoch-1",
             "kind": "request_user_input_response",
+            "call_id": "call-1",
             "turn_id": "turn-1",
             "response": {
                 "answers": {
@@ -347,6 +350,7 @@ mod tests {
         };
         assert_eq!(command.command_id, "cmd-1");
         assert_eq!(command.kind, RemoteCommandKind::RequestUserInputResponse);
+        assert_eq!(command.call_id.as_deref(), Some("call-1"));
         assert_eq!(command.turn_id.as_deref(), Some("turn-1"));
         assert_eq!(
             command

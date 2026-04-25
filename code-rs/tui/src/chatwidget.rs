@@ -11754,6 +11754,15 @@ impl ChatWidget<'_> {
         turn_id: String,
         response: code_protocol::request_user_input::RequestUserInputResponse,
     ) {
+        self.on_request_user_input_answer_with_source(turn_id, response, None);
+    }
+
+    fn on_request_user_input_answer_with_source(
+        &mut self,
+        turn_id: String,
+        response: code_protocol::request_user_input::RequestUserInputResponse,
+        source_label: Option<String>,
+    ) {
         let Some(pending) = self.pending_request_user_input.take() else {
             tracing::warn!(
                 "[request_user_input] received UI answer but no request is pending (turn_id={turn_id})"
@@ -11770,8 +11779,11 @@ impl ChatWidget<'_> {
 
         self.bottom_pane.close_request_user_input_view();
 
-        let display_text =
+        let mut display_text =
             Self::format_request_user_input_display(&pending.questions, &response);
+        if let Some(source_label) = source_label.filter(|label| !label.trim().is_empty()) {
+            display_text = format!("{source_label}:\n{display_text}");
+        }
 
         if !display_text.trim().is_empty() {
             let key = Self::order_key_successor(pending.anchor_key);
@@ -11798,18 +11810,35 @@ impl ChatWidget<'_> {
     pub(crate) fn on_remote_inbox_request_user_input_answer(
         &mut self,
         command_id: String,
+        call_id: Option<String>,
         turn_id: String,
         response: code_protocol::request_user_input::RequestUserInputResponse,
         issued_by: Option<String>,
     ) -> Result<(), String> {
         let Some(pending) = self.pending_request_user_input.as_ref() else {
-            tracing::warn!(command_id, issued_by, "rejecting remote request_user_input answer with no active prompt");
+            tracing::warn!(
+                command_id,
+                issued_by = issued_by.as_deref(),
+                "rejecting remote request_user_input answer with no active prompt"
+            );
             return Err("session is not waiting for requested user input".to_string());
         };
+        if let Some(call_id) = call_id.as_deref().filter(|call_id| !call_id.trim().is_empty())
+            && pending.call_id != call_id
+        {
+            tracing::warn!(
+                command_id,
+                issued_by = issued_by.as_deref(),
+                expected_call_id = pending.call_id.as_str(),
+                got_call_id = call_id,
+                "rejecting remote request_user_input answer for unexpected call"
+            );
+            return Err("request_user_input call does not match the active prompt".to_string());
+        }
         if pending.turn_id != turn_id {
             tracing::warn!(
                 command_id,
-                issued_by,
+                issued_by = issued_by.as_deref(),
                 expected_turn_id = pending.turn_id,
                 got_turn_id = turn_id,
                 "rejecting remote request_user_input answer for unexpected turn"
@@ -11817,8 +11846,17 @@ impl ChatWidget<'_> {
             return Err("request_user_input turn does not match the active prompt".to_string());
         }
 
-        tracing::info!(command_id, issued_by, turn_id, "accepting remote request_user_input answer");
-        self.on_request_user_input_answer(turn_id, response);
+        tracing::info!(
+            command_id,
+            issued_by = issued_by.as_deref(),
+            turn_id,
+            "accepting remote request_user_input answer"
+        );
+        let source_label = match issued_by.as_deref() {
+            Some(issued_by) => format!("Remote answer from Discord ({issued_by})"),
+            None => "Remote answer from Discord".to_string(),
+        };
+        self.on_request_user_input_answer_with_source(turn_id, response, Some(source_label));
         Ok(())
     }
 
@@ -31576,6 +31614,7 @@ use code_core::protocol::OrderMeta;
 
         chat.on_remote_inbox_request_user_input_answer(
             "cmd-1".to_string(),
+            Some("call-1".to_string()),
             "turn-1".to_string(),
             RequestUserInputResponse {
                 answers: std::collections::HashMap::from([(
@@ -31604,6 +31643,7 @@ use code_core::protocol::OrderMeta;
             other => panic!("expected UserInputAnswer, got {other:?}"),
         }
         assert!(chat.pending_request_user_input.is_none());
+        assert!(history_contains_text(chat, "Remote answer from Discord (123):"));
         assert!(history_contains_text(chat, "Safe"));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
@@ -31703,6 +31743,7 @@ use code_core::protocol::OrderMeta;
         let err = chat
             .on_remote_inbox_request_user_input_answer(
                 "cmd-1".to_string(),
+                None,
                 "turn-2".to_string(),
                 RequestUserInputResponse {
                     answers: std::collections::HashMap::from([(
@@ -31717,6 +31758,50 @@ use code_core::protocol::OrderMeta;
             .expect_err("mismatched turn should be rejected");
 
         assert_eq!(err, "request_user_input turn does not match the active prompt");
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn remote_inbox_request_user_input_answer_rejects_unexpected_call() {
+        use code_protocol::request_user_input::RequestUserInputAnswer;
+        use code_protocol::request_user_input::RequestUserInputQuestion;
+        use code_protocol::request_user_input::RequestUserInputResponse;
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        chat.pending_request_user_input = Some(PendingRequestUserInput {
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            anchor_key: chat.next_internal_key(),
+            questions: vec![RequestUserInputQuestion {
+                id: "mode".to_string(),
+                header: "Build mode".to_string(),
+                question: "Choose a mode".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: None,
+            }],
+        });
+
+        let err = chat
+            .on_remote_inbox_request_user_input_answer(
+                "cmd-1".to_string(),
+                Some("call-2".to_string()),
+                "turn-1".to_string(),
+                RequestUserInputResponse {
+                    answers: std::collections::HashMap::from([(
+                        "mode".to_string(),
+                        RequestUserInputAnswer {
+                            answers: vec!["Safe".to_string()],
+                        },
+                    )]),
+                },
+                None,
+            )
+            .expect_err("mismatched call should be rejected");
+
+        assert_eq!(err, "request_user_input call does not match the active prompt");
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 

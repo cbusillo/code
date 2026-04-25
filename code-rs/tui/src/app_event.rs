@@ -233,6 +233,7 @@ pub(crate) enum AppEvent {
     /// from a remote inbox bridge.
     RemoteInboxRequestUserInputAnswer {
         command_id: String,
+        call_id: Option<String>,
         turn_id: String,
         response: RequestUserInputResponse,
         issued_by: Option<String>,

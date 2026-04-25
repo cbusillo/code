@@ -975,6 +975,7 @@ impl App<'_> {
                 }
                 AppEvent::RemoteInboxRequestUserInputAnswer {
                     command_id,
+                    call_id,
                     turn_id,
                     response,
                     issued_by,
@@ -983,6 +984,7 @@ impl App<'_> {
                     let result = if let AppState::Chat { widget } = &mut self.app_state {
                         widget.on_remote_inbox_request_user_input_answer(
                             command_id,
+                            call_id,
                             turn_id,
                             response,
                             issued_by,

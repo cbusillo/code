@@ -639,6 +639,7 @@ where
                     let accepted = app_event_tx.send_with_result(
                         AppEvent::RemoteInboxRequestUserInputAnswer {
                             command_id: command_id.clone(),
+                            call_id: command.call_id,
                             turn_id,
                             response,
                             issued_by: command.issued_by,
@@ -993,6 +994,7 @@ mod tests {
             "session_id": "session-1",
             "session_epoch": "epoch-1",
             "kind": "request_user_input_response",
+            "call_id": "call-1",
             "turn_id": "turn-1",
             "response": {
                 "answers": {
@@ -1196,11 +1198,13 @@ mod tests {
             event,
             AppEvent::RemoteInboxRequestUserInputAnswer {
                 command_id,
+                call_id,
                 turn_id,
                 issued_by,
                 response,
                 ..
             } if command_id == "cmd-1"
+                && call_id.as_deref() == Some("call-1")
                 && turn_id == "turn-1"
                 && issued_by.as_deref() == Some("123")
                 && response
