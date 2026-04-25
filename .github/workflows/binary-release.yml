@@ -33,6 +33,7 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       release_name: ${{ steps.meta.outputs.release_name }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
+      code_version: ${{ steps.code_version.outputs.version }}
       toolchain: ${{ steps.rust_toolchain.outputs.channel }}
     steps:
       - name: Check out repository
@@ -80,6 +81,22 @@ jobs:
           )
           echo "channel=${toolchain}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve embedded Code version
+        id: code_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(git tag --list 'rust-v[0-9]*' \
+            | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.]+)?$' \
+            | sort -V \
+            | tail -n 1 \
+            | sed 's/^rust-v//')
+          if [[ -z "$version" ]]; then
+            echo "Unable to resolve embedded Code version from rust-v tags" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
     needs: metadata
@@ -106,6 +123,7 @@ jobs:
       RUSTUP_HOME: ${{ github.workspace }}/.cargo-home/rustup
       CARGO_TARGET_DIR: ${{ github.workspace }}/code-rs/target
       CARGO_TERM_COLOR: always
+      CODE_VERSION: ${{ needs.metadata.outputs.code_version }}
 
     steps:
       - name: Check out repository

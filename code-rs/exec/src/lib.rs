@@ -319,7 +319,7 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
     }
 
     let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        code_core::otel_init::build_provider(&config, env!("CARGO_PKG_VERSION"))
+        code_core::otel_init::build_provider(&config, code_version::version())
     })) {
         Ok(Ok(otel)) => otel,
         Ok(Err(err)) => {

@@ -160,11 +160,10 @@ impl EventProcessor for EventProcessorWithHumanOutput {
     /// for the session. This mirrors the information shown in the TUI welcome
     /// screen.
     fn print_config_summary(&mut self, config: &Config, prompt: &str) {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
         ts_println!(
             self,
             "OpenAI Codex v{} (research preview)",
-            VERSION
+            code_version::version()
         );
 
         // Show which binary is being used to execute sub-agents so users can

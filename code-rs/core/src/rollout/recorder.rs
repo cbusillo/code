@@ -160,7 +160,7 @@ impl RolloutRecorder {
                         timestamp,
                         cwd: config.cwd.clone(),
                         originator: DEFAULT_ORIGINATOR.to_string(),
-                        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+                        cli_version: code_version::version().to_string(),
                         source,
                         model_provider: None,
                         base_instructions: instructions.map(|text| BaseInstructions { text }),

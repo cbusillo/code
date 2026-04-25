@@ -23,6 +23,7 @@ code-common = { workspace = true, features = [
     "elapsed",
     "sandbox_summary",
 ] }
+code-version = { path = "../code-version" }
 code-core = { workspace = true }
 code-ollama = { workspace = true }
 code-protocol = { workspace = true }

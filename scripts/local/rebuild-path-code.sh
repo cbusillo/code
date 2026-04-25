@@ -5,8 +5,24 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 code_rs_root="$repo_root/code-rs"
 release_bin="$code_rs_root/target/release/code"
 
+resolve_code_version() {
+	git -C "$repo_root" tag --list 'rust-v[0-9]*' |
+		grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.]+)?$' |
+		sort -V |
+		tail -n 1 |
+		sed 's/^rust-v//'
+}
+
+code_version="${CODE_VERSION:-$(resolve_code_version || true)}"
+
 echo "Building release binary from $code_rs_root"
-cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release
+if [[ -n "$code_version" ]]; then
+	echo "Embedding CODE_VERSION=$code_version"
+	CODE_VERSION="$code_version" cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release
+else
+	echo "warning: could not resolve CODE_VERSION from rust-v tags; building without override" >&2
+	cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release
+fi
 
 path_code="$(command -v code || true)"
 if [[ -z "$path_code" ]]; then
