@@ -42,7 +42,7 @@ env:
 jobs:
   precheck:
     name: Precheck (no-op gate)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     timeout-minutes: 10
     outputs:
       skip_due_to_active: ${{ steps.active_guard.outputs.skip_due_to_active }}
@@ -177,7 +177,7 @@ jobs:
   merge:
     needs: [precheck]
     if: needs.precheck.outputs.skip_due_to_active != 'true' && needs.precheck.outputs.action == 'merge'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     timeout-minutes: 45
 
     steps:
@@ -1055,7 +1055,7 @@ jobs:
     name: Open/Update PR (no merge work)
     needs: [precheck]
     if: needs.precheck.outputs.skip_due_to_active != 'true' && needs.precheck.outputs.action == 'pr_only'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     timeout-minutes: 10
     steps:
       - name: Check out repository (full history)

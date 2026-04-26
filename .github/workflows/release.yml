@@ -32,7 +32,7 @@ permissions:
 jobs:
   npm-auth-check:
     name: Validate npm auth
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 5
     # Fail fast if npm auth is not usable; downstream jobs should not continue.
@@ -66,9 +66,9 @@ jobs:
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
     needs: [npm-auth-check]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     env:
-      CARGO_TARGET_DIR: /mnt/cargo-target
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
     steps:
       - name: Prepare cargo target dir on data disk
         shell: bash
@@ -163,7 +163,7 @@ jobs:
   determine-version:
     name: Determine Version
     needs: [npm-auth-check]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -223,27 +223,32 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: [determine-version]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJson(matrix.runs_on) }}
     strategy:
       matrix:
         include:
           # Linux builds
-          - os: ubuntu-24.04
+          - os: linux-self-hosted
+            runs_on: '["self-hosted","Linux","X64","chris-testing"]'
             target: x86_64-unknown-linux-musl
             artifact: code-x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
+            runs_on: '["ubuntu-24.04-arm"]'
             target: aarch64-unknown-linux-musl
             artifact: code-aarch64-unknown-linux-musl
           # (GNU variants omitted to reduce asset duplication; npm defaults to musl)
           # macOS builds
           - os: macos-14
+            runs_on: '["macos-14"]'
             target: x86_64-apple-darwin
             artifact: code-x86_64-apple-darwin
           - os: macos-14
+            runs_on: '["macos-14"]'
             target: aarch64-apple-darwin
             artifact: code-aarch64-apple-darwin
           # Windows build
           - os: windows-latest
+            runs_on: '["windows-latest"]'
             target: x86_64-pc-windows-msvc
             artifact: code-x86_64-pc-windows-msvc.exe
 
@@ -309,7 +314,7 @@ jobs:
 
       # Linux GNU: use mold if available; prefer system OpenSSL
       - name: Linux (gnu) tuning
-        if: contains(matrix.os, 'ubuntu') && contains(matrix.target, 'gnu')
+        if: runner.os == 'Linux' && contains(matrix.target, 'gnu')
         shell: bash
         run: |
           set -euo pipefail
@@ -327,7 +332,7 @@ jobs:
 
       # Linux MUSL: reliable static build via musl-gcc (no glibc symbol leaks)
       - name: Linux (musl) tuning
-        if: contains(matrix.os, 'ubuntu') && contains(matrix.target, 'musl')
+        if: runner.os == 'Linux' && contains(matrix.target, 'musl')
         shell: bash
         run: |
           set -euo pipefail
@@ -392,7 +397,7 @@ jobs:
 
       - name: Post-build smoke (run binary) [Unix]
         if: |
-          (contains(matrix.os, 'ubuntu')  && matrix.target == 'x86_64-unknown-linux-musl') ||
+          (runner.os == 'Linux'  && matrix.target == 'x86_64-unknown-linux-musl') ||
           (matrix.os == 'ubuntu-24.04-arm' && matrix.target == 'aarch64-unknown-linux-musl') ||
           (startsWith(matrix.os, 'macos-') && matrix.target == 'aarch64-apple-darwin')
         shell: bash
@@ -436,12 +441,12 @@ jobs:
           }
 
       - name: Install zstd (Linux)
-        if: contains(matrix.os, 'ubuntu')
+        if: runner.os == 'Linux'
         shell: bash
         run: sudo apt-get update -qq && sudo apt-get install -y zstd
 
       - name: Compress artifacts (Linux dual-format)
-        if: contains(matrix.os, 'ubuntu')
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           shopt -s nullglob
@@ -490,7 +495,7 @@ jobs:
   release:
     name: Publish to npm
     needs: [determine-version, build-binaries, preflight-tests]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 30
     env:

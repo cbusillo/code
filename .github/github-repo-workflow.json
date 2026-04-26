@@ -1,0 +1,18 @@
+{
+  "defaultBranch": "fork-main",
+  "importantWorkflows": [
+    "blob-size-policy",
+    "Preview Build",
+    "Release",
+    "Upstream Merge"
+  ],
+  "qaLabels": [],
+  "deployLabels": [],
+  "healthUrls": [],
+  "relatedRepos": [],
+  "validatedThrough": [],
+  "cleanup": {
+    "deleteMergedLocalBranches": true,
+    "removeMergedCleanWorktrees": true
+  }
+}

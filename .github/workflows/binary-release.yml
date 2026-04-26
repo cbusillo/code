@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   metadata:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       release_name: ${{ steps.meta.outputs.release_name }}
@@ -233,7 +233,7 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: [metadata, build]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     timeout-minutes: 30
     steps:
       - name: Download workflow artifacts
