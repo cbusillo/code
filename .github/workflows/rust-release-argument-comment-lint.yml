@@ -10,7 +10,7 @@ on:
 jobs:
   skip:
     if: ${{ !inputs.publish }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     steps:
       - run: echo "Skipping argument-comment-lint release assets for prerelease tag"
 
@@ -30,7 +30,8 @@ jobs:
             lib_name: libargument_comment_lint@nightly-2025-09-18-aarch64-apple-darwin.dylib
             runner_binary: argument-comment-lint
             cargo_dylint_binary: cargo-dylint
-          - runner: ubuntu-24.04
+          - runner: linux-self-hosted
+            runs_on: [self-hosted, Linux, X64, chris-testing]
             target: x86_64-unknown-linux-gnu
             archive_name: argument-comment-lint-x86_64-unknown-linux-gnu.tar.gz
             lib_name: libargument_comment_lint@nightly-2025-09-18-x86_64-unknown-linux-gnu.so

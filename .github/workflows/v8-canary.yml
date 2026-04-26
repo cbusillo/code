@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   metadata:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       v8_version: ${{ steps.v8_version.outputs.version }}
 
@@ -35,7 +35,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: metadata
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJson(matrix.runs_on) }}
     permissions:
       contents: read
       actions: read
@@ -43,10 +43,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: linux-self-hosted
+            runs_on: '["self-hosted","Linux","X64","chris-testing"]'
             platform: linux_amd64_musl
             target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
+            runs_on: '["ubuntu-24.04-arm"]'
             platform: linux_arm64_musl
             target: aarch64-unknown-linux-musl
 

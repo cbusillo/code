@@ -26,7 +26,7 @@ jobs:
         github.event.pull_request.head.ref != 'upstream-merge'
       )
     name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJson(matrix.runs_on) }}
     env:
       # Consistent Cargo/rustup homes for caching across all workflows
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -38,21 +38,26 @@ jobs:
       matrix:
         include:
           # Linux MUSL (static-ish) builds
-          - os: ubuntu-24.04
+          - os: linux-self-hosted
+            runs_on: '["self-hosted","Linux","X64","chris-testing"]'
             target: x86_64-unknown-linux-musl
             artifact: code-x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
+            runs_on: '["ubuntu-24.04-arm"]'
             target: aarch64-unknown-linux-musl
             artifact: code-aarch64-unknown-linux-musl
           # macOS builds (both architectures)
           - os: macos-14
+            runs_on: '["macos-14"]'
             target: x86_64-apple-darwin
             artifact: code-x86_64-apple-darwin
           - os: macos-14
+            runs_on: '["macos-14"]'
             target: aarch64-apple-darwin
             artifact: code-aarch64-apple-darwin
           # Windows build
           - os: windows-latest
+            runs_on: '["windows-latest"]'
             target: x86_64-pc-windows-msvc
             artifact: code-x86_64-pc-windows-msvc.exe
 
@@ -101,7 +106,7 @@ jobs:
 
       # Platform tuning (lightweight)
       - name: Linux musl tuning
-        if: contains(matrix.os, 'ubuntu') && contains(matrix.target, 'musl')
+        if: runner.os == 'Linux' && contains(matrix.target, 'musl')
         shell: bash
         run: |
           sudo apt-get update
@@ -207,7 +212,7 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.ref != 'upstream-merge' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     steps:
       - name: Resolve slug and next tag
         id: slug
@@ -367,7 +372,7 @@ jobs:
         needs.release.result == 'skipped' ||
         needs.release.outputs.skip == 'true'
       )
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -384,7 +389,7 @@ jobs:
       github.event.pull_request.head.ref != 'upstream-merge' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       needs.release.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, chris-testing]
     steps:
       - name: Resolve slug and latest tag
         id: slug
