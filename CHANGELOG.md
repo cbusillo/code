@@ -7,6 +7,14 @@
 
 - (none)
 
+## [0.6.96] - 2026-04-26
+
+- Goals: add persistent thread goals with `/goal` controls, status UI, pause and unpause actions, token budgets, and automatic continuation across app-server, core, and TUI flows. (0ee737ce, 6c874f9b, 32ace07a, 41676286, f1c963d7)
+- TUI: keep slash command popup columns stable while scrolling so command descriptions stop shifting horizontally. (0c785598)
+- App Server: restore the persisted model provider on thread resume so resumed encrypted conversations stay on the correct endpoint. (bce74c70)
+- Updates: wait for npm registry readiness before prompting npm or Bun installs to upgrade. (4e30281a)
+- Core: bypass managed network proxying for explicitly escalated commands and fix Bedrock GPT-5.4 reasoning levels to avoid provider-side failures. (9aaa5d93, d19de6d1)
+
 ## [0.6.95] - 2026-04-25
 
 - Models: add GPT-5.5 support and refresh model schema plus GPT agent defaults for more reliable model selection. (bd64cb7d, cea03ccf)

@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::ConstraintError;
+use crate::goals::GoalRuntimeState;
 use tokio::sync::Semaphore;
 
 /// Context for an initialized model agent
@@ -23,9 +24,9 @@ pub(crate) struct Session {
     pub(super) mailbox: Mailbox,
     pub(super) mailbox_rx: Mutex<MailboxReceiver>,
     pub(super) idle_pending_input: Mutex<Vec<ResponseInputItem>>, // TODO (jif) merge with mailbox!
+    pub(crate) goal_runtime: GoalRuntimeState,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
-    pub(super) js_repl: Arc<JsReplHandle>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -766,18 +767,12 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                 ),
-                code_mode_service: crate::tools::code_mode::CodeModeService::new(
-                    config.js_repl_node_path.clone(),
-                ),
+                code_mode_service: crate::tools::code_mode::CodeModeService::new(),
                 environment_manager,
             };
             services
                 .model_client
                 .set_window_generation(window_generation);
-            let js_repl = Arc::new(JsReplHandle::with_node_path(
-                config.js_repl_node_path.clone(),
-                config.js_repl_node_module_dirs.clone(),
-            ));
             let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
                 watch::channel(false);
 
@@ -796,9 +791,9 @@ impl Session {
                 mailbox,
                 mailbox_rx: Mutex::new(mailbox_rx),
                 idle_pending_input: Mutex::new(Vec::new()),
+                goal_runtime: GoalRuntimeState::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
-                js_repl,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {

@@ -119,6 +119,61 @@ pub enum WebSearchMode {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
+pub enum WebSearchContextSize {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[schemars(deny_unknown_fields)]
+pub struct WebSearchLocation {
+    pub country: Option<String>,
+    pub region: Option<String>,
+    pub city: Option<String>,
+    pub timezone: Option<String>,
+}
+
+impl WebSearchLocation {
+    pub fn merge(&self, other: &Self) -> Self {
+        Self {
+            country: other.country.clone().or_else(|| self.country.clone()),
+            region: other.region.clone().or_else(|| self.region.clone()),
+            city: other.city.clone().or_else(|| self.city.clone()),
+            timezone: other.timezone.clone().or_else(|| self.timezone.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[schemars(deny_unknown_fields)]
+pub struct WebSearchToolConfig {
+    pub context_size: Option<WebSearchContextSize>,
+    pub allowed_domains: Option<Vec<String>>,
+    pub location: Option<WebSearchLocation>,
+}
+
+impl WebSearchToolConfig {
+    pub fn merge(&self, other: &Self) -> Self {
+        Self {
+            context_size: other.context_size.or(self.context_size),
+            allowed_domains: other
+                .allowed_domains
+                .clone()
+                .or_else(|| self.allowed_domains.clone()),
+            location: match (&self.location, &other.location) {
+                (Some(location), Some(other_location)) => Some(location.merge(other_location)),
+                (Some(location), None) => Some(location.clone()),
+                (None, Some(other_location)) => Some(other_location.clone()),
+                (None, None) => None,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum ServiceTier {
     /// Legacy compatibility value for older local config files.
     Standard,

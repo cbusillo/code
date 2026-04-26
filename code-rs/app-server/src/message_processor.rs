@@ -35,6 +35,7 @@ use code_app_server_protocol::AskForApproval as V2AskForApproval;
 use code_app_server_protocol::WriteStatus;
 use code_protocol::config_types::Verbosity;
 use code_protocol::config_types::WebSearchMode;
+use code_protocol::config_types::WebSearchToolConfig;
 use code_core::AuthManager;
 use code_core::ConversationManager;
 use code_core::config::Config;
@@ -586,7 +587,12 @@ impl MessageProcessor {
                 WebSearchMode::Disabled
             }),
             tools: Some(ToolsV2 {
-                web_search: Some(config.tools_web_search_request),
+                web_search: config
+                    .tools_web_search_request
+                    .then(|| WebSearchToolConfig {
+                        allowed_domains: config.tools_web_search_allowed_domains.clone(),
+                        ..Default::default()
+                    }),
                 view_image: Some(config.include_view_image_tool),
             }),
             profile: config.active_profile.clone(),

@@ -424,6 +424,9 @@
             "general_analytics": {
               "type": "boolean"
             },
+            "goals": {
+              "type": "boolean"
+            },
             "guardian_approval": {
               "type": "boolean"
             },
@@ -582,16 +585,6 @@
         },
         "include_permissions_instructions": {
           "type": "boolean"
-        },
-        "js_repl_node_module_dirs": {
-          "description": "Ordered list of directories to search for Node modules in `js_repl`.",
-          "items": {
-            "$ref": "#/definitions/AbsolutePathBuf"
-          },
-          "type": "array"
-        },
-        "js_repl_node_path": {
-          "$ref": "#/definitions/AbsolutePathBuf"
         },
         "model": {
           "type": "string"
@@ -2626,6 +2619,9 @@
         "general_analytics": {
           "type": "boolean"
         },
+        "goals": {
+          "type": "boolean"
+        },
         "guardian_approval": {
           "type": "boolean"
         },
@@ -2848,21 +2844,6 @@
     "instructions": {
       "description": "System instructions.",
       "type": "string"
-    },
-    "js_repl_node_module_dirs": {
-      "description": "Ordered list of directories to search for Node modules in `js_repl`.",
-      "items": {
-        "$ref": "#/definitions/AbsolutePathBuf"
-      },
-      "type": "array"
-    },
-    "js_repl_node_path": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/AbsolutePathBuf"
-        }
-      ],
-      "description": "Optional absolute path to the Node runtime used by `js_repl`."
     },
     "log_dir": {
       "allOf": [
