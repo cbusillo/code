@@ -74,6 +74,10 @@ code --version
 code exec -m gpt-5.5 --sandbox read-only --max-seconds 30 "Reply with exactly OK."
 ```
 
+Run `just local-code-rebuild` after any release-readiness `./build-fast.sh` run:
+the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary
+that reports `0.0.0`.
+
 Then push the overlay branch and tag to `origin`, and monitor `Binary Release`:
 
 ```sh
