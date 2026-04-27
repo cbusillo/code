@@ -78,6 +78,23 @@ Run `just local-code-rebuild` after any release-readiness `./build-fast.sh` run:
 the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary
 that reports `0.0.0`.
 
+## Session Exit Cleanup
+
+Before leaving a local work session, reclaim rebuildable artifacts:
+
+```sh
+just local-cleanup-space --apply
+```
+
+The cleanup is intentionally aggressive: it removes `codex-rs/target`, legacy
+root targets, `code-rs` debug/dev-fast artifacts, all `./build-fast.sh` target
+cache buckets, and release dependency cache. It preserves
+`code-rs/target/release/code`, which is the PATH-resolved local binary built by
+`just local-code-rebuild`.
+
+Run without `--apply` to preview deletions. Use `--keep-current-fast-cache` or
+`--keep-release-cache` only when you intentionally want a warmer next build.
+
 Then push the overlay branch and tag to `origin`, and monitor `Binary Release`:
 
 ```sh

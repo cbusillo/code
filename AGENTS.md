@@ -61,6 +61,9 @@ Examples:
 - The canonical local-carry branch is `local/cbusillo-overlay`. Treat it as the source of truth for the `code` binary installed on this machine.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary that reports `0.0.0`.
+- Before leaving a local work session, run `just local-cleanup-space --apply`
+  to remove rebuildable target/cache artifacts while preserving
+  `code-rs/target/release/code`.
 - Use `just local-overlay-update` only from a clean `local/*` branch. It fetches `upstream/main`, merges it into the current overlay branch, replays any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release binary.
 - Commits already on `local/cbusillo-overlay` persist automatically across future upstream merges. They do not need to be duplicated in `scripts/local/overlay-picks.txt`.
 - If you make a new local fix that should remain part of the carried overlay, commit it onto `local/cbusillo-overlay` first. Do not leave important local changes only as an unmerged side branch.

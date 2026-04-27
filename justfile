@@ -75,6 +75,10 @@ local-overlay-update:
 local-fork-health:
     ./scripts/local/fork-health.sh
 
+[no-cd]
+local-cleanup-space *args:
+    ./scripts/local/cleanup-space.sh "$@"
+
 bazel-test:
     bazel test --test_tag_filters=-argument-comment-lint //... --keep_going
 
