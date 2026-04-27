@@ -2,12 +2,34 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-repo_name="$(basename "$repo_root")"
+if [[ "$repo_root" == */.code/working/*/branches/* ]]; then
+	repo_worktree_parent="${repo_root%/branches/*}"
+	repo_name="$(basename "$repo_worktree_parent")"
+else
+	repo_name="$(basename "$repo_root")"
+fi
+
+if [[ -n "${CODE_HOME:-}" && -n "$CODE_HOME" ]]; then
+	cache_home="${CODE_HOME%/}"
+elif [[ -n "${CODEX_HOME:-}" && -n "$CODEX_HOME" ]]; then
+	cache_home="${CODEX_HOME%/}"
+elif [[ -d "/mnt/data" && -w "/mnt/data" ]]; then
+	cache_home="/mnt/data/.code"
+else
+	cache_home="$repo_root/.code"
+fi
+case "$cache_home" in
+/*) ;;
+*)
+	cache_home="$repo_root/${cache_home#./}"
+	;;
+esac
 
 apply=0
 keep_current_fast_cache=0
 keep_release_cache=0
 cleanup_failed=0
+declare -a protected_paths=()
 declare -a protected_realpaths=()
 
 usage() {
@@ -64,7 +86,17 @@ protect_path() {
 	local path="$1"
 
 	if [[ -e "$path" || -L "$path" ]]; then
+		protected_paths+=("$path")
 		protected_realpaths+=("$(real_path "$path")")
+	fi
+}
+
+protect_if_same_realpath() {
+	local path="$1"
+	local expected_realpath="$2"
+
+	if [[ -n "$expected_realpath" && (-e "$path" || -L "$path") && "$(real_path "$path")" = "$expected_realpath" ]]; then
+		protect_path "$path"
 	fi
 }
 
@@ -81,6 +113,12 @@ path_protects_active_code() {
 	local protected
 
 	path_real="$(real_path "$path")"
+	for protected in "${protected_paths[@]}"; do
+		if is_under "$protected" "$path" || is_under "$protected" "$path_real"; then
+			return 0
+		fi
+	done
+
 	for protected in "${protected_realpaths[@]}"; do
 		if is_under "$protected" "$path_real"; then
 			return 0
@@ -180,9 +218,15 @@ echo
 
 protect_path "$path_code"
 protect_path "$release_bin"
+protect_if_same_realpath "$repo_root/code-rs/target/dev-fast/code" "$resolved_code"
+protect_if_same_realpath "$repo_root/target/dev-fast/code" "$resolved_code"
+protect_if_same_realpath "$repo_root/target/release/code" "$resolved_code"
+protect_if_same_realpath "$repo_root/code-rs/target/dev-fast/code" "$release_bin_real"
+protect_if_same_realpath "$repo_root/target/dev-fast/code" "$release_bin_real"
+protect_if_same_realpath "$repo_root/target/release/code" "$release_bin_real"
 
 echo "Cleanup candidates:"
-target_cache_root="$repo_root/.code/working/_target-cache/$repo_name"
+target_cache_root="$cache_home/working/_target-cache/$repo_name"
 active_fast_bin=""
 if [[ -e "$repo_root/code-rs/target/dev-fast/code" || -L "$repo_root/code-rs/target/dev-fast/code" ]]; then
 	active_fast_bin="$(real_path "$repo_root/code-rs/target/dev-fast/code")"
