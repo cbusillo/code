@@ -44,6 +44,10 @@ jobs:
       - name: Resolve release metadata
         id: meta
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
 
@@ -52,9 +56,9 @@ jobs:
             prerelease=false
             release_name="Code ${tag}"
           else
-            tag="${{ inputs.release_tag }}"
-            prerelease="${{ inputs.prerelease }}"
-            release_name="${{ inputs.release_name }}"
+            tag="${RELEASE_TAG}"
+            prerelease="${PRERELEASE}"
+            release_name="${RELEASE_NAME}"
             if [[ -z "${release_name}" ]]; then
               release_name="Code ${tag}"
             fi
@@ -248,6 +252,9 @@ jobs:
 
       - name: Prepare release bundle
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          CODE_VERSION: ${{ needs.metadata.outputs.code_version }}
         run: |
           set -euo pipefail
 
@@ -258,27 +265,44 @@ jobs:
 
           sha256sum dist/* > dist/SHA256SUMS.txt
 
-          tag="${{ needs.metadata.outputs.tag }}"
+          tag="${RELEASE_TAG}"
           previous_tag="$(git tag --list 'overlay-v*' --merged "${GITHUB_SHA}" --sort=-v:refname \
             | grep -Fxv "${tag}" \
             | head -n 1 || true)"
           if [[ -n "${previous_tag}" ]]; then
-            range="${previous_tag}..${GITHUB_SHA}"
+            range_base="${previous_tag}"
+          else
+            upstream_tag="v${tag#overlay-v}"
+            upstream_tag="${upstream_tag%.*}"
+            if git rev-parse --verify --quiet "${upstream_tag}^{commit}" >/dev/null; then
+              range_base="${upstream_tag}"
+            else
+              parent_commit="$(git rev-parse --verify --quiet "${GITHUB_SHA}^" || true)"
+              if [[ -n "${parent_commit}" ]]; then
+                range_base="${parent_commit}"
+              else
+                range_base=""
+              fi
+            fi
+          fi
+
+          if [[ -n "${range_base}" ]]; then
+            range="${range_base}..${GITHUB_SHA}"
           else
             range="${GITHUB_SHA}"
           fi
 
-          commit_count="$(git rev-list --count "${range}" 2>/dev/null || echo 1)"
           commit_summary="$(mktemp)"
-          git log --no-merges --format='%s' "${range}" > "${commit_summary}" \
+          git log --format='%s' "${range}" > "${commit_summary}" \
             || git log -1 --format='%s' "${GITHUB_SHA}" > "${commit_summary}"
 
           fixes="$(mktemp)"
           features="$(mktemp)"
-          local_updates="$(mktemp)"
+          maintenance_updates="$(mktemp)"
           ci_updates="$(mktemp)"
           other_updates="$(mktemp)"
           seen_subjects="$(mktemp)"
+          listed_entry_count=0
 
           while IFS= read -r subject; do
             [[ -n "${subject}" ]] || continue
@@ -289,22 +313,28 @@ jobs:
             lower_subject="$(printf '%s' "${subject}" | tr '[:upper:]' '[:lower:]')"
             if [[ "${subject}" =~ ^(fix|revert)(\(|:) ]]; then
               printf '%s\n' "${subject}" >> "${fixes}"
+              listed_entry_count=$((listed_entry_count + 1))
             elif [[ "${subject}" =~ ^feat(\(|:) ]]; then
               printf '%s\n' "${subject}" >> "${features}"
+              listed_entry_count=$((listed_entry_count + 1))
             elif [[ "${subject}" == "Add GitHub repo workflow metadata" ]]; then
-              printf '%s\n' "${subject}" >> "${local_updates}"
+              printf '%s\n' "${subject}" >> "${maintenance_updates}"
+              listed_entry_count=$((listed_entry_count + 1))
             elif [[ "${subject}" =~ ^(ci|build)(\(|:) ]] \
               || [[ "${lower_subject}" == *workflow* ]] \
               || [[ "${lower_subject}" == *runner* ]] \
               || [[ "${lower_subject}" == *actionlint* ]]; then
               printf '%s\n' "${subject}" >> "${ci_updates}"
+              listed_entry_count=$((listed_entry_count + 1))
             elif [[ "${subject}" =~ ^(docs|chore|test)(\(|:) ]] \
               || [[ "${lower_subject}" == *local* ]] \
               || [[ "${lower_subject}" == *overlay* ]] \
               || [[ "${lower_subject}" == *cleanup* ]]; then
-              printf '%s\n' "${subject}" >> "${local_updates}"
+              printf '%s\n' "${subject}" >> "${maintenance_updates}"
+              listed_entry_count=$((listed_entry_count + 1))
             else
               printf '%s\n' "${subject}" >> "${other_updates}"
+              listed_entry_count=$((listed_entry_count + 1))
             fi
           done < "${commit_summary}"
 
@@ -325,22 +355,23 @@ jobs:
           {
             echo "## What's Changed"
             echo ""
-            echo "This overlay release carries local fork updates on top of upstream Code ${{ needs.metadata.outputs.code_version }}."
+            echo "This overlay release carries local fork updates on top of upstream Code ${CODE_VERSION}."
             if [[ -n "${previous_tag}" ]]; then
-              echo "It includes ${commit_count} commits since ${previous_tag}."
+              echo "It includes ${listed_entry_count} listed changes since ${previous_tag}."
             fi
             echo ""
 
             write_section "Fixes" "${fixes}"
             write_section "Features" "${features}"
-            write_section "Local Fork Improvements" "${local_updates}"
+            write_section "Maintenance Updates" "${maintenance_updates}"
             write_section "CI and Release Infrastructure" "${ci_updates}"
             write_section "Other Updates" "${other_updates}"
 
             echo "## Verification"
             echo ""
             echo "- Binary Release workflow completed successfully for Linux x64, macOS x86_64, and macOS aarch64."
-            echo "- Each built binary ran its release smoke test before packaging."
+            echo "- Release smoke tests ran for the Linux x64 and macOS aarch64 binaries before packaging."
+            echo "- macOS x86_64 was built and packaged, but not smoke-tested in workflow."
             echo "- SHA-256 checksums are included in SHA256SUMS.txt."
             echo ""
             echo "## Build"
