@@ -236,6 +236,11 @@ jobs:
     runs-on: [self-hosted, Linux, X64, chris-testing]
     timeout-minutes: 30
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download workflow artifacts
         uses: actions/download-artifact@v4
         with:
@@ -253,13 +258,103 @@ jobs:
 
           sha256sum dist/* > dist/SHA256SUMS.txt
 
+          tag="${{ needs.metadata.outputs.tag }}"
+          previous_tag="$(git tag --list 'overlay-v*' --merged "${GITHUB_SHA}" --sort=-v:refname \
+            | grep -Fxv "${tag}" \
+            | head -n 1 || true)"
+          if [[ -n "${previous_tag}" ]]; then
+            range="${previous_tag}..${GITHUB_SHA}"
+          else
+            range="${GITHUB_SHA}"
+          fi
+
+          commit_count="$(git rev-list --count "${range}" 2>/dev/null || echo 1)"
+          commit_summary="$(mktemp)"
+          git log --no-merges --format='%s' "${range}" > "${commit_summary}" \
+            || git log -1 --format='%s' "${GITHUB_SHA}" > "${commit_summary}"
+
+          fixes="$(mktemp)"
+          features="$(mktemp)"
+          local_updates="$(mktemp)"
+          ci_updates="$(mktemp)"
+          other_updates="$(mktemp)"
+          seen_subjects="$(mktemp)"
+
+          while IFS= read -r subject; do
+            [[ -n "${subject}" ]] || continue
+            if grep -Fxq -- "${subject}" "${seen_subjects}"; then
+              continue
+            fi
+            printf '%s\n' "${subject}" >> "${seen_subjects}"
+            lower_subject="$(printf '%s' "${subject}" | tr '[:upper:]' '[:lower:]')"
+            if [[ "${subject}" =~ ^(fix|revert)(\(|:) ]]; then
+              printf '%s\n' "${subject}" >> "${fixes}"
+            elif [[ "${subject}" =~ ^feat(\(|:) ]]; then
+              printf '%s\n' "${subject}" >> "${features}"
+            elif [[ "${subject}" == "Add GitHub repo workflow metadata" ]]; then
+              printf '%s\n' "${subject}" >> "${local_updates}"
+            elif [[ "${subject}" =~ ^(ci|build)(\(|:) ]] \
+              || [[ "${lower_subject}" == *workflow* ]] \
+              || [[ "${lower_subject}" == *runner* ]] \
+              || [[ "${lower_subject}" == *actionlint* ]]; then
+              printf '%s\n' "${subject}" >> "${ci_updates}"
+            elif [[ "${subject}" =~ ^(docs|chore|test)(\(|:) ]] \
+              || [[ "${lower_subject}" == *local* ]] \
+              || [[ "${lower_subject}" == *overlay* ]] \
+              || [[ "${lower_subject}" == *cleanup* ]]; then
+              printf '%s\n' "${subject}" >> "${local_updates}"
+            else
+              printf '%s\n' "${subject}" >> "${other_updates}"
+            fi
+          done < "${commit_summary}"
+
+          write_section() {
+            local title="$1"
+            local file="$2"
+            if [[ -s "${file}" ]]; then
+              echo "### ${title}"
+              echo ""
+              while IFS= read -r subject; do
+                [[ -n "${subject}" ]] || continue
+                echo "- ${subject}"
+              done < "${file}"
+              echo ""
+            fi
+          }
+
           {
-            echo "Built from ref ${GITHUB_REF_NAME}"
+            echo "## What's Changed"
             echo ""
-            echo "Commit: ${GITHUB_SHA}"
+            echo "This overlay release carries local fork updates on top of upstream Code ${{ needs.metadata.outputs.code_version }}."
+            if [[ -n "${previous_tag}" ]]; then
+              echo "It includes ${commit_count} commits since ${previous_tag}."
+            fi
             echo ""
-            echo "Assets:"
-            find dist -maxdepth 1 -type f -printf ' - %f\n' | sort
+
+            write_section "Fixes" "${fixes}"
+            write_section "Features" "${features}"
+            write_section "Local Fork Improvements" "${local_updates}"
+            write_section "CI and Release Infrastructure" "${ci_updates}"
+            write_section "Other Updates" "${other_updates}"
+
+            echo "## Verification"
+            echo ""
+            echo "- Binary Release workflow completed successfully for Linux x64, macOS x86_64, and macOS aarch64."
+            echo "- Each built binary ran its release smoke test before packaging."
+            echo "- SHA-256 checksums are included in SHA256SUMS.txt."
+            echo ""
+            echo "## Build"
+            echo ""
+            echo "Built from \`${GITHUB_REF_NAME}\` at \`${GITHUB_SHA}\`."
+            if [[ -n "${previous_tag}" ]]; then
+              echo "Previous overlay release: \`${previous_tag}\`."
+            fi
+            echo ""
+            echo "### Assets"
+            echo ""
+            while IFS= read -r asset; do
+              echo "- \`${asset}\`"
+            done < <(find dist -maxdepth 1 -type f -exec basename {} \; | sort)
           } > dist/RELEASE_NOTES.txt
 
       - name: Publish GitHub release
