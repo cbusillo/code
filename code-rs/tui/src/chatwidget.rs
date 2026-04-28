@@ -182,6 +182,8 @@ use code_core::protocol::ImageGenerationBeginEvent;
 use code_core::protocol::ImageGenerationEndEvent;
 use code_core::protocol::McpServerFailure;
 use code_core::protocol::McpServerFailurePhase;
+use code_core::protocol::McpToolCallBeginEvent;
+use code_core::protocol::McpToolCallEndEvent;
 use code_core::protocol::SessionConfiguredEvent;
 // MCP tool call handlers moved into chatwidget::tools
 use code_core::protocol::Op;
@@ -15178,6 +15180,7 @@ impl ChatWidget<'_> {
                     seq
                 );
                 self.ensure_spinner_for_activity("mcp-begin");
+                self.remote_inbox_send_mcp_tool_begin(&ev);
                 tools::mcp_begin(self, ev, order_ok);
                 if self.interrupts.has_queued() {
                     self.flush_interrupt_queue();
@@ -15201,6 +15204,7 @@ impl ChatWidget<'_> {
                             ev2.call_id,
                             seq
                         );
+                        this.remote_inbox_send_mcp_tool_end(&ev2);
                         tools::mcp_end(this, ev2, order_ok)
                     },
                 );
@@ -15222,6 +15226,11 @@ impl ChatWidget<'_> {
                 // Show an active entry immediately for all custom tools so the user sees progress
                 let params_json = parameters.clone();
                 let params_string = params_json.clone().map(|p| p.to_string());
+                self.remote_inbox_send_custom_tool_begin(&CustomToolCallBeginEvent {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    parameters: parameters.clone(),
+                });
                 if agent_runs::is_agent_tool(&tool_name) {
                     if agent_runs::handle_custom_tool_begin(
                         self,
@@ -15377,6 +15386,13 @@ impl ChatWidget<'_> {
                 result,
             }) => {
                 let params_json = parameters.clone();
+                self.remote_inbox_send_custom_tool_end(&CustomToolCallEndEvent {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    parameters: parameters.clone(),
+                    duration,
+                    result: result.clone(),
+                });
                 if agent_runs::is_agent_tool(&tool_name) {
                     if agent_runs::handle_custom_tool_end(
                         self,
@@ -30277,6 +30293,30 @@ Have we met every part of this goal and is there no further work to do?"#
     fn remote_inbox_send_exec_command_end(&self, command: &[String], event: &ExecCommandEndEvent) {
         if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
             client.send_exec_command_end(turn_id, &event.call_id, command, event);
+        }
+    }
+
+    fn remote_inbox_send_mcp_tool_begin(&self, event: &McpToolCallBeginEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_mcp_tool_begin(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_mcp_tool_end(&self, event: &McpToolCallEndEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_mcp_tool_end(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_custom_tool_begin(&self, event: &CustomToolCallBeginEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_custom_tool_begin(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_custom_tool_end(&self, event: &CustomToolCallEndEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_custom_tool_end(turn_id, event);
         }
     }
 

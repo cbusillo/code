@@ -9,9 +9,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use code_core::config::RemoteInboxConfig;
+use code_core::protocol::CustomToolCallBeginEvent;
+use code_core::protocol::CustomToolCallEndEvent;
 use code_core::protocol::ExecCommandBeginEvent;
 use code_core::protocol::ExecCommandEndEvent;
 use code_core::protocol::ExecApprovalRequestEvent;
+use code_core::protocol::McpToolCallBeginEvent;
+use code_core::protocol::McpToolCallEndEvent;
 use code_core::protocol::ReviewDecision;
 use code_protocol::request_user_input::RequestUserInputAnswer;
 use code_protocol::request_user_input::RequestUserInputEvent;
@@ -191,6 +195,74 @@ impl RemoteInboxClientHandle {
             "Shell command",
             &exec_command_end_detail(command, event),
             if event.exit_code == 0 { "completed" } else { "error" },
+        )));
+    }
+
+    pub(crate) fn send_mcp_tool_begin(&self, turn_id: &str, event: &McpToolCallBeginEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step(
+            turn_id,
+            &event.call_id,
+            "tool",
+            "MCP tool",
+            &tool_begin_detail(&mcp_tool_label(event), event.invocation.arguments.as_ref()),
+            "running",
+        )));
+    }
+
+    pub(crate) fn send_mcp_tool_end(&self, turn_id: &str, event: &McpToolCallEndEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step(
+            turn_id,
+            &event.call_id,
+            "tool",
+            "MCP tool",
+            &tool_end_detail(
+                &format!("{}.{}", event.invocation.server, event.invocation.tool),
+                event.duration,
+                event.result.as_ref().err().map(String::as_str),
+            ),
+            if event.result.is_ok() { "completed" } else { "error" },
+        )));
+    }
+
+    pub(crate) fn send_custom_tool_begin(&self, turn_id: &str, event: &CustomToolCallBeginEvent) {
+        if !self.code_everywhere_timeline_enabled || !should_mirror_custom_tool(&event.tool_name) {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step(
+            turn_id,
+            &event.call_id,
+            "tool",
+            &custom_tool_title(&event.tool_name),
+            &tool_begin_detail(&event.tool_name, event.parameters.as_ref()),
+            "running",
+        )));
+    }
+
+    pub(crate) fn send_custom_tool_end(&self, turn_id: &str, event: &CustomToolCallEndEvent) {
+        if !self.code_everywhere_timeline_enabled || !should_mirror_custom_tool(&event.tool_name) {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step(
+            turn_id,
+            &event.call_id,
+            "tool",
+            &custom_tool_title(&event.tool_name),
+            &tool_end_detail(
+                &event.tool_name,
+                event.duration,
+                event.result.as_ref().err().map(String::as_str),
+            ),
+            if event.result.is_ok() { "completed" } else { "error" },
         )));
     }
 
@@ -819,6 +891,55 @@ fn exec_output_tail(event: &ExecCommandEndEvent) -> String {
         .rev()
         .collect();
     format!("...{tail}")
+}
+
+fn mcp_tool_label(event: &McpToolCallBeginEvent) -> String {
+    format!("{}.{}", event.invocation.server, event.invocation.tool)
+}
+
+fn should_mirror_custom_tool(tool_name: &str) -> bool {
+    !matches!(tool_name, "wait" | "kill")
+}
+
+fn custom_tool_title(tool_name: &str) -> String {
+    if tool_name.starts_with("browser_") {
+        "Browser tool".to_string()
+    } else if tool_name.starts_with("agent_") {
+        "Agent tool".to_string()
+    } else {
+        "Tool".to_string()
+    }
+}
+
+fn tool_begin_detail(label: &str, parameters: Option<&Value>) -> String {
+    match parameters {
+        Some(parameters) => format!("{label}\n{}", compact_json_value(parameters)),
+        None => label.to_string(),
+    }
+}
+
+fn tool_end_detail(label: &str, duration: Duration, error: Option<&str>) -> String {
+    let mut detail = format!("{label}\n{} after {:.1}s.", if error.is_some() { "Failed" } else { "Completed" }, duration.as_secs_f32());
+
+    if let Some(error) = error.map(str::trim).filter(|error| !error.is_empty()) {
+        detail.push_str("\n");
+        detail.push_str(&truncate_chars(error, 500));
+    }
+
+    detail
+}
+
+fn compact_json_value(value: &Value) -> String {
+    truncate_chars(&value.to_string(), 500)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let tail: String = value.chars().take(max_chars).collect();
+    format!("{tail}...")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1898,6 +2019,41 @@ mod tests {
                 .expect("Code Everywhere timeline step"),
             ClientMessage::TurnStep(step) if step.step_id == "turn-1:tool:call-1"
         ));
+    }
+
+    #[test]
+    fn client_handle_mirrors_custom_tool_timeline_steps_and_skips_internal_waiters() {
+        let (handle, mut status_rx) = test_remote_inbox_client_handle();
+
+        handle.send_custom_tool_begin(
+            "turn-1",
+            &CustomToolCallBeginEvent {
+                call_id: "call-browser".to_string(),
+                tool_name: "browser_open".to_string(),
+                parameters: Some(json!({ "url": "http://127.0.0.1:3000" })),
+            },
+        );
+
+        let step = match status_rx.try_recv().expect("browser tool step") {
+            ClientMessage::TurnStep(step) => step,
+            other => panic!("expected turn step, got {other:?}"),
+        };
+        assert_eq!(step.turn_id, "turn-1");
+        assert_eq!(step.step_id, "turn-1:tool:call-browser");
+        assert_eq!(step.title, "Browser tool");
+        assert_eq!(step.state, "running");
+        assert!(step.detail.contains("browser_open"));
+
+        handle.send_custom_tool_begin(
+            "turn-1",
+            &CustomToolCallBeginEvent {
+                call_id: "call-wait".to_string(),
+                tool_name: "wait".to_string(),
+                parameters: None,
+            },
+        );
+
+        assert!(status_rx.try_recv().is_err());
     }
 
     #[test]
