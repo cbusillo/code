@@ -66,21 +66,61 @@ pub(crate) struct RemoteInboxSession {
 }
 
 pub(crate) struct RemoteInboxClientHandle {
-    handle: tokio::task::JoinHandle<()>,
-    status_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    status_txs: Vec<tokio::sync::mpsc::UnboundedSender<ClientMessage>>,
+    timeline_status_txs: Vec<tokio::sync::mpsc::UnboundedSender<ClientMessage>>,
     session_id: String,
     session_epoch: String,
     latest_status_snapshot: LatestStatusSnapshot,
     code_everywhere_timeline_enabled: bool,
 }
 
+struct RemoteInboxClientSink {
+    handle: tokio::task::JoinHandle<()>,
+    status_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
+    code_everywhere_timeline_enabled: bool,
+}
+
 impl Drop for RemoteInboxClientHandle {
     fn drop(&mut self) {
-        self.handle.abort();
+        for handle in &self.handles {
+            handle.abort();
+        }
     }
 }
 
 impl RemoteInboxClientHandle {
+    fn from_sinks(
+        session_id: String,
+        session_epoch: String,
+        latest_status_snapshot: LatestStatusSnapshot,
+        sinks: Vec<RemoteInboxClientSink>,
+    ) -> Self {
+        let mut handles = Vec::with_capacity(sinks.len());
+        let mut status_txs = Vec::with_capacity(sinks.len());
+        let mut timeline_status_txs = Vec::new();
+        let mut code_everywhere_timeline_enabled = false;
+
+        for sink in sinks {
+            if sink.code_everywhere_timeline_enabled {
+                code_everywhere_timeline_enabled = true;
+                timeline_status_txs.push(sink.status_tx.clone());
+            }
+            handles.push(sink.handle);
+            status_txs.push(sink.status_tx);
+        }
+
+        Self {
+            handles,
+            status_txs,
+            timeline_status_txs,
+            session_id,
+            session_epoch,
+            latest_status_snapshot,
+            code_everywhere_timeline_enabled,
+        }
+    }
+
     pub(crate) fn send_waiting_for_model(&self) {
         self.send_status(ClientMessage::StatusChanged(self.status_event(
             None,
@@ -242,8 +282,17 @@ impl RemoteInboxClientHandle {
                 Err(err) => tracing::warn!("failed to store remote inbox status snapshot: {err}"),
             }
         }
-        if let Err(err) = self.status_tx.send(message) {
-            tracing::warn!("failed to queue remote inbox status event: {err}");
+
+        let target_txs = if matches!(message, ClientMessage::TurnStep(_)) {
+            &self.timeline_status_txs
+        } else {
+            &self.status_txs
+        };
+
+        for status_tx in target_txs {
+            if let Err(err) = status_tx.send(message.clone()) {
+                tracing::warn!("failed to queue remote inbox status event: {err}");
+            }
         }
     }
 }
@@ -258,8 +307,9 @@ pub(crate) fn test_remote_inbox_client_handle(
     let latest_status_snapshot = Arc::new(Mutex::new(None));
     (
         RemoteInboxClientHandle {
-            handle: tokio::spawn(async {}),
-            status_tx,
+            handles: Vec::new(),
+            status_txs: vec![status_tx.clone()],
+            timeline_status_txs: vec![status_tx],
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
             latest_status_snapshot,
@@ -278,30 +328,62 @@ pub(crate) fn spawn_remote_inbox_client(
         return None;
     }
 
+    let session_id = session.session_id.clone();
+    let session_epoch = session.session_epoch.clone();
+    let latest_status_snapshot = Arc::new(Mutex::new(None));
+    let mut sinks = Vec::new();
+
+    if let Some(bridge_url) = config
+        .bridge_url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+    {
+        sinks.push(spawn_websocket_remote_inbox_client(
+            bridge_url,
+            config.clone(),
+            session.clone(),
+            app_event_tx.clone(),
+            latest_status_snapshot.clone(),
+        ));
+    }
+
     if let Some(code_everywhere_url) = config
         .code_everywhere_url
         .clone()
         .filter(|url| !url.trim().is_empty())
     {
-        return Some(spawn_code_everywhere_http_client(
+        sinks.push(spawn_code_everywhere_http_client(
             code_everywhere_url,
             config,
             session,
             app_event_tx,
+            latest_status_snapshot.clone(),
         ));
     }
 
-    let Some(bridge_url) = config.bridge_url.clone() else {
+    if sinks.is_empty() {
         tracing::warn!(
             "remote inbox is enabled but neither bridge_url nor code_everywhere_url is configured"
         );
         return None;
-    };
+    }
 
-    let session_id = session.session_id.clone();
-    let session_epoch = session.session_epoch.clone();
+    Some(RemoteInboxClientHandle::from_sinks(
+        session_id,
+        session_epoch,
+        latest_status_snapshot,
+        sinks,
+    ))
+}
+
+fn spawn_websocket_remote_inbox_client(
+    bridge_url: String,
+    config: RemoteInboxConfig,
+    session: RemoteInboxSession,
+    app_event_tx: AppEventSender,
+    latest_status_snapshot: LatestStatusSnapshot,
+) -> RemoteInboxClientSink {
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
-    let latest_status_snapshot = Arc::new(Mutex::new(None));
     let client_latest_status_snapshot = latest_status_snapshot.clone();
     let handle = tokio::spawn(async move {
         let mut processed_command_ids = ProcessedCommandIds::default();
@@ -322,14 +404,11 @@ pub(crate) fn spawn_remote_inbox_client(
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
     });
-    Some(RemoteInboxClientHandle {
+    RemoteInboxClientSink {
         handle,
         status_tx,
-        session_id,
-        session_epoch,
-        latest_status_snapshot,
         code_everywhere_timeline_enabled: false,
-    })
+    }
 }
 
 impl RemoteInboxSession {
@@ -354,11 +433,9 @@ fn spawn_code_everywhere_http_client(
     config: RemoteInboxConfig,
     session: RemoteInboxSession,
     app_event_tx: AppEventSender,
-) -> RemoteInboxClientHandle {
-    let session_id = session.session_id.clone();
-    let session_epoch = session.session_epoch.clone();
+    latest_status_snapshot: LatestStatusSnapshot,
+) -> RemoteInboxClientSink {
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
-    let latest_status_snapshot = Arc::new(Mutex::new(None));
     let client_latest_status_snapshot = latest_status_snapshot.clone();
     let handle = tokio::spawn(async move {
         let http = CodeEverywhereHttpClient::new(code_everywhere_url);
@@ -399,12 +476,9 @@ fn spawn_code_everywhere_http_client(
         }
     });
 
-    RemoteInboxClientHandle {
+    RemoteInboxClientSink {
         handle,
         status_tx,
-        session_id,
-        session_epoch,
-        latest_status_snapshot,
         code_everywhere_timeline_enabled: true,
     }
 }
@@ -1781,6 +1855,52 @@ mod tests {
     }
 
     #[test]
+    fn client_handle_fans_out_status_and_routes_timeline_only_to_code_everywhere() {
+        let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (code_everywhere_tx, mut code_everywhere_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = RemoteInboxClientHandle {
+            handles: Vec::new(),
+            status_txs: vec![bridge_tx, code_everywhere_tx.clone()],
+            timeline_status_txs: vec![code_everywhere_tx],
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            latest_status_snapshot: Arc::new(Mutex::new(None)),
+            code_everywhere_timeline_enabled: true,
+        };
+
+        handle.send_waiting_for_model();
+        assert!(matches!(
+            bridge_rx.try_recv().expect("bridge status"),
+            ClientMessage::StatusChanged(_)
+        ));
+        assert!(matches!(
+            code_everywhere_rx
+                .try_recv()
+                .expect("Code Everywhere status"),
+            ClientMessage::StatusChanged(_)
+        ));
+
+        handle.send_status(ClientMessage::TurnStep(RemoteTurnStep {
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            step_id: "turn-1:tool:call-1".to_string(),
+            kind: "tool".to_string(),
+            title: "Shell command".to_string(),
+            detail: "pnpm test".to_string(),
+            state: "running".to_string(),
+        }));
+
+        assert!(bridge_rx.try_recv().is_err());
+        assert!(matches!(
+            code_everywhere_rx
+                .try_recv()
+                .expect("Code Everywhere timeline step"),
+            ClientMessage::TurnStep(step) if step.step_id == "turn-1:tool:call-1"
+        ));
+    }
+
+    #[test]
     fn code_everywhere_url_join_preserves_base_path() {
         assert_eq!(
             local_http_url("http://127.0.0.1:4789", "commands/claim"),
@@ -2345,8 +2465,9 @@ mod tests {
         let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
         let latest_status_snapshot = Arc::new(Mutex::new(None));
         let handle = RemoteInboxClientHandle {
-            handle: tokio::spawn(async {}),
-            status_tx,
+            handles: Vec::new(),
+            status_txs: vec![status_tx.clone()],
+            timeline_status_txs: vec![status_tx],
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
             latest_status_snapshot: latest_status_snapshot.clone(),
@@ -2380,8 +2501,9 @@ mod tests {
         let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
         let latest_status_snapshot = Arc::new(Mutex::new(None));
         let handle = RemoteInboxClientHandle {
-            handle: tokio::spawn(async {}),
-            status_tx,
+            handles: Vec::new(),
+            status_txs: vec![status_tx.clone()],
+            timeline_status_txs: vec![status_tx],
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
             latest_status_snapshot: latest_status_snapshot.clone(),
