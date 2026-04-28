@@ -160,6 +160,7 @@ pub struct RemoteInboxConfig {
     #[serde(default)]
     pub enabled: bool,
     pub bridge_url: Option<String>,
+    pub code_everywhere_url: Option<String>,
     pub token: Option<String>,
     pub host_label: Option<String>,
 }
@@ -1954,6 +1955,7 @@ persistence = "none"
 [remote_inbox]
 enabled = true
 bridge_url = "ws://127.0.0.1:8787/every-code/connect"
+code_everywhere_url = "http://127.0.0.1:4789"
 token = "shared-secret"
 host_label = "Mac Studio"
 "#,
@@ -1965,6 +1967,7 @@ host_label = "Mac Studio"
             Some(RemoteInboxConfig {
                 enabled: true,
                 bridge_url: Some("ws://127.0.0.1:8787/every-code/connect".to_string()),
+                code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
                 token: Some("shared-secret".to_string()),
                 host_label: Some("Mac Studio".to_string()),
             })
@@ -1980,6 +1983,10 @@ host_label = "Mac Studio"
         assert_eq!(
             resolved.remote_inbox.bridge_url.as_deref(),
             Some("ws://127.0.0.1:8787/every-code/connect")
+        );
+        assert_eq!(
+            resolved.remote_inbox.code_everywhere_url.as_deref(),
+            Some("http://127.0.0.1:4789")
         );
         assert_eq!(resolved.remote_inbox.token.as_deref(), Some("shared-secret"));
         assert_eq!(resolved.remote_inbox.host_label.as_deref(), Some("Mac Studio"));
