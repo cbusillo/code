@@ -274,7 +274,8 @@ jobs:
           else
             upstream_tag="v${tag#overlay-v}"
             upstream_tag="${upstream_tag%.*}"
-            if git rev-parse --verify --quiet "${upstream_tag}^{commit}" >/dev/null; then
+            if git rev-parse --verify --quiet "${upstream_tag}^{commit}" >/dev/null \
+              && git merge-base --is-ancestor "${upstream_tag}" "${GITHUB_SHA}"; then
               range_base="${upstream_tag}"
             else
               parent_commit="$(git rev-parse --verify --quiet "${GITHUB_SHA}^" || true)"
