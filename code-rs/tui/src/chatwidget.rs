@@ -5861,6 +5861,7 @@ impl ChatWidget<'_> {
         seq: u64,
     ) {
         self.finalize_active_stream();
+        self.remote_inbox_send_exec_command_begin(&ev);
         tracing::info!(
             "[order] ExecCommandBegin call_id={} seq={}",
             ev.call_id,
@@ -15135,7 +15136,14 @@ impl ChatWidget<'_> {
             }
             EventMsg::ExecCommandEnd(ev) => {
                 let ev2 = ev.clone();
+                let ev_for_remote = ev.clone();
                 let seq = event.event_seq;
+                let remote_command = self
+                    .exec
+                    .running_commands
+                    .get(&ExecCallId(ev.call_id.clone()))
+                    .map(|running| running.command.clone())
+                    .unwrap_or_default();
                 let order_meta_end = event
                     .order
                     .clone()
@@ -15150,6 +15158,7 @@ impl ChatWidget<'_> {
                             seq
                         );
                         this.enqueue_or_handle_exec_end(ev2, order_meta_end);
+                        this.remote_inbox_send_exec_command_end(&remote_command, &ev_for_remote);
                     },
                 );
             }
@@ -30256,6 +30265,26 @@ Have we met every part of this goal and is there no further work to do?"#
     fn remote_inbox_send_turn_complete(&self, turn_id: &str, assistant_message: Option<String>) {
         if let Some(client) = &self.remote_inbox_client {
             client.send_turn_complete(turn_id, assistant_message);
+        }
+    }
+
+    fn remote_inbox_send_exec_command_begin(&self, event: &ExecCommandBeginEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_exec_command_begin(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_exec_command_end(&self, command: &[String], event: &ExecCommandEndEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_exec_command_end(turn_id, &event.call_id, command, event);
+        }
+    }
+
+    fn remote_inbox_current_turn_id(&self) -> Option<&str> {
+        if self.active_task_ids.len() == 1 {
+            self.active_task_ids.iter().next().map(String::as_str)
+        } else {
+            None
         }
     }
 

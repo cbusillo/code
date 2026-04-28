@@ -11,6 +11,7 @@ pub(crate) enum ClientMessage {
     Heartbeat(SessionHeartbeat),
     UserMessage(RemoteUserMessage),
     StatusChanged(SessionStatusEvent),
+    TurnStep(RemoteTurnStep),
     TurnComplete(SessionStatusEvent),
     Error(SessionStatusEvent),
     ApprovalRequest(RemoteApprovalRequest),
@@ -55,6 +56,18 @@ pub(crate) struct SessionStatusEvent {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RemoteTurnStep {
+    pub session_id: String,
+    pub session_epoch: String,
+    pub turn_id: String,
+    pub step_id: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

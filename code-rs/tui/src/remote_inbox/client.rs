@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use code_core::config::RemoteInboxConfig;
+use code_core::protocol::ExecCommandBeginEvent;
+use code_core::protocol::ExecCommandEndEvent;
 use code_core::protocol::ExecApprovalRequestEvent;
 use code_core::protocol::ReviewDecision;
 use code_protocol::request_user_input::RequestUserInputAnswer;
@@ -42,6 +44,7 @@ use crate::remote_inbox::protocol::ServerMessage;
 use crate::remote_inbox::protocol::SessionHeartbeat;
 use crate::remote_inbox::protocol::SessionHello;
 use crate::remote_inbox::protocol::SessionStatusEvent;
+use crate::remote_inbox::protocol::RemoteTurnStep;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const CODE_EVERYWHERE_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -68,6 +71,7 @@ pub(crate) struct RemoteInboxClientHandle {
     session_id: String,
     session_epoch: String,
     latest_status_snapshot: LatestStatusSnapshot,
+    code_everywhere_timeline_enabled: bool,
 }
 
 impl Drop for RemoteInboxClientHandle {
@@ -110,6 +114,43 @@ impl RemoteInboxClientHandle {
             Some(turn_id),
             Some("Turn complete. Replies here will start the next turn.".to_string()),
             assistant_message,
+        )));
+    }
+
+    pub(crate) fn send_exec_command_begin(&self, turn_id: &str, event: &ExecCommandBeginEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        let command = shell_command_label(&event.command);
+        self.send_status(ClientMessage::TurnStep(self.turn_step(
+            turn_id,
+            &event.call_id,
+            "tool",
+            "Shell command",
+            &command,
+            "running",
+        )));
+    }
+
+    pub(crate) fn send_exec_command_end(
+        &self,
+        turn_id: &str,
+        call_id: &str,
+        command: &[String],
+        event: &ExecCommandEndEvent,
+    ) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step(
+            turn_id,
+            call_id,
+            "tool",
+            "Shell command",
+            &exec_command_end_detail(command, event),
+            if event.exit_code == 0 { "completed" } else { "error" },
         )));
     }
 
@@ -173,6 +214,27 @@ impl RemoteInboxClientHandle {
         }
     }
 
+    fn turn_step(
+        &self,
+        turn_id: &str,
+        call_id: &str,
+        kind: &str,
+        title: &str,
+        detail: &str,
+        state: &str,
+    ) -> RemoteTurnStep {
+        RemoteTurnStep {
+            session_id: self.session_id.clone(),
+            session_epoch: self.session_epoch.clone(),
+            turn_id: turn_id.to_string(),
+            step_id: format!("{turn_id}:tool:{call_id}"),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            detail: detail.to_string(),
+            state: state.to_string(),
+        }
+    }
+
     fn send_status(&self, message: ClientMessage) {
         if is_replayable_status_snapshot(&message) {
             match self.latest_status_snapshot.lock() {
@@ -201,6 +263,7 @@ pub(crate) fn test_remote_inbox_client_handle(
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
             latest_status_snapshot,
+            code_everywhere_timeline_enabled: true,
         },
         status_rx,
     )
@@ -265,6 +328,7 @@ pub(crate) fn spawn_remote_inbox_client(
         session_id,
         session_epoch,
         latest_status_snapshot,
+        code_everywhere_timeline_enabled: false,
     })
 }
 
@@ -341,6 +405,7 @@ fn spawn_code_everywhere_http_client(
         session_id,
         session_epoch,
         latest_status_snapshot,
+        code_everywhere_timeline_enabled: true,
     }
 }
 
@@ -467,6 +532,7 @@ fn code_everywhere_events_for_client_message(
             }
         })],
         ClientMessage::StatusChanged(status) => status_changed_events(status, now),
+        ClientMessage::TurnStep(step) => vec![turn_step_event(step, now)],
         ClientMessage::TurnComplete(status) => turn_complete_events(status, now),
         ClientMessage::Error(status) => vec![session_status_event(status, "error", now)],
         ClientMessage::ApprovalRequest(request) => vec![json!({
@@ -506,6 +572,23 @@ fn code_everywhere_events_for_client_message(
             Vec::new()
         }
     }
+}
+
+fn turn_step_event(step: RemoteTurnStep, timestamp: String) -> Value {
+    json!({
+        "kind": "turn_step_added",
+        "sessionId": step.session_id,
+        "sessionEpoch": step.session_epoch,
+        "turnId": step.turn_id,
+        "step": {
+            "id": step.step_id,
+            "kind": step.kind,
+            "title": step.title,
+            "detail": step.detail,
+            "timestamp": timestamp,
+            "state": step.state,
+        }
+    })
 }
 
 fn status_changed_events(status: SessionStatusEvent, updated_at: String) -> Vec<Value> {
@@ -618,6 +701,50 @@ fn code_everywhere_question(question: code_protocol::request_user_input::Request
 
 fn shell_command_label(command: &[String]) -> String {
     shlex::try_join(command.iter().map(String::as_str)).unwrap_or_else(|_| command.join(" "))
+}
+
+fn exec_command_end_detail(command: &[String], event: &ExecCommandEndEvent) -> String {
+    let command_label = if command.is_empty() {
+        event.call_id.clone()
+    } else {
+        shell_command_label(command)
+    };
+    let duration = event.duration.as_secs_f32();
+    let mut detail = format!(
+        "{command_label}\nExited with code {} after {:.1}s.",
+        event.exit_code, duration
+    );
+    let output = exec_output_tail(event);
+
+    if !output.is_empty() {
+        detail.push_str("\n");
+        detail.push_str(&output);
+    }
+
+    detail
+}
+
+fn exec_output_tail(event: &ExecCommandEndEvent) -> String {
+    let output = if event.stderr.trim().is_empty() {
+        event.stdout.trim()
+    } else {
+        event.stderr.trim()
+    };
+
+    const MAX_OUTPUT_CHARS: usize = 500;
+    if output.chars().count() <= MAX_OUTPUT_CHARS {
+        return output.to_string();
+    }
+
+    let tail: String = output
+        .chars()
+        .rev()
+        .take(MAX_OUTPUT_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1737,6 +1864,39 @@ mod tests {
     }
 
     #[test]
+    fn code_everywhere_maps_turn_tool_steps() {
+        let session = test_session();
+        let config = RemoteInboxConfig {
+            enabled: true,
+            bridge_url: None,
+            code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
+            token: None,
+            host_label: Some("Mac Studio".to_string()),
+        };
+        let events = code_everywhere_events_for_client_message(
+            &session,
+            &config,
+            ClientMessage::TurnStep(RemoteTurnStep {
+                session_id: "session-1".to_string(),
+                session_epoch: "epoch-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                step_id: "turn-1:tool:call-1".to_string(),
+                kind: "tool".to_string(),
+                title: "Shell command".to_string(),
+                detail: "pnpm test".to_string(),
+                state: "running".to_string(),
+            }),
+        );
+
+        assert_eq!(events[0]["kind"], "turn_step_added");
+        assert_eq!(events[0]["sessionId"], "session-1");
+        assert_eq!(events[0]["turnId"], "turn-1");
+        assert_eq!(events[0]["step"]["id"], "turn-1:tool:call-1");
+        assert_eq!(events[0]["step"]["kind"], "tool");
+        assert_eq!(events[0]["step"]["state"], "running");
+    }
+
+    #[test]
     fn code_everywhere_maps_command_outcomes() {
         let session = test_session();
         let event = code_everywhere_command_outcome_event(
@@ -2190,6 +2350,7 @@ mod tests {
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
             latest_status_snapshot: latest_status_snapshot.clone(),
+            code_everywhere_timeline_enabled: true,
         };
 
         handle.send_request_user_input(&RequestUserInputEvent {
@@ -2224,6 +2385,7 @@ mod tests {
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
             latest_status_snapshot: latest_status_snapshot.clone(),
+            code_everywhere_timeline_enabled: true,
         };
 
         handle.send_request_user_input(&RequestUserInputEvent {
