@@ -314,7 +314,10 @@ fn spawn_code_everywhere_http_client(
                     match http.claim_commands(&session).await {
                         Ok(commands) => {
                             for command in commands {
-                                dispatch_code_everywhere_command(command, &session, &app_event_tx);
+                                let outcome = dispatch_code_everywhere_command(command, &session, &app_event_tx).await;
+                                if let Err(err) = http.publish_command_outcome(&session, outcome).await {
+                                    tracing::warn!("failed to publish Code Everywhere command outcome: {err}");
+                                }
                             }
                         }
                         Err(err) => tracing::debug!("failed to claim Code Everywhere commands: {err}"),
@@ -374,6 +377,19 @@ impl CodeEverywhereHttpClient {
             return Ok(());
         }
 
+        self.publish_events(events).await
+    }
+
+    async fn publish_command_outcome(
+        &self,
+        session: &RemoteInboxSession,
+        outcome: CodeEverywhereCommandOutcome,
+    ) -> Result<(), reqwest::Error> {
+        self.publish_events(vec![code_everywhere_command_outcome_event(session, outcome)])
+            .await
+    }
+
+    async fn publish_events(&self, events: Vec<Value>) -> Result<(), reqwest::Error> {
         self.client
             .post(local_http_url(&self.base_url, "events"))
             .json(&json!({ "events": events }))
@@ -495,6 +511,24 @@ fn session_status_event(status: SessionStatusEvent, state: &str, updated_at: Str
     })
 }
 
+fn code_everywhere_command_outcome_event(
+    session: &RemoteInboxSession,
+    outcome: CodeEverywhereCommandOutcome,
+) -> Value {
+    json!({
+        "kind": "command_outcome",
+        "outcome": {
+            "commandId": outcome.command_id,
+            "sessionId": session.session_id,
+            "sessionEpoch": session.session_epoch,
+            "commandKind": outcome.command_kind,
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "handledAt": chrono::Utc::now().to_rfc3339(),
+        }
+    })
+}
+
 fn code_everywhere_question(question: code_protocol::request_user_input::RequestUserInputQuestion) -> Value {
     json!({
         "id": question.id,
@@ -596,9 +630,14 @@ enum CodeEverywhereCommand {
     PauseCurrentTurn {
         id: String,
     },
-    EndSession,
-    StatusRequest,
+    EndSession {
+        id: String,
+    },
+    StatusRequest {
+        id: String,
+    },
     ApprovalDecision {
+        id: String,
         approval_id: String,
         decision: ReviewDecision,
     },
@@ -607,6 +646,39 @@ enum CodeEverywhereCommand {
         turn_id: String,
         response: RequestUserInputResponse,
     },
+}
+
+struct CodeEverywhereCommandOutcome {
+    command_id: String,
+    command_kind: &'static str,
+    status: &'static str,
+    reason: Option<String>,
+}
+
+impl CodeEverywhereCommand {
+    fn id(&self) -> &str {
+        match self {
+            CodeEverywhereCommand::Reply { id, .. }
+            | CodeEverywhereCommand::ContinueAutonomously { id }
+            | CodeEverywhereCommand::PauseCurrentTurn { id }
+            | CodeEverywhereCommand::EndSession { id }
+            | CodeEverywhereCommand::StatusRequest { id }
+            | CodeEverywhereCommand::ApprovalDecision { id, .. }
+            | CodeEverywhereCommand::RequestUserInputResponse { id, .. } => id,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            CodeEverywhereCommand::Reply { .. } => "reply",
+            CodeEverywhereCommand::ContinueAutonomously { .. } => "continue_autonomously",
+            CodeEverywhereCommand::PauseCurrentTurn { .. } => "pause_current_turn",
+            CodeEverywhereCommand::EndSession { .. } => "end_session",
+            CodeEverywhereCommand::StatusRequest { .. } => "status_request",
+            CodeEverywhereCommand::ApprovalDecision { .. } => "approval_decision",
+            CodeEverywhereCommand::RequestUserInputResponse { .. } => "request_user_input_response",
+        }
+    }
 }
 
 fn parse_code_everywhere_command(
@@ -637,11 +709,15 @@ fn parse_code_everywhere_command(
         CodeEverywhereCommandPayload::EndSession {
             session_id,
             session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::EndSession),
+        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::EndSession {
+            id: record.id,
+        }),
         CodeEverywhereCommandPayload::StatusRequest {
             session_id,
             session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::StatusRequest),
+        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::StatusRequest {
+            id: record.id,
+        }),
         CodeEverywhereCommandPayload::ApprovalDecision {
             session_id,
             session_epoch,
@@ -654,6 +730,7 @@ fn parse_code_everywhere_command(
                 _ => return None,
             };
             Some(CodeEverywhereCommand::ApprovalDecision {
+                id: record.id,
                 approval_id,
                 decision,
             })
@@ -695,73 +772,127 @@ fn matches_session(session_id: &str, session_epoch: &str, session: &RemoteInboxS
     true
 }
 
-fn dispatch_code_everywhere_command(
+async fn dispatch_code_everywhere_command(
     command: CodeEverywhereCommand,
     session: &RemoteInboxSession,
     app_event_tx: &AppEventSender,
-) {
-    match command {
+) -> CodeEverywhereCommandOutcome {
+    let command_id = command.id().to_string();
+    let command_kind = command.kind();
+    let result = match command {
         CodeEverywhereCommand::Reply { id, text } => {
-            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-            let _ = app_event_tx.send_with_result(AppEvent::RemoteInboxReply {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if !app_event_tx.send_with_result(AppEvent::RemoteInboxReply {
                 command_id: id,
                 text,
                 issued_by: Some("Code Everywhere".to_string()),
                 response_tx: Redacted(response_tx),
-            });
+            }) {
+                Err("app event channel is closed".to_string())
+            } else {
+                wait_for_local_command_acceptance(response_rx).await
+            }
         }
         CodeEverywhereCommand::ContinueAutonomously { id } => {
-            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-            let _ = app_event_tx.send_with_result(AppEvent::RemoteInboxContinueAutonomously {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if !app_event_tx.send_with_result(AppEvent::RemoteInboxContinueAutonomously {
                 command_id: id,
                 issued_by: Some("Code Everywhere".to_string()),
                 response_tx: Redacted(response_tx),
-            });
+            }) {
+                Err("app event channel is closed".to_string())
+            } else {
+                wait_for_local_command_acceptance(response_rx).await
+            }
         }
         CodeEverywhereCommand::PauseCurrentTurn { id } => {
-            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-            let _ = app_event_tx.send_with_result(AppEvent::RemoteInboxPauseCurrentTurn {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if !app_event_tx.send_with_result(AppEvent::RemoteInboxPauseCurrentTurn {
                 command_id: id,
                 issued_by: Some("Code Everywhere".to_string()),
                 response_tx: Redacted(response_tx),
-            });
+            }) {
+                Err("app event channel is closed".to_string())
+            } else {
+                wait_for_local_command_acceptance(response_rx).await
+            }
         }
-        CodeEverywhereCommand::EndSession => {
-            let _ = app_event_tx.send_with_result(AppEvent::ExitRequest);
+        CodeEverywhereCommand::EndSession { .. } => {
+            if app_event_tx.send_with_result(AppEvent::ExitRequest) {
+                Ok(())
+            } else {
+                Err("app event channel is closed".to_string())
+            }
         }
-        CodeEverywhereCommand::StatusRequest => {
+        CodeEverywhereCommand::StatusRequest { .. } => {
             tracing::info!(
                 session_id = session.session_id,
                 session_epoch = session.session_epoch,
                 "Code Everywhere requested status"
             );
+            Ok(())
         }
         CodeEverywhereCommand::ApprovalDecision {
+            id: _,
             approval_id,
             decision,
         } => {
-            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-            let _ = app_event_tx.send_with_result(AppEvent::RemoteInboxApprovalDecision {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if !app_event_tx.send_with_result(AppEvent::RemoteInboxApprovalDecision {
                 approval_id,
                 decision,
                 response_tx: Redacted(response_tx),
-            });
+            }) {
+                Err("app event channel is closed".to_string())
+            } else {
+                wait_for_local_command_acceptance(response_rx).await
+            }
         }
         CodeEverywhereCommand::RequestUserInputResponse {
             id,
             turn_id,
             response,
         } => {
-            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-            let _ = app_event_tx.send_with_result(AppEvent::RemoteInboxRequestUserInputAnswer {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if !app_event_tx.send_with_result(AppEvent::RemoteInboxRequestUserInputAnswer {
                 command_id: id,
                 call_id: None,
                 turn_id,
                 response,
                 issued_by: Some("Code Everywhere".to_string()),
                 response_tx: Redacted(response_tx),
-            });
+            }) {
+                Err("app event channel is closed".to_string())
+            } else {
+                wait_for_local_command_acceptance(response_rx).await
+            }
         }
+    };
+
+    match result {
+        Ok(()) => CodeEverywhereCommandOutcome {
+            command_id,
+            command_kind,
+            status: "accepted",
+            reason: None,
+        },
+        Err(reason) => CodeEverywhereCommandOutcome {
+            command_id,
+            command_kind,
+            status: "rejected",
+            reason: Some(reason),
+        },
+    }
+}
+
+async fn wait_for_local_command_acceptance(
+    response_rx: tokio::sync::oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    match tokio::time::timeout(COMMAND_ACCEPT_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(reason))) => Err(reason),
+        Ok(Err(_)) => Err("remote inbox command acceptance was canceled".to_string()),
+        Err(_) => Err("timed out waiting for app to accept command".to_string()),
     }
 }
 
@@ -1494,6 +1625,28 @@ mod tests {
     }
 
     #[test]
+    fn code_everywhere_maps_command_outcomes() {
+        let session = test_session();
+        let event = code_everywhere_command_outcome_event(
+            &session,
+            CodeEverywhereCommandOutcome {
+                command_id: "command-1".to_string(),
+                command_kind: "status_request",
+                status: "accepted",
+                reason: None,
+            },
+        );
+
+        assert_eq!(event["kind"], "command_outcome");
+        assert_eq!(event["outcome"]["commandId"], "command-1");
+        assert_eq!(event["outcome"]["sessionId"], "session-1");
+        assert_eq!(event["outcome"]["sessionEpoch"], "epoch-1");
+        assert_eq!(event["outcome"]["commandKind"], "status_request");
+        assert_eq!(event["outcome"]["status"], "accepted");
+        assert!(event["outcome"]["reason"].is_null());
+    }
+
+    #[test]
     fn code_everywhere_claimed_commands_map_to_local_actions() {
         let session = test_session();
         let reply = CodeEverywhereCommandRecord {
@@ -1514,7 +1667,7 @@ mod tests {
 
         assert!(matches!(
             parse_code_everywhere_command(reply, &session),
-            Some(CodeEverywhereCommand::Reply { text, .. }) if text == "keep going"
+            Some(CodeEverywhereCommand::Reply { id, text }) if id == "command-1" && text == "keep going"
         ));
         assert!(parse_code_everywhere_command(stale, &session).is_none());
     }
