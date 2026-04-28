@@ -229,6 +229,13 @@ pub(crate) enum AppEvent {
         response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
     },
 
+    /// Start a fresh chat session from a remote inbox bridge, mirroring `/new`.
+    RemoteInboxNewSession {
+        command_id: String,
+        issued_by: Option<String>,
+        response_tx: Redacted<oneshot::Sender<Result<(), String>>>,
+    },
+
     /// Submit a structured response to a pending request_user_input prompt
     /// from a remote inbox bridge.
     RemoteInboxRequestUserInputAnswer {

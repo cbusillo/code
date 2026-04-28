@@ -3671,7 +3671,7 @@ context_mode = "1m"
     }
 
     #[test]
-    fn context_mode_auto_preserves_gpt_5_5_codex_limits() -> anyhow::Result<()> {
+    fn context_mode_auto_preserves_gpt_5_5_manifest_limits() -> anyhow::Result<()> {
         let code_home = TempDir::new()?;
         let cfg = toml::from_str::<ConfigToml>(
             r#"
@@ -3689,8 +3689,8 @@ context_mode = "auto"
         )?;
 
         assert_eq!(config.context_mode, Some(ContextMode::Auto));
-        assert_eq!(config.model_context_window, Some(400_000));
-        assert_eq!(config.model_auto_compact_token_limit, Some(360_000));
+        assert_eq!(config.model_context_window, Some(272_000));
+        assert_eq!(config.model_auto_compact_token_limit, Some(244_800));
         Ok(())
     }
 
@@ -3713,8 +3713,8 @@ context_mode = "1m"
         )?;
 
         assert_eq!(config.context_mode, Some(ContextMode::OneM));
-        assert_eq!(config.model_context_window, Some(400_000));
-        assert_eq!(config.model_auto_compact_token_limit, Some(360_000));
+        assert_eq!(config.model_context_window, Some(272_000));
+        assert_eq!(config.model_auto_compact_token_limit, Some(244_800));
         Ok(())
     }
 

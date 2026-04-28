@@ -1269,6 +1269,12 @@ enum CodeEverywhereCommandPayload {
         #[serde(rename = "sessionEpoch")]
         session_epoch: String,
     },
+    NewSession {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "sessionEpoch")]
+        session_epoch: String,
+    },
     EndSession {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -1319,6 +1325,9 @@ enum CodeEverywhereCommand {
     PauseCurrentTurn {
         id: String,
     },
+    NewSession {
+        id: String,
+    },
     EndSession {
         id: String,
     },
@@ -1350,6 +1359,7 @@ impl CodeEverywhereCommand {
             CodeEverywhereCommand::Reply { id, .. }
             | CodeEverywhereCommand::ContinueAutonomously { id }
             | CodeEverywhereCommand::PauseCurrentTurn { id }
+            | CodeEverywhereCommand::NewSession { id }
             | CodeEverywhereCommand::EndSession { id }
             | CodeEverywhereCommand::StatusRequest { id }
             | CodeEverywhereCommand::ApprovalDecision { id, .. }
@@ -1362,6 +1372,7 @@ impl CodeEverywhereCommand {
             CodeEverywhereCommand::Reply { .. } => "reply",
             CodeEverywhereCommand::ContinueAutonomously { .. } => "continue_autonomously",
             CodeEverywhereCommand::PauseCurrentTurn { .. } => "pause_current_turn",
+            CodeEverywhereCommand::NewSession { .. } => "new_session",
             CodeEverywhereCommand::EndSession { .. } => "end_session",
             CodeEverywhereCommand::StatusRequest { .. } => "status_request",
             CodeEverywhereCommand::ApprovalDecision { .. } => "approval_decision",
@@ -1393,6 +1404,12 @@ fn parse_code_everywhere_command(
             session_id,
             session_epoch,
         } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::PauseCurrentTurn {
+            id: record.id,
+        }),
+        CodeEverywhereCommandPayload::NewSession {
+            session_id,
+            session_epoch,
+        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::NewSession {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::EndSession {
@@ -1497,6 +1514,18 @@ async fn dispatch_code_everywhere_command(
         CodeEverywhereCommand::PauseCurrentTurn { id } => {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             if !app_event_tx.send_with_result(AppEvent::RemoteInboxPauseCurrentTurn {
+                command_id: id,
+                issued_by: Some("Code Everywhere".to_string()),
+                response_tx: Redacted(response_tx),
+            }) {
+                Err("app event channel is closed".to_string())
+            } else {
+                wait_for_local_command_acceptance(response_rx).await
+            }
+        }
+        CodeEverywhereCommand::NewSession { id } => {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if !app_event_tx.send_with_result(AppEvent::RemoteInboxNewSession {
                 command_id: id,
                 issued_by: Some("Code Everywhere".to_string()),
                 response_tx: Redacted(response_tx),
@@ -1895,6 +1924,36 @@ where
                     let command_id = command.command_id.clone();
                     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
                     let accepted = app_event_tx.send_with_result(AppEvent::RemoteInboxPauseCurrentTurn {
+                        command_id: command_id.clone(),
+                        issued_by: command.issued_by,
+                        response_tx: Redacted(response_tx),
+                    });
+                    if !accepted {
+                        send_json(
+                            write,
+                            &ClientMessage::CommandReject(CommandReject {
+                                command_id: Some(command_id),
+                                session_id: session.session_id.clone(),
+                                session_epoch: session.session_epoch.clone(),
+                                reason: "app event channel is closed".to_string(),
+                            }),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
+                    pending_command_ids.insert(command_id.clone());
+                    pending_command_acceptances.push(wait_for_command_acceptance(
+                        command_id,
+                        session.session_id.clone(),
+                        session.session_epoch.clone(),
+                        response_rx,
+                    ));
+                }
+                RemoteCommandKind::NewSession => {
+                    let command_id = command.command_id.clone();
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    let accepted = app_event_tx.send_with_result(AppEvent::RemoteInboxNewSession {
                         command_id: command_id.clone(),
                         issued_by: command.issued_by,
                         response_tx: Redacted(response_tx),
@@ -2654,6 +2713,18 @@ mod tests {
         .to_string()
     }
 
+    fn new_session_command_message(command_id: &str) -> String {
+        json!({
+            "type": "command",
+            "command_id": command_id,
+            "session_id": "session-1",
+            "session_epoch": "epoch-1",
+            "kind": "new_session",
+            "issued_by": "123",
+        })
+        .to_string()
+    }
+
     fn end_session_command_message(command_id: &str) -> String {
         json!({
             "type": "command",
@@ -2819,6 +2890,37 @@ mod tests {
                 "session_epoch": "epoch-1",
             })
         );
+    }
+
+    #[tokio::test]
+    async fn new_session_command_sends_app_event() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+        let mut sink = RecordingSink::default();
+        let mut processed_command_ids = ProcessedCommandIds::default();
+        let mut pending_command_ids = HashSet::new();
+        let mut pending_command_acceptances = FuturesUnordered::<PendingCommandFuture>::new();
+
+        handle_text_message(
+            &new_session_command_message("cmd-1"),
+            &session,
+            &app_event_tx,
+            &mut sink,
+            &mut processed_command_ids,
+            &mut pending_command_ids,
+            &mut pending_command_acceptances,
+        )
+        .await
+        .expect("command handled");
+
+        let event = app_event_rx.try_recv().expect("remote inbox event");
+        assert!(matches!(
+            event,
+            AppEvent::RemoteInboxNewSession { command_id, issued_by, .. }
+                if command_id == "cmd-1" && issued_by.as_deref() == Some("123")
+        ));
+        assert!(pending_command_ids.contains("cmd-1"));
+        assert_eq!(sink.messages.len(), 0);
     }
 
     #[tokio::test]

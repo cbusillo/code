@@ -47,6 +47,7 @@ impl AppEventSender {
                 | AppEvent::Paste(_)
                 | AppEvent::RequestRedraw
                 | AppEvent::RemoteInboxApprovalDecision { .. }
+                | AppEvent::RemoteInboxNewSession { .. }
                 | AppEvent::RemoteInboxPauseCurrentTurn { .. }
                 | AppEvent::RemoteInboxRequestUserInputAnswer { .. }
                 | AppEvent::RemoteInboxReply { .. }
@@ -125,6 +126,7 @@ mod tests {
     use super::*;
     use std::sync::mpsc::channel;
     use std::time::Duration;
+    use tokio::sync::oneshot;
 
     #[test]
     fn auto_coordinator_countdown_bypasses_bulk_backlog() {
@@ -152,6 +154,43 @@ mod tests {
                 countdown_id: 99,
                 seconds_left: 9
             }
+        ));
+
+        assert!(matches!(
+            bulk_rx.try_recv(),
+            Ok(AppEvent::AutoCoordinatorAction { .. })
+        ));
+    }
+
+    #[test]
+    fn remote_inbox_new_session_bypasses_bulk_backlog() {
+        let (high_tx, high_rx) = channel();
+        let (bulk_tx, bulk_rx) = channel();
+        let sender = AppEventSender::new_dual(high_tx, bulk_tx);
+
+        for idx in 0..64 {
+            sender.send(AppEvent::AutoCoordinatorAction {
+                message: format!("bulk-{idx}"),
+            });
+        }
+
+        let (response_tx, _response_rx) = oneshot::channel();
+        sender.send(AppEvent::RemoteInboxNewSession {
+            command_id: "cmd-1".to_string(),
+            issued_by: Some("remote-user".to_string()),
+            response_tx: crate::app_event::Redacted(response_tx),
+        });
+
+        let prioritized = high_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("new session event should bypass bulk backlog");
+        assert!(matches!(
+            prioritized,
+            AppEvent::RemoteInboxNewSession {
+                command_id,
+                issued_by,
+                ..
+            } if command_id == "cmd-1" && issued_by.as_deref() == Some("remote-user")
         ));
 
         assert!(matches!(

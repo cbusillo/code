@@ -99,6 +99,31 @@ impl App<'_> {
         });
     }
 
+    fn start_new_chat_session(&mut self) -> Result<(), String> {
+        if !matches!(self.app_state, AppState::Chat { .. }) {
+            return Err("chat widget is not active".to_string());
+        }
+        if let AppState::Chat { widget } = &mut self.app_state {
+            widget.abort_active_turn_for_new_chat();
+        }
+
+        let mut new_widget = ChatWidget::new(
+            self.config.clone(),
+            self.app_event_tx.clone(),
+            None,
+            Vec::new(),
+            self.enhanced_keys_supported,
+            self.terminal_info.clone(),
+            self.show_order_overlay,
+            self.latest_upgrade_version.clone(),
+        );
+        new_widget.enable_perf(self.timing_enabled);
+        self.app_state = AppState::Chat { widget: Box::new(new_widget) };
+        self.terminal_runs.clear();
+        self.app_event_tx.send(AppEvent::RequestRedraw);
+        Ok(())
+    }
+
     pub(crate) fn run(&mut self, terminal: &mut tui::Tui) -> Result<()> {
         // Insert an event to trigger the first render.
         let app_event_tx = self.app_event_tx.clone();
@@ -973,6 +998,11 @@ impl App<'_> {
                     };
                     let _ = response_tx.0.send(result);
                 }
+                AppEvent::RemoteInboxNewSession { command_id, issued_by, response_tx } => {
+                    tracing::info!(command_id, issued_by, "starting new session from remote inbox");
+                    let result = self.start_new_chat_session();
+                    let _ = response_tx.0.send(result);
+                }
                 AppEvent::RemoteInboxRequestUserInputAnswer {
                     command_id,
                     call_id,
@@ -1214,25 +1244,7 @@ impl App<'_> {
                             }
                         }
                         SlashCommand::New => {
-                            if let AppState::Chat { widget } = &mut self.app_state {
-                                widget.abort_active_turn_for_new_chat();
-                            }
-                            // Start a brand new conversation (core session) with no carried history.
-                            // Replace the chat widget entirely, mirroring SwitchCwd flow but without import.
-                            let mut new_widget = ChatWidget::new(
-                                self.config.clone(),
-                                self.app_event_tx.clone(),
-                                None,
-                                Vec::new(),
-                                self.enhanced_keys_supported,
-                                self.terminal_info.clone(),
-                                self.show_order_overlay,
-                                self.latest_upgrade_version.clone(),
-                            );
-                            new_widget.enable_perf(self.timing_enabled);
-                            self.app_state = AppState::Chat { widget: Box::new(new_widget) };
-                            self.terminal_runs.clear();
-                            self.app_event_tx.send(AppEvent::RequestRedraw);
+                            let _ = self.start_new_chat_session();
                         }
                         SlashCommand::Init => {
                             // Guard: do not run if a task is active.
