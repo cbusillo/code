@@ -14047,7 +14047,9 @@ impl ChatWidget<'_> {
                 );
                 tools::web_search_begin(self, ev.call_id, ev.query, event.order.as_ref(), ok)
             }
-            EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent { call_id }) => {
+            EventMsg::ImageGenerationBegin(ev) => {
+                self.remote_inbox_send_image_generation_begin(&ev);
+                let ImageGenerationBeginEvent { call_id } = ev;
                 self.ensure_spinner_for_activity("image-generation-begin");
                 tracing::info!(
                     "[order] ImageGenerationBegin call_id={} seq={}",
@@ -14204,13 +14206,15 @@ impl ChatWidget<'_> {
                 };
                 tools::web_search_complete(self, ev.call_id, ev.query, event.order.as_ref(), ok)
             }
-            EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
-                call_id: _,
-                status,
-                revised_prompt: _,
-                result: _,
-                saved_path,
-            }) => {
+            EventMsg::ImageGenerationEnd(ev) => {
+                self.remote_inbox_send_image_generation_end(&ev);
+                let ImageGenerationEndEvent {
+                    call_id: _,
+                    status,
+                    revised_prompt: _,
+                    result: _,
+                    saved_path,
+                } = ev;
                 let ok = match event.order.as_ref() {
                     Some(om) => self.provider_order_key_from_order_meta(om),
                     None => {
@@ -14766,6 +14770,7 @@ impl ChatWidget<'_> {
                 self.request_redraw();
             }
             EventMsg::Error(ErrorEvent { message }) => {
+                self.remote_inbox_send_turn_error(&message);
                 self.remote_inbox_send_error(&message);
                 self.on_error(message);
             }
@@ -15104,11 +15109,13 @@ impl ChatWidget<'_> {
                     self.request_redraw();
                 }
             }
-            EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
-                call_id,
-                auto_approved,
-                changes,
-            }) => {
+            EventMsg::PatchApplyBegin(ev) => {
+                self.remote_inbox_send_patch_apply_begin(&ev);
+                let PatchApplyBeginEvent {
+                    call_id,
+                    auto_approved,
+                    changes,
+                } = ev;
                 let exec_call_id = ExecCallId(call_id.clone());
                 self.exec.suppress_exec_end(exec_call_id);
                 self.diffs.record_patch_set(&changes, true);
@@ -15130,6 +15137,7 @@ impl ChatWidget<'_> {
                 let _ = self.history_insert_with_key_global(Box::new(cell), ok);
             }
             EventMsg::PatchApplyEnd(ev) => {
+                self.remote_inbox_send_patch_apply_end(&ev);
                 let ev2 = ev.clone();
                 self.defer_or_handle(
                     move |interrupts| interrupts.push_patch_end(event.event_seq, ev),
@@ -15865,7 +15873,9 @@ impl ChatWidget<'_> {
                 self.push_background_tail("🟡 ShutdownComplete".to_string());
                 self.app_event_tx.send(AppEvent::ExitRequest);
             }
-            EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => {
+            EventMsg::TurnDiff(ev) => {
+                self.remote_inbox_send_turn_diff(&ev);
+                let TurnDiffEvent { unified_diff } = ev;
                 info!("TurnDiffEvent: {unified_diff}");
                 self.turn_had_code_edits = true;
             }
@@ -30317,6 +30327,42 @@ Have we met every part of this goal and is there no further work to do?"#
     fn remote_inbox_send_custom_tool_end(&self, event: &CustomToolCallEndEvent) {
         if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
             client.send_custom_tool_end(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_patch_apply_begin(&self, event: &PatchApplyBeginEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_patch_apply_begin(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_patch_apply_end(&self, event: &PatchApplyEndEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_patch_apply_end(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_turn_diff(&self, event: &TurnDiffEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_turn_diff(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_image_generation_begin(&self, event: &ImageGenerationBeginEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_image_generation_begin(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_image_generation_end(&self, event: &ImageGenerationEndEvent) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_image_generation_end(turn_id, event);
+        }
+    }
+
+    fn remote_inbox_send_turn_error(&self, message: &str) {
+        if let (Some(client), Some(turn_id)) = (&self.remote_inbox_client, self.remote_inbox_current_turn_id()) {
+            client.send_turn_error(turn_id, message);
         }
     }
 

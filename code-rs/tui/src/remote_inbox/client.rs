@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
@@ -14,9 +15,15 @@ use code_core::protocol::CustomToolCallEndEvent;
 use code_core::protocol::ExecCommandBeginEvent;
 use code_core::protocol::ExecCommandEndEvent;
 use code_core::protocol::ExecApprovalRequestEvent;
+use code_core::protocol::FileChange;
+use code_core::protocol::ImageGenerationBeginEvent;
+use code_core::protocol::ImageGenerationEndEvent;
 use code_core::protocol::McpToolCallBeginEvent;
 use code_core::protocol::McpToolCallEndEvent;
+use code_core::protocol::PatchApplyBeginEvent;
+use code_core::protocol::PatchApplyEndEvent;
 use code_core::protocol::ReviewDecision;
+use code_core::protocol::TurnDiffEvent;
 use code_protocol::request_user_input::RequestUserInputAnswer;
 use code_protocol::request_user_input::RequestUserInputEvent;
 use code_protocol::request_user_input::RequestUserInputResponse;
@@ -266,6 +273,96 @@ impl RemoteInboxClientHandle {
         )));
     }
 
+    pub(crate) fn send_patch_apply_begin(&self, turn_id: &str, event: &PatchApplyBeginEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step_with_id(
+            turn_id,
+            &patch_step_id(turn_id, &event.call_id),
+            "diff",
+            "Patch apply",
+            &patch_begin_detail(event),
+            "running",
+        )));
+    }
+
+    pub(crate) fn send_patch_apply_end(&self, turn_id: &str, event: &PatchApplyEndEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step_with_id(
+            turn_id,
+            &patch_step_id(turn_id, &event.call_id),
+            "diff",
+            if event.success { "Patch applied" } else { "Patch failed" },
+            &patch_end_detail(event),
+            if event.success { "completed" } else { "error" },
+        )));
+    }
+
+    pub(crate) fn send_turn_diff(&self, turn_id: &str, event: &TurnDiffEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step_with_id(
+            turn_id,
+            &format!("{turn_id}:diff"),
+            "diff",
+            "Turn diff",
+            &bounded_detail(&event.unified_diff, 4_000),
+            "completed",
+        )));
+    }
+
+    pub(crate) fn send_image_generation_begin(&self, turn_id: &str, event: &ImageGenerationBeginEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step_with_id(
+            turn_id,
+            &artifact_step_id(turn_id, &event.call_id),
+            "artifact",
+            "Image generation",
+            "Generating image artifact.",
+            "running",
+        )));
+    }
+
+    pub(crate) fn send_image_generation_end(&self, turn_id: &str, event: &ImageGenerationEndEvent) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step_with_id(
+            turn_id,
+            &artifact_step_id(turn_id, &event.call_id),
+            "artifact",
+            if event.saved_path.is_some() { "Image artifact" } else { "Image generation" },
+            &image_generation_detail(event),
+            if event.saved_path.is_some() { "completed" } else { "error" },
+        )));
+    }
+
+    pub(crate) fn send_turn_error(&self, turn_id: &str, message: &str) {
+        if !self.code_everywhere_timeline_enabled {
+            return;
+        }
+
+        self.send_status(ClientMessage::TurnStep(self.turn_step_with_id(
+            turn_id,
+            &format!("{turn_id}:error"),
+            "error",
+            "Turn error",
+            &bounded_detail(message, 1_000),
+            "error",
+        )));
+    }
+
     pub(crate) fn send_error(&self, message: &str) {
         self.send_status(ClientMessage::Error(
             self.status_event(None, Some(message.to_string()), None),
@@ -335,11 +432,30 @@ impl RemoteInboxClientHandle {
         detail: &str,
         state: &str,
     ) -> RemoteTurnStep {
+        self.turn_step_with_id(
+            turn_id,
+            &format!("{turn_id}:tool:{call_id}"),
+            kind,
+            title,
+            detail,
+            state,
+        )
+    }
+
+    fn turn_step_with_id(
+        &self,
+        turn_id: &str,
+        step_id: &str,
+        kind: &str,
+        title: &str,
+        detail: &str,
+        state: &str,
+    ) -> RemoteTurnStep {
         RemoteTurnStep {
             session_id: self.session_id.clone(),
             session_epoch: self.session_epoch.clone(),
             turn_id: turn_id.to_string(),
-            step_id: format!("{turn_id}:tool:{call_id}"),
+            step_id: step_id.to_string(),
             kind: kind.to_string(),
             title: title.to_string(),
             detail: detail.to_string(),
@@ -511,8 +627,11 @@ fn spawn_code_everywhere_http_client(
     let client_latest_status_snapshot = latest_status_snapshot.clone();
     let handle = tokio::spawn(async move {
         let http = CodeEverywhereHttpClient::new(code_everywhere_url);
+        let mut hello_published = false;
         if let Err(err) = http.publish_client_message(&session, &config, ClientMessage::Hello(session.hello(&config))).await {
             tracing::warn!("failed to publish Code Everywhere session hello: {err}");
+        } else {
+            hello_published = true;
         }
         let mut poll = tokio::time::interval(CODE_EVERYWHERE_POLL_INTERVAL);
         loop {
@@ -527,8 +646,20 @@ fn spawn_code_everywhere_http_client(
                             Err(err) => tracing::warn!("failed to store Code Everywhere status snapshot: {err}"),
                         }
                     }
-                    if let Err(err) = http.publish_client_message(&session, &config, status).await {
+                    let result = if hello_published {
+                        http.publish_client_message(&session, &config, status).await
+                    } else {
+                        http.publish_client_messages(
+                            &session,
+                            &config,
+                            [ClientMessage::Hello(session.hello(&config)), status],
+                        )
+                        .await
+                    };
+                    if let Err(err) = result {
                         tracing::warn!("failed to publish Code Everywhere status event: {err}");
+                    } else {
+                        hello_published = true;
                     }
                 }
                 _ = poll.tick() => {
@@ -591,7 +722,19 @@ impl CodeEverywhereHttpClient {
         config: &RemoteInboxConfig,
         message: ClientMessage,
     ) -> Result<(), reqwest::Error> {
-        let events = code_everywhere_events_for_client_message(session, config, message);
+        self.publish_client_messages(session, config, [message]).await
+    }
+
+    async fn publish_client_messages(
+        &self,
+        session: &RemoteInboxSession,
+        config: &RemoteInboxConfig,
+        messages: impl IntoIterator<Item = ClientMessage>,
+    ) -> Result<(), reqwest::Error> {
+        let events = messages
+            .into_iter()
+            .flat_map(|message| code_everywhere_events_for_client_message(session, config, message))
+            .collect::<Vec<_>>();
         if events.is_empty() {
             return Ok(());
         }
@@ -923,14 +1066,120 @@ fn tool_end_detail(label: &str, duration: Duration, error: Option<&str>) -> Stri
 
     if let Some(error) = error.map(str::trim).filter(|error| !error.is_empty()) {
         detail.push_str("\n");
-        detail.push_str(&truncate_chars(error, 500));
+        detail.push_str(&bounded_detail(error, 500));
     }
 
     detail
 }
 
+fn patch_step_id(turn_id: &str, call_id: &str) -> String {
+    format!("{turn_id}:patch:{call_id}")
+}
+
+fn artifact_step_id(turn_id: &str, call_id: &str) -> String {
+    format!("{turn_id}:artifact:{call_id}")
+}
+
+fn patch_begin_detail(event: &PatchApplyBeginEvent) -> String {
+    let approval = if event.auto_approved {
+        "Applying auto-approved patch."
+    } else {
+        "Applying approved patch."
+    };
+    let changes = summarize_file_changes(&event.changes);
+    if changes.is_empty() {
+        approval.to_string()
+    } else {
+        format!("{approval}\n{changes}")
+    }
+}
+
+fn patch_end_detail(event: &PatchApplyEndEvent) -> String {
+    let mut detail = if event.success {
+        "Patch applied.".to_string()
+    } else {
+        "Patch failed.".to_string()
+    };
+
+    if let Some(stdout) = non_empty_section("stdout", &event.stdout, 1_000) {
+        detail.push('\n');
+        detail.push_str(&stdout);
+    }
+    if let Some(stderr) = non_empty_section("stderr", &event.stderr, 1_000) {
+        detail.push('\n');
+        detail.push_str(&stderr);
+    }
+
+    detail
+}
+
+fn image_generation_detail(event: &ImageGenerationEndEvent) -> String {
+    let mut detail = format!("Status: {}", event.status);
+
+    if let Some(saved_path) = event.saved_path.as_ref() {
+        detail.push_str("\nSaved: ");
+        detail.push_str(&saved_path.display().to_string());
+    } else {
+        detail.push_str("\nNo saved artifact path was reported.");
+    }
+
+    if let Some(prompt) = event
+        .revised_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        detail.push_str("\nPrompt: ");
+        detail.push_str(&bounded_detail(prompt, 1_000));
+    }
+
+    detail
+}
+
+fn summarize_file_changes(changes: &HashMap<PathBuf, FileChange>) -> String {
+    let mut lines = changes
+        .iter()
+        .map(|(path, change)| match change {
+            FileChange::Update {
+                move_path: Some(move_path),
+                ..
+            } => format!("Moved {} -> {}", path.display(), move_path.display()),
+            _ => format!("{} {}", file_change_label(change), path.display()),
+        })
+        .collect::<Vec<_>>();
+    lines.sort();
+    bounded_detail(&lines.join("\n"), 2_000)
+}
+
+fn file_change_label(change: &FileChange) -> &'static str {
+    match change {
+        FileChange::Add { .. } => "Added",
+        FileChange::Delete => "Deleted",
+        FileChange::Update { .. } => "Updated",
+    }
+}
+
+fn non_empty_section(label: &str, value: &str, max_chars: usize) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("{label}:\n{}", bounded_detail(trimmed, max_chars)))
+}
+
 fn compact_json_value(value: &Value) -> String {
-    truncate_chars(&value.to_string(), 500)
+    bounded_detail(&value.to_string(), 500)
+}
+
+fn bounded_detail(value: &str, max_chars: usize) -> String {
+    truncate_chars(&strip_control_chars(value), max_chars)
+}
+
+fn strip_control_chars(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .collect()
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -2054,6 +2303,81 @@ mod tests {
         );
 
         assert!(status_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn client_handle_mirrors_patch_diff_and_error_timeline_steps() {
+        let (handle, mut status_rx) = test_remote_inbox_client_handle();
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("src/main.rs"),
+            FileChange::Update {
+                unified_diff: "@@ -1 +1 @@".to_string(),
+                move_path: None,
+                original_content: "old".to_string(),
+                new_content: "new".to_string(),
+            },
+        );
+
+        handle.send_patch_apply_begin(
+            "turn-1",
+            &PatchApplyBeginEvent {
+                call_id: "patch-1".to_string(),
+                auto_approved: true,
+                changes,
+            },
+        );
+        let step = match status_rx.try_recv().expect("patch begin step") {
+            ClientMessage::TurnStep(step) => step,
+            other => panic!("expected turn step, got {other:?}"),
+        };
+        assert_eq!(step.step_id, "turn-1:patch:patch-1");
+        assert_eq!(step.kind, "diff");
+        assert_eq!(step.title, "Patch apply");
+        assert_eq!(step.state, "running");
+        assert!(step.detail.contains("Updated src/main.rs"));
+
+        handle.send_patch_apply_end(
+            "turn-1",
+            &PatchApplyEndEvent {
+                call_id: "patch-1".to_string(),
+                stdout: "done".to_string(),
+                stderr: "\u{0007}warning".to_string(),
+                success: false,
+            },
+        );
+        let step = match status_rx.try_recv().expect("patch end step") {
+            ClientMessage::TurnStep(step) => step,
+            other => panic!("expected turn step, got {other:?}"),
+        };
+        assert_eq!(step.step_id, "turn-1:patch:patch-1");
+        assert_eq!(step.title, "Patch failed");
+        assert_eq!(step.state, "error");
+        assert!(!step.detail.contains('\u{0007}'));
+
+        handle.send_turn_diff(
+            "turn-1",
+            &TurnDiffEvent {
+                unified_diff: "diff\n".repeat(1_000),
+            },
+        );
+        let step = match status_rx.try_recv().expect("turn diff step") {
+            ClientMessage::TurnStep(step) => step,
+            other => panic!("expected turn step, got {other:?}"),
+        };
+        assert_eq!(step.step_id, "turn-1:diff");
+        assert_eq!(step.kind, "diff");
+        assert!(step.detail.ends_with("..."));
+
+        handle.send_turn_error("turn-1", "failure\u{0007}");
+        let step = match status_rx.try_recv().expect("turn error step") {
+            ClientMessage::TurnStep(step) => step,
+            other => panic!("expected turn step, got {other:?}"),
+        };
+        assert_eq!(step.step_id, "turn-1:error");
+        assert_eq!(step.kind, "error");
+        assert_eq!(step.state, "error");
+        assert_eq!(step.detail, "failure");
     }
 
     #[test]
