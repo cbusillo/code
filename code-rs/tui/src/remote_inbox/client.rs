@@ -79,13 +79,15 @@ impl Drop for RemoteInboxClientHandle {
 impl RemoteInboxClientHandle {
     pub(crate) fn send_waiting_for_model(&self) {
         self.send_status(ClientMessage::StatusChanged(self.status_event(
+            None,
             Some("Waiting for model".to_string()),
             None,
         )));
     }
 
-    pub(crate) fn send_turn_started(&self) {
+    pub(crate) fn send_turn_started(&self, turn_id: &str) {
         self.send_status(ClientMessage::StatusChanged(self.status_event(
+            Some(turn_id),
             Some("Turn started".to_string()),
             None,
         )));
@@ -98,12 +100,14 @@ impl RemoteInboxClientHandle {
         self.send_status(ClientMessage::UserMessage(RemoteUserMessage {
             session_id: self.session_id.clone(),
             session_epoch: self.session_epoch.clone(),
+            turn_id: None,
             message: message.to_string(),
         }));
     }
 
-    pub(crate) fn send_turn_complete(&self, assistant_message: Option<String>) {
+    pub(crate) fn send_turn_complete(&self, turn_id: &str, assistant_message: Option<String>) {
         self.send_status(ClientMessage::TurnComplete(self.status_event(
+            Some(turn_id),
             Some("Turn complete. Replies here will start the next turn.".to_string()),
             assistant_message,
         )));
@@ -111,12 +115,13 @@ impl RemoteInboxClientHandle {
 
     pub(crate) fn send_error(&self, message: &str) {
         self.send_status(ClientMessage::Error(
-            self.status_event(Some(message.to_string()), None),
+            self.status_event(None, Some(message.to_string()), None),
         ));
     }
 
     pub(crate) fn send_turn_aborted(&self) {
         self.send_status(ClientMessage::StatusChanged(self.status_event(
+            None,
             Some("Turn aborted".to_string()),
             None,
         )));
@@ -124,6 +129,7 @@ impl RemoteInboxClientHandle {
 
     pub(crate) fn send_compaction_started(&self) {
         self.send_status(ClientMessage::StatusChanged(self.status_event(
+            None,
             Some("Compacting context".to_string()),
             None,
         )));
@@ -154,12 +160,14 @@ impl RemoteInboxClientHandle {
 
     fn status_event(
         &self,
+        turn_id: Option<&str>,
         message: Option<String>,
         assistant_message: Option<String>,
     ) -> SessionStatusEvent {
         SessionStatusEvent {
             session_id: self.session_id.clone(),
             session_epoch: self.session_epoch.clone(),
+            turn_id: turn_id.map(str::to_string),
             message,
             assistant_message,
         }
@@ -458,8 +466,8 @@ fn code_everywhere_events_for_client_message(
                 "currentTurnId": null,
             }
         })],
-        ClientMessage::StatusChanged(status) => vec![session_status_event(status, "running", now)],
-        ClientMessage::TurnComplete(status) => vec![session_status_event(status, "idle", now)],
+        ClientMessage::StatusChanged(status) => status_changed_events(status, now),
+        ClientMessage::TurnComplete(status) => turn_complete_events(status, now),
         ClientMessage::Error(status) => vec![session_status_event(status, "error", now)],
         ClientMessage::ApprovalRequest(request) => vec![json!({
             "kind": "approval_requested",
@@ -498,6 +506,71 @@ fn code_everywhere_events_for_client_message(
             Vec::new()
         }
     }
+}
+
+fn status_changed_events(status: SessionStatusEvent, updated_at: String) -> Vec<Value> {
+    if status.message.as_deref() == Some("Turn started") {
+        if let Some(turn_id) = status.turn_id.clone() {
+            return vec![json!({
+                "kind": "turn_started",
+                "sessionEpoch": status.session_epoch,
+                "turn": {
+                    "id": turn_id,
+                    "sessionId": status.session_id,
+                    "title": "Every Code turn",
+                    "status": "running",
+                    "actor": "assistant",
+                    "startedAt": updated_at,
+                    "completedAt": null,
+                    "summary": status.message.unwrap_or_else(|| "Turn started".to_string()),
+                    "steps": [],
+                }
+            })];
+        }
+    }
+
+    vec![session_status_event(status, "running", updated_at)]
+}
+
+fn turn_complete_events(status: SessionStatusEvent, updated_at: String) -> Vec<Value> {
+    let Some(turn_id) = status.turn_id.clone() else {
+        return vec![session_status_event(status, "idle", updated_at)];
+    };
+    let session_id = status.session_id.clone();
+    let session_epoch = status.session_epoch.clone();
+
+    let mut events = Vec::new();
+    if let Some(assistant_message) = status
+        .assistant_message
+        .clone()
+        .filter(|message| !message.trim().is_empty())
+    {
+        events.push(json!({
+            "kind": "turn_step_added",
+            "sessionId": session_id,
+            "sessionEpoch": session_epoch,
+            "turnId": turn_id.clone(),
+            "step": {
+                "id": format!("{turn_id}:assistant-message"),
+                "kind": "message",
+                "title": "Assistant message",
+                "detail": assistant_message,
+                "timestamp": updated_at.clone(),
+                "state": "completed",
+            }
+        }));
+    }
+
+    events.push(json!({
+        "kind": "turn_status_changed",
+        "sessionId": status.session_id,
+        "sessionEpoch": status.session_epoch,
+        "turnId": turn_id,
+        "status": "completed",
+        "summary": status.message.unwrap_or_else(|| "Turn complete.".to_string()),
+        "completedAt": updated_at,
+    }));
+    events
 }
 
 fn session_status_event(status: SessionStatusEvent, state: &str, updated_at: String) -> Value {
@@ -1625,6 +1698,45 @@ mod tests {
     }
 
     #[test]
+    fn code_everywhere_maps_turn_lifecycle_events() {
+        let session = test_session();
+        let config = RemoteInboxConfig {
+            enabled: true,
+            bridge_url: None,
+            code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
+            token: None,
+            host_label: Some("Mac Studio".to_string()),
+        };
+
+        let mut started = status_event("Turn started", None);
+        started.turn_id = Some("turn-1".to_string());
+        let events = code_everywhere_events_for_client_message(
+            &session,
+            &config,
+            ClientMessage::StatusChanged(started),
+        );
+        assert_eq!(events[0]["kind"], "turn_started");
+        assert_eq!(events[0]["sessionEpoch"], "epoch-1");
+        assert_eq!(events[0]["turn"]["id"], "turn-1");
+        assert_eq!(events[0]["turn"]["status"], "running");
+
+        let mut complete = status_event("Turn complete", Some("Done."));
+        complete.turn_id = Some("turn-1".to_string());
+        let events = code_everywhere_events_for_client_message(
+            &session,
+            &config,
+            ClientMessage::TurnComplete(complete),
+        );
+        assert_eq!(events[0]["kind"], "turn_step_added");
+        assert_eq!(events[0]["turnId"], "turn-1");
+        assert_eq!(events[0]["step"]["id"], "turn-1:assistant-message");
+        assert_eq!(events[0]["step"]["detail"], "Done.");
+        assert_eq!(events[1]["kind"], "turn_status_changed");
+        assert_eq!(events[1]["turnId"], "turn-1");
+        assert_eq!(events[1]["status"], "completed");
+    }
+
+    #[test]
     fn code_everywhere_maps_command_outcomes() {
         let session = test_session();
         let event = code_everywhere_command_outcome_event(
@@ -1777,6 +1889,7 @@ mod tests {
         SessionStatusEvent {
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
+            turn_id: None,
             message: Some(message.to_string()),
             assistant_message: assistant_message.map(str::to_string),
         }

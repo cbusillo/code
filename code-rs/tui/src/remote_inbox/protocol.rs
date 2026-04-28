@@ -41,6 +41,8 @@ pub(crate) struct SessionHeartbeat {
 pub(crate) struct RemoteUserMessage {
     pub session_id: String,
     pub session_epoch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub message: String,
 }
 
@@ -48,6 +50,8 @@ pub(crate) struct RemoteUserMessage {
 pub(crate) struct SessionStatusEvent {
     pub session_id: String,
     pub session_epoch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_message: Option<String>,
@@ -184,6 +188,7 @@ mod tests {
         let message = ClientMessage::TurnComplete(SessionStatusEvent {
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
             message: Some("done".to_string()),
             assistant_message: None,
         });
@@ -195,6 +200,7 @@ mod tests {
                 "type": "turn_complete",
                 "session_id": "session-1",
                 "session_epoch": "epoch-1",
+                "turn_id": "turn-1",
                 "message": "done",
             })
         );

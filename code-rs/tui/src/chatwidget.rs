@@ -14491,7 +14491,7 @@ impl ChatWidget<'_> {
                 self.bottom_pane
                     .update_status_text("waiting for model".to_string());
                 self.ensure_spinner_for_activity("task-started");
-                self.remote_inbox_send_turn_started();
+                self.remote_inbox_send_turn_started(&id);
                 tracing::info!("[order] EventMsg::TaskStarted id={}", id);
 
                 // Capture a baseline snapshot for this turn so background auto review only
@@ -14566,7 +14566,7 @@ impl ChatWidget<'_> {
                 self.maybe_trigger_auto_review();
                 let remote_assistant_message = last_agent_message.clone();
                 self.emit_turn_complete_notification(last_agent_message);
-                self.remote_inbox_send_turn_complete(remote_assistant_message);
+                self.remote_inbox_send_turn_complete(&id, remote_assistant_message);
                 self.current_task_lifecycle = None;
                 self.suppress_next_agent_hint = false;
                 self.mark_needs_redraw();
@@ -30241,9 +30241,9 @@ Have we met every part of this goal and is there no further work to do?"#
         }
     }
 
-    fn remote_inbox_send_turn_started(&self) {
+    fn remote_inbox_send_turn_started(&self, turn_id: &str) {
         if let Some(client) = &self.remote_inbox_client {
-            client.send_turn_started();
+            client.send_turn_started(turn_id);
         }
     }
 
@@ -30253,9 +30253,9 @@ Have we met every part of this goal and is there no further work to do?"#
         }
     }
 
-    fn remote_inbox_send_turn_complete(&self, assistant_message: Option<String>) {
+    fn remote_inbox_send_turn_complete(&self, turn_id: &str, assistant_message: Option<String>) {
         if let Some(client) = &self.remote_inbox_client {
-            client.send_turn_complete(assistant_message);
+            client.send_turn_complete(turn_id, assistant_message);
         }
     }
 
@@ -31405,7 +31405,7 @@ use code_core::protocol::OrderMeta;
         loop {
             match code_op_rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
-                Ok(Op::AddToHistory { .. }) => continue,
+                Ok(Op::AddToHistory { .. } | Op::PersistHistorySnapshot { .. }) => continue,
                 Ok(op) => panic!("expected no pending user input ops, got {op:?}"),
                 Err(err) => panic!("expected no pending user input ops, got {err:?}"),
             }
