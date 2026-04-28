@@ -293,7 +293,7 @@ jobs:
           fi
 
           commit_summary="$(mktemp)"
-          git log --format='%s' "${range}" > "${commit_summary}" \
+          git log --no-merges --format='%s' "${range}" > "${commit_summary}" \
             || git log -1 --format='%s' "${GITHUB_SHA}" > "${commit_summary}"
 
           fixes="$(mktemp)"
