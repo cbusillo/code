@@ -658,17 +658,34 @@ fn spawn_code_everywhere_http_client(
                     };
                     if let Err(err) = result {
                         tracing::warn!("failed to publish Code Everywhere status event: {err}");
+                        hello_published = false;
                     } else {
                         hello_published = true;
                     }
                 }
                 _ = poll.tick() => {
+                    match http.session_is_present(&session).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            if let Err(err) = http.publish_client_message(&session, &config, ClientMessage::Hello(session.hello(&config))).await {
+                                tracing::debug!("failed to republish Code Everywhere session hello: {err}");
+                                hello_published = false;
+                            } else {
+                                hello_published = true;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::debug!("failed to check Code Everywhere session snapshot: {err}");
+                            hello_published = false;
+                        }
+                    }
                     match http.claim_commands(&session).await {
                         Ok(commands) => {
                             for command in commands {
                                 let outcome = dispatch_code_everywhere_command(command, &session, &app_event_tx).await;
                                 if let Err(err) = http.publish_command_outcome(&session, outcome).await {
                                     tracing::warn!("failed to publish Code Everywhere command outcome: {err}");
+                                    hello_published = false;
                                 }
                             }
                         }
@@ -761,6 +778,21 @@ impl CodeEverywhereHttpClient {
         Ok(())
     }
 
+    async fn session_is_present(&self, session: &RemoteInboxSession) -> Result<bool, reqwest::Error> {
+        let snapshot = self
+            .client
+            .get(local_http_url(&self.base_url, "snapshot"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<CodeEverywhereSnapshot>()
+            .await?;
+
+        Ok(snapshot.sessions.into_iter().any(|candidate| {
+            candidate.session_id == session.session_id && candidate.session_epoch == session.session_epoch
+        }))
+    }
+
     async fn claim_commands(
         &self,
         session: &RemoteInboxSession,
@@ -781,6 +813,19 @@ impl CodeEverywhereHttpClient {
             .filter_map(|record| parse_code_everywhere_command(record, session))
             .collect())
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeEverywhereSnapshot {
+    sessions: Vec<CodeEverywhereSessionSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeEverywhereSessionSnapshot {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "sessionEpoch")]
+    session_epoch: String,
 }
 
 fn local_http_url(base_url: &str, path: &str) -> String {
