@@ -672,10 +672,31 @@ fn spawn_code_everywhere_http_client(
                     match http.claim_commands(&session).await {
                         Ok(commands) => {
                             for command in commands {
-                                let outcome = dispatch_code_everywhere_command(command, &session, &app_event_tx).await;
+                                let queue_new_session = matches!(command, CodeEverywhereCommand::NewSession { .. });
+                                let outcome = if queue_new_session {
+                                    CodeEverywhereCommandOutcome {
+                                        command_id: command.id().to_string(),
+                                        command_kind: command.kind(),
+                                        status: "accepted",
+                                        reason: None,
+                                    }
+                                } else {
+                                    dispatch_code_everywhere_command(command, &session, &app_event_tx).await
+                                };
+                                let new_session_command_id = if queue_new_session {
+                                    Some(outcome.command_id.clone())
+                                } else {
+                                    None
+                                };
                                 if let Err(err) = http.publish_command_outcome(&session, outcome).await {
                                     tracing::warn!("failed to publish Code Everywhere command outcome: {err}");
                                     hello_published = false;
+                                } else if let Some(command_id) = new_session_command_id {
+                                    queue_remote_new_session(
+                                        &app_event_tx,
+                                        command_id,
+                                        Some("Code Everywhere".to_string()),
+                                    );
                                 }
                             }
                         }
@@ -1534,6 +1555,19 @@ fn matches_session(session_id: &str, session_epoch: &str, session: &RemoteInboxS
     true
 }
 
+fn queue_remote_new_session(
+    app_event_tx: &AppEventSender,
+    command_id: String,
+    issued_by: Option<String>,
+) -> bool {
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    app_event_tx.send_with_result(AppEvent::RemoteInboxNewSession {
+        command_id,
+        issued_by,
+        response_tx: Redacted(response_tx),
+    })
+}
+
 async fn dispatch_code_everywhere_command(
     command: CodeEverywhereCommand,
     session: &RemoteInboxSession,
@@ -1580,15 +1614,10 @@ async fn dispatch_code_everywhere_command(
             }
         }
         CodeEverywhereCommand::NewSession { id } => {
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            if !app_event_tx.send_with_result(AppEvent::RemoteInboxNewSession {
-                command_id: id,
-                issued_by: Some("Code Everywhere".to_string()),
-                response_tx: Redacted(response_tx),
-            }) {
+            if !queue_remote_new_session(app_event_tx, id, Some("Code Everywhere".to_string())) {
                 Err("app event channel is closed".to_string())
             } else {
-                wait_for_local_command_acceptance(response_rx).await
+                Ok(())
             }
         }
         CodeEverywhereCommand::EndSession { .. } => {
@@ -2008,33 +2037,25 @@ where
                 }
                 RemoteCommandKind::NewSession => {
                     let command_id = command.command_id.clone();
-                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                    let accepted = app_event_tx.send_with_result(AppEvent::RemoteInboxNewSession {
-                        command_id: command_id.clone(),
-                        issued_by: command.issued_by,
-                        response_tx: Redacted(response_tx),
-                    });
-                    if !accepted {
-                        send_json(
-                            write,
-                            &ClientMessage::CommandReject(CommandReject {
-                                command_id: Some(command_id),
-                                session_id: session.session_id.clone(),
-                                session_epoch: session.session_epoch.clone(),
-                                reason: "app event channel is closed".to_string(),
-                            }),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
+                    processed_command_ids.insert(command_id.clone());
+                    send_json(
+                        write,
+                        &ClientMessage::CommandAck(CommandAck {
+                            command_id: command_id.clone(),
+                            session_id: session.session_id.clone(),
+                            session_epoch: session.session_epoch.clone(),
+                        }),
+                    )
+                    .await?;
 
-                    pending_command_ids.insert(command_id.clone());
-                    pending_command_acceptances.push(wait_for_command_acceptance(
-                        command_id,
-                        session.session_id.clone(),
-                        session.session_epoch.clone(),
-                        response_rx,
-                    ));
+                    let accepted = queue_remote_new_session(
+                        app_event_tx,
+                        command_id.clone(),
+                        command.issued_by,
+                    );
+                    if !accepted {
+                        tracing::warn!(command_id, "failed to queue remote inbox new_session after ack");
+                    }
                 }
                 RemoteCommandKind::EndSession => {
                     send_json(
@@ -2992,7 +3013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_session_command_sends_app_event() {
+    async fn new_session_command_acks_before_sending_app_event() {
         let session = test_session();
         let (app_event_tx, app_event_rx) = app_event_sender();
         let mut sink = RecordingSink::default();
@@ -3012,14 +3033,51 @@ mod tests {
         .await
         .expect("command handled");
 
+        assert_eq!(
+            sent_payload(&sink, 0),
+            json!({
+                "type": "command_ack",
+                "command_id": "cmd-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+            })
+        );
         let event = app_event_rx.try_recv().expect("remote inbox event");
         assert!(matches!(
             event,
             AppEvent::RemoteInboxNewSession { command_id, issued_by, .. }
                 if command_id == "cmd-1" && issued_by.as_deref() == Some("123")
         ));
-        assert!(pending_command_ids.contains("cmd-1"));
-        assert_eq!(sink.messages.len(), 0);
+        assert!(processed_command_ids.contains("cmd-1"));
+        assert!(pending_command_ids.is_empty());
+        assert!(pending_command_acceptances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn code_everywhere_new_session_dispatch_does_not_wait_for_ui_reset_ack() {
+        let session = test_session();
+        let (app_event_tx, app_event_rx) = app_event_sender();
+
+        let outcome = dispatch_code_everywhere_command(
+            CodeEverywhereCommand::NewSession {
+                id: "cmd-1".to_string(),
+            },
+            &session,
+            &app_event_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.command_id, "cmd-1");
+        assert_eq!(outcome.command_kind, "new_session");
+        assert_eq!(outcome.status, "accepted");
+        assert!(outcome.reason.is_none());
+        let event = app_event_rx.try_recv().expect("remote inbox event");
+        assert!(matches!(
+            event,
+            AppEvent::RemoteInboxNewSession { command_id, issued_by, .. }
+                if command_id == "cmd-1"
+                    && issued_by.as_deref() == Some("Code Everywhere")
+        ));
     }
 
     #[tokio::test]
