@@ -162,6 +162,7 @@ pub struct RemoteInboxConfig {
     pub bridge_url: Option<String>,
     pub code_everywhere_url: Option<String>,
     pub token: Option<String>,
+    pub host_id: Option<String>,
     pub host_label: Option<String>,
 }
 
@@ -1957,6 +1958,7 @@ enabled = true
 bridge_url = "ws://127.0.0.1:8787/every-code/connect"
 code_everywhere_url = "http://127.0.0.1:4789"
 token = "shared-secret"
+host_id = "host-mac-studio"
 host_label = "Mac Studio"
 "#,
         )
@@ -1969,6 +1971,7 @@ host_label = "Mac Studio"
                 bridge_url: Some("ws://127.0.0.1:8787/every-code/connect".to_string()),
                 code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
                 token: Some("shared-secret".to_string()),
+                host_id: Some("host-mac-studio".to_string()),
                 host_label: Some("Mac Studio".to_string()),
             })
         );
@@ -1989,6 +1992,7 @@ host_label = "Mac Studio"
             Some("http://127.0.0.1:4789")
         );
         assert_eq!(resolved.remote_inbox.token.as_deref(), Some("shared-secret"));
+        assert_eq!(resolved.remote_inbox.host_id.as_deref(), Some("host-mac-studio"));
         assert_eq!(resolved.remote_inbox.host_label.as_deref(), Some("Mac Studio"));
 
         let default_resolved = Config::load_from_base_config_with_overrides(

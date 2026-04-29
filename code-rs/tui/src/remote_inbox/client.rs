@@ -761,6 +761,7 @@ impl RemoteInboxSession {
         SessionHello {
             session_id: self.session_id.clone(),
             session_epoch: self.session_epoch.clone(),
+            host_id: config.host_id.clone().filter(|id| !id.trim().is_empty()),
             host_label: config
                 .host_label
                 .clone()
@@ -925,9 +926,8 @@ fn code_everywhere_events_for_client_message(
 ) -> Vec<Value> {
     let now = chrono::Utc::now().to_rfc3339();
     match message {
-        ClientMessage::Hello(hello) => vec![json!({
-            "kind": "session_hello",
-            "session": {
+        ClientMessage::Hello(hello) => {
+            let mut session = json!({
                 "sessionId": hello.session_id,
                 "sessionEpoch": hello.session_epoch,
                 "hostLabel": hello.host_label,
@@ -940,8 +940,16 @@ fn code_everywhere_events_for_client_message(
                 "startedAt": now,
                 "updatedAt": now,
                 "currentTurnId": null,
+            });
+            if let Some(host_id) = hello.host_id {
+                session["hostId"] = json!(host_id);
             }
-        })],
+
+            vec![json!({
+                "kind": "session_hello",
+                "session": session,
+            })]
+        }
         ClientMessage::StatusChanged(status) => status_changed_events(status, now),
         ClientMessage::TurnStep(step) => vec![turn_step_event(step, now)],
         ClientMessage::TurnComplete(status) => turn_complete_events(status, now),
@@ -1885,6 +1893,7 @@ async fn connect_once(
         &ClientMessage::Hello(SessionHello {
             session_id: session.session_id.clone(),
             session_epoch: session.session_epoch.clone(),
+            host_id: config.host_id.clone().filter(|id| !id.trim().is_empty()),
             host_label: config
                 .host_label
                 .clone()
@@ -2743,6 +2752,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: Some("host-mac-studio".to_string()),
             host_label: Some("Mac Studio".to_string()),
         };
         let hello = ClientMessage::Hello(session.hello(&config));
@@ -2750,6 +2760,7 @@ mod tests {
 
         assert_eq!(events[0]["kind"], "session_hello");
         assert_eq!(events[0]["session"]["sessionId"], "session-1");
+        assert_eq!(events[0]["session"]["hostId"], "host-mac-studio");
         assert_eq!(events[0]["session"]["hostLabel"], "Mac Studio");
 
         let approval = ClientMessage::ApprovalRequest(RemoteApprovalRequest {
@@ -2775,6 +2786,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
 
@@ -2814,6 +2826,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
         let events = code_everywhere_events_for_client_message(
@@ -2913,6 +2926,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
         let latest_status_snapshot = Arc::new(Mutex::new(Some(ClientMessage::TurnComplete(
@@ -2938,6 +2952,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
         let latest_status_snapshot = Arc::new(Mutex::new(None));
