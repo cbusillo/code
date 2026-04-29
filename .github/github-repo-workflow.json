@@ -1,18 +1,98 @@
 {
-  "defaultBranch": "fork-main",
+  "defaultBranch": "local/cbusillo-overlay",
+  "projectType": "codex-cli-local-overlay",
+  "upstreamForkBaseBranch": "fork-main",
+  "overlayBranch": "local/cbusillo-overlay",
+  "docs": {
+    "overview": "README.md",
+    "agentGuide": "AGENTS.md",
+    "localOverlay": "docs/local-overlay.md",
+    "execution": "docs/exec.md",
+    "sandboxing": "docs/platform-sandboxing.md",
+    "tuiComposer": "docs/tui-chat-composer.md",
+    "homebrew": "docs/homebrew.md",
+    "rustWorkspace": "code-rs",
+    "upstreamMirror": "codex-rs"
+  },
+  "qualityGate": {
+    "build": {
+      "default": "./build-fast.sh",
+      "releasePreflight": "./pre-release.sh",
+      "localRebuild": "just local-code-rebuild"
+    },
+    "test": {
+      "workspaceNextest": "cd code-rs && cargo nextest run --no-fail-fast --locked",
+      "tuiFocused": "cd code-rs && cargo test -p code-tui --features test-helpers",
+      "cloudTasksFocused": "cd code-rs && cargo test -p code-cloud-tasks --tests",
+      "mcpTypesFocused": "cd code-rs && cargo test -p mcp-types --tests"
+    },
+    "scripts": {
+      "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch local/cbusillo-overlay",
+      "cleanupSpace": "just local-cleanup-space --apply",
+      "overlayUpdate": "just local-overlay-update"
+    },
+    "docsRequiredWhen": [
+      "CLI behavior changes",
+      "TUI behavior changes",
+      "sandbox or execution behavior changes",
+      "release behavior changes",
+      "local overlay behavior changes",
+      "Code Everywhere behavior changes",
+      "upstream mirror behavior changes"
+    ]
+  },
   "importantWorkflows": [
     "blob-size-policy",
     "Preview Build",
     "Release",
-    "Upstream Merge"
+    "Upstream Merge",
+    "binary-release",
+    "rust-release-argument-comment-lint",
+    "rusty-v8-release",
+    "v8-canary",
+    "Issue Code",
+    "Issue Comment",
+    "Issue Triage"
   ],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
-  "relatedRepos": [],
+  "relatedRepos": ["code-everywhere"],
   "validatedThrough": [],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "available",
+      "secretScanning": "not_enabled",
+      "dependabotAlerts": "not_enabled",
+      "securityAdvisories": "available"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
   "cleanup": {
     "deleteMergedLocalBranches": true,
     "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "GitHub default branch changes",
+      "overlay branch changes",
+      "release workflow changes",
+      "upstream mirror policy changes"
+    ]
   }
 }
