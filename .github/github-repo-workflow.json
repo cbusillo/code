@@ -65,7 +65,7 @@
       "checkSecurityAndQuality": true
     },
     "capabilities": {
-      "codeScanning": "available",
+      "codeScanning": "not_enabled",
       "secretScanning": "not_enabled",
       "dependabotAlerts": "not_enabled",
       "securityAdvisories": "available"
