@@ -149,6 +149,7 @@ branches/
 # coder directories
 .coder/
 .code/
+*.override.*
 
 # trigger: test non-notes change (no [skip ci])
 

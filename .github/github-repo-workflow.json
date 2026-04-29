@@ -1,0 +1,93 @@
+{
+  "defaultBranch": "fork-main",
+  "projectType": "codex-cli-fork",
+  "overlayBranch": "local/cbusillo-overlay",
+  "docs": {
+    "overview": "README.md",
+    "agentGuide": "AGENTS.md",
+    "execution": "docs/exec.md",
+    "sandboxing": "docs/platform-sandboxing.md",
+    "tuiComposer": "docs/tui-chat-composer.md",
+    "homebrew": "docs/homebrew.md",
+    "rustWorkspace": "code-rs",
+    "upstreamMirror": "codex-rs"
+  },
+  "qualityGate": {
+    "build": {
+      "default": "./build-fast.sh",
+      "releasePreflight": "./pre-release.sh"
+    },
+    "test": {
+      "workspaceNextest": "cd code-rs && cargo nextest run --no-fail-fast --locked",
+      "tuiFocused": "cd code-rs && cargo test -p code-tui --features test-helpers",
+      "cloudTasksFocused": "cd code-rs && cargo test -p code-cloud-tasks --tests",
+      "mcpTypesFocused": "cd code-rs && cargo test -p mcp-types --tests"
+    },
+    "scripts": {
+      "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch fork-main",
+      "cleanupSpace": "just local-cleanup-space --apply"
+    },
+    "docsRequiredWhen": [
+      "CLI behavior changes",
+      "TUI behavior changes",
+      "sandbox or execution behavior changes",
+      "release behavior changes",
+      "fork overlay behavior changes",
+      "Code Everywhere behavior changes",
+      "upstream mirror behavior changes"
+    ]
+  },
+  "importantWorkflows": [
+    "rust-ci",
+    "Preview Build",
+    "Release",
+    "Upstream Merge",
+    "Native macOS Artifact",
+    "Native macOS TestFlight",
+    "Native iOS TestFlight",
+    "Issue Code",
+    "Issue Comment",
+    "Issue Triage"
+  ],
+  "qaLabels": [],
+  "deployLabels": [],
+  "healthUrls": [],
+  "relatedRepos": ["code-everywhere"],
+  "validatedThrough": [],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "available",
+      "secretScanning": "not_enabled",
+      "dependabotAlerts": "not_enabled",
+      "securityAdvisories": "available"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
+  "cleanup": {
+    "deleteMergedLocalBranches": true,
+    "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "default branch changes",
+      "overlay branch changes",
+      "release workflow changes",
+      "upstream mirror policy changes"
+    ]
+  }
+}
