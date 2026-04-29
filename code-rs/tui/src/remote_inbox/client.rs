@@ -679,6 +679,7 @@ fn spawn_code_everywhere_http_client(
                                         command_kind: command.kind(),
                                         status: "accepted",
                                         reason: None,
+                                        accepted_resolution: None,
                                     }
                                 } else {
                                     dispatch_code_everywhere_command(command, &session, &app_event_tx).await
@@ -760,6 +761,7 @@ impl RemoteInboxSession {
         SessionHello {
             session_id: self.session_id.clone(),
             session_epoch: self.session_epoch.clone(),
+            host_id: config.host_id.clone().filter(|id| !id.trim().is_empty()),
             host_label: config
                 .host_label
                 .clone()
@@ -841,8 +843,7 @@ impl CodeEverywhereHttpClient {
         session: &RemoteInboxSession,
         outcome: CodeEverywhereCommandOutcome,
     ) -> Result<(), reqwest::Error> {
-        self.publish_events(vec![code_everywhere_command_outcome_event(session, outcome)])
-            .await
+        self.publish_events(code_everywhere_command_events(session, outcome)).await
     }
 
     async fn publish_events(&self, events: Vec<Value>) -> Result<(), reqwest::Error> {
@@ -925,9 +926,8 @@ fn code_everywhere_events_for_client_message(
 ) -> Vec<Value> {
     let now = chrono::Utc::now().to_rfc3339();
     match message {
-        ClientMessage::Hello(hello) => vec![json!({
-            "kind": "session_hello",
-            "session": {
+        ClientMessage::Hello(hello) => {
+            let mut session = json!({
                 "sessionId": hello.session_id,
                 "sessionEpoch": hello.session_epoch,
                 "hostLabel": hello.host_label,
@@ -940,8 +940,16 @@ fn code_everywhere_events_for_client_message(
                 "startedAt": now,
                 "updatedAt": now,
                 "currentTurnId": null,
+            });
+            if let Some(host_id) = hello.host_id {
+                session["hostId"] = json!(host_id);
             }
-        })],
+
+            vec![json!({
+                "kind": "session_hello",
+                "session": session,
+            })]
+        }
         ClientMessage::StatusChanged(status) => status_changed_events(status, now),
         ClientMessage::TurnStep(step) => vec![turn_step_event(step, now)],
         ClientMessage::TurnComplete(status) => turn_complete_events(status, now),
@@ -1078,9 +1086,22 @@ fn session_status_event(status: SessionStatusEvent, state: &str, updated_at: Str
     })
 }
 
-fn code_everywhere_command_outcome_event(
+fn code_everywhere_command_events(
     session: &RemoteInboxSession,
     outcome: CodeEverywhereCommandOutcome,
+) -> Vec<Value> {
+    let mut events = vec![code_everywhere_command_outcome_event(session, &outcome)];
+    if outcome.status == "accepted" {
+        if let Some(resolution) = outcome.accepted_resolution {
+            events.push(code_everywhere_pending_work_resolved_event(session, resolution));
+        }
+    }
+    events
+}
+
+fn code_everywhere_command_outcome_event(
+    session: &RemoteInboxSession,
+    outcome: &CodeEverywhereCommandOutcome,
 ) -> Value {
     json!({
         "kind": "command_outcome",
@@ -1094,6 +1115,33 @@ fn code_everywhere_command_outcome_event(
             "handledAt": chrono::Utc::now().to_rfc3339(),
         }
     })
+}
+
+fn code_everywhere_pending_work_resolved_event(
+    session: &RemoteInboxSession,
+    resolution: CodeEverywherePendingWorkResolution,
+) -> Value {
+    let resolved_at = chrono::Utc::now().to_rfc3339();
+    match resolution {
+        CodeEverywherePendingWorkResolution::Approval {
+            approval_id,
+            decision,
+        } => json!({
+            "kind": "approval_resolved",
+            "sessionId": session.session_id,
+            "sessionEpoch": session.session_epoch,
+            "approvalId": approval_id,
+            "decision": decision,
+            "resolvedAt": resolved_at,
+        }),
+        CodeEverywherePendingWorkResolution::RequestedInput { input_id } => json!({
+            "kind": "user_input_resolved",
+            "sessionId": session.session_id,
+            "sessionEpoch": session.session_epoch,
+            "inputId": input_id,
+            "resolvedAt": resolved_at,
+        }),
+    }
 }
 
 fn code_everywhere_question(question: code_protocol::request_user_input::RequestUserInputQuestion) -> Value {
@@ -1378,6 +1426,8 @@ enum CodeEverywhereCommandPayload {
         session_id: String,
         #[serde(rename = "sessionEpoch")]
         session_epoch: String,
+        #[serde(rename = "inputId")]
+        input_id: Option<String>,
         #[serde(rename = "turnId")]
         turn_id: String,
         answers: Vec<CodeEverywhereRequestedInputAnswer>,
@@ -1392,6 +1442,11 @@ struct CodeEverywhereRequestedInputAnswer {
 }
 
 enum CodeEverywhereCommand {
+    Stale {
+        id: String,
+        command_kind: &'static str,
+        reason: String,
+    },
     Reply {
         id: String,
         text: String,
@@ -1418,6 +1473,7 @@ enum CodeEverywhereCommand {
     },
     RequestUserInputResponse {
         id: String,
+        input_id: Option<String>,
         turn_id: String,
         response: RequestUserInputResponse,
     },
@@ -1428,12 +1484,24 @@ struct CodeEverywhereCommandOutcome {
     command_kind: &'static str,
     status: &'static str,
     reason: Option<String>,
+    accepted_resolution: Option<CodeEverywherePendingWorkResolution>,
+}
+
+enum CodeEverywherePendingWorkResolution {
+    Approval {
+        approval_id: String,
+        decision: &'static str,
+    },
+    RequestedInput {
+        input_id: String,
+    },
 }
 
 impl CodeEverywhereCommand {
     fn id(&self) -> &str {
         match self {
-            CodeEverywhereCommand::Reply { id, .. }
+            CodeEverywhereCommand::Stale { id, .. }
+            | CodeEverywhereCommand::Reply { id, .. }
             | CodeEverywhereCommand::ContinueAutonomously { id }
             | CodeEverywhereCommand::PauseCurrentTurn { id }
             | CodeEverywhereCommand::NewSession { id }
@@ -1446,6 +1514,7 @@ impl CodeEverywhereCommand {
 
     fn kind(&self) -> &'static str {
         match self {
+            CodeEverywhereCommand::Stale { command_kind, .. } => command_kind,
             CodeEverywhereCommand::Reply { .. } => "reply",
             CodeEverywhereCommand::ContinueAutonomously { .. } => "continue_autonomously",
             CodeEverywhereCommand::PauseCurrentTurn { .. } => "pause_current_turn",
@@ -1456,57 +1525,90 @@ impl CodeEverywhereCommand {
             CodeEverywhereCommand::RequestUserInputResponse { .. } => "request_user_input_response",
         }
     }
+
+    fn accepted_resolution(&self) -> Option<CodeEverywherePendingWorkResolution> {
+        match self {
+            CodeEverywhereCommand::ApprovalDecision {
+                approval_id,
+                decision,
+                ..
+            } => Some(CodeEverywherePendingWorkResolution::Approval {
+                approval_id: approval_id.clone(),
+                decision: match decision {
+                    ReviewDecision::Approved | ReviewDecision::ApprovedForSession => "approve",
+                    ReviewDecision::Denied | ReviewDecision::Abort => "deny",
+                },
+            }),
+            CodeEverywhereCommand::RequestUserInputResponse {
+                input_id: Some(input_id),
+                ..
+            } => Some(CodeEverywherePendingWorkResolution::RequestedInput {
+                input_id: input_id.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 fn parse_code_everywhere_command(
     record: CodeEverywhereCommandRecord,
     session: &RemoteInboxSession,
 ) -> Option<CodeEverywhereCommand> {
+    let command_kind = record.command.kind();
+    let (session_id, session_epoch) = record.command.session_scope();
+    if !matches_session(session_id, session_epoch, session) {
+        return Some(CodeEverywhereCommand::Stale {
+            id: record.id,
+            command_kind,
+            reason: stale_command_reason(session_id, session_epoch, session),
+        });
+    }
+
     match record.command {
         CodeEverywhereCommandPayload::Reply {
-            session_id,
-            session_epoch,
+            session_id: _,
+            session_epoch: _,
             content,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::Reply {
+        } => Some(CodeEverywhereCommand::Reply {
             id: record.id,
             text: content,
         }),
         CodeEverywhereCommandPayload::ContinueAutonomously {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::ContinueAutonomously {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::ContinueAutonomously {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::PauseCurrentTurn {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::PauseCurrentTurn {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::PauseCurrentTurn {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::NewSession {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::NewSession {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::NewSession {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::EndSession {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::EndSession {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::EndSession {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::StatusRequest {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::StatusRequest {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::StatusRequest {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::ApprovalDecision {
-            session_id,
-            session_epoch,
+            session_id: _,
+            session_epoch: _,
             approval_id,
             decision,
-        } if matches_session(&session_id, &session_epoch, session) => {
+        } => {
             let decision = match decision.as_str() {
                 "approve" => ReviewDecision::Approved,
                 "deny" => ReviewDecision::Denied,
@@ -1519,11 +1621,12 @@ fn parse_code_everywhere_command(
             })
         }
         CodeEverywhereCommandPayload::RequestUserInputResponse {
-            session_id,
-            session_epoch,
+            session_id: _,
+            session_epoch: _,
+            input_id,
             turn_id,
             answers,
-        } if matches_session(&session_id, &session_epoch, session) => {
+        } => {
             let response = RequestUserInputResponse {
                 answers: answers
                     .into_iter()
@@ -1539,12 +1642,74 @@ fn parse_code_everywhere_command(
             };
             Some(CodeEverywhereCommand::RequestUserInputResponse {
                 id: record.id,
+                input_id,
                 turn_id,
                 response,
             })
         }
-        _ => None,
     }
+}
+
+impl CodeEverywhereCommandPayload {
+    fn kind(&self) -> &'static str {
+        match self {
+            CodeEverywhereCommandPayload::Reply { .. } => "reply",
+            CodeEverywhereCommandPayload::ContinueAutonomously { .. } => "continue_autonomously",
+            CodeEverywhereCommandPayload::PauseCurrentTurn { .. } => "pause_current_turn",
+            CodeEverywhereCommandPayload::NewSession { .. } => "new_session",
+            CodeEverywhereCommandPayload::EndSession { .. } => "end_session",
+            CodeEverywhereCommandPayload::StatusRequest { .. } => "status_request",
+            CodeEverywhereCommandPayload::ApprovalDecision { .. } => "approval_decision",
+            CodeEverywhereCommandPayload::RequestUserInputResponse { .. } => "request_user_input_response",
+        }
+    }
+
+    fn session_scope(&self) -> (&str, &str) {
+        match self {
+            CodeEverywhereCommandPayload::Reply {
+                session_id,
+                session_epoch,
+                ..
+            }
+            | CodeEverywhereCommandPayload::ContinueAutonomously {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::PauseCurrentTurn {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::NewSession {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::EndSession {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::StatusRequest {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::ApprovalDecision {
+                session_id,
+                session_epoch,
+                ..
+            }
+            | CodeEverywhereCommandPayload::RequestUserInputResponse {
+                session_id,
+                session_epoch,
+                ..
+            } => (session_id, session_epoch),
+        }
+    }
+}
+
+fn stale_command_reason(session_id: &str, session_epoch: &str, session: &RemoteInboxSession) -> String {
+    format!(
+        "stale session scope: command targeted session {session_id} epoch {session_epoch}, active session is {} epoch {}",
+        session.session_id, session.session_epoch
+    )
 }
 
 fn matches_session(session_id: &str, session_epoch: &str, session: &RemoteInboxSession) -> bool {
@@ -1575,7 +1740,9 @@ async fn dispatch_code_everywhere_command(
 ) -> CodeEverywhereCommandOutcome {
     let command_id = command.id().to_string();
     let command_kind = command.kind();
+    let accepted_resolution = command.accepted_resolution();
     let result = match command {
+        CodeEverywhereCommand::Stale { reason, .. } => Err(reason),
         CodeEverywhereCommand::Reply { id, text } => {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             if !app_event_tx.send_with_result(AppEvent::RemoteInboxReply {
@@ -1653,6 +1820,7 @@ async fn dispatch_code_everywhere_command(
         }
         CodeEverywhereCommand::RequestUserInputResponse {
             id,
+            input_id: _,
             turn_id,
             response,
         } => {
@@ -1678,12 +1846,14 @@ async fn dispatch_code_everywhere_command(
             command_kind,
             status: "accepted",
             reason: None,
+            accepted_resolution,
         },
         Err(reason) => CodeEverywhereCommandOutcome {
             command_id,
             command_kind,
             status: "rejected",
             reason: Some(reason),
+            accepted_resolution: None,
         },
     }
 }
@@ -1723,6 +1893,7 @@ async fn connect_once(
         &ClientMessage::Hello(SessionHello {
             session_id: session.session_id.clone(),
             session_epoch: session.session_epoch.clone(),
+            host_id: config.host_id.clone().filter(|id| !id.trim().is_empty()),
             host_label: config
                 .host_label
                 .clone()
@@ -2581,6 +2752,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: Some("host-mac-studio".to_string()),
             host_label: Some("Mac Studio".to_string()),
         };
         let hello = ClientMessage::Hello(session.hello(&config));
@@ -2588,6 +2760,7 @@ mod tests {
 
         assert_eq!(events[0]["kind"], "session_hello");
         assert_eq!(events[0]["session"]["sessionId"], "session-1");
+        assert_eq!(events[0]["session"]["hostId"], "host-mac-studio");
         assert_eq!(events[0]["session"]["hostLabel"], "Mac Studio");
 
         let approval = ClientMessage::ApprovalRequest(RemoteApprovalRequest {
@@ -2613,6 +2786,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
 
@@ -2652,6 +2826,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
         let events = code_everywhere_events_for_client_message(
@@ -2680,14 +2855,16 @@ mod tests {
     #[test]
     fn code_everywhere_maps_command_outcomes() {
         let session = test_session();
+        let outcome = CodeEverywhereCommandOutcome {
+            command_id: "command-1".to_string(),
+            command_kind: "status_request",
+            status: "accepted",
+            reason: None,
+            accepted_resolution: None,
+        };
         let event = code_everywhere_command_outcome_event(
             &session,
-            CodeEverywhereCommandOutcome {
-                command_id: "command-1".to_string(),
-                command_kind: "status_request",
-                status: "accepted",
-                reason: None,
-            },
+            &outcome,
         );
 
         assert_eq!(event["kind"], "command_outcome");
@@ -2700,6 +2877,48 @@ mod tests {
     }
 
     #[test]
+    fn code_everywhere_maps_accepted_pending_work_command_resolutions() {
+        let session = test_session();
+        let approval_events = code_everywhere_command_events(
+            &session,
+            CodeEverywhereCommandOutcome {
+                command_id: "command-approval".to_string(),
+                command_kind: "approval_decision",
+                status: "accepted",
+                reason: None,
+                accepted_resolution: Some(CodeEverywherePendingWorkResolution::Approval {
+                    approval_id: "approval-1".to_string(),
+                    decision: "approve",
+                }),
+            },
+        );
+
+        assert_eq!(approval_events.len(), 2);
+        assert_eq!(approval_events[0]["kind"], "command_outcome");
+        assert_eq!(approval_events[1]["kind"], "approval_resolved");
+        assert_eq!(approval_events[1]["approvalId"], "approval-1");
+        assert_eq!(approval_events[1]["decision"], "approve");
+
+        let input_events = code_everywhere_command_events(
+            &session,
+            CodeEverywhereCommandOutcome {
+                command_id: "command-input".to_string(),
+                command_kind: "request_user_input_response",
+                status: "accepted",
+                reason: None,
+                accepted_resolution: Some(CodeEverywherePendingWorkResolution::RequestedInput {
+                    input_id: "input-1".to_string(),
+                }),
+            },
+        );
+
+        assert_eq!(input_events.len(), 2);
+        assert_eq!(input_events[0]["kind"], "command_outcome");
+        assert_eq!(input_events[1]["kind"], "user_input_resolved");
+        assert_eq!(input_events[1]["inputId"], "input-1");
+    }
+
+    #[test]
     fn code_everywhere_republish_includes_latest_status_snapshot() {
         let session = test_session();
         let config = RemoteInboxConfig {
@@ -2707,6 +2926,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
         let latest_status_snapshot = Arc::new(Mutex::new(Some(ClientMessage::TurnComplete(
@@ -2732,6 +2952,7 @@ mod tests {
             bridge_url: None,
             code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
             token: None,
+            host_id: None,
             host_label: Some("Mac Studio".to_string()),
         };
         let latest_status_snapshot = Arc::new(Mutex::new(None));
@@ -2765,7 +2986,14 @@ mod tests {
             parse_code_everywhere_command(reply, &session),
             Some(CodeEverywhereCommand::Reply { id, text }) if id == "command-1" && text == "keep going"
         ));
-        assert!(parse_code_everywhere_command(stale, &session).is_none());
+        assert!(matches!(
+            parse_code_everywhere_command(stale, &session),
+            Some(CodeEverywhereCommand::Stale { id, command_kind, reason })
+                if id == "command-2"
+                    && command_kind == "status_request"
+                    && reason.contains("old-epoch")
+                    && reason.contains("epoch-1")
+        ));
     }
 
     #[test]
@@ -2779,6 +3007,7 @@ mod tests {
                         "kind": "request_user_input_response",
                         "sessionId": "session-1",
                         "sessionEpoch": "epoch-1",
+                        "inputId": "input-1",
                         "turnId": "turn-1",
                         "answers": [
                             { "questionId": "question-1", "value": "Ship it" }
@@ -2791,8 +3020,8 @@ mod tests {
 
         assert!(matches!(
             parse_code_everywhere_command(claim.commands.into_iter().next().unwrap(), &session),
-            Some(CodeEverywhereCommand::RequestUserInputResponse { response, .. })
-                if response.answers.contains_key("question-1")
+            Some(CodeEverywhereCommand::RequestUserInputResponse { input_id, response, .. })
+                if input_id.as_deref() == Some("input-1") && response.answers.contains_key("question-1")
         ));
     }
 

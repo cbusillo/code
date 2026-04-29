@@ -872,6 +872,19 @@ pub(crate) fn is_test_mode() -> bool {
         })
     }
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn code_everywhere_pending_work_smoke_enabled() -> bool {
+    std::env::var("CODE_EVERYWHERE_SMOKE_PENDING_WORK")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
 use serde_json;
 use tracing::{debug, info, warn};
 // use image::GenericImageView;
@@ -13984,6 +13997,7 @@ impl ChatWidget<'_> {
                 // Record session id for potential future fork/backtrack features
                 self.session_id = Some(event.session_id);
                 self.start_remote_inbox_if_needed(event.session_id);
+                self.seed_code_everywhere_pending_work_if_requested();
                 self.bottom_pane
                     .set_history_metadata(event.history_log_id, event.history_entry_count);
                 // Record session information at the top of the conversation.
@@ -30148,6 +30162,88 @@ Have we met every part of this goal and is there no further work to do?"#
         );
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
+    fn seed_code_everywhere_pending_work_if_requested(&mut self) {
+        if !code_everywhere_pending_work_smoke_enabled() {
+            return;
+        }
+
+        let Some(client) = &self.remote_inbox_client else {
+            return;
+        };
+        let turn_id = "ce-smoke-pending-turn";
+        client.send_turn_started(turn_id);
+
+        self.handle_exec_approval_now(
+            "ce-smoke-approval-event".to_string(),
+            ExecApprovalRequestEvent {
+                call_id: "ce-smoke-approval".to_string(),
+                approval_id: Some("ce-smoke-approval".to_string()),
+                turn_id: turn_id.to_string(),
+                command: vec!["printf".to_string(), "Code Everywhere approval smoke".to_string()],
+                cwd: self.config.cwd.clone(),
+                reason: Some("Code Everywhere approval smoke".to_string()),
+                network_approval_context: None,
+                additional_permissions: None,
+            },
+        );
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    fn seed_code_everywhere_requested_input_smoke(&mut self) {
+        if !code_everywhere_pending_work_smoke_enabled()
+            || self.pending_request_user_input.is_some()
+        {
+            return;
+        }
+        let turn_id = "ce-smoke-pending-turn";
+        let input = code_protocol::request_user_input::RequestUserInputEvent {
+            call_id: "ce-smoke-input".to_string(),
+            turn_id: turn_id.to_string(),
+            questions: vec![code_protocol::request_user_input::RequestUserInputQuestion {
+                id: "mode".to_string(),
+                header: "Smoke mode".to_string(),
+                question: "Choose the Code Everywhere smoke mode.".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: Some(vec![
+                    code_protocol::request_user_input::RequestUserInputQuestionOption {
+                        label: "Continue (Recommended)".to_string(),
+                        description: "Use the deterministic smoke answer.".to_string(),
+                    },
+                    code_protocol::request_user_input::RequestUserInputQuestionOption {
+                        label: "Pause".to_string(),
+                        description: "Leave this option unused in the smoke.".to_string(),
+                    },
+                ]),
+            }],
+        };
+        self.pending_request_user_input = Some(PendingRequestUserInput {
+            turn_id: input.turn_id.clone(),
+            call_id: input.call_id.clone(),
+            anchor_key: self.next_internal_key(),
+            questions: input.questions.clone(),
+        });
+        self.bottom_pane
+            .update_status_text("waiting for user input".to_string());
+        self.bottom_pane.set_task_running(true);
+        self.bottom_pane.ensure_input_focus();
+        self.bottom_pane
+            .show_request_user_input(crate::bottom_pane::RequestUserInputView::new(
+                input.turn_id.clone(),
+                input.questions.clone(),
+                self.app_event_tx.clone(),
+            ));
+        self.remote_inbox_send_request_user_input(&input);
+        self.request_redraw();
+    }
+
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    fn seed_code_everywhere_pending_work_if_requested(&mut self) {}
+
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    fn seed_code_everywhere_requested_input_smoke(&mut self) {}
+
     pub(crate) fn on_remote_inbox_reply(
         &mut self,
         command_id: String,
@@ -30269,6 +30365,9 @@ Have we met every part of this goal and is there no further work to do?"#
             .resolve_approval_decision(&approval_id, decision)
         {
             tracing::info!(approval_id, "accepted remote inbox approval decision");
+            if matches!(decision, code_core::protocol::ReviewDecision::Approved) {
+                self.seed_code_everywhere_requested_input_smoke();
+            }
             Ok(())
         } else {
             tracing::warn!(approval_id, "rejected remote inbox approval decision");

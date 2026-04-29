@@ -26,6 +26,8 @@ pub(crate) enum ClientMessage {
 pub(crate) struct SessionHello {
     pub session_id: String,
     pub session_epoch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     pub host_label: String,
     pub cwd: String,
     pub branch: Option<String>,
@@ -176,6 +178,7 @@ mod tests {
         let message = ClientMessage::Hello(SessionHello {
             session_id: "session-1".to_string(),
             session_epoch: "epoch-1".to_string(),
+            host_id: Some("host-mac-studio".to_string()),
             host_label: "Mac Studio".to_string(),
             cwd: "/tmp/project".to_string(),
             branch: Some("main".to_string()),
@@ -189,6 +192,7 @@ mod tests {
                 "type": "hello",
                 "session_id": "session-1",
                 "session_epoch": "epoch-1",
+                "host_id": "host-mac-studio",
                 "host_label": "Mac Studio",
                 "cwd": "/tmp/project",
                 "branch": "main",
