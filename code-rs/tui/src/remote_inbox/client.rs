@@ -679,6 +679,7 @@ fn spawn_code_everywhere_http_client(
                                         command_kind: command.kind(),
                                         status: "accepted",
                                         reason: None,
+                                        accepted_resolution: None,
                                     }
                                 } else {
                                     dispatch_code_everywhere_command(command, &session, &app_event_tx).await
@@ -841,8 +842,7 @@ impl CodeEverywhereHttpClient {
         session: &RemoteInboxSession,
         outcome: CodeEverywhereCommandOutcome,
     ) -> Result<(), reqwest::Error> {
-        self.publish_events(vec![code_everywhere_command_outcome_event(session, outcome)])
-            .await
+        self.publish_events(code_everywhere_command_events(session, outcome)).await
     }
 
     async fn publish_events(&self, events: Vec<Value>) -> Result<(), reqwest::Error> {
@@ -1078,9 +1078,22 @@ fn session_status_event(status: SessionStatusEvent, state: &str, updated_at: Str
     })
 }
 
-fn code_everywhere_command_outcome_event(
+fn code_everywhere_command_events(
     session: &RemoteInboxSession,
     outcome: CodeEverywhereCommandOutcome,
+) -> Vec<Value> {
+    let mut events = vec![code_everywhere_command_outcome_event(session, &outcome)];
+    if outcome.status == "accepted" {
+        if let Some(resolution) = outcome.accepted_resolution {
+            events.push(code_everywhere_pending_work_resolved_event(session, resolution));
+        }
+    }
+    events
+}
+
+fn code_everywhere_command_outcome_event(
+    session: &RemoteInboxSession,
+    outcome: &CodeEverywhereCommandOutcome,
 ) -> Value {
     json!({
         "kind": "command_outcome",
@@ -1094,6 +1107,33 @@ fn code_everywhere_command_outcome_event(
             "handledAt": chrono::Utc::now().to_rfc3339(),
         }
     })
+}
+
+fn code_everywhere_pending_work_resolved_event(
+    session: &RemoteInboxSession,
+    resolution: CodeEverywherePendingWorkResolution,
+) -> Value {
+    let resolved_at = chrono::Utc::now().to_rfc3339();
+    match resolution {
+        CodeEverywherePendingWorkResolution::Approval {
+            approval_id,
+            decision,
+        } => json!({
+            "kind": "approval_resolved",
+            "sessionId": session.session_id,
+            "sessionEpoch": session.session_epoch,
+            "approvalId": approval_id,
+            "decision": decision,
+            "resolvedAt": resolved_at,
+        }),
+        CodeEverywherePendingWorkResolution::RequestedInput { input_id } => json!({
+            "kind": "user_input_resolved",
+            "sessionId": session.session_id,
+            "sessionEpoch": session.session_epoch,
+            "inputId": input_id,
+            "resolvedAt": resolved_at,
+        }),
+    }
 }
 
 fn code_everywhere_question(question: code_protocol::request_user_input::RequestUserInputQuestion) -> Value {
@@ -1378,6 +1418,8 @@ enum CodeEverywhereCommandPayload {
         session_id: String,
         #[serde(rename = "sessionEpoch")]
         session_epoch: String,
+        #[serde(rename = "inputId")]
+        input_id: Option<String>,
         #[serde(rename = "turnId")]
         turn_id: String,
         answers: Vec<CodeEverywhereRequestedInputAnswer>,
@@ -1418,6 +1460,7 @@ enum CodeEverywhereCommand {
     },
     RequestUserInputResponse {
         id: String,
+        input_id: Option<String>,
         turn_id: String,
         response: RequestUserInputResponse,
     },
@@ -1428,6 +1471,17 @@ struct CodeEverywhereCommandOutcome {
     command_kind: &'static str,
     status: &'static str,
     reason: Option<String>,
+    accepted_resolution: Option<CodeEverywherePendingWorkResolution>,
+}
+
+enum CodeEverywherePendingWorkResolution {
+    Approval {
+        approval_id: String,
+        decision: &'static str,
+    },
+    RequestedInput {
+        input_id: String,
+    },
 }
 
 impl CodeEverywhereCommand {
@@ -1454,6 +1508,29 @@ impl CodeEverywhereCommand {
             CodeEverywhereCommand::StatusRequest { .. } => "status_request",
             CodeEverywhereCommand::ApprovalDecision { .. } => "approval_decision",
             CodeEverywhereCommand::RequestUserInputResponse { .. } => "request_user_input_response",
+        }
+    }
+
+    fn accepted_resolution(&self) -> Option<CodeEverywherePendingWorkResolution> {
+        match self {
+            CodeEverywhereCommand::ApprovalDecision {
+                approval_id,
+                decision,
+                ..
+            } => Some(CodeEverywherePendingWorkResolution::Approval {
+                approval_id: approval_id.clone(),
+                decision: match decision {
+                    ReviewDecision::Approved | ReviewDecision::ApprovedForSession => "approve",
+                    ReviewDecision::Denied | ReviewDecision::Abort => "deny",
+                },
+            }),
+            CodeEverywhereCommand::RequestUserInputResponse {
+                input_id: Some(input_id),
+                ..
+            } => Some(CodeEverywherePendingWorkResolution::RequestedInput {
+                input_id: input_id.clone(),
+            }),
+            _ => None,
         }
     }
 }
@@ -1521,6 +1598,7 @@ fn parse_code_everywhere_command(
         CodeEverywhereCommandPayload::RequestUserInputResponse {
             session_id,
             session_epoch,
+            input_id,
             turn_id,
             answers,
         } if matches_session(&session_id, &session_epoch, session) => {
@@ -1539,6 +1617,7 @@ fn parse_code_everywhere_command(
             };
             Some(CodeEverywhereCommand::RequestUserInputResponse {
                 id: record.id,
+                input_id,
                 turn_id,
                 response,
             })
@@ -1575,6 +1654,7 @@ async fn dispatch_code_everywhere_command(
 ) -> CodeEverywhereCommandOutcome {
     let command_id = command.id().to_string();
     let command_kind = command.kind();
+    let accepted_resolution = command.accepted_resolution();
     let result = match command {
         CodeEverywhereCommand::Reply { id, text } => {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -1653,6 +1733,7 @@ async fn dispatch_code_everywhere_command(
         }
         CodeEverywhereCommand::RequestUserInputResponse {
             id,
+            input_id: _,
             turn_id,
             response,
         } => {
@@ -1678,12 +1759,14 @@ async fn dispatch_code_everywhere_command(
             command_kind,
             status: "accepted",
             reason: None,
+            accepted_resolution,
         },
         Err(reason) => CodeEverywhereCommandOutcome {
             command_id,
             command_kind,
             status: "rejected",
             reason: Some(reason),
+            accepted_resolution: None,
         },
     }
 }
@@ -2680,14 +2763,16 @@ mod tests {
     #[test]
     fn code_everywhere_maps_command_outcomes() {
         let session = test_session();
+        let outcome = CodeEverywhereCommandOutcome {
+            command_id: "command-1".to_string(),
+            command_kind: "status_request",
+            status: "accepted",
+            reason: None,
+            accepted_resolution: None,
+        };
         let event = code_everywhere_command_outcome_event(
             &session,
-            CodeEverywhereCommandOutcome {
-                command_id: "command-1".to_string(),
-                command_kind: "status_request",
-                status: "accepted",
-                reason: None,
-            },
+            &outcome,
         );
 
         assert_eq!(event["kind"], "command_outcome");
@@ -2697,6 +2782,48 @@ mod tests {
         assert_eq!(event["outcome"]["commandKind"], "status_request");
         assert_eq!(event["outcome"]["status"], "accepted");
         assert!(event["outcome"]["reason"].is_null());
+    }
+
+    #[test]
+    fn code_everywhere_maps_accepted_pending_work_command_resolutions() {
+        let session = test_session();
+        let approval_events = code_everywhere_command_events(
+            &session,
+            CodeEverywhereCommandOutcome {
+                command_id: "command-approval".to_string(),
+                command_kind: "approval_decision",
+                status: "accepted",
+                reason: None,
+                accepted_resolution: Some(CodeEverywherePendingWorkResolution::Approval {
+                    approval_id: "approval-1".to_string(),
+                    decision: "approve",
+                }),
+            },
+        );
+
+        assert_eq!(approval_events.len(), 2);
+        assert_eq!(approval_events[0]["kind"], "command_outcome");
+        assert_eq!(approval_events[1]["kind"], "approval_resolved");
+        assert_eq!(approval_events[1]["approvalId"], "approval-1");
+        assert_eq!(approval_events[1]["decision"], "approve");
+
+        let input_events = code_everywhere_command_events(
+            &session,
+            CodeEverywhereCommandOutcome {
+                command_id: "command-input".to_string(),
+                command_kind: "request_user_input_response",
+                status: "accepted",
+                reason: None,
+                accepted_resolution: Some(CodeEverywherePendingWorkResolution::RequestedInput {
+                    input_id: "input-1".to_string(),
+                }),
+            },
+        );
+
+        assert_eq!(input_events.len(), 2);
+        assert_eq!(input_events[0]["kind"], "command_outcome");
+        assert_eq!(input_events[1]["kind"], "user_input_resolved");
+        assert_eq!(input_events[1]["inputId"], "input-1");
     }
 
     #[test]
@@ -2779,6 +2906,7 @@ mod tests {
                         "kind": "request_user_input_response",
                         "sessionId": "session-1",
                         "sessionEpoch": "epoch-1",
+                        "inputId": "input-1",
                         "turnId": "turn-1",
                         "answers": [
                             { "questionId": "question-1", "value": "Ship it" }
@@ -2791,8 +2919,8 @@ mod tests {
 
         assert!(matches!(
             parse_code_everywhere_command(claim.commands.into_iter().next().unwrap(), &session),
-            Some(CodeEverywhereCommand::RequestUserInputResponse { response, .. })
-                if response.answers.contains_key("question-1")
+            Some(CodeEverywhereCommand::RequestUserInputResponse { input_id, response, .. })
+                if input_id.as_deref() == Some("input-1") && response.answers.contains_key("question-1")
         ));
     }
 
