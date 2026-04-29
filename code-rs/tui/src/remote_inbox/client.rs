@@ -66,6 +66,7 @@ const MAX_PROCESSED_COMMAND_IDS: usize = 1024;
 
 type PendingCommandFuture = Pin<Box<dyn Future<Output = PendingCommandResult> + Send>>;
 type LatestStatusSnapshot = Arc<Mutex<Option<ClientMessage>>>;
+type SessionPresenceCheck = tokio::task::JoinHandle<Result<bool, reqwest::Error>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteInboxSession {
@@ -628,11 +629,15 @@ fn spawn_code_everywhere_http_client(
     let handle = tokio::spawn(async move {
         let http = CodeEverywhereHttpClient::new(code_everywhere_url);
         let mut hello_published = false;
-        if let Err(err) = http.publish_client_message(&session, &config, ClientMessage::Hello(session.hello(&config))).await {
+        if let Err(err) = http
+            .publish_client_message(&session, &config, ClientMessage::Hello(session.hello(&config)))
+            .await
+        {
             tracing::warn!("failed to publish Code Everywhere session hello: {err}");
         } else {
             hello_published = true;
         }
+        let mut session_presence_check: Option<SessionPresenceCheck> = None;
         let mut poll = tokio::time::interval(CODE_EVERYWHERE_POLL_INTERVAL);
         loop {
             tokio::select! {
@@ -664,21 +669,6 @@ fn spawn_code_everywhere_http_client(
                     }
                 }
                 _ = poll.tick() => {
-                    match http.session_is_present(&session).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            if let Err(err) = http.publish_client_message(&session, &config, ClientMessage::Hello(session.hello(&config))).await {
-                                tracing::debug!("failed to republish Code Everywhere session hello: {err}");
-                                hello_published = false;
-                            } else {
-                                hello_published = true;
-                            }
-                        }
-                        Err(err) => {
-                            tracing::debug!("failed to check Code Everywhere session snapshot: {err}");
-                            hello_published = false;
-                        }
-                    }
                     match http.claim_commands(&session).await {
                         Ok(commands) => {
                             for command in commands {
@@ -690,6 +680,47 @@ fn spawn_code_everywhere_http_client(
                             }
                         }
                         Err(err) => tracing::debug!("failed to claim Code Everywhere commands: {err}"),
+                    }
+                    if session_presence_check
+                        .as_ref()
+                        .is_some_and(tokio::task::JoinHandle::is_finished)
+                    {
+                        match session_presence_check.take().expect("finished check").await {
+                            Ok(Ok(true)) => {}
+                            Ok(Ok(false)) => {
+                                if let Err(err) = http.publish_client_messages(
+                                    &session,
+                                    &config,
+                                    session_republish_messages(
+                                        &session,
+                                        &config,
+                                        &client_latest_status_snapshot,
+                                    ),
+                                )
+                                .await
+                                {
+                                    tracing::debug!("failed to republish Code Everywhere session hello: {err}");
+                                    hello_published = false;
+                                } else {
+                                    hello_published = true;
+                                }
+                            }
+                            Ok(Err(err)) => {
+                                tracing::debug!("failed to check Code Everywhere session snapshot: {err}");
+                                hello_published = false;
+                            }
+                            Err(err) => {
+                                tracing::debug!("Code Everywhere session snapshot check task failed: {err}");
+                                hello_published = false;
+                            }
+                        }
+                    }
+                    if session_presence_check.is_none() {
+                        let check_http = http.clone();
+                        let check_session = session.clone();
+                        session_presence_check = Some(tokio::spawn(async move {
+                            check_http.session_is_present(&check_session).await
+                        }));
                     }
                 }
             }
@@ -720,6 +751,31 @@ impl RemoteInboxSession {
     }
 }
 
+fn session_republish_messages(
+    session: &RemoteInboxSession,
+    config: &RemoteInboxConfig,
+    latest_status_snapshot: &LatestStatusSnapshot,
+) -> Vec<ClientMessage> {
+    let mut messages = vec![ClientMessage::Hello(session.hello(config))];
+    if let Some(latest_status) = latest_status_snapshot_message(latest_status_snapshot) {
+        messages.push(latest_status);
+    }
+    messages
+}
+
+fn latest_status_snapshot_message(
+    latest_status_snapshot: &LatestStatusSnapshot,
+) -> Option<ClientMessage> {
+    match latest_status_snapshot.lock() {
+        Ok(latest) => latest.clone(),
+        Err(err) => {
+            tracing::warn!("failed to read remote inbox status snapshot: {err}");
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
 struct CodeEverywhereHttpClient {
     base_url: String,
     client: reqwest::Client,
@@ -2620,6 +2676,49 @@ mod tests {
         assert_eq!(event["outcome"]["commandKind"], "status_request");
         assert_eq!(event["outcome"]["status"], "accepted");
         assert!(event["outcome"]["reason"].is_null());
+    }
+
+    #[test]
+    fn code_everywhere_republish_includes_latest_status_snapshot() {
+        let session = test_session();
+        let config = RemoteInboxConfig {
+            enabled: true,
+            bridge_url: None,
+            code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
+            token: None,
+            host_label: Some("Mac Studio".to_string()),
+        };
+        let latest_status_snapshot = Arc::new(Mutex::new(Some(ClientMessage::TurnComplete(
+            status_event("Turn complete", Some("Done.")),
+        ))));
+
+        let messages = session_republish_messages(&session, &config, &latest_status_snapshot);
+
+        assert!(matches!(messages.first(), Some(ClientMessage::Hello(_))));
+        assert!(matches!(
+            messages.get(1),
+            Some(ClientMessage::TurnComplete(status))
+                if status.message.as_deref() == Some("Turn complete")
+                    && status.assistant_message.as_deref() == Some("Done.")
+        ));
+    }
+
+    #[test]
+    fn code_everywhere_republish_without_snapshot_sends_only_hello() {
+        let session = test_session();
+        let config = RemoteInboxConfig {
+            enabled: true,
+            bridge_url: None,
+            code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
+            token: None,
+            host_label: Some("Mac Studio".to_string()),
+        };
+        let latest_status_snapshot = Arc::new(Mutex::new(None));
+
+        let messages = session_republish_messages(&session, &config, &latest_status_snapshot);
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages.first(), Some(ClientMessage::Hello(_))));
     }
 
     #[test]
