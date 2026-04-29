@@ -1434,6 +1434,11 @@ struct CodeEverywhereRequestedInputAnswer {
 }
 
 enum CodeEverywhereCommand {
+    Stale {
+        id: String,
+        command_kind: &'static str,
+        reason: String,
+    },
     Reply {
         id: String,
         text: String,
@@ -1487,7 +1492,8 @@ enum CodeEverywherePendingWorkResolution {
 impl CodeEverywhereCommand {
     fn id(&self) -> &str {
         match self {
-            CodeEverywhereCommand::Reply { id, .. }
+            CodeEverywhereCommand::Stale { id, .. }
+            | CodeEverywhereCommand::Reply { id, .. }
             | CodeEverywhereCommand::ContinueAutonomously { id }
             | CodeEverywhereCommand::PauseCurrentTurn { id }
             | CodeEverywhereCommand::NewSession { id }
@@ -1500,6 +1506,7 @@ impl CodeEverywhereCommand {
 
     fn kind(&self) -> &'static str {
         match self {
+            CodeEverywhereCommand::Stale { command_kind, .. } => command_kind,
             CodeEverywhereCommand::Reply { .. } => "reply",
             CodeEverywhereCommand::ContinueAutonomously { .. } => "continue_autonomously",
             CodeEverywhereCommand::PauseCurrentTurn { .. } => "pause_current_turn",
@@ -1539,51 +1546,61 @@ fn parse_code_everywhere_command(
     record: CodeEverywhereCommandRecord,
     session: &RemoteInboxSession,
 ) -> Option<CodeEverywhereCommand> {
+    let command_kind = record.command.kind();
+    let (session_id, session_epoch) = record.command.session_scope();
+    if !matches_session(session_id, session_epoch, session) {
+        return Some(CodeEverywhereCommand::Stale {
+            id: record.id,
+            command_kind,
+            reason: stale_command_reason(session_id, session_epoch, session),
+        });
+    }
+
     match record.command {
         CodeEverywhereCommandPayload::Reply {
-            session_id,
-            session_epoch,
+            session_id: _,
+            session_epoch: _,
             content,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::Reply {
+        } => Some(CodeEverywhereCommand::Reply {
             id: record.id,
             text: content,
         }),
         CodeEverywhereCommandPayload::ContinueAutonomously {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::ContinueAutonomously {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::ContinueAutonomously {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::PauseCurrentTurn {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::PauseCurrentTurn {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::PauseCurrentTurn {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::NewSession {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::NewSession {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::NewSession {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::EndSession {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::EndSession {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::EndSession {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::StatusRequest {
-            session_id,
-            session_epoch,
-        } if matches_session(&session_id, &session_epoch, session) => Some(CodeEverywhereCommand::StatusRequest {
+            session_id: _,
+            session_epoch: _,
+        } => Some(CodeEverywhereCommand::StatusRequest {
             id: record.id,
         }),
         CodeEverywhereCommandPayload::ApprovalDecision {
-            session_id,
-            session_epoch,
+            session_id: _,
+            session_epoch: _,
             approval_id,
             decision,
-        } if matches_session(&session_id, &session_epoch, session) => {
+        } => {
             let decision = match decision.as_str() {
                 "approve" => ReviewDecision::Approved,
                 "deny" => ReviewDecision::Denied,
@@ -1596,12 +1613,12 @@ fn parse_code_everywhere_command(
             })
         }
         CodeEverywhereCommandPayload::RequestUserInputResponse {
-            session_id,
-            session_epoch,
+            session_id: _,
+            session_epoch: _,
             input_id,
             turn_id,
             answers,
-        } if matches_session(&session_id, &session_epoch, session) => {
+        } => {
             let response = RequestUserInputResponse {
                 answers: answers
                     .into_iter()
@@ -1622,8 +1639,69 @@ fn parse_code_everywhere_command(
                 response,
             })
         }
-        _ => None,
     }
+}
+
+impl CodeEverywhereCommandPayload {
+    fn kind(&self) -> &'static str {
+        match self {
+            CodeEverywhereCommandPayload::Reply { .. } => "reply",
+            CodeEverywhereCommandPayload::ContinueAutonomously { .. } => "continue_autonomously",
+            CodeEverywhereCommandPayload::PauseCurrentTurn { .. } => "pause_current_turn",
+            CodeEverywhereCommandPayload::NewSession { .. } => "new_session",
+            CodeEverywhereCommandPayload::EndSession { .. } => "end_session",
+            CodeEverywhereCommandPayload::StatusRequest { .. } => "status_request",
+            CodeEverywhereCommandPayload::ApprovalDecision { .. } => "approval_decision",
+            CodeEverywhereCommandPayload::RequestUserInputResponse { .. } => "request_user_input_response",
+        }
+    }
+
+    fn session_scope(&self) -> (&str, &str) {
+        match self {
+            CodeEverywhereCommandPayload::Reply {
+                session_id,
+                session_epoch,
+                ..
+            }
+            | CodeEverywhereCommandPayload::ContinueAutonomously {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::PauseCurrentTurn {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::NewSession {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::EndSession {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::StatusRequest {
+                session_id,
+                session_epoch,
+            }
+            | CodeEverywhereCommandPayload::ApprovalDecision {
+                session_id,
+                session_epoch,
+                ..
+            }
+            | CodeEverywhereCommandPayload::RequestUserInputResponse {
+                session_id,
+                session_epoch,
+                ..
+            } => (session_id, session_epoch),
+        }
+    }
+}
+
+fn stale_command_reason(session_id: &str, session_epoch: &str, session: &RemoteInboxSession) -> String {
+    format!(
+        "stale session scope: command targeted session {session_id} epoch {session_epoch}, active session is {} epoch {}",
+        session.session_id, session.session_epoch
+    )
 }
 
 fn matches_session(session_id: &str, session_epoch: &str, session: &RemoteInboxSession) -> bool {
@@ -1656,6 +1734,7 @@ async fn dispatch_code_everywhere_command(
     let command_kind = command.kind();
     let accepted_resolution = command.accepted_resolution();
     let result = match command {
+        CodeEverywhereCommand::Stale { reason, .. } => Err(reason),
         CodeEverywhereCommand::Reply { id, text } => {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             if !app_event_tx.send_with_result(AppEvent::RemoteInboxReply {
@@ -2892,7 +2971,14 @@ mod tests {
             parse_code_everywhere_command(reply, &session),
             Some(CodeEverywhereCommand::Reply { id, text }) if id == "command-1" && text == "keep going"
         ));
-        assert!(parse_code_everywhere_command(stale, &session).is_none());
+        assert!(matches!(
+            parse_code_everywhere_command(stale, &session),
+            Some(CodeEverywhereCommand::Stale { id, command_kind, reason })
+                if id == "command-2"
+                    && command_kind == "status_request"
+                    && reason.contains("old-epoch")
+                    && reason.contains("epoch-1")
+        ));
     }
 
     #[test]
