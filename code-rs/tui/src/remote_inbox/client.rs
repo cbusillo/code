@@ -669,7 +669,7 @@ fn spawn_code_everywhere_http_client(
                     }
                 }
                 _ = poll.tick() => {
-                    match http.claim_commands(&session).await {
+                    match http.claim_commands(&session, &config).await {
                         Ok(commands) => {
                             for command in commands {
                                 let queue_new_session = matches!(command, CodeEverywhereCommand::NewSession { .. });
@@ -689,7 +689,10 @@ fn spawn_code_everywhere_http_client(
                                 } else {
                                     None
                                 };
-                                if let Err(err) = http.publish_command_outcome(&session, outcome).await {
+                                if let Err(err) = http
+                                    .publish_command_outcome(&session, &config, outcome)
+                                    .await
+                                {
                                     tracing::warn!("failed to publish Code Everywhere command outcome: {err}");
                                     hello_published = false;
                                 } else if let Some(command_id) = new_session_command_id {
@@ -738,10 +741,11 @@ fn spawn_code_everywhere_http_client(
                         }
                     }
                     if session_presence_check.is_none() {
+                        let check_config = config.clone();
                         let check_http = http.clone();
                         let check_session = session.clone();
                         session_presence_check = Some(tokio::spawn(async move {
-                            check_http.session_is_present(&check_session).await
+                            check_http.session_is_present(&check_session, &check_config).await
                         }));
                     }
                 }
@@ -835,31 +839,46 @@ impl CodeEverywhereHttpClient {
             return Ok(());
         }
 
-        self.publish_events(events).await
+        self.publish_events(config, events).await
     }
 
     async fn publish_command_outcome(
         &self,
         session: &RemoteInboxSession,
+        config: &RemoteInboxConfig,
         outcome: CodeEverywhereCommandOutcome,
     ) -> Result<(), reqwest::Error> {
-        self.publish_events(code_everywhere_command_events(session, outcome)).await
+        self.publish_events(config, code_everywhere_command_events(session, outcome))
+            .await
     }
 
-    async fn publish_events(&self, events: Vec<Value>) -> Result<(), reqwest::Error> {
-        self.client
-            .post(local_http_url(&self.base_url, "events"))
-            .json(&json!({ "events": events }))
-            .send()
-            .await?
-            .error_for_status()?;
+    async fn publish_events(
+        &self,
+        config: &RemoteInboxConfig,
+        events: Vec<Value>,
+    ) -> Result<(), reqwest::Error> {
+        self.apply_auth(
+            self.client
+                .post(local_http_url(&self.base_url, "events"))
+                .json(&json!({ "events": events })),
+            config,
+        )
+        .send()
+        .await?
+        .error_for_status()?;
         Ok(())
     }
 
-    async fn session_is_present(&self, session: &RemoteInboxSession) -> Result<bool, reqwest::Error> {
+    async fn session_is_present(
+        &self,
+        session: &RemoteInboxSession,
+        config: &RemoteInboxConfig,
+    ) -> Result<bool, reqwest::Error> {
         let snapshot = self
-            .client
-            .get(local_http_url(&self.base_url, "snapshot"))
+            .apply_auth(
+                self.client.get(local_http_url(&self.base_url, "snapshot")),
+                config,
+            )
             .send()
             .await?
             .error_for_status()?
@@ -874,11 +893,15 @@ impl CodeEverywhereHttpClient {
     async fn claim_commands(
         &self,
         session: &RemoteInboxSession,
+        config: &RemoteInboxConfig,
     ) -> Result<Vec<CodeEverywhereCommand>, reqwest::Error> {
         let response = self
-            .client
-            .post(local_http_url(&self.base_url, "commands/claim"))
-            .json(&json!({ "sessionId": session.session_id }))
+            .apply_auth(
+                self.client
+                    .post(local_http_url(&self.base_url, "commands/claim"))
+                    .json(&json!({ "sessionId": session.session_id })),
+                config,
+            )
             .send()
             .await?
             .error_for_status()?
@@ -890,6 +913,27 @@ impl CodeEverywhereHttpClient {
             .into_iter()
             .filter_map(|record| parse_code_everywhere_command(record, session))
             .collect())
+    }
+
+    fn apply_auth(
+        &self,
+        request: reqwest::RequestBuilder,
+        config: &RemoteInboxConfig,
+    ) -> reqwest::RequestBuilder {
+        if let Some(header) = code_everywhere_auth_header_value(config) {
+            request.header(reqwest::header::AUTHORIZATION, header)
+        } else {
+            request
+        }
+    }
+}
+
+fn code_everywhere_auth_header_value(config: &RemoteInboxConfig) -> Option<String> {
+    let token = config.token.as_ref()?.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(format!("Bearer {token}"))
     }
 }
 
@@ -2742,6 +2786,27 @@ mod tests {
             local_http_url("http://127.0.0.1:4789/local/", "events"),
             "http://127.0.0.1:4789/local/events"
         );
+    }
+
+    #[test]
+    fn code_everywhere_http_auth_header_uses_remote_inbox_token() {
+        let config = RemoteInboxConfig {
+            enabled: true,
+            bridge_url: None,
+            code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
+            token: Some("  apple-proof-token  ".to_string()),
+            host_id: None,
+            host_label: None,
+        };
+
+        assert_eq!(
+            code_everywhere_auth_header_value(&config).as_deref(),
+            Some("Bearer apple-proof-token")
+        );
+
+        let mut blank_config = config;
+        blank_config.token = Some("   ".to_string());
+        assert_eq!(code_everywhere_auth_header_value(&blank_config), None);
     }
 
     #[test]
