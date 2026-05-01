@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::MarketplaceAddResponse;
+use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallResponse;
@@ -20,30 +22,30 @@ use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
+use codex_protocol::message_history::HistoryEntry;
 use codex_protocol::openai_models::ModelPreset;
-use codex_protocol::protocol::GetHistoryEntryResponseEvent;
-use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RateLimitSnapshot;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
 
+use crate::app_command::AppCommand;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::chatwidget::UserMessage;
+use codex_app_server_protocol::AskForApproval;
 use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_realtime_webrtc::RealtimeWebrtcEvent;
 use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 
@@ -59,6 +61,13 @@ pub(crate) enum RealtimeAudioDeviceKind {
 pub(crate) enum ThreadGoalSetMode {
     ConfirmIfExists,
     ReplaceExisting,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HistoryLookupResponse {
+    pub(crate) offset: usize,
+    pub(crate) log_id: u64,
+    pub(crate) entry: Option<HistoryEntry>,
 }
 
 impl RealtimeAudioDeviceKind {
@@ -107,6 +116,13 @@ pub(crate) enum RateLimitRefreshOrigin {
     StatusCommand { request_id: u64 },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeymapEditIntent {
+    ReplaceAll,
+    AddAlternate,
+    ReplaceOne { old_key: String },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -124,13 +140,13 @@ pub(crate) enum AppEvent {
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {
         thread_id: ThreadId,
-        op: Op,
+        op: AppCommand,
     },
 
     /// Deliver a synthetic history lookup response to a specific thread channel.
     ThreadHistoryEntryResponse {
         thread_id: ThreadId,
-        event: GetHistoryEntryResponseEvent,
+        event: HistoryLookupResponse,
     },
 
     /// Start a new session.
@@ -172,9 +188,15 @@ pub(crate) enum AppEvent {
     #[allow(dead_code)]
     FatalExitRequest(String),
 
-    /// Forward an `Op` to the Agent. Using an `AppEvent` for this avoids
+    /// Forward a command to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
-    CodexOp(Op),
+    CodexOp(AppCommand),
+
+    /// Approve one retry of a recent auto-review denial selected in the TUI.
+    ApproveRecentAutoReviewDenial {
+        thread_id: ThreadId,
+        id: String,
+    },
 
     /// Kick off an asynchronous file search for the given query (text after
     /// the `@`). Previous searches may be cancelled by the app layer so there
@@ -206,7 +228,7 @@ pub(crate) enum AppEvent {
         mode: ThreadGoalSetMode,
     },
 
-    /// Pause or unpause the current thread goal.
+    /// Pause or resume the current thread goal.
     SetThreadGoalStatus {
         thread_id: ThreadId,
         status: ThreadGoalStatus,
@@ -268,10 +290,68 @@ pub(crate) enum AppEvent {
         cwd: PathBuf,
     },
 
+    /// Fetch lifecycle hook inventory for the provided working directory.
+    FetchHooksList {
+        cwd: PathBuf,
+    },
+
     /// Result of fetching plugin marketplace state.
     PluginsLoaded {
         cwd: PathBuf,
         result: Result<PluginListResponse, String>,
+    },
+
+    /// Result of fetching lifecycle hook inventory.
+    HooksLoaded {
+        cwd: PathBuf,
+        result: Result<codex_app_server_protocol::HooksListResponse, String>,
+    },
+
+    /// Open the prompt for adding a marketplace source.
+    OpenMarketplaceAddPrompt,
+
+    /// Replace the plugins popup with a marketplace-add loading state.
+    OpenMarketplaceAddLoading {
+        source: String,
+    },
+
+    /// Add a marketplace from the provided source.
+    FetchMarketplaceAdd {
+        cwd: PathBuf,
+        source: String,
+    },
+
+    /// Result of adding a marketplace.
+    MarketplaceAddLoaded {
+        cwd: PathBuf,
+        source: String,
+        result: Result<MarketplaceAddResponse, String>,
+    },
+
+    /// Open the confirmation prompt for removing a marketplace.
+    OpenMarketplaceRemoveConfirm {
+        marketplace_name: String,
+        marketplace_display_name: String,
+    },
+
+    /// Replace the plugins popup with a marketplace-remove loading state.
+    OpenMarketplaceRemoveLoading {
+        marketplace_display_name: String,
+    },
+
+    /// Remove a marketplace by name.
+    FetchMarketplaceRemove {
+        cwd: PathBuf,
+        marketplace_name: String,
+        marketplace_display_name: String,
+    },
+
+    /// Result of removing a marketplace.
+    MarketplaceRemoveLoaded {
+        cwd: PathBuf,
+        marketplace_name: String,
+        marketplace_display_name: String,
+        result: Result<MarketplaceRemoveResponse, String>,
     },
 
     /// Replace the plugins popup with a plugin-detail loading state.
@@ -384,7 +464,33 @@ pub(crate) enum AppEvent {
         result: Result<SkillsListResponse, String>,
     },
 
+    /// Begin buffering initial resume replay rows before they are written to scrollback.
+    BeginInitialHistoryReplayBuffer,
+
     InsertHistoryCell(Box<dyn HistoryCell>),
+
+    /// Finish buffering initial resume replay after all replay events have been queued.
+    EndInitialHistoryReplayBuffer,
+
+    /// Replace the contiguous run of streaming `AgentMessageCell`s at the end of
+    /// the transcript with a single `AgentMarkdownCell` that stores the raw
+    /// markdown source and re-renders from it on resize.
+    ///
+    /// Emitted by `ChatWidget::flush_answer_stream_with_separator` after stream
+    /// finalization. The `App` handler walks backward through `transcript_cells`
+    /// to find the `AgentMessageCell` run and splices in the consolidated cell.
+    /// The `cwd` keeps local file-link display stable across the final re-render.
+    ConsolidateAgentMessage {
+        source: String,
+        cwd: PathBuf,
+    },
+
+    /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the
+    /// end of the transcript with a single source-backed `ProposedPlanCell`.
+    ///
+    /// Emitted by `ChatWidget::on_plan_item_completed` after plan stream
+    /// finalization.
+    ConsolidateProposedPlan(String),
 
     /// Apply rollback semantics to local transcript cells.
     ///
@@ -542,8 +648,8 @@ pub(crate) enum AppEvent {
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 
-    /// Update the current sandbox policy in the running app and widget.
-    UpdateSandboxPolicy(SandboxPolicy),
+    /// Update the current permission profile in the running app and widget.
+    UpdatePermissionProfile(PermissionProfile),
 
     /// Update the current approvals reviewer in the running app and widget.
     UpdateApprovalsReviewer(ApprovalsReviewer),
@@ -619,6 +725,19 @@ pub(crate) enum AppEvent {
         enabled: bool,
     },
 
+    /// Enable or disable a hook by stable hook key.
+    SetHookEnabled {
+        key: String,
+        enabled: bool,
+    },
+
+    /// Result of persisting hook enabled state.
+    HookEnabledSet {
+        key: String,
+        enabled: bool,
+        result: Result<(), String>,
+    },
+
     /// Notify that the manage skills popup was closed.
     ManageSkillsClosed,
 
@@ -689,6 +808,7 @@ pub(crate) enum AppEvent {
     /// Apply a user-confirmed status-line item ordering/selection.
     StatusLineSetup {
         items: Vec<StatusLineItem>,
+        use_theme_colors: bool,
     },
     /// Dismiss the status-line setup UI without changing config.
     StatusLineSetupCancelled,
@@ -707,6 +827,42 @@ pub(crate) enum AppEvent {
     /// Apply a user-confirmed syntax theme selection.
     SyntaxThemeSelected {
         name: String,
+    },
+
+    /// Runtime syntax theme preview changed; refresh theme-derived UI colors.
+    SyntaxThemePreviewed,
+
+    /// Open set/remove actions for the selected keymap action.
+    OpenKeymapActionMenu {
+        context: String,
+        action: String,
+    },
+
+    /// Open binding selection before replacing one binding for an action.
+    OpenKeymapReplaceBindingMenu {
+        context: String,
+        action: String,
+    },
+
+    /// Open key capture for the selected keymap action.
+    OpenKeymapCapture {
+        context: String,
+        action: String,
+        intent: KeymapEditIntent,
+    },
+
+    /// Apply a captured key to the selected keymap action.
+    KeymapCaptured {
+        context: String,
+        action: String,
+        key: String,
+        intent: KeymapEditIntent,
+    },
+
+    /// Remove the custom root binding for the selected keymap action.
+    KeymapCleared {
+        context: String,
+        action: String,
     },
 }
 

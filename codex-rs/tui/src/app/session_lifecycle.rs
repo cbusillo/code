@@ -385,13 +385,8 @@ impl App {
     }
 
     pub(super) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        self.overlay = None;
-        self.transcript_cells.clear();
-        self.deferred_history_lines.clear();
+        self.reset_transcript_state_after_clear();
         tui.clear_pending_history_lines();
-        self.has_emitted_history_lines = false;
-        self.backtrack = BacktrackState::default();
-        self.backtrack_render_pending = false;
         Self::clear_terminal_for_thread_switch(&mut tui.terminal)?;
         Ok(())
     }
@@ -641,7 +636,7 @@ impl App {
         let resume_cwd = if self.remote_app_server_url.is_some() {
             current_cwd.clone()
         } else {
-            match crate::resolve_cwd_for_resume_or_fork(
+            match crate::session_resume::resolve_cwd_for_resume_or_fork(
                 tui,
                 &self.config,
                 &current_cwd,
@@ -652,9 +647,9 @@ impl App {
             )
             .await?
             {
-                crate::ResolveCwdOutcome::Continue(Some(cwd)) => cwd,
-                crate::ResolveCwdOutcome::Continue(None) => current_cwd.clone(),
-                crate::ResolveCwdOutcome::Exit => {
+                crate::session_resume::ResolveCwdOutcome::Continue(Some(cwd)) => cwd,
+                crate::session_resume::ResolveCwdOutcome::Continue(None) => current_cwd.clone(),
+                crate::session_resume::ResolveCwdOutcome::Exit => {
                     return Ok(AppRunControl::Exit(ExitReason::UserRequested));
                 }
             }
