@@ -118,6 +118,50 @@ def test_recommend_actions_prioritizes_review_comments():
     ]
 
 
+def test_recommend_actions_ignores_stale_failed_jobs_from_completed_runs():
+    actions = gh_pr_watch.recommend_actions(
+        sample_pr(),
+        sample_checks(),
+        [],
+        [
+            {
+                "run_id": 99,
+                "run_status": "completed",
+                "run_conclusion": "failure",
+                "job_name": "unit tests",
+                "conclusion": "failure",
+            }
+        ],
+        [],
+        3,
+        3,
+    )
+
+    assert actions == ["ready_to_merge"]
+
+
+def test_recommend_actions_diagnoses_failed_jobs_from_active_runs():
+    actions = gh_pr_watch.recommend_actions(
+        sample_pr(),
+        sample_checks(all_terminal=False, pending_count=1),
+        [],
+        [
+            {
+                "run_id": 99,
+                "run_status": "in_progress",
+                "run_conclusion": "",
+                "job_name": "unit tests",
+                "conclusion": "failure",
+            }
+        ],
+        [],
+        0,
+        3,
+    )
+
+    assert actions == ["diagnose_ci_failure"]
+
+
 def test_run_watch_keeps_polling_open_ready_to_merge_pr(monkeypatch):
     sleeps = []
     events = []

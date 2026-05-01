@@ -610,6 +610,10 @@ def unique_actions(actions):
     return out
 
 
+def has_active_failed_job(failed_jobs):
+    return any(str(job.get("run_status") or "").lower() != "completed" for job in failed_jobs)
+
+
 def is_pr_ready_to_merge(pr, checks_summary, new_review_items):
     if pr["closed"] or pr["merged"]:
         return False
@@ -643,7 +647,7 @@ def recommend_actions(pr, checks_summary, failed_runs, failed_jobs, new_review_i
     if new_review_items:
         actions.append("process_review_comment")
 
-    has_failed_pr_checks = checks_summary["failed_count"] > 0 or bool(failed_jobs)
+    has_failed_pr_checks = checks_summary["failed_count"] > 0 or has_active_failed_job(failed_jobs)
     if has_failed_pr_checks:
         if checks_summary["all_terminal"] and retries_used >= max_retries:
             actions.append("stop_exhausted_retries")
