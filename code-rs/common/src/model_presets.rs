@@ -85,7 +85,7 @@ static PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
             model: "gpt-5.4".to_string(),
             display_name: "gpt-5.4".to_string(),
             description: "Frontier flagship model.".to_string(),
-            default_reasoning_effort: ReasoningEffort::Medium,
+            default_reasoning_effort: ReasoningEffort::XHigh,
             supported_reasoning_efforts: vec![
                 ReasoningEffortPreset {
                     effort: ReasoningEffort::Low,
