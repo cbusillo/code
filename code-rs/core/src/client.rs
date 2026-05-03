@@ -396,7 +396,7 @@ impl Clone for ModelClient {
             websockets_disabled: AtomicBool::new(
                 self.websockets_disabled.load(Ordering::Relaxed),
             ),
-            websocket_session: Arc::clone(&self.websocket_session),
+            websocket_session: Arc::new(TokioMutex::new(ResponsesWebsocketSession::default())),
             verbosity: self.verbosity,
             debug_logger: Arc::clone(&self.debug_logger),
         }
@@ -690,7 +690,6 @@ impl ModelClient {
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
-        self.reset_responses_websocket_session().await;
         let env_log_tag = std::env::var("CODE_DEBUG_LOG_TAG").ok();
         let log_tag = env_log_tag
             .as_deref()
