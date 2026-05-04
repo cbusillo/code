@@ -155,15 +155,59 @@ pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
 
 const DEFAULT_RESPONSES_ORIGINATOR_HEADER: &str = "code_cli_rs";
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoteInboxConfig {
-    #[serde(default)]
     pub enabled: bool,
     pub bridge_url: Option<String>,
-    pub code_everywhere_url: Option<String>,
     pub token: Option<String>,
     pub host_id: Option<String>,
     pub host_label: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RemoteInboxConfigToml {
+    #[serde(default)]
+    enabled: bool,
+    bridge_url: Option<String>,
+    code_everywhere_url: Option<String>,
+    token: Option<String>,
+    host_id: Option<String>,
+    host_label: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for RemoteInboxConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RemoteInboxConfigToml::deserialize(deserializer)?;
+        let bridge_url = raw
+            .bridge_url
+            .or_else(|| raw.code_everywhere_url.and_then(migrate_legacy_remote_inbox_url));
+
+        Ok(Self {
+            enabled: raw.enabled,
+            bridge_url,
+            token: raw.token,
+            host_id: raw.host_id,
+            host_label: raw.host_label,
+        })
+    }
+}
+
+fn migrate_legacy_remote_inbox_url(url: String) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        tracing::warn!(
+            "remote_inbox.code_everywhere_url is deprecated; use remote_inbox.bridge_url"
+        );
+        return Some(url);
+    }
+
+    tracing::warn!(
+        "remote_inbox.code_everywhere_url HTTP polling is no longer supported; configure remote_inbox.bridge_url with the Every Code WebSocket bridge URL"
+    );
+    None
 }
 
 fn normalize_auto_drive_routing_reasoning_levels(
@@ -590,12 +634,26 @@ impl Config {
         let mut root_value = TomlValue::Table(Default::default());
         let cli_paths: Vec<String> = cli_overrides.iter().map(|(path, _)| path.clone()).collect();
         for (path, value) in cli_overrides {
+            let (path, value) = normalize_cli_override(path, value);
             validation::apply_toml_override(&mut root_value, &path, value);
         }
 
         let cfg = validation::deserialize_config_toml_with_cli_warnings(&root_value, &cli_paths)?;
         Config::load_from_base_config_with_overrides(cfg, overrides, code_home)
     }
+}
+
+fn normalize_cli_override(path: String, value: TomlValue) -> (String, TomlValue) {
+    if path == "remote_inbox.code_everywhere_url"
+        && matches!(
+            value.as_str().map(str::trim),
+            Some(url) if url.starts_with("ws://") || url.starts_with("wss://")
+        )
+    {
+        return ("remote_inbox.bridge_url".to_string(), value);
+    }
+
+    (path, value)
 }
 
 pub fn load_config_as_toml_with_cli_overrides(
@@ -1956,7 +2014,6 @@ persistence = "none"
 [remote_inbox]
 enabled = true
 bridge_url = "ws://127.0.0.1:8787/every-code/connect"
-code_everywhere_url = "http://127.0.0.1:4789"
 token = "shared-secret"
 host_id = "host-mac-studio"
 host_label = "Mac Studio"
@@ -1969,7 +2026,6 @@ host_label = "Mac Studio"
             Some(RemoteInboxConfig {
                 enabled: true,
                 bridge_url: Some("ws://127.0.0.1:8787/every-code/connect".to_string()),
-                code_everywhere_url: Some("http://127.0.0.1:4789".to_string()),
                 token: Some("shared-secret".to_string()),
                 host_id: Some("host-mac-studio".to_string()),
                 host_label: Some("Mac Studio".to_string()),
@@ -1987,10 +2043,6 @@ host_label = "Mac Studio"
             resolved.remote_inbox.bridge_url.as_deref(),
             Some("ws://127.0.0.1:8787/every-code/connect")
         );
-        assert_eq!(
-            resolved.remote_inbox.code_everywhere_url.as_deref(),
-            Some("http://127.0.0.1:4789")
-        );
         assert_eq!(resolved.remote_inbox.token.as_deref(), Some("shared-secret"));
         assert_eq!(resolved.remote_inbox.host_id.as_deref(), Some("host-mac-studio"));
         assert_eq!(resolved.remote_inbox.host_label.as_deref(), Some("Mac Studio"));
@@ -2001,6 +2053,109 @@ host_label = "Mac Studio"
             code_home.path().to_path_buf(),
         )?;
         assert_eq!(default_resolved.remote_inbox, RemoteInboxConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn remote_inbox_config_accepts_legacy_bridge_url_key() {
+        let cfg = toml::from_str::<ConfigToml>(
+            r#"
+[remote_inbox]
+enabled = true
+code_everywhere_url = "ws://127.0.0.1:8787/every-code/connect"
+"#,
+        )
+        .expect("legacy remote inbox key should deserialize");
+
+        assert_eq!(
+            cfg.remote_inbox,
+            Some(RemoteInboxConfig {
+                enabled: true,
+                bridge_url: Some("ws://127.0.0.1:8787/every-code/connect".to_string()),
+                token: None,
+                host_id: None,
+                host_label: None,
+            })
+        );
+    }
+
+    #[test]
+    fn remote_inbox_config_prefers_bridge_url_over_legacy_key() {
+        let cfg = toml::from_str::<ConfigToml>(
+            r#"
+[remote_inbox]
+enabled = true
+bridge_url = "ws://127.0.0.1:8787/every-code/connect"
+code_everywhere_url = "ws://127.0.0.1:9999/legacy"
+"#,
+        )
+        .expect("remote inbox config with both keys should deserialize");
+
+        assert_eq!(
+            cfg.remote_inbox
+                .expect("remote inbox config")
+                .bridge_url
+                .as_deref(),
+            Some("ws://127.0.0.1:8787/every-code/connect")
+        );
+    }
+
+    #[test]
+    fn remote_inbox_config_rejects_legacy_http_polling_url() {
+        let cfg = toml::from_str::<ConfigToml>(
+            r#"
+[remote_inbox]
+enabled = true
+code_everywhere_url = "http://127.0.0.1:4789"
+"#,
+        )
+        .expect("legacy remote inbox HTTP key should deserialize");
+
+        assert_eq!(
+            cfg.remote_inbox
+                .expect("remote inbox config")
+                .bridge_url
+                .as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_inbox_cli_override_accepts_legacy_bridge_url_key() -> std::io::Result<()> {
+        let code_home = TempDir::new()?;
+        let config = ConfigBuilder::new()
+            .with_code_home(code_home.path().to_path_buf())
+            .with_cli_overrides(vec![
+                ("remote_inbox.enabled".to_string(), TomlValue::Boolean(true)),
+                (
+                    "remote_inbox.code_everywhere_url".to_string(),
+                    TomlValue::String("ws://127.0.0.1:8787/every-code/connect".to_string()),
+                ),
+            ])
+            .load()?;
+
+        assert_eq!(
+            config.remote_inbox.bridge_url.as_deref(),
+            Some("ws://127.0.0.1:8787/every-code/connect")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_inbox_cli_override_does_not_migrate_legacy_http_url() -> std::io::Result<()> {
+        let code_home = TempDir::new()?;
+        let config = ConfigBuilder::new()
+            .with_code_home(code_home.path().to_path_buf())
+            .with_cli_overrides(vec![
+                ("remote_inbox.enabled".to_string(), TomlValue::Boolean(true)),
+                (
+                    "remote_inbox.code_everywhere_url".to_string(),
+                    TomlValue::String("http://127.0.0.1:4789".to_string()),
+                ),
+            ])
+            .load()?;
+
+        assert_eq!(config.remote_inbox.bridge_url.as_deref(), None);
         Ok(())
     }
 
