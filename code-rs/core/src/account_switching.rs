@@ -95,6 +95,7 @@ fn usage_reset_blocked_until(
         .into_iter()
         .chain(snapshot.secondary_next_reset_at)
         .max()
+        .or(snapshot.last_usage_limit_hit_at)
 }
 
 fn usage_used_percent(snapshot: &account_usage::StoredRateLimitSnapshot) -> Option<f64> {
@@ -372,6 +373,44 @@ mod tests {
         let reset_in = Some(60 * 60);
         account_usage::record_usage_limit_hint(home.path(), &b.id, Some("Pro"), reset_in, now)
             .expect("hint");
+
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        let next =
+            select_next_account_id(home.path(), &state, false, now, Some(a.id.as_str()))
+                .expect("select");
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn skips_chatgpt_accounts_blocked_by_hint_without_reset() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+
+        let now = fixed_now() + chrono::Duration::hours(1);
+        account_usage::record_usage_limit_hint(
+            home.path(),
+            &b.id,
+            Some("Pro"),
+            None,
+            now + chrono::Duration::hours(1),
+        )
+        .expect("hint");
 
         let mut state = RateLimitSwitchState::default();
         state.mark_limited(&a.id, AuthMode::ChatGPT, None);
