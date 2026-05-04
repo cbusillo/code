@@ -1,4 +1,5 @@
 use crate::exec::ExecToolCallOutput;
+use crate::protocol::RateLimitReachedType;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::StatusCode;
 use serde_json;
@@ -239,6 +240,7 @@ impl std::fmt::Display for RetryLimitReachedError {
 pub struct UsageLimitReachedError {
     pub plan_type: Option<String>,
     pub resets_in_seconds: Option<u64>,
+    pub rate_limit_reached_type: Option<RateLimitReachedType>,
 }
 
 impl UsageLimitReachedError {
@@ -418,6 +420,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: Some("plus".to_string()),
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),
@@ -430,6 +433,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),
@@ -442,6 +446,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: Some("pro".to_string()),
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),
@@ -454,6 +459,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: None,
             resets_in_seconds: Some(5 * 60),
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),
@@ -466,6 +472,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: Some("plus".to_string()),
             resets_in_seconds: Some(3 * 3600 + 32 * 60),
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),
@@ -478,6 +485,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: None,
             resets_in_seconds: Some(2 * 86_400 + 3 * 3600 + 5 * 60),
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),
@@ -490,6 +498,7 @@ mod tests {
         let err = UsageLimitReachedError {
             plan_type: None,
             resets_in_seconds: Some(30),
+            rate_limit_reached_type: None,
         };
         assert_eq!(
             err.to_string(),

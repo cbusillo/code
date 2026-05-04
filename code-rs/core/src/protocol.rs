@@ -747,6 +747,53 @@ fn rate_limit_snapshot_to_protocol(
         secondary: Some(secondary),
         credits: None,
         plan_type: None,
+        rate_limit_reached_type: snapshot
+            .rate_limit_reached_type
+            .map(rate_limit_reached_type_to_protocol),
+    }
+}
+
+fn rate_limit_reached_type_to_protocol(
+    reached: RateLimitReachedType,
+) -> code_protocol::protocol::RateLimitReachedType {
+    match reached {
+        RateLimitReachedType::RateLimitReached => {
+            code_protocol::protocol::RateLimitReachedType::RateLimitReached
+        }
+        RateLimitReachedType::WorkspaceOwnerCreditsDepleted => {
+            code_protocol::protocol::RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+        }
+        RateLimitReachedType::WorkspaceMemberCreditsDepleted => {
+            code_protocol::protocol::RateLimitReachedType::WorkspaceMemberCreditsDepleted
+        }
+        RateLimitReachedType::WorkspaceOwnerUsageLimitReached => {
+            code_protocol::protocol::RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+        }
+        RateLimitReachedType::WorkspaceMemberUsageLimitReached => {
+            code_protocol::protocol::RateLimitReachedType::WorkspaceMemberUsageLimitReached
+        }
+    }
+}
+
+fn rate_limit_reached_type_from_protocol(
+    reached: code_protocol::protocol::RateLimitReachedType,
+) -> RateLimitReachedType {
+    match reached {
+        code_protocol::protocol::RateLimitReachedType::RateLimitReached => {
+            RateLimitReachedType::RateLimitReached
+        }
+        code_protocol::protocol::RateLimitReachedType::WorkspaceOwnerCreditsDepleted => {
+            RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+        }
+        code_protocol::protocol::RateLimitReachedType::WorkspaceMemberCreditsDepleted => {
+            RateLimitReachedType::WorkspaceMemberCreditsDepleted
+        }
+        code_protocol::protocol::RateLimitReachedType::WorkspaceOwnerUsageLimitReached => {
+            RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+        }
+        code_protocol::protocol::RateLimitReachedType::WorkspaceMemberUsageLimitReached => {
+            RateLimitReachedType::WorkspaceMemberUsageLimitReached
+        }
     }
 }
 
@@ -800,6 +847,9 @@ fn rate_limit_snapshot_from_protocol(
         secondary_window_minutes,
         primary_reset_after_seconds,
         secondary_reset_after_seconds,
+        rate_limit_reached_type: snapshot
+            .rate_limit_reached_type
+            .map(rate_limit_reached_type_from_protocol),
     }
 }
 
@@ -1159,6 +1209,19 @@ pub struct RateLimitSnapshotEvent {
     /// Seconds until the secondary window resets, if reported by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secondary_reset_after_seconds: Option<u64>,
+    /// Backend classification for a reached limit, when provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reached_type: Option<RateLimitReachedType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitReachedType {
+    RateLimitReached,
+    WorkspaceOwnerCreditsDepleted,
+    WorkspaceMemberCreditsDepleted,
+    WorkspaceOwnerUsageLimitReached,
+    WorkspaceMemberUsageLimitReached,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

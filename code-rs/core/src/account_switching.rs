@@ -8,6 +8,7 @@ use code_app_server_protocol::AuthMode;
 use crate::auth;
 use crate::account_usage;
 use crate::auth_accounts;
+use crate::protocol::RateLimitReachedType;
 
 #[derive(Debug, Default)]
 pub struct RateLimitSwitchState {
@@ -66,6 +67,29 @@ fn account_has_credentials(account: &auth_accounts::StoredAccount) -> bool {
 fn usage_reset_blocked_until(
     snapshot: &account_usage::StoredRateLimitSnapshot,
 ) -> Option<DateTime<Utc>> {
+    if snapshot
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.rate_limit_reached_type)
+        .is_some_and(|reached| {
+            matches!(
+                reached,
+                RateLimitReachedType::RateLimitReached
+                    | RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+                    | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+                    | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+                    | RateLimitReachedType::WorkspaceMemberUsageLimitReached
+            )
+        })
+    {
+        return snapshot
+            .primary_next_reset_at
+            .into_iter()
+            .chain(snapshot.secondary_next_reset_at)
+            .max()
+            .or(snapshot.last_usage_limit_hit_at);
+    }
+
     snapshot
         .primary_next_reset_at
         .into_iter()
@@ -278,6 +302,19 @@ mod tests {
         Utc.with_ymd_and_hms(2025, 12, 22, 12, 0, 0).unwrap()
     }
 
+    fn sample_snapshot(used_percent: f64) -> crate::protocol::RateLimitSnapshotEvent {
+        crate::protocol::RateLimitSnapshotEvent {
+            primary_used_percent: used_percent,
+            secondary_used_percent: used_percent,
+            primary_to_secondary_ratio_percent: 25.0,
+            primary_window_minutes: 300,
+            secondary_window_minutes: 10_080,
+            primary_reset_after_seconds: Some(600),
+            secondary_reset_after_seconds: Some(3_600),
+            rate_limit_reached_type: None,
+        }
+    }
+
     #[test]
     fn selects_another_chatgpt_account_when_available() {
         let home = tempdir().expect("tmp");
@@ -342,6 +379,72 @@ mod tests {
             select_next_account_id(home.path(), &state, false, now, Some(a.id.as_str()))
                 .expect("select");
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn typed_usage_limit_snapshot_blocks_only_that_account() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+        let c = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-c", "c@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert c");
+
+        let now = fixed_now();
+        let mut limited_snapshot = sample_snapshot(95.0);
+        limited_snapshot.rate_limit_reached_type = Some(
+            RateLimitReachedType::WorkspaceMemberUsageLimitReached,
+        );
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &b.id,
+            Some("Pro"),
+            &limited_snapshot,
+            now,
+        )
+        .expect("limited snapshot");
+        let mut available_snapshot = sample_snapshot(20.0);
+        available_snapshot.primary_reset_after_seconds = None;
+        available_snapshot.secondary_reset_after_seconds = None;
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &c.id,
+            Some("Pro"),
+            &available_snapshot,
+            now,
+        )
+        .expect("available snapshot");
+
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now,
+            Some(a.id.as_str()),
+        )
+        .expect("select");
+        assert_eq!(next.as_deref(), Some(c.id.as_str()));
     }
 
     #[test]

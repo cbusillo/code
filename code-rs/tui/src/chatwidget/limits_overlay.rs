@@ -132,6 +132,17 @@ impl LimitsOverlay {
         }
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(dead_code)]
+    pub(crate) fn has_snapshot_view(&self) -> bool {
+        match &self.content {
+            LimitsOverlayContent::Tabs(tabs) => tabs
+                .iter()
+                .any(|tab| matches!(tab.body, LimitsTabBody::View(_))),
+            _ => false,
+        }
+    }
+
     pub(crate) fn lines_for_width(&self, width: u16) -> Vec<RtLine<'static>> {
         let mut lines = match &self.content {
             LimitsOverlayContent::Loading => loading_lines(),

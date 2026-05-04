@@ -3130,6 +3130,7 @@ mod tests {
                 secondary_window_minutes: 5,
                 primary_reset_after_seconds: Some(30),
                 secondary_reset_after_seconds: Some(60),
+                rate_limit_reached_type: None,
             },
             legend: vec![RateLimitLegendEntry {
                 label: "primary".into(),

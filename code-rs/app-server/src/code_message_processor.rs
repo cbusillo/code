@@ -118,6 +118,7 @@ use code_protocol::mcp_protocol::CancelLoginChatGptResponse;
 use code_protocol::mcp_protocol::LogoutChatGptResponse;
 use code_protocol::account::PlanType;
 use code_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
+use code_protocol::protocol::RateLimitReachedType as CoreRateLimitReachedType;
 use code_protocol::protocol::RateLimitWindow as CoreRateLimitWindow;
 
 // Removed deprecated ChatGPT login support scaffolding
@@ -2143,6 +2144,7 @@ mod tests {
             secondary_window_minutes: 1440,
             primary_reset_after_seconds: Some(12),
             secondary_reset_after_seconds: Some(34),
+            rate_limit_reached_type: None,
         };
 
         let snapshot = rate_limit_snapshot_from_event(&event, Some(PlanType::Pro));
@@ -2338,6 +2340,31 @@ fn rate_limit_snapshot_from_event(
         secondary: Some(secondary),
         credits: None,
         plan_type,
+        rate_limit_reached_type: snapshot
+            .rate_limit_reached_type
+            .map(rate_limit_reached_type_to_protocol),
+    }
+}
+
+fn rate_limit_reached_type_to_protocol(
+    reached: code_core::protocol::RateLimitReachedType,
+) -> CoreRateLimitReachedType {
+    match reached {
+        code_core::protocol::RateLimitReachedType::RateLimitReached => {
+            CoreRateLimitReachedType::RateLimitReached
+        }
+        code_core::protocol::RateLimitReachedType::WorkspaceOwnerCreditsDepleted => {
+            CoreRateLimitReachedType::WorkspaceOwnerCreditsDepleted
+        }
+        code_core::protocol::RateLimitReachedType::WorkspaceMemberCreditsDepleted => {
+            CoreRateLimitReachedType::WorkspaceMemberCreditsDepleted
+        }
+        code_core::protocol::RateLimitReachedType::WorkspaceOwnerUsageLimitReached => {
+            CoreRateLimitReachedType::WorkspaceOwnerUsageLimitReached
+        }
+        code_core::protocol::RateLimitReachedType::WorkspaceMemberUsageLimitReached => {
+            CoreRateLimitReachedType::WorkspaceMemberUsageLimitReached
+        }
     }
 }
 

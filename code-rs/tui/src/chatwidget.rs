@@ -134,7 +134,7 @@ use code_auto_drive_core::{
     TurnConfig,
     TurnDescriptor,
 };
-use self::limits_overlay::{LimitsOverlayContent, LimitsTab};
+use self::limits_overlay::{LimitsOverlayContent, LimitsTab, LimitsTabBody};
 use crate::chrome_launch::ChromeLaunchOption;
 use crate::insert_history::word_wrap_lines;
 use self::rate_limit_refresh::{
@@ -1051,7 +1051,7 @@ use code_cloud_tasks_client::{ApplyOutcome, CloudTaskError, CreatedTask, TaskSum
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
 use code_core::config_types::{validation_tool_category, ValidationCategory};
-use code_core::protocol::RateLimitSnapshotEvent;
+use code_core::protocol::{RateLimitReachedType, RateLimitSnapshotEvent};
 use code_core::protocol::ValidationGroup;
 use crate::rate_limits_view::{
     build_limits_view, RateLimitDisplayConfig, RateLimitResetInfo, DEFAULT_DISPLAY_CONFIG,
@@ -9109,13 +9109,26 @@ impl ChatWidget<'_> {
         }
     }
 
-    fn set_limits_overlay_tabs(&mut self, tabs: Vec<LimitsTab>) {
-        let content = if tabs.is_empty() {
+    fn build_limits_overlay_content(
+        &self,
+        snapshot: Option<RateLimitSnapshotEvent>,
+    ) -> LimitsOverlayContent {
+        let reset_info = self.rate_limit_reset_info();
+        let tabs = self.build_limits_tabs(snapshot, reset_info);
+        if tabs.is_empty() {
             LimitsOverlayContent::Placeholder
         } else {
             LimitsOverlayContent::Tabs(tabs)
-        };
-        self.set_limits_overlay_content(content);
+        }
+    }
+
+    fn limits_content_has_snapshot(content: &LimitsOverlayContent) -> bool {
+        match content {
+            LimitsOverlayContent::Tabs(tabs) => tabs
+                .iter()
+                .any(|tab| matches!(tab.body, LimitsTabBody::View(_))),
+            _ => false,
+        }
     }
 
     fn build_limits_tabs(
@@ -9410,6 +9423,17 @@ impl ChatWidget<'_> {
             RtSpan::raw(status_field_prefix("Plan")),
             RtSpan::styled(plan.to_string(), value_style),
         ]));
+        if let Some(snapshot) = record.and_then(|r| r.snapshot.as_ref()) {
+            if let Some(reached_type) = snapshot.rate_limit_reached_type {
+                lines.push(RtLine::from(vec![
+                    RtSpan::raw(status_field_prefix("Status")),
+                    RtSpan::styled(
+                        Self::rate_limit_reached_label(reached_type),
+                        Style::default().fg(crate::colors::warning()),
+                    ),
+                ]));
+            }
+        }
         let tokens_prefix = status_field_prefix("Tokens");
         let tokens_summary = format!("{formatted_total} total {cost_suffix}");
         lines.push(RtLine::from(vec![
@@ -9438,6 +9462,24 @@ impl ChatWidget<'_> {
             ]));
         }
         lines
+    }
+
+    fn rate_limit_reached_label(reached_type: RateLimitReachedType) -> String {
+        match reached_type {
+            RateLimitReachedType::RateLimitReached => "Usage limit reached".to_string(),
+            RateLimitReachedType::WorkspaceOwnerCreditsDepleted => {
+                "Workspace owner credits depleted".to_string()
+            }
+            RateLimitReachedType::WorkspaceMemberCreditsDepleted => {
+                "Workspace member credits depleted".to_string()
+            }
+            RateLimitReachedType::WorkspaceOwnerUsageLimitReached => {
+                "Workspace owner usage limit reached".to_string()
+            }
+            RateLimitReachedType::WorkspaceMemberUsageLimitReached => {
+                "Workspace member usage limit reached".to_string()
+            }
+        }
     }
 
     fn hourly_usage_lines(
@@ -16878,12 +16920,12 @@ impl ChatWidget<'_> {
         let snapshot = self.rate_limit_snapshot.clone();
         let needs_refresh = self.should_refresh_limits();
 
-        if self.rate_limit_fetch_inflight || needs_refresh {
+        let content = self.build_limits_overlay_content(snapshot.clone());
+        let has_snapshot = Self::limits_content_has_snapshot(&content);
+        if (self.rate_limit_fetch_inflight || needs_refresh) && !has_snapshot {
             self.set_limits_overlay_content(LimitsOverlayContent::Loading);
         } else {
-            let reset_info = self.rate_limit_reset_info();
-            let tabs = self.build_limits_tabs(snapshot.clone(), reset_info);
-            self.set_limits_overlay_tabs(tabs);
+            self.set_limits_overlay_content(content);
         }
 
         self.request_redraw();
@@ -16955,7 +16997,12 @@ impl ChatWidget<'_> {
         }
 
         if show_loading {
-            self.set_limits_overlay_content(LimitsOverlayContent::Loading);
+            let content = self.build_limits_overlay_content(self.rate_limit_snapshot.clone());
+            if Self::limits_content_has_snapshot(&content) {
+                self.set_limits_overlay_content(content);
+            } else {
+                self.set_limits_overlay_content(LimitsOverlayContent::Loading);
+            }
             self.request_redraw();
         }
 
@@ -16989,7 +17036,11 @@ impl ChatWidget<'_> {
     pub(crate) fn on_rate_limit_refresh_failed(&mut self, message: String) {
         self.rate_limit_fetch_inflight = false;
 
-        let content = if self.rate_limit_snapshot.is_some() {
+        let has_live_snapshot = self.rate_limit_snapshot.is_some();
+        let content = self.build_limits_overlay_content(self.rate_limit_snapshot.clone());
+        let content = if Self::limits_content_has_snapshot(&content) {
+            content
+        } else if has_live_snapshot {
             LimitsOverlayContent::Error(message.clone())
         } else {
             LimitsOverlayContent::Placeholder
@@ -16997,7 +17048,7 @@ impl ChatWidget<'_> {
         self.set_limits_overlay_content(content);
         self.request_redraw();
 
-        if self.rate_limit_snapshot.is_some() {
+        if has_live_snapshot {
             self.history_push_plain_state(history_cell::new_warning_event(message));
         }
     }
@@ -25414,16 +25465,12 @@ Have we met every part of this goal and is there no further work to do?"#
         let snapshot = self.rate_limit_snapshot.clone();
         let needs_refresh = self.should_refresh_limits();
 
-        let content = if self.rate_limit_fetch_inflight || needs_refresh {
+        let content = self.build_limits_overlay_content(snapshot.clone());
+        let has_snapshot = Self::limits_content_has_snapshot(&content);
+        let content = if (self.rate_limit_fetch_inflight || needs_refresh) && !has_snapshot {
             LimitsOverlayContent::Loading
         } else {
-            let reset_info = self.rate_limit_reset_info();
-            let tabs = self.build_limits_tabs(snapshot.clone(), reset_info);
-            if tabs.is_empty() {
-                LimitsOverlayContent::Placeholder
-            } else {
-                LimitsOverlayContent::Tabs(tabs)
-            }
+            content
         };
 
         if needs_refresh {
@@ -31517,6 +31564,7 @@ impl Drop for AutoReviewStubGuard {
     use crate::chatwidget::message::UserMessage;
     use crate::chatwidget::smoke_helpers::{enter_test_runtime_guard, ChatWidgetHarness};
     use crate::history_cell::{self, ExploreAggregationCell, HistoryCellType};
+    use base64::Engine;
     use code_common::model_presets::ReasoningEffortPreset;
     use code_auto_drive_core::{
         AutoContinueMode,
@@ -31590,6 +31638,68 @@ use code_core::protocol::OrderMeta;
                 other => panic!("expected UserInput, got {other:?}"),
             }
         }
+    }
+
+    fn test_rate_limit_snapshot() -> RateLimitSnapshotEvent {
+        RateLimitSnapshotEvent {
+            primary_used_percent: 12.0,
+            secondary_used_percent: 34.0,
+            primary_to_secondary_ratio_percent: 25.0,
+            primary_window_minutes: 300,
+            secondary_window_minutes: 10_080,
+            primary_reset_after_seconds: Some(600),
+            secondary_reset_after_seconds: Some(3_600),
+            rate_limit_reached_type: None,
+        }
+    }
+
+    fn write_test_chatgpt_account(
+        code_home: &std::path::Path,
+        account_id: &str,
+        email: &str,
+    ) {
+        let payload = serde_json::json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "pro",
+                "chatgpt_account_id": account_id,
+                "chatgpt_user_id": "user-12345",
+                "user_id": "user-12345"
+            }
+        });
+        let header = serde_json::json!({ "alg": "none", "typ": "JWT" });
+        let encode = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).expect("json bytes"))
+        };
+        let id_token = format!(
+            "{}.{}.{}",
+            encode(header),
+            encode(payload),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+        );
+        let accounts = serde_json::json!({
+            "version": 1,
+            "active_account_id": account_id,
+            "accounts": [
+                {
+                    "id": account_id,
+                    "mode": "chatgpt",
+                    "label": email,
+                    "tokens": {
+                        "id_token": id_token,
+                        "access_token": "access",
+                        "refresh_token": "refresh",
+                        "account_id": account_id
+                    }
+                }
+            ]
+        });
+        std::fs::write(
+            code_home.join("auth_accounts.json"),
+            serde_json::to_string_pretty(&accounts).expect("accounts json"),
+        )
+        .expect("write auth accounts");
     }
 
     fn expect_post_turn_developer_input(code_op_rx: &mut UnboundedReceiver<Op>) -> String {
@@ -32590,6 +32700,52 @@ use code_core::protocol::OrderMeta;
 
         chat.rate_limit_secondary_next_reset_at = None;
         chat.maybe_schedule_rate_limit_refresh();
+    }
+
+    #[test]
+    fn limits_overlay_uses_cached_snapshot_while_refresh_due() {
+        let _runtime_guard = enter_test_runtime_guard();
+        let code_home = tempdir().expect("temp code home");
+        let mut harness = ChatWidgetHarness::new();
+        harness.with_chat(|chat| {
+            chat.config.code_home = code_home.path().to_path_buf();
+            write_test_chatgpt_account(
+                &chat.config.code_home,
+                "limits-account",
+                "limits@example.com",
+            );
+            account_usage::record_rate_limit_snapshot(
+                &chat.config.code_home,
+                "limits-account",
+                Some("Pro"),
+                &test_rate_limit_snapshot(),
+                Utc::now(),
+            )
+            .expect("snapshot stored");
+            chat.rate_limit_last_fetch_at = None;
+            chat.rate_limit_fetch_inflight = false;
+
+            let tabs = chat.build_limits_tabs(None, RateLimitResetInfo::default());
+            assert!(
+                tabs.iter()
+                    .any(|tab| matches!(tab.body, LimitsTabBody::View(_))),
+                "test fixture should produce a cached snapshot tab"
+            );
+
+            chat.show_limits_settings_ui();
+
+            let content = chat
+                .settings
+                .overlay
+                .as_ref()
+                .and_then(|overlay| overlay.limits_content())
+                .expect("limits content");
+            assert!(
+                content.has_snapshot_view(),
+                "cached snapshot should remain visible while refresh runs"
+            );
+            assert!(chat.rate_limit_fetch_inflight);
+        });
     }
 
     #[test]

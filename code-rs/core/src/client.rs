@@ -78,6 +78,7 @@ use crate::openai_tools::create_tools_json_for_responses_api;
 use crate::openai_tools::ConfigShellToolType;
 use crate::openai_tools::ToolsConfig;
 use crate::protocol::RateLimitSnapshotEvent;
+use crate::protocol::RateLimitReachedType;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::TokenUsage;
 use crate::reasoning::clamp_reasoning_effort_for_model;
@@ -257,6 +258,7 @@ struct Error {
     // Optional fields available on "usage_limit_reached" and "usage_not_included" errors
     plan_type: Option<String>,
     resets_in_seconds: Option<u64>,
+    rate_limit_reached_type: Option<RateLimitReachedType>,
 }
 
 #[derive(Serialize)]
@@ -1881,16 +1883,20 @@ impl ModelClient {
                                         .map(|s| s.to_string());
                                     let resets_in_seconds =
                                         body.as_ref().and_then(|err| err.error.resets_in_seconds);
+                                    let reached_type = body
+                                        .as_ref()
+                                        .and_then(|err| err.error.rate_limit_reached_type);
                                     let code_home = self.code_home().to_path_buf();
                                     let account_id = current_account_id.clone();
                                     tokio::task::spawn_blocking(move || {
                                         let observed_at = Utc::now();
-                                        if let Err(err) = account_usage::record_usage_limit_hint(
+                                        if let Err(err) = account_usage::record_usage_limit_hint_with_type(
                                             &code_home,
                                             &account_id,
                                             plan_type.as_deref(),
                                             resets_in_seconds,
                                             observed_at,
+                                            reached_type,
                                         ) {
                                             tracing::warn!("Failed to persist usage limit hint: {err}");
                                         }
@@ -2023,6 +2029,7 @@ impl ModelClient {
                                 return Err(CodexErr::UsageLimitReached(UsageLimitReachedError {
                                     plan_type,
                                     resets_in_seconds,
+                                    rate_limit_reached_type: error.rate_limit_reached_type,
                                 }));
                             } else if error.r#type.as_deref() == Some("usage_not_included") {
                                 return Err(CodexErr::UsageNotIncluded);
@@ -2399,6 +2406,7 @@ fn map_wrapped_websocket_error_event(event: WrappedWebsocketErrorEvent) -> Optio
                 return Some(CodexErr::UsageLimitReached(UsageLimitReachedError {
                     plan_type: error.plan_type,
                     resets_in_seconds: error.resets_in_seconds,
+                    rate_limit_reached_type: error.rate_limit_reached_type,
                 }));
             }
 
@@ -2646,6 +2654,7 @@ fn parse_rate_limit_snapshot(headers: &HeaderMap) -> Option<RateLimitSnapshotEve
         secondary_window_minutes,
         primary_reset_after_seconds,
         secondary_reset_after_seconds,
+        rate_limit_reached_type: None,
     })
 }
 
@@ -3101,6 +3110,7 @@ async fn process_sse<S>(
                                         UsageLimitReachedError {
                                             plan_type: error.plan_type,
                                             resets_in_seconds: error.resets_in_seconds,
+                                            rate_limit_reached_type: error.rate_limit_reached_type,
                                         },
                                     ));
                                 } else if error.r#type.as_deref() == Some("usage_not_included") {
@@ -4043,6 +4053,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         let retry_after = try_parse_retry_after(&err, now).expect("retry");
@@ -4060,6 +4071,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
         let retry_after = try_parse_retry_after(&err, now).expect("retry");
         assert_eq!(retry_after.delay, Duration::from_secs_f64(1.898));
@@ -4075,6 +4087,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
         let retry_after = try_parse_retry_after(&err, now).expect("retry");
         assert_eq!(retry_after.delay, Duration::from_secs(35));
@@ -4090,6 +4103,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         assert!(try_parse_retry_after(&err, now).is_none());
@@ -4143,6 +4157,7 @@ mod tests {
                 param: None,
                 plan_type: None,
                 resets_in_seconds: None,
+                rate_limit_reached_type: None,
             };
             chosen = try_parse_retry_after(&err, now);
         }
@@ -4169,6 +4184,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         for status in [
@@ -4194,6 +4210,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         assert!(!is_quota_exceeded_http_error(StatusCode::BAD_REQUEST, &error));
@@ -4208,6 +4225,7 @@ mod tests {
             param: Some("reasoning.summary".to_string()),
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         assert!(is_reasoning_summary_rejected(&error_with_param));
@@ -4219,6 +4237,7 @@ mod tests {
             param: None,
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         assert!(is_reasoning_summary_rejected(&error_by_message));
@@ -4232,6 +4251,7 @@ mod tests {
             param: Some("reasoning.summary".to_string()),
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         };
 
         assert!(!is_reasoning_summary_rejected(&rate_limit_error));

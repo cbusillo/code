@@ -3107,13 +3107,15 @@ async fn run_turn(
                     let usage_account = ctx.account_id.clone();
                     let usage_plan = ctx.plan.clone();
                     let resets = limit_err.resets_in_seconds;
+                    let reached_type = limit_err.rate_limit_reached_type;
                     spawn_usage_task(move || {
-                        if let Err(err) = account_usage::record_usage_limit_hint(
+                        if let Err(err) = account_usage::record_usage_limit_hint_with_type(
                             &usage_home,
                             &usage_account,
                             usage_plan.as_deref(),
                             resets,
                             Utc::now(),
+                            reached_type,
                         ) {
                             warn!("Failed to persist usage limit hint: {err}");
                         }
