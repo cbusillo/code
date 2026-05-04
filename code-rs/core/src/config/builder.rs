@@ -4,7 +4,7 @@ use toml::Value as TomlValue;
 
 use super::sources;
 use super::validation::{apply_toml_override, deserialize_config_toml_with_cli_warnings};
-use super::{Config, ConfigOverrides, ConfigToml};
+use super::{Config, ConfigOverrides, ConfigToml, normalize_cli_override};
 
 #[derive(Default, Debug, Clone)]
 pub struct ConfigBuilder {
@@ -42,6 +42,7 @@ impl ConfigBuilder {
         let mut root_value = sources::load_config_as_toml(&code_home)?;
         let cli_paths: Vec<String> = self.cli_overrides.iter().map(|(path, _)| path.clone()).collect();
         for (path, value) in self.cli_overrides.into_iter() {
+            let (path, value) = normalize_cli_override(path, value);
             apply_toml_override(&mut root_value, &path, value);
         }
 
@@ -71,6 +72,7 @@ impl ConfigBuilder {
         let mut root_value = sources::load_config_as_toml(&code_home)?;
         let cli_paths: Vec<String> = self.cli_overrides.iter().map(|(path, _)| path.clone()).collect();
         for (path, value) in self.cli_overrides.into_iter() {
+            let (path, value) = normalize_cli_override(path, value);
             apply_toml_override(&mut root_value, &path, value);
         }
 
