@@ -966,6 +966,7 @@ mod tests {
             secondary_window_minutes: 60,
             primary_reset_after_seconds: Some(900),
             secondary_reset_after_seconds: Some(3600),
+            rate_limit_reached_type: None,
         }
     }
 

@@ -130,6 +130,7 @@ pub fn fault_to_error(fault: InjectedFault) -> anyhow::Error {
             Some(FaultReset::Seconds(secs)) => anyhow!(CodexErr::UsageLimitReached(UsageLimitReachedError {
                 plan_type: None,
                 resets_in_seconds: Some(secs),
+                rate_limit_reached_type: None,
             })),
             Some(FaultReset::Timestamp(instant)) => {
                 let reset_at = chrono::Utc::now()

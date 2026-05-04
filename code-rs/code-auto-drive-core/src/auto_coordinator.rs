@@ -1571,6 +1571,7 @@ mod tests {
         let err = anyhow!(CodexErr::UsageLimitReached(UsageLimitReachedError {
             plan_type: None,
             resets_in_seconds: None,
+            rate_limit_reached_type: None,
         }));
         match classify_model_error(&err) {
             RetryDecision::Fatal(e) => {

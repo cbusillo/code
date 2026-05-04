@@ -4,7 +4,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
-use crate::protocol::RateLimitSnapshotEvent;
+use crate::protocol::{RateLimitReachedType, RateLimitSnapshotEvent};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -516,11 +516,33 @@ pub fn record_usage_limit_hint(
     resets_in_seconds: Option<u64>,
     observed_at: DateTime<Utc>,
 ) -> std::io::Result<()> {
+    record_usage_limit_hint_with_type(
+        code_home,
+        account_id,
+        plan,
+        resets_in_seconds,
+        observed_at,
+        Some(RateLimitReachedType::RateLimitReached),
+    )
+}
+
+pub fn record_usage_limit_hint_with_type(
+    code_home: &Path,
+    account_id: &str,
+    plan: Option<&str>,
+    resets_in_seconds: Option<u64>,
+    observed_at: DateTime<Utc>,
+    reached_type: Option<RateLimitReachedType>,
+) -> std::io::Result<()> {
+    let reached_type = reached_type.or(Some(RateLimitReachedType::RateLimitReached));
     if resets_in_seconds.is_none() {
         return with_usage_file(code_home, account_id, plan, |data| {
             data.last_updated = observed_at;
             let mut info = data.rate_limit.take().unwrap_or_default();
             info.last_usage_limit_hit_at = Some(observed_at);
+            if let Some(snapshot) = info.snapshot.as_mut() {
+                snapshot.rate_limit_reached_type = reached_type;
+            }
             data.rate_limit = Some(info);
         });
     }
@@ -529,6 +551,9 @@ pub fn record_usage_limit_hint(
         data.last_updated = observed_at;
         let mut info = data.rate_limit.take().unwrap_or_default();
         info.last_usage_limit_hit_at = Some(observed_at);
+        if let Some(snapshot) = info.snapshot.as_mut() {
+            snapshot.rate_limit_reached_type = reached_type;
+        }
         if let Some(seconds) = resets_in_seconds {
             let reset_at = observed_at + Duration::seconds(seconds as i64);
             info.primary_next_reset_at = Some(reset_at);
@@ -826,6 +851,7 @@ mod tests {
     //! The helper tests below construct scenarios targeting each rule so the state
     //! machine in `record_threshold_log` can be refactored confidently.
     use super::*;
+    use crate::protocol::RateLimitReachedType;
     use std::fs::File;
     use crate::protocol::TokenUsage;
     use tempfile::TempDir;
@@ -837,6 +863,19 @@ mod tests {
             output_tokens: 80,
             reasoning_output_tokens: 10,
             total_tokens: 210,
+        }
+    }
+
+    fn sample_snapshot() -> RateLimitSnapshotEvent {
+        RateLimitSnapshotEvent {
+            primary_used_percent: 50.0,
+            secondary_used_percent: 60.0,
+            primary_to_secondary_ratio_percent: 25.0,
+            primary_window_minutes: 300,
+            secondary_window_minutes: 10_080,
+            primary_reset_after_seconds: Some(600),
+            secondary_reset_after_seconds: Some(3_600),
+            rate_limit_reached_type: None,
         }
     }
 
@@ -854,9 +893,72 @@ mod tests {
         assert_eq!(snapshot.account_id, "acct-1");
         assert_eq!(snapshot.plan.as_deref(), Some("Team"));
         assert_eq!(snapshot.last_usage_limit_hit_at, Some(now));
+        assert_eq!(
+            snapshot
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.rate_limit_reached_type),
+            None,
+            "a hint without a prior snapshot should not fabricate usage bars"
+        );
         let expected_reset = now + Duration::seconds(300);
         assert_eq!(snapshot.primary_next_reset_at, Some(expected_reset));
         assert_eq!(snapshot.secondary_next_reset_at, Some(expected_reset));
+    }
+
+    #[test]
+    fn usage_limit_hint_marks_existing_snapshot_with_reached_type() {
+        let home = TempDir::new().expect("tempdir");
+        let now = Utc::now();
+        let mut snapshot = sample_snapshot();
+
+        record_rate_limit_snapshot(home.path(), "acct-1", Some("Team"), &snapshot, now)
+            .expect("snapshot recorded");
+        record_usage_limit_hint_with_type(
+            home.path(),
+            "acct-1",
+            Some("Team"),
+            Some(300),
+            now,
+            Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
+        )
+        .expect("hint recorded");
+
+        let snapshots = list_rate_limit_snapshots(home.path()).expect("snapshot listing");
+        let stored = snapshots
+            .iter()
+            .find(|snapshot| snapshot.account_id == "acct-1")
+            .expect("account snapshot");
+        assert_eq!(
+            stored
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.rate_limit_reached_type),
+            Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached)
+        );
+
+        snapshot.primary_used_percent = 1.0;
+        record_rate_limit_snapshot(
+            home.path(),
+            "acct-1",
+            Some("Team"),
+            &snapshot,
+            now + Duration::minutes(1),
+        )
+        .expect("fresh snapshot recorded");
+        let snapshots = list_rate_limit_snapshots(home.path()).expect("snapshot listing");
+        let stored = snapshots
+            .iter()
+            .find(|snapshot| snapshot.account_id == "acct-1")
+            .expect("account snapshot");
+        assert_eq!(
+            stored
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.rate_limit_reached_type),
+            None,
+            "fresh successful snapshots clear stale reached classification"
+        );
     }
 
     #[test]

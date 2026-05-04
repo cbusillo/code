@@ -992,6 +992,12 @@ impl LimitsSettingsContent {
         self.overlay.set_content(content);
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(dead_code)]
+    pub(crate) fn has_snapshot_view(&self) -> bool {
+        self.overlay.has_snapshot_view()
+    }
+
     fn render_tabs(&self, area: Rect, buf: &mut Buffer) {
         use ratatui::widgets::Paragraph;
 
@@ -1523,6 +1529,12 @@ impl SettingsOverlayView {
 
     pub(crate) fn limits_content_mut(&mut self) -> Option<&mut LimitsSettingsContent> {
         self.limits_content.as_mut()
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(dead_code)]
+    pub(crate) fn limits_content(&self) -> Option<&LimitsSettingsContent> {
+        self.limits_content.as_ref()
     }
 
     pub(crate) fn set_section(&mut self, section: SettingsSection) -> bool {

@@ -39,6 +39,7 @@ use code_protocol::protocol::RejectConfig as CoreRejectConfig;
 use code_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use code_protocol::protocol::CreditsSnapshot as CoreCreditsSnapshot;
 use code_protocol::protocol::NetworkAccess as CoreNetworkAccess;
+use code_protocol::protocol::RateLimitReachedType as CoreRateLimitReachedType;
 use code_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use code_protocol::protocol::RateLimitWindow as CoreRateLimitWindow;
 use code_protocol::protocol::SessionSource as CoreSessionSource;
@@ -3418,6 +3419,8 @@ pub struct RateLimitSnapshot {
     pub secondary: Option<RateLimitWindow>,
     pub credits: Option<CreditsSnapshot>,
     pub plan_type: Option<PlanType>,
+    #[serde(default)]
+    pub rate_limit_reached_type: Option<RateLimitReachedType>,
 }
 
 impl From<CoreRateLimitSnapshot> for RateLimitSnapshot {
@@ -3429,6 +3432,41 @@ impl From<CoreRateLimitSnapshot> for RateLimitSnapshot {
             secondary: value.secondary.map(RateLimitWindow::from),
             credits: value.credits.map(CreditsSnapshot::from),
             plan_type: value.plan_type,
+            rate_limit_reached_type: value
+                .rate_limit_reached_type
+                .map(RateLimitReachedType::from),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum RateLimitReachedType {
+    RateLimitReached,
+    WorkspaceOwnerCreditsDepleted,
+    WorkspaceMemberCreditsDepleted,
+    WorkspaceOwnerUsageLimitReached,
+    WorkspaceMemberUsageLimitReached,
+}
+
+impl From<CoreRateLimitReachedType> for RateLimitReachedType {
+    fn from(value: CoreRateLimitReachedType) -> Self {
+        match value {
+            CoreRateLimitReachedType::RateLimitReached => Self::RateLimitReached,
+            CoreRateLimitReachedType::WorkspaceOwnerCreditsDepleted => {
+                Self::WorkspaceOwnerCreditsDepleted
+            }
+            CoreRateLimitReachedType::WorkspaceMemberCreditsDepleted => {
+                Self::WorkspaceMemberCreditsDepleted
+            }
+            CoreRateLimitReachedType::WorkspaceOwnerUsageLimitReached => {
+                Self::WorkspaceOwnerUsageLimitReached
+            }
+            CoreRateLimitReachedType::WorkspaceMemberUsageLimitReached => {
+                Self::WorkspaceMemberUsageLimitReached
+            }
         }
     }
 }
