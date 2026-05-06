@@ -17019,8 +17019,22 @@ impl ChatWidget<'_> {
         if self.rate_limit_fetch_inflight {
             return false;
         }
+        let now = Utc::now();
+        let reset_due = self
+            .rate_limit_primary_next_reset_at
+            .into_iter()
+            .chain(self.rate_limit_secondary_next_reset_at)
+            .any(|reset_at| {
+                now >= reset_at
+                    && self
+                        .rate_limit_last_fetch_at
+                        .is_none_or(|last_fetch| last_fetch < reset_at)
+            });
+        if reset_due {
+            return true;
+        }
         match self.rate_limit_last_fetch_at {
-            Some(ts) => Utc::now() - ts > RATE_LIMIT_REFRESH_INTERVAL,
+            Some(ts) => now - ts > RATE_LIMIT_REFRESH_INTERVAL,
             None => true,
         }
     }
@@ -32745,6 +32759,39 @@ use code_core::protocol::OrderMeta;
                 "cached snapshot should remain visible while refresh runs"
             );
             assert!(chat.rate_limit_fetch_inflight);
+        });
+    }
+
+    #[test]
+    fn limits_refreshes_when_reset_time_has_passed() {
+        let mut harness = ChatWidgetHarness::new();
+        harness.with_chat(|chat| {
+            chat.rate_limit_fetch_inflight = false;
+            let now = Utc::now();
+            let expired_reset = now - ChronoDuration::minutes(1);
+            chat.rate_limit_last_fetch_at = Some(expired_reset - ChronoDuration::seconds(1));
+            chat.rate_limit_primary_next_reset_at = Some(expired_reset);
+            chat.rate_limit_secondary_next_reset_at = Some(now + ChronoDuration::hours(1));
+
+            assert!(
+                chat.should_refresh_limits(),
+                "expired hourly reset should force refresh even inside normal interval"
+            );
+
+            chat.rate_limit_primary_next_reset_at = Some(now + ChronoDuration::hours(1));
+            chat.rate_limit_secondary_next_reset_at = Some(expired_reset);
+
+            assert!(
+                chat.should_refresh_limits(),
+                "expired weekly reset should force refresh even inside normal interval"
+            );
+
+            chat.rate_limit_last_fetch_at = Some(expired_reset + ChronoDuration::seconds(1));
+
+            assert!(
+                !chat.should_refresh_limits(),
+                "successful fetch after reset should not refresh repeatedly"
+            );
         });
     }
 
