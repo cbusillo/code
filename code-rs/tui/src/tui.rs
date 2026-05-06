@@ -4,6 +4,7 @@ use std::io::Stdout;
 use std::io::stdout;
 use std::io::BufWriter;
 use std::io::Write;
+use std::process::Command;
 
 use code_core::config::Config;
 use crossterm::cursor::MoveTo;
@@ -184,6 +185,16 @@ pub fn init(config: &Config) -> Result<(Tui, TerminalInfo)> {
 
 /// Query terminal capabilities before entering raw mode
 fn query_terminal_info() -> TerminalInfo {
+    if should_skip_terminal_capability_queries() {
+        tracing::info!(
+            "Skipping terminal capability queries because the tmux session has no attached clients"
+        );
+        return TerminalInfo {
+            picker: None,
+            font_size: default_terminal_font_size(),
+        };
+    }
+
     // Try to query using ratatui_image's picker
     let picker = match Picker::from_query_stdio() {
         Ok(p) => {
@@ -206,15 +217,57 @@ fn query_terminal_info() -> TerminalInfo {
         // Fall back to our own terminal query
         crate::terminal_info::get_cell_size_pixels().unwrap_or_else(|| {
             tracing::warn!("Failed to get cell size, using defaults");
-            if std::env::var("TERM_PROGRAM").unwrap_or_default() == "iTerm.app" {
-                (7, 15)
-            } else {
-                (8, 16)
-            }
+            default_terminal_font_size()
         })
     };
 
     TerminalInfo { picker, font_size }
+}
+
+fn default_terminal_font_size() -> (u16, u16) {
+    if std::env::var("TERM_PROGRAM").unwrap_or_default() == "iTerm.app" {
+        (7, 15)
+    } else {
+        (8, 16)
+    }
+}
+
+fn should_skip_terminal_capability_queries() -> bool {
+    if std::env::var_os("CODE_FORCE_TERMINAL_CAPABILITY_QUERIES").is_some() {
+        return false;
+    }
+
+    if std::env::var_os("TMUX").is_none() {
+        return false;
+    }
+
+    match tmux_session_attached() {
+        Some(true) => false,
+        Some(false) | None => true,
+    }
+}
+
+fn tmux_session_attached() -> Option<bool> {
+    let mut command = Command::new("tmux");
+    command.args(["display-message", "-p", "#{session_attached}"]);
+    if let Some(pane) = std::env::var_os("TMUX_PANE") {
+        command.arg("-t").arg(pane);
+    }
+
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_tmux_session_attached_output(&output.stdout)
+}
+
+fn parse_tmux_session_attached_output(output: &[u8]) -> Option<bool> {
+    match std::str::from_utf8(output).ok()?.trim() {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
 }
 
 fn set_panic_hook() {
@@ -428,7 +481,17 @@ pub(crate) fn should_enable_keyboard_enhancement() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_tmux_session_attached_output;
     use super::should_enable_keyboard_enhancement;
+
+    #[test]
+    fn parse_tmux_session_attached_values() {
+        assert_eq!(parse_tmux_session_attached_output(b"0\n"), Some(false));
+        assert_eq!(parse_tmux_session_attached_output(b"1\n"), Some(true));
+        assert_eq!(parse_tmux_session_attached_output(b""), None);
+        assert_eq!(parse_tmux_session_attached_output(b"not-a-bool\n"), None);
+        assert_eq!(parse_tmux_session_attached_output(b"2\n"), None);
+    }
 
     #[test]
     fn keyboard_enhancement_respects_env_overrides() {
