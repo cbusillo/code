@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cbusillo.every-code-worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/cbusillo/Developer/code/scripts/local/every-code-worker.sh</string>
+    <string>run</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LAUNCHPLANE_EVERY_CODE_SERVICE</key>
+    <string>https://launchplane.shinycomputers.com</string>
+    <key>LAUNCHPLANE_EVERY_CODE_WORKSPACE</key>
+    <string>/Users/cbusillo/Developer</string>
+    <key>LAUNCHPLANE_EVERY_CODE_WORKTREE</key>
+    <string>/Users/cbusillo/Developer/launchplane</string>
+    <key>LAUNCHPLANE_EVERY_CODE_STATE_DIR</key>
+    <string>/Users/cbusillo/.local/state/launchplane/every-code</string>
+    <key>LAUNCHPLANE_EVERY_CODE_TOKEN_ITEM</key>
+    <string>launchplane-every-code-worker-token</string>
+    <key>LAUNCHPLANE_EVERY_CODE_HOST</key>
+    <string>Chris-Studio</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/cbusillo/Developer/code</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/cbusillo/.local/state/launchplane/every-code/every-code-worker/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/cbusillo/.local/state/launchplane/every-code/every-code-worker/launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+</dict>
+</plist>
