@@ -49,6 +49,7 @@ use crate::remote_inbox::protocol::RemoteUserMessage;
 use crate::remote_inbox::protocol::ServerMessage;
 use crate::remote_inbox::protocol::SessionHeartbeat;
 use crate::remote_inbox::protocol::SessionHello;
+use crate::remote_inbox::protocol::SessionOrigin;
 use crate::remote_inbox::protocol::SessionStatusEvent;
 use crate::remote_inbox::protocol::RemoteTurnStep;
 
@@ -68,6 +69,7 @@ pub(crate) struct RemoteInboxSession {
     pub cwd: String,
     pub branch: Option<String>,
     pub pid: u32,
+    pub origin: Option<SessionOrigin>,
 }
 
 pub(crate) struct RemoteInboxClientHandle {
@@ -590,8 +592,31 @@ impl RemoteInboxSession {
             cwd: cwd.display().to_string(),
             branch,
             pid: std::process::id(),
+            origin: session_origin_from_env(),
         }
     }
+}
+
+fn session_origin_from_env() -> Option<SessionOrigin> {
+    let kind = env_value("EVERY_CODE_SESSION_ORIGIN")
+        .or_else(|| env_value("EVERY_CODE_ORIGIN"))
+        .or_else(|| env_value("LAUNCHPLANE_EVERY_CODE_ORIGIN"))
+        .or_else(|| env_value("EVERY_CODE_REQUEST_ID").map(|_| "every_code".to_string()))?;
+
+    Some(SessionOrigin {
+        kind,
+        request_id: env_value("EVERY_CODE_REQUEST_ID"),
+        repository: env_value("EVERY_CODE_REPOSITORY"),
+        issue_number: env_value("EVERY_CODE_ISSUE_NUMBER").and_then(|value| value.parse().ok()),
+        issue_url: env_value("EVERY_CODE_ISSUE_URL"),
+    })
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl RemoteInboxSession {
@@ -608,6 +633,7 @@ impl RemoteInboxSession {
             cwd: self.cwd.clone(),
             branch: self.branch.clone(),
             pid: self.pid,
+            origin: self.origin.clone(),
         }
     }
 }
@@ -1463,11 +1489,14 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::sync::mpsc;
+    use std::sync::Mutex;
     use std::task::Context;
     use std::task::Poll;
 
     use futures::Sink;
     use serde_json::json;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[derive(Default)]
     struct RecordingSink {
@@ -1511,6 +1540,76 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             branch: Some("main".to_string()),
             pid: 42,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn session_origin_is_read_from_every_code_env() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex");
+        let backup = EnvBackup::new(&[
+            "EVERY_CODE_SESSION_ORIGIN",
+            "EVERY_CODE_ORIGIN",
+            "LAUNCHPLANE_EVERY_CODE_ORIGIN",
+            "EVERY_CODE_REQUEST_ID",
+            "EVERY_CODE_REPOSITORY",
+            "EVERY_CODE_ISSUE_NUMBER",
+            "EVERY_CODE_ISSUE_URL",
+        ]);
+        backup.set("EVERY_CODE_SESSION_ORIGIN", "every_code");
+        backup.set("EVERY_CODE_REQUEST_ID", "every-code-cbusillo-syo-67");
+        backup.set("EVERY_CODE_REPOSITORY", "cbusillo/sellyouroutboard");
+        backup.set("EVERY_CODE_ISSUE_NUMBER", "67");
+        backup.set(
+            "EVERY_CODE_ISSUE_URL",
+            "https://github.com/cbusillo/sellyouroutboard/issues/67",
+        );
+
+        let origin = session_origin_from_env().expect("origin from env");
+
+        assert_eq!(origin.kind, "every_code");
+        assert_eq!(
+            origin.request_id.as_deref(),
+            Some("every-code-cbusillo-syo-67")
+        );
+        assert_eq!(origin.repository.as_deref(), Some("cbusillo/sellyouroutboard"));
+        assert_eq!(origin.issue_number, Some(67));
+        assert_eq!(
+            origin.issue_url.as_deref(),
+            Some("https://github.com/cbusillo/sellyouroutboard/issues/67")
+        );
+    }
+
+    struct EnvBackup {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvBackup {
+        fn new(keys: &[&'static str]) -> Self {
+            let values = keys
+                .iter()
+                .map(|key| {
+                    let previous = std::env::var(key).ok();
+                    unsafe { std::env::remove_var(key) };
+                    (*key, previous)
+                })
+                .collect();
+            Self { values }
+        }
+
+        fn set(&self, key: &str, value: &str) {
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+
+    impl Drop for EnvBackup {
+        fn drop(&mut self) {
+            for (key, value) in &self.values {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
         }
     }
 
