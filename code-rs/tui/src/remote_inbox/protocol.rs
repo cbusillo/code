@@ -32,6 +32,21 @@ pub(crate) struct SessionHello {
     pub cwd: String,
     pub branch: Option<String>,
     pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct SessionOrigin {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +198,7 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             branch: Some("main".to_string()),
             pid: 42,
+            origin: None,
         });
 
         let value = serde_json::to_value(message).expect("serialize hello");
@@ -197,6 +213,47 @@ mod tests {
                 "cwd": "/tmp/project",
                 "branch": "main",
                 "pid": 42,
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_hello_origin_metadata() {
+        let message = ClientMessage::Hello(SessionHello {
+            session_id: "session-1".to_string(),
+            session_epoch: "epoch-1".to_string(),
+            host_id: None,
+            host_label: "Mac Studio".to_string(),
+            cwd: "/tmp/project".to_string(),
+            branch: Some("every-code/issue-67".to_string()),
+            pid: 42,
+            origin: Some(SessionOrigin {
+                kind: "every_code".to_string(),
+                request_id: Some("every-code-cbusillo-syo-67".to_string()),
+                repository: Some("cbusillo/sellyouroutboard".to_string()),
+                issue_number: Some(67),
+                issue_url: Some("https://github.com/cbusillo/sellyouroutboard/issues/67".to_string()),
+            }),
+        });
+
+        let value = serde_json::to_value(message).expect("serialize hello");
+        assert_eq!(
+            value,
+            json!({
+                "type": "hello",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "host_label": "Mac Studio",
+                "cwd": "/tmp/project",
+                "branch": "every-code/issue-67",
+                "pid": 42,
+                "origin": {
+                    "kind": "every_code",
+                    "request_id": "every-code-cbusillo-syo-67",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "issue_number": 67,
+                    "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/67",
+                },
             })
         );
     }
