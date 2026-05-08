@@ -4356,7 +4356,7 @@ async fn handle_response_item(
             }
             None
         }
-        ResponseItem::CompactionSummary { .. } => {
+        ResponseItem::CompactionSummary { .. } | ResponseItem::ContextCompaction { .. } => {
             // Keep compaction summaries in history; no user-visible event to emit.
             None
         }
