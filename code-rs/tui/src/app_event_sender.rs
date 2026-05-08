@@ -53,6 +53,7 @@ impl AppEventSender {
                 | AppEvent::RemoteInboxReply { .. }
                 | AppEvent::Redraw
                 | AppEvent::ExitRequest
+                | AppEvent::ClearUi
                 | AppEvent::SetTerminalTitle { .. }
                 | AppEvent::EmitTuiNotification { .. }
                 | AppEvent::AutoCoordinatorCountdown { .. }
