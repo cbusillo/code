@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-Usage: every-code-worker [--json] [start|status|stop|run-once|logs]
+Usage: every-code-worker [--json] [start|status|stop|run|run-once|logs]
 
 Controls the local Every Code worker that claims Launchplane work requests and
 opens visible tmux/Code sessions on this Mac.
@@ -48,6 +48,9 @@ workspace_root="${LAUNCHPLANE_EVERY_CODE_WORKSPACE:-/Users/cbusillo/Developer}"
 launchplane_worktree="${LAUNCHPLANE_EVERY_CODE_WORKTREE:-$workspace_root/launchplane}"
 state_dir="${LAUNCHPLANE_EVERY_CODE_STATE_DIR:-$HOME/.local/state/launchplane/every-code}"
 token_item="${LAUNCHPLANE_EVERY_CODE_TOKEN_ITEM:-launchplane-every-code-worker-token}"
+worker_host="${LAUNCHPLANE_EVERY_CODE_HOST:-Chris-Studio}"
+launchd_label="${LAUNCHPLANE_EVERY_CODE_LAUNCHD_LABEL:-com.cbusillo.every-code-worker}"
+launchd_domain="gui/$(id -u)"
 
 require_worker_token() {
 	local worker_token
@@ -65,6 +68,38 @@ run_launchplane() {
 		exit 1
 	fi
 	uv --directory "$launchplane_worktree" run launchplane every-code "$@"
+}
+
+launchd_status_payload() {
+	local service_output
+	if ! service_output="$(launchctl print "$launchd_domain/$launchd_label" 2>/dev/null)"; then
+		return 1
+	fi
+	SERVICE_OUTPUT="$service_output" python3 - "$launchd_label" <<'PY'
+import json
+import os
+import re
+import sys
+
+label = sys.argv[1]
+output = os.environ["SERVICE_OUTPUT"]
+state_match = re.search(r"\n\s*state = ([^\n]+)", output)
+pid_match = re.search(r"\n\s*pid = (\d+)", output)
+state = state_match.group(1).strip() if state_match else "unknown"
+pid = int(pid_match.group(1)) if pid_match else None
+running = state == "running" and pid is not None
+print(json.dumps({
+    "detail": (
+        f"Every Code worker launchd service {label} is running."
+        if running
+        else f"Every Code worker launchd service {label} is {state}."
+    ),
+    "launchd_label": label,
+    "launchd_state": state,
+    "pid": pid,
+    "running": running,
+}, indent=2, sort_keys=True))
+PY
 }
 
 emit_result() {
@@ -134,7 +169,7 @@ start)
 	emit_result "$payload"
 	;;
 status)
-	payload="$(run_launchplane status --state-dir "$state_dir" "$@")"
+	payload="$(launchd_status_payload || run_launchplane status --state-dir "$state_dir" "$@")"
 	emit_result "$payload"
 	;;
 stop)
@@ -149,6 +184,15 @@ run-once)
 		--state-dir "$state_dir" \
 		"$@")"
 	emit_result "$payload"
+	;;
+run)
+	require_worker_token
+	exec uv --directory "$launchplane_worktree" run launchplane every-code run \
+		--service-url "$service_url" \
+		--workspace-root "$workspace_root" \
+		--state-dir "$state_dir" \
+		--host "$worker_host" \
+		"$@"
 	;;
 logs)
 	log_file="$state_dir/every-code-worker/worker.log"
