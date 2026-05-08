@@ -30247,7 +30247,12 @@ Have we met every part of this goal and is there no further work to do?"#
     }
 
     fn start_remote_inbox_if_needed(&mut self, session_id: uuid::Uuid) {
-        if self.remote_inbox_client.is_some() || !self.config.remote_inbox.enabled {
+        if self.remote_inbox_client.is_some() {
+            tracing::debug!("remote inbox client already started");
+            return;
+        }
+        if !self.config.remote_inbox.enabled {
+            tracing::info!("remote inbox disabled for this session");
             return;
         }
 
@@ -30255,6 +30260,18 @@ Have we met every part of this goal and is there no further work to do?"#
             session_id.to_string(),
             chrono::Utc::now().timestamp_millis().to_string(),
             self.config.cwd.clone(),
+        );
+        tracing::info!(
+            session_id = %session.session_id,
+            cwd = %session.cwd,
+            branch = session.branch.as_deref().unwrap_or(""),
+            bridge_url_configured = self
+                .config
+                .remote_inbox
+                .bridge_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty()),
+            "starting remote inbox client"
         );
         self.remote_inbox_client = crate::remote_inbox::spawn_remote_inbox_client(
             self.config.remote_inbox.clone(),

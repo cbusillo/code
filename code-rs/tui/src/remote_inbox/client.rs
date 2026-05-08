@@ -509,6 +509,7 @@ pub(crate) fn spawn_remote_inbox_client(
     app_event_tx: AppEventSender,
 ) -> Option<RemoteInboxClientHandle> {
     if !config.enabled {
+        tracing::info!("remote inbox client spawn skipped because it is disabled");
         return None;
     }
 
@@ -522,6 +523,12 @@ pub(crate) fn spawn_remote_inbox_client(
         .clone()
         .filter(|url| !url.trim().is_empty())
     {
+        let bridge_endpoint = redact_bridge_url_for_logs(&bridge_url);
+        tracing::info!(
+            session_id = %session_id,
+            bridge_endpoint = %bridge_endpoint,
+            "spawning websocket remote inbox client"
+        );
         sinks.push(spawn_websocket_remote_inbox_client(
             bridge_url,
             config.clone(),
@@ -567,7 +574,12 @@ fn spawn_websocket_remote_inbox_client(
             )
             .await
             {
-                tracing::warn!("remote inbox connection ended: {err}");
+                let bridge_endpoint = redact_bridge_url_for_logs(&bridge_url);
+                tracing::warn!(
+                    session_id = %session.session_id,
+                    bridge_endpoint = %bridge_endpoint,
+                    "remote inbox connection ended: {err}"
+                );
             }
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
@@ -870,7 +882,12 @@ async fn connect_once(
     }
 
     let (ws, _) = connect_async(request).await?;
-    tracing::info!("remote inbox connected");
+    let bridge_endpoint = redact_bridge_url_for_logs(bridge_url);
+    tracing::info!(
+        session_id = %session.session_id,
+        bridge_endpoint = %bridge_endpoint,
+        "remote inbox connected"
+    );
     let (mut write, mut read) = ws.split();
 
     send_json(&mut write, &ClientMessage::Hello(session.hello(config))).await?;
@@ -955,6 +972,19 @@ async fn connect_once(
     }
 
     Ok(())
+}
+
+fn redact_bridge_url_for_logs(bridge_url: &str) -> String {
+    match url::Url::parse(bridge_url) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => "<invalid bridge_url>".to_string(),
+    }
 }
 
 async fn send_latest_status_snapshot_if_idle<S>(
