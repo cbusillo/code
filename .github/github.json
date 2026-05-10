@@ -58,7 +58,21 @@
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": ["code-everywhere"],
-  "validatedThrough": [],
+  "validatedThrough": [
+    {
+      "date": "2026-05-10",
+      "source": "cbusillo/code#38",
+      "checks": [
+        "jq empty .github/github.json",
+        "rg github-repo-workflow\\.json",
+        "codex-skills github-repo-snapshot.sh --json",
+        "GitHub Actions Blob size policy"
+      ],
+      "caveats": [
+        "Validation was metadata-focused; expensive Rust workspace gates were not rerun for this metadata-only change."
+      ]
+    }
+  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
