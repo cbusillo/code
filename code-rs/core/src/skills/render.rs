@@ -21,9 +21,11 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     lines.push(
         r###"- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement. Open its `SKILL.md` before taking other investigative or implementation actions for that turn.
+- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, follow that delegation and open the delegated skill's `SKILL.md` before taking actions in that subdomain.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
-  1) After deciding to use a skill, open its `SKILL.md`. Read only enough to follow the workflow.
+  1) Open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
   2) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
   3) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   4) If `assets/` or templates exist, reuse them instead of recreating from scratch.
@@ -39,4 +41,36 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     );
 
     Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::model::SkillScope;
+    use std::path::PathBuf;
+
+    #[test]
+    fn rendered_skill_guidance_preserves_binding_trigger_ordering() {
+        let rendered = render_skills_section(&[SkillMetadata {
+            name: "github".to_string(),
+            description:
+                "Use for repository work. For durable planning, use github-plan.".to_string(),
+            path: PathBuf::from("/skills/github/SKILL.md"),
+            scope: SkillScope::User,
+            content: String::new(),
+        }, SkillMetadata {
+            name: "chronicle".to_string(),
+            description: "Use when recent work is ambiguous. This skill MUST be used.".to_string(),
+            path: PathBuf::from("/skills/chronicle/SKILL.md"),
+            scope: SkillScope::User,
+            content: String::new(),
+        }])
+        .expect("skills section should render");
+
+        assert!(rendered.contains("If a skill description says it MUST be used"));
+        assert!(rendered.contains("Open its `SKILL.md` before taking other investigative"));
+        assert!(rendered.contains("If a skill description tells you to use another named skill"));
+        assert!(rendered.contains("open the delegated skill's `SKILL.md` before taking actions"));
+        assert!(!rendered.contains("After deciding to use a skill"));
+    }
 }
