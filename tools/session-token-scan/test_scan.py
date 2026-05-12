@@ -58,6 +58,40 @@ class SessionTokenScanTests(unittest.TestCase):
             self.assertEqual(report.token_total_resets, 1)
             self.assertTrue(report.large_payloads)
 
+    def test_attach_usage_does_not_mix_multiple_accounts_without_filter(self) -> None:
+        report = scan.SessionReport(
+            path="rollout-test.jsonl",
+            bytes=0,
+            started_at="2026-05-12T00:00:00Z",
+            ended_at="2026-05-12T00:10:00Z",
+        )
+        usage_entries = [
+            (scan.parse_timestamp("2026-05-12T00:01:00Z"), scan.TokenUsage(total_tokens=100), "acct-a"),
+            (scan.parse_timestamp("2026-05-12T00:02:00Z"), scan.TokenUsage(total_tokens=200), "acct-b"),
+        ]
+
+        scan.attach_usage([report], usage_entries)
+
+        self.assertEqual(report.usage_entries, 0)
+        self.assertEqual(report.usage_tokens.total_tokens, 0)
+
+    def test_attach_usage_filters_by_requested_account(self) -> None:
+        report = scan.SessionReport(
+            path="rollout-test.jsonl",
+            bytes=0,
+            started_at="2026-05-12T00:00:00Z",
+            ended_at="2026-05-12T00:10:00Z",
+        )
+        usage_entries = [
+            (scan.parse_timestamp("2026-05-12T00:01:00Z"), scan.TokenUsage(total_tokens=100), "acct-a"),
+            (scan.parse_timestamp("2026-05-12T00:02:00Z"), scan.TokenUsage(total_tokens=200), "acct-b"),
+        ]
+
+        scan.attach_usage([report], usage_entries, account_id="acct-b")
+
+        self.assertEqual(report.usage_entries, 1)
+        self.assertEqual(report.usage_tokens.total_tokens, 200)
+
 
 def token_count(timestamp: str, *, total: int, last: int) -> dict[str, object]:
     return {

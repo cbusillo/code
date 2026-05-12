@@ -364,9 +364,18 @@ def load_usage_entries(root: Path) -> list[tuple[datetime, TokenUsage, str]]:
     return entries
 
 
-def attach_usage(reports: list[SessionReport], usage_entries: list[tuple[datetime, TokenUsage, str]]) -> None:
+def attach_usage(
+    reports: list[SessionReport],
+    usage_entries: list[tuple[datetime, TokenUsage, str]],
+    account_id: str | None = None,
+) -> None:
     if not usage_entries:
         return
+    accounts = {account for _timestamp, _tokens, account in usage_entries}
+    if account_id is None:
+        if len(accounts) != 1:
+            return
+        account_id = next(iter(accounts))
     for report in reports:
         start = parse_timestamp(report.started_at)
         end = parse_timestamp(report.ended_at)
@@ -376,7 +385,9 @@ def attach_usage(reports: list[SessionReport], usage_entries: list[tuple[datetim
             start = start.replace(tzinfo=timezone.utc)
         if end.tzinfo is None:
             end = end.replace(tzinfo=timezone.utc)
-        for timestamp, tokens, _account in usage_entries:
+        for timestamp, tokens, account in usage_entries:
+            if account != account_id:
+                continue
             if start <= timestamp <= end:
                 report.usage_entries += 1
                 report.usage_tokens.add(tokens)
@@ -512,6 +523,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--top", type=int, default=10, help="Number of top suspects to print per section.")
     parser.add_argument("--large-threshold", type=int, default=16_384, help="Record/string byte threshold for large-record suspects.")
     parser.add_argument("--usage-root", default="~/.code/usage", help="Usage directory for optional timestamp correlation.")
+    parser.add_argument("--account-id", help="Only correlate usage entries for this account id. Required when --usage-root has multiple accounts.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     return parser.parse_args(argv)
 
@@ -521,7 +533,7 @@ def main(argv: list[str]) -> int:
     limit = None if args.limit == 0 else args.limit
     sessions = discover_sessions(args.inputs, args.pattern, limit)
     reports = [analyze_session(path, args.large_threshold, args.top) for path in sessions]
-    attach_usage(reports, load_usage_entries(Path(args.usage_root).expanduser()))
+    attach_usage(reports, load_usage_entries(Path(args.usage_root).expanduser()), args.account_id)
     if args.json:
         print(json.dumps({"sessions": [to_jsonable(report) for report in reports]}, indent=2, sort_keys=True))
     else:
