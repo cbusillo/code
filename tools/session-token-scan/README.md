@@ -19,7 +19,9 @@ Useful options:
 - `--limit 0`: scan all discovered rollout files under the inputs.
 - `--json`: emit machine-readable output for PR evidence or later classifiers.
 - `--usage-root ~/.code/usage`: correlate timestamped usage entries when
-  available.
+  available. When the usage root contains multiple account files, pass
+  `--account-id <id>` to avoid mixing unrelated account usage into a session.
+- `--account-id <id>`: filter usage correlation to one account.
 - `--large-threshold 16384`: set the byte threshold for large-record suspects.
 
 ## Reports
