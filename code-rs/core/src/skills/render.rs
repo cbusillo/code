@@ -30,7 +30,9 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
   3) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   4) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
-  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
+  - Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
+  - If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request.
+  - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
   - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
@@ -71,6 +73,9 @@ mod tests {
         assert!(rendered.contains("Open its `SKILL.md` before taking other investigative"));
         assert!(rendered.contains("If a skill description tells you to use another named skill"));
         assert!(rendered.contains("find that delegated skill in the Available Skills list"));
+        assert!(rendered.contains("Match skills independently against every part of the request"));
+        assert!(rendered.contains("regression investigation and durable GitHub planning"));
+        assert!(rendered.contains("use all relevant mandatory or delegated skills"));
         assert!(!rendered.contains("After deciding to use a skill"));
     }
 }

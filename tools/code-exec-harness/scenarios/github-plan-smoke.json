@@ -18,7 +18,7 @@
   },
   "expect": {
     "returncode": 0,
-    "gh_contains": ["issue list"],
+    "gh_contains": ["issue list --json number,title,state"],
     "assistant_contains": ["parent"]
   },
   "max_seconds": 90,

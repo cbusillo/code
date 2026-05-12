@@ -422,6 +422,7 @@ def run_exec(command: list[str], scenario: dict[str, Any], paths: RunPaths, env:
 def summarize(events: list[dict[str, Any]], paths: RunPaths, returncode: int, command: list[str]) -> dict[str, Any]:
     final_message = None
     commands = []
+    command_starts = []
     running_commands: dict[str, str] = {}
     file_changes = []
     usage = None
@@ -446,7 +447,9 @@ def summarize(events: list[dict[str, Any]], paths: RunPaths, returncode: int, co
             call_id = msg.get("call_id")
             if isinstance(call_id, str):
                 raw_command = msg.get("command", [])
-                running_commands[call_id] = " ".join(raw_command) if isinstance(raw_command, list) else str(raw_command)
+                command_text = " ".join(raw_command) if isinstance(raw_command, list) else str(raw_command)
+                running_commands[call_id] = command_text
+                command_starts.append(command_text)
         elif msg_type == "exec_command_end":
             call_id = msg.get("call_id")
             commands.append({
@@ -484,6 +487,7 @@ def summarize(events: list[dict[str, Any]], paths: RunPaths, returncode: int, co
         "event_count": len(events),
         "final_message": final_message,
         "commands": commands,
+        "command_starts": command_starts,
         "file_changes": file_changes,
         "errors": errors,
         "gh_calls": gh_calls,
@@ -497,12 +501,31 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
     failures: list[str] = []
     expect = scenario.get("expect", {})
     final_message = summary.get("final_message") or ""
+    completed_commands = [str(command.get("command") or "") for command in summary.get("commands", [])]
+    started_commands = [str(command) for command in summary.get("command_starts", [])]
     for needle in expect.get("assistant_contains", []):
         if str(needle) not in final_message:
             failures.append(f"assistant message did not contain {needle!r}")
     for needle in expect.get("command_contains", []):
         if not any(str(needle) in str(command.get("command")) for command in summary.get("commands", [])):
             failures.append(f"no completed command contained {needle!r}")
+    prefix_needles = [str(needle) for needle in expect.get("command_prefix_contains", [])]
+    prefix = started_commands[:len(prefix_needles)]
+    for index, needle in enumerate(prefix_needles):
+        if index >= len(prefix):
+            failures.append(f"launch prefix missing command {index + 1} containing {needle!r}")
+            continue
+        if needle not in prefix[index]:
+            failures.append(f"launch prefix command {index + 1} did not contain {needle!r}")
+    for needle in expect.get("command_order_contains", []):
+        position = next((index for index, command in enumerate(started_commands) if str(needle) in command), None)
+        if position is None:
+            failures.append(f"no launched command contained {needle!r}")
+            continue
+        earlier = "\n".join(started_commands[:position])
+        for before in expect.get("before_command_contains", {}).get(str(needle), []):
+            if str(before) not in earlier:
+                failures.append(f"no earlier command contained {before!r} before {needle!r}")
     for needle in expect.get("gh_contains", []):
         text = "\n".join(" ".join(call.get("argv", [])) for call in summary.get("gh_calls", []))
         if str(needle) not in text:
