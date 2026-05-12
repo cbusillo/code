@@ -2,6 +2,8 @@ use code_protocol::models::ContentItem;
 use code_protocol::models::FunctionCallOutputContentItem;
 use code_protocol::models::FunctionCallOutputPayload;
 use code_protocol::models::ResponseItem;
+use code_protocol::protocol::EventMsg as ProtoEventMsg;
+use code_protocol::protocol::UserMessageEvent;
 
 use crate::truncate::truncate_middle;
 
@@ -72,6 +74,17 @@ pub(crate) fn compact_response_items_for_model_history(
         .collect()
 }
 
+pub(crate) fn compact_protocol_event_msg_for_rollout_storage(
+    msg: ProtoEventMsg,
+) -> ProtoEventMsg {
+    match msg {
+        ProtoEventMsg::UserMessage(user_msg) => {
+            ProtoEventMsg::UserMessage(compact_user_message_event(user_msg))
+        }
+        other => other,
+    }
+}
+
 /// Compact items before writing them to rollout storage.
 ///
 /// Rollouts are replayed into future sessions, so they should keep useful
@@ -120,6 +133,14 @@ fn compact_message_content(content: Vec<ContentItem>) -> Vec<ContentItem> {
             },
         })
         .collect()
+}
+
+fn compact_user_message_event(mut event: UserMessageEvent) -> UserMessageEvent {
+    event.message = truncate_text(event.message, HISTORY_TEXT_CONTENT_MAX_BYTES);
+    if let Some(images) = event.images.take() {
+        event.images = Some(images.into_iter().map(compact_image_url).collect());
+    }
+    event
 }
 
 fn image_generation_placeholder(
@@ -310,6 +331,25 @@ mod tests {
             ResponseItem::Message { content, .. }
                 if matches!(content.first(), Some(ContentItem::InputImage { image_url })
                     if image_url == &current_image_url)
+        ));
+    }
+
+    #[test]
+    fn rollout_storage_replaces_user_message_event_images() {
+        let msg = ProtoEventMsg::UserMessage(UserMessageEvent {
+            message: "see screenshot".to_string(),
+            images: Some(vec![large_data_image()]),
+            local_images: vec![],
+            text_elements: vec![],
+        });
+
+        let compacted = compact_protocol_event_msg_for_rollout_storage(msg);
+        assert!(matches!(
+            compacted,
+            ProtoEventMsg::UserMessage(UserMessageEvent { images: Some(images), .. })
+                if images.len() == 1
+                    && images[0].contains("image omitted from reusable history")
+                    && !images[0].contains("data:image")
         ));
     }
 }
