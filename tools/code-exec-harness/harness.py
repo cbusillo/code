@@ -510,13 +510,20 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
         if not any(str(needle) in str(command.get("command")) for command in summary.get("commands", [])):
             failures.append(f"no completed command contained {needle!r}")
     prefix_needles = [str(needle) for needle in expect.get("command_prefix_contains", [])]
-    prefix = started_commands[:len(prefix_needles)]
-    for index, needle in enumerate(prefix_needles):
-        if index >= len(prefix):
-            failures.append(f"launch prefix missing command {index + 1} containing {needle!r}")
-            continue
-        if needle not in prefix[index]:
-            failures.append(f"launch prefix command {index + 1} did not contain {needle!r}")
+    prefix_index = 0
+    for command_index, command in enumerate(started_commands, start=1):
+        if prefix_index >= len(prefix_needles):
+            break
+        expected = prefix_needles[prefix_index]
+        if expected not in command:
+            failures.append(
+                f"launch command {command_index} appeared before prefix matched {expected!r}"
+            )
+            break
+        while prefix_index < len(prefix_needles) and prefix_needles[prefix_index] in command:
+            prefix_index += 1
+    if not failures and prefix_index < len(prefix_needles):
+        failures.append(f"launch prefix missing command containing {prefix_needles[prefix_index]!r}")
     for needle in expect.get("command_order_contains", []):
         position = next((index for index, command in enumerate(started_commands) if str(needle) in command), None)
         if position is None:
