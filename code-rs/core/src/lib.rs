@@ -31,6 +31,7 @@ pub mod config_profile;
 pub mod config_types;
 mod config_loader;
 mod conversation_history;
+mod history_compaction;
 pub mod context_timeline;
 pub mod acp;
 pub mod custom_prompts;

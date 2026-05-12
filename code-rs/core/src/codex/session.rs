@@ -1579,7 +1579,19 @@ impl Session {
     /// history with additional items for this turn.
     /// Browser screenshots are filtered out from history to keep them ephemeral.
     pub fn turn_input_with_history(&self, extra: Vec<ResponseItem>) -> Vec<ResponseItem> {
+        self.turn_input_with_history_preserving_latest(extra, false)
+    }
+
+    pub fn turn_input_with_history_preserving_latest(
+        &self,
+        extra: Vec<ResponseItem>,
+        preserve_latest_history_item: bool,
+    ) -> Vec<ResponseItem> {
         let history = self.state.lock().unwrap().history.contents();
+        let history = crate::history_compaction::compact_response_items_for_model_history(
+            history,
+            preserve_latest_history_item,
+        );
 
         // Debug: Count function call outputs in history
         let fc_output_count = history

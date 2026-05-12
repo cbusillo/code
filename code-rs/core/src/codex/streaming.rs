@@ -2576,7 +2576,7 @@ async fn run_agent(
             }
             review_history.clone()
         } else {
-            sess.turn_input_with_history(pending_input_tail.clone())
+            sess.turn_input_with_history_preserving_latest(pending_input_tail.clone(), true)
         };
 
         let turn_input_messages: Vec<String> = turn_input
