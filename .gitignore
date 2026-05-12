@@ -78,6 +78,7 @@ actions-runner/
 
 # caches
 .cache/
+__pycache__/
 .turbo/
 .parcel-cache/
 .eslintcache
