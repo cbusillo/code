@@ -12,12 +12,13 @@ shims such as fake `gh` need to write logs and state outside the fixture
 workspace. Run it only with trusted scenarios.
 
 By default, each scenario gets an empty `CODE_HOME`. Pass `--inherit-auth` only
-when you want a live model-backed run; it copies auth files into the isolated
-run home without copying the rest of your config.
+when you want a live model-backed run; it copies Code auth and GitHub CLI config
+into the isolated run home without copying the rest of your config.
 
 `HOME`, `ZDOTDIR`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME` are also redirected
 inside the run directory so shell startup files and home-directory tooling do
-not silently use the real user profile.
+not silently use the real user profile. When auth is inherited, `GH_CONFIG_DIR`
+points at the copied GitHub CLI config inside that redirected home.
 
 ## Run
 
@@ -48,7 +49,7 @@ Scenarios are JSON files. Common fields:
   `PATH`
 - `config_toml`: isolated `CODE_HOME/config.toml` contents
 - `config_overrides`: `-c key=value` arguments passed to `code exec`
-- `inherit_auth`: copy auth files from the current `CODE_HOME` for this scenario
+- `inherit_auth`: copy Code auth and GitHub CLI config for this scenario
 - `expect`: simple assertions over the final answer, commands, fake `gh` calls,
   and exit code
 

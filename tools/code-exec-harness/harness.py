@@ -153,12 +153,28 @@ def write_config(scenario: dict[str, Any], paths: RunPaths) -> None:
         put_text(paths.code_home / "config.toml", config + "\n")
 
 
-def inherit_auth(paths: RunPaths) -> None:
+def gh_config_source() -> Path:
+    if os.environ.get("GH_CONFIG_DIR"):
+        return Path(os.environ["GH_CONFIG_DIR"]).expanduser()
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home).expanduser() / "gh"
+    return Path.home() / ".config" / "gh"
+
+
+def inherit_auth(paths: RunPaths) -> dict[str, str]:
+    env_overrides: dict[str, str] = {}
     source_home = Path(os.environ.get("CODE_HOME") or os.environ.get("CODEX_HOME") or Path.home() / ".code")
     for name in ("auth.json", ".credentials.json"):
         source = source_home / name
         if source.is_file():
             shutil.copy2(source, paths.code_home / name)
+    source_gh_config = gh_config_source()
+    if source_gh_config.is_dir():
+        target_gh_config = paths.shell_home / ".config" / "gh"
+        copy_or_link(source_gh_config, target_gh_config, symlink=False)
+        env_overrides["GH_CONFIG_DIR"] = str(target_gh_config)
+    return env_overrides
 
 
 FAKE_GH = r'''#!/usr/bin/env python3
@@ -205,6 +221,25 @@ def finish(stdout="", stderr="", exit_code=0):
     if stderr:
         print(stderr, file=sys.stderr)
     raise SystemExit(exit_code)
+
+def fields_from_args():
+    fields = {}
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"-F", "--field", "-f", "--raw-field"} and index + 1 < len(args):
+            field = args[index + 1]
+            if "=" in field:
+                key, value = field.split("=", 1)
+                fields[key] = value
+                index += 2
+                continue
+            if index + 2 < len(args):
+                fields[field] = args[index + 2]
+                index += 3
+                continue
+        index += 1
+    return fields
 
 for response in fixture.get("responses", []):
     match = response.get("match", {})
@@ -292,10 +327,7 @@ if args[:2] == ["issue", "edit"] and len(args) >= 3:
 if args and args[0] == "api":
     joined = " ".join(args)
     match = re.search(r"repos/([^/]+)/([^/]+)/issues/(\d+)/sub_issues", joined)
-    child = None
-    for index, arg in enumerate(args):
-        if arg in {"-F", "--field"} and index + 1 < len(args) and args[index + 1].startswith("sub_issue_id="):
-            child = args[index + 1].split("=", 1)[1]
+    child = fields_from_args().get("sub_issue_id")
     if match and child:
         parent = match.group(3)
         issue = state["issues"].setdefault(parent, {"number": int(parent), "title": "", "state": "OPEN", "subIssues": []})
@@ -490,8 +522,9 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
     materialize_workspace(scenario, paths)
     materialize_skills(scenario, paths, scenario_dir, extra_roots)
     write_config(scenario, paths)
+    inherited_env = {}
     if args.inherit_auth or scenario.get("inherit_auth", False):
-        inherit_auth(paths)
+        inherited_env = inherit_auth(paths)
     gh_paths = write_fake_gh(scenario, paths)
     command = build_command(scenario, args, paths)
 
@@ -506,6 +539,7 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         "XDG_CONFIG_HOME": str(paths.shell_home / ".config"),
         "ZDOTDIR": str(paths.shell_home),
     })
+    env.update(inherited_env)
     for key, value in scenario.get("env", {}).items():
         env[str(key)] = str(value)
     if gh_paths:
