@@ -539,6 +539,7 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         "XDG_CONFIG_HOME": str(paths.shell_home / ".config"),
         "ZDOTDIR": str(paths.shell_home),
     })
+    env.pop("GH_CONFIG_DIR", None)
     env.update(inherited_env)
     for key, value in scenario.get("env", {}).items():
         env[str(key)] = str(value)
