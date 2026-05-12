@@ -21,8 +21,8 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     lines.push(
         r###"- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement. Open its `SKILL.md` before taking other investigative or implementation actions for that turn.
-- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, follow that delegation and open the delegated skill's `SKILL.md` before taking actions in that subdomain.
+- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Open its `SKILL.md` before taking other investigative or implementation actions for that turn.
+- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and open its `SKILL.md` before taking actions in that subdomain.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
   1) Open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
@@ -50,7 +50,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn rendered_skill_guidance_preserves_binding_trigger_ordering() {
+    fn rendered_skill_guidance_includes_binding_trigger_rules() {
         let rendered = render_skills_section(&[SkillMetadata {
             name: "github".to_string(),
             description:
@@ -67,10 +67,10 @@ mod tests {
         }])
         .expect("skills section should render");
 
-        assert!(rendered.contains("If a skill description says it MUST be used"));
+        assert!(rendered.contains("hard requirement in the described context"));
         assert!(rendered.contains("Open its `SKILL.md` before taking other investigative"));
         assert!(rendered.contains("If a skill description tells you to use another named skill"));
-        assert!(rendered.contains("open the delegated skill's `SKILL.md` before taking actions"));
+        assert!(rendered.contains("find that delegated skill in the Available Skills list"));
         assert!(!rendered.contains("After deciding to use a skill"));
     }
 }
