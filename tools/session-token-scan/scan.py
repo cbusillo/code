@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
@@ -90,6 +90,7 @@ class SessionReport:
     large_payloads: list[LargePayload] = field(default_factory=list)
     usage_entries: int = 0
     usage_tokens: TokenUsage = field(default_factory=TokenUsage)
+    usage_note: str | None = None
 
     @property
     def final_total(self) -> TokenUsage:
@@ -366,16 +367,24 @@ def load_usage_entries(root: Path) -> list[tuple[datetime, TokenUsage, str]]:
 
 def attach_usage(
     reports: list[SessionReport],
-    usage_entries: list[tuple[datetime, TokenUsage, str]],
+    usage_entries: Sequence[tuple[datetime, TokenUsage, str]],
     account_id: str | None = None,
 ) -> None:
     if not usage_entries:
         return
-    accounts = {account for _timestamp, _tokens, account in usage_entries}
     if account_id is None:
+        accounts = {account for _timestamp, _tokens, account in usage_entries}
         if len(accounts) != 1:
+            note = f"usage correlation skipped; pass --account-id for one of {', '.join(sorted(accounts))}"
+            for report in reports:
+                report.usage_note = note
             return
         account_id = next(iter(accounts))
+    elif all(account != account_id for _timestamp, _tokens, account in usage_entries):
+        note = f"usage correlation skipped; account id {account_id!r} was not found in usage entries"
+        for report in reports:
+            report.usage_note = note
+        return
     for report in reports:
         start = parse_timestamp(report.started_at)
         end = parse_timestamp(report.ended_at)
@@ -422,6 +431,7 @@ def to_jsonable(report: SessionReport) -> dict[str, Any]:
         "agent_event_count": report.agent_event_count,
         "usage_entries": report.usage_entries,
         "usage_tokens": report.usage_tokens.to_dict(),
+        "usage_note": report.usage_note,
         "large_payloads": [payload.__dict__ for payload in report.large_payloads],
         "token_events": [
             {
@@ -502,6 +512,13 @@ def print_text_report(reports: list[SessionReport], top: int) -> None:
             print(
                 f"- {human_tokens(report.usage_tokens.total_tokens)} usage tokens from {report.usage_entries} usage entries: {report.path}"
             )
+        print()
+
+    usage_notes = sorted({report.usage_note for report in reports if report.usage_note})
+    if usage_notes:
+        print("## Usage Correlation Notes")
+        for note in usage_notes:
+            print(f"- {note}")
         print()
 
 
