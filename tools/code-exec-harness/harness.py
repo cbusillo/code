@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import os
 import re
 import shutil
+import socketserver
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +34,170 @@ class RunPaths:
 
 class HarnessError(RuntimeError):
     pass
+
+
+class FakeResponsesServer:
+    def __init__(self, fixture: dict[str, Any], artifacts: Path) -> None:
+        self.fixture = fixture
+        self.artifacts = artifacts
+        self.requests: list[dict[str, Any]] = []
+        self._responses = list(fixture.get("responses", []))
+        self._lock = threading.Lock()
+        self._httpd: socketserver.ThreadingTCPServer | None = None
+        self._thread: threading.Thread | None = None
+        self.base_url = ""
+
+    def __enter__(self) -> "FakeResponsesServer":
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:  # noqa: N802
+                owner._handle_post(self)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        self._httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        self._httpd.daemon_threads = True
+        port = self._httpd.server_address[1]
+        self.base_url = f"http://127.0.0.1:{port}/v1"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        if self._httpd is not None:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        self.write_artifacts()
+
+    def _next_response(self) -> dict[str, Any]:
+        with self._lock:
+            index = len(self.requests)
+            if index >= len(self._responses):
+                return {"status": 500, "body": {"error": f"missing fake response for request {index + 1}"}}
+            return self._responses[index]
+
+    def _handle_post(self, handler: http.server.BaseHTTPRequestHandler) -> None:
+        parsed = urlparse(handler.path)
+        length = int(handler.headers.get("content-length", "0"))
+        raw_body = handler.rfile.read(length).decode("utf-8")
+        try:
+            body = json.loads(raw_body) if raw_body else None
+        except json.JSONDecodeError:
+            body = {"_invalid_json": raw_body}
+        response = self._next_response()
+        with self._lock:
+            self.requests.append({"method": "POST", "path": parsed.path, "body": body})
+
+        if not parsed.path.endswith("/responses"):
+            self._send_json(handler, 404, {"error": f"unexpected path {parsed.path}"})
+            return
+
+        status = int(response.get("status", 200))
+        if response.get("body") is not None:
+            self._send_json(handler, status, response.get("body", {}))
+        else:
+            self._send_sse(handler, status, response_sse_body(response))
+
+    def _send_json(self, handler: http.server.BaseHTTPRequestHandler, status: int, body: Any) -> None:
+        data = json.dumps(body).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("content-type", "application/json")
+        handler.send_header("content-length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    def _send_sse(self, handler: http.server.BaseHTTPRequestHandler, status: int, body: str) -> None:
+        data = body.encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("content-type", "text/event-stream")
+        handler.send_header("cache-control", "no-cache")
+        handler.send_header("content-length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    def write_artifacts(self) -> None:
+        put_json(self.artifacts / "responses-requests.json", self.requests)
+
+
+def data_image_payload_bytes(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value) if value.startswith("data:image/") else 0
+    if isinstance(value, list):
+        return sum(data_image_payload_bytes(item) for item in value)
+    if isinstance(value, dict):
+        return sum(data_image_payload_bytes(item) for item in value.values())
+    return 0
+
+
+def contains_text(value: Any, needle: str) -> bool:
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, list):
+        return any(contains_text(item, needle) for item in value)
+    if isinstance(value, dict):
+        return any(contains_text(item, needle) for item in value.values())
+    return False
+
+
+def expand_fixture_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value.keys()) == {"$repeat", "count"}:
+            return str(value["$repeat"]) * int(value["count"])
+        return {key: expand_fixture_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [expand_fixture_value(item) for item in value]
+    return value
+
+
+def sse_event(event_type: str, payload: dict[str, Any]) -> str:
+    event = expand_fixture_value(payload)
+    return f"event: {event_type}\ndata: {json.dumps(event)}\n\n"
+
+
+def completed_sse(response_id: str) -> str:
+    return sse_event(
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "usage": {
+                    "input_tokens": 0,
+                    "input_tokens_details": None,
+                    "output_tokens": 0,
+                    "output_tokens_details": None,
+                    "total_tokens": 0,
+                },
+                "output": [],
+            },
+        },
+    )
+
+
+def response_sse_body(response: dict[str, Any]) -> str:
+    if "sse" in response:
+        return str(response["sse"])
+    chunks: list[str] = []
+    for event in response.get("events", []):
+        if not isinstance(event, dict):
+            raise HarnessError("responses_api events must be objects")
+        event_type = str(event.get("event", event.get("type", "response.output_item.done")))
+        payload = event.get("payload")
+        if payload is None and "item" in event:
+            payload = {"type": "response.output_item.done", "item": event["item"]}
+            event_type = "response.output_item.done"
+        if not isinstance(payload, dict):
+            raise HarnessError("responses_api event payload must be an object")
+        chunks.append(sse_event(event_type, payload))
+    if response.get("completed", True):
+        chunks.append(completed_sse(str(response.get("response_id", "resp_harness"))))
+    return "".join(chunks)
 
 
 def read_text(path: Path) -> str:
@@ -369,6 +537,16 @@ def write_fake_gh(scenario: dict[str, Any], paths: RunPaths) -> dict[str, Path] 
 
 
 def build_command(scenario: dict[str, Any], args: argparse.Namespace, paths: RunPaths) -> list[str]:
+    return build_command_for_prompt(scenario, args, paths, str(scenario.get("prompt", "")), None)
+
+
+def build_command_for_prompt(
+    scenario: dict[str, Any],
+    args: argparse.Namespace,
+    paths: RunPaths,
+    prompt: str,
+    resume_session_id: str | None,
+) -> list[str]:
     code_bin_value = args.code_bin or shutil.which("code")
     if not code_bin_value:
         raise HarnessError("could not find `code`; pass --code-bin")
@@ -392,7 +570,10 @@ def build_command(scenario: dict[str, Any], args: argparse.Namespace, paths: Run
         command.extend(["--sandbox", str(sandbox)])
     for override in scenario.get("config_overrides", []):
         command.extend(["-c", str(override)])
-    command.append(str(scenario.get("prompt", "")))
+    if resume_session_id:
+        command.extend(["resume", resume_session_id, prompt])
+    else:
+        command.append(prompt)
     return command
 
 
@@ -417,6 +598,23 @@ def run_exec(command: list[str], scenario: dict[str, Any], paths: RunPaths, env:
         except json.JSONDecodeError as exc:
             events.append({"type": "harness.invalid_json", "line": line_number, "text": line, "error": str(exc)})
     return proc.returncode, events
+
+
+def run_exec_capture(
+    command: list[str],
+    scenario: dict[str, Any],
+    paths: RunPaths,
+    env: dict[str, str],
+    label: str,
+) -> tuple[int, list[dict[str, Any]]]:
+    returncode, events = run_exec(command, scenario, paths, env)
+    stdout_path = paths.artifacts / "stdout.jsonl"
+    stderr_path = paths.artifacts / "stderr.log"
+    if stdout_path.exists():
+        shutil.copy2(stdout_path, paths.artifacts / f"{label}-stdout.jsonl")
+    if stderr_path.exists():
+        shutil.copy2(stderr_path, paths.artifacts / f"{label}-stderr.log")
+    return returncode, events
 
 
 def summarize(events: list[dict[str, Any]], paths: RunPaths, returncode: int, command: list[str]) -> dict[str, Any]:
@@ -493,6 +691,54 @@ def summarize(events: list[dict[str, Any]], paths: RunPaths, returncode: int, co
     }
 
 
+def session_id_from_summary(summary: dict[str, Any]) -> str:
+    thread_id = summary.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise HarnessError("could not determine session id from first turn")
+    return thread_id
+
+
+def latest_session_id(paths: RunPaths) -> str | None:
+    catalog = paths.code_home / "sessions" / "index" / "catalog.jsonl"
+    if not catalog.is_file():
+        return None
+    latest: tuple[str, str] | None = None
+    for line in read_text(catalog).splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        session_id = entry.get("session_id")
+        last_event_at = entry.get("last_event_at") or entry.get("created_at") or ""
+        if isinstance(session_id, str) and isinstance(last_event_at, str):
+            candidate = (last_event_at, session_id)
+            if latest is None or candidate > latest:
+                latest = candidate
+    return latest[1] if latest else None
+
+
+def session_id_from_summary_or_catalog(summary: dict[str, Any], paths: RunPaths) -> str:
+    try:
+        return session_id_from_summary(summary)
+    except HarnessError:
+        session_id = latest_session_id(paths)
+        if session_id:
+            return session_id
+        raise
+
+
+def request_at(summary: dict[str, Any], index: int) -> dict[str, Any]:
+    requests = summary.get("responses_requests")
+    if not isinstance(requests, list) or index >= len(requests):
+        raise HarnessError(f"missing captured responses request at index {index}")
+    request = requests[index]
+    if not isinstance(request, dict):
+        raise HarnessError(f"captured responses request {index} is not an object")
+    return request
+
+
 def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     expect = scenario.get("expect", {})
@@ -509,6 +755,36 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
             failures.append(f"no fake gh call contained {needle!r}")
     if "returncode" in expect and int(expect["returncode"]) != int(summary.get("returncode", -1)):
         failures.append(f"returncode expected {expect['returncode']}, got {summary.get('returncode')}")
+    if "responses_request_count" in expect:
+        actual = len(summary.get("responses_requests") or [])
+        expected = int(expect["responses_request_count"])
+        if actual != expected:
+            failures.append(f"responses request count expected {expected}, got {actual}")
+    for assertion in expect.get("responses", []):
+        if not isinstance(assertion, dict):
+            failures.append("responses expectation entries must be objects")
+            continue
+        try:
+            request = request_at(summary, int(assertion.get("request", 0)))
+        except HarnessError as exc:
+            failures.append(str(exc))
+            continue
+        body = request.get("body")
+        if "image_payload_bytes" in assertion:
+            actual = data_image_payload_bytes(body)
+            expected = int(assertion["image_payload_bytes"])
+            if actual != expected:
+                failures.append(
+                    f"responses request {assertion.get('request', 0)} image payload bytes expected {expected}, got {actual}"
+                )
+        if "contains" in assertion and not contains_text(body, str(assertion["contains"])):
+            failures.append(
+                f"responses request {assertion.get('request', 0)} did not contain {assertion['contains']!r}"
+            )
+        if "not_contains" in assertion and contains_text(body, str(assertion["not_contains"])):
+            failures.append(
+                f"responses request {assertion.get('request', 0)} unexpectedly contained {assertion['not_contains']!r}"
+            )
     return failures
 
 
@@ -526,7 +802,6 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
     if args.inherit_auth or scenario.get("inherit_auth", False):
         inherited_env = inherit_auth(paths)
     gh_paths = write_fake_gh(scenario, paths)
-    command = build_command(scenario, args, paths)
 
     env = os.environ.copy()
     env.update({
@@ -548,9 +823,47 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         env["CODE_EXEC_HARNESS_GH_LOG"] = str(gh_paths["log"])
         env["CODE_EXEC_HARNESS_GH_STATE"] = str(gh_paths["state"])
 
+    fake_responses = scenario.get("responses_api")
+    server_context = (
+        FakeResponsesServer(fake_responses, paths.artifacts)
+        if isinstance(fake_responses, dict)
+        else None
+    )
+
+    def run_with_env(fake_server: FakeResponsesServer | None) -> tuple[int, list[dict[str, Any]], list[str]]:
+        run_env = env.copy()
+        if fake_server is not None:
+            run_env["OPENAI_BASE_URL"] = fake_server.base_url
+            run_env.setdefault("OPENAI_API_KEY", "harness-test-key")
+            run_env.setdefault("OPENAI_WIRE_API", "responses")
+
+        turn_prompts = scenario.get("turns")
+        if isinstance(turn_prompts, list) and turn_prompts:
+            all_events: list[dict[str, Any]] = []
+            commands: list[str] = []
+            session_id: str | None = None
+            last_returncode = 0
+            for index, turn in enumerate(turn_prompts, start=1):
+                prompt = str(turn.get("prompt", "") if isinstance(turn, dict) else turn)
+                command = build_command_for_prompt(scenario, args, paths, prompt, session_id)
+                commands.append(" ".join(command))
+                returncode, events = run_exec_capture(command, scenario, paths, run_env, f"turn-{index}")
+                all_events.extend(events)
+                last_returncode = returncode
+                turn_summary = summarize(events, paths, returncode, command)
+                put_json(paths.artifacts / f"turn-{index}-summary.json", turn_summary)
+                if returncode != 0:
+                    break
+                if session_id is None:
+                    session_id = session_id_from_summary_or_catalog(turn_summary, paths)
+            return last_returncode, all_events, commands
+
+        command = build_command(scenario, args, paths)
+        returncode, events = run_exec_capture(command, scenario, paths, run_env, "turn-1")
+        return returncode, events, [" ".join(command)]
+
     put_json(paths.artifacts / "manifest.json", {
         "scenario": str(path),
-        "command": command,
         "code_home": str(paths.code_home),
         "workspace": str(paths.workspace),
     })
@@ -558,8 +871,18 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         print(paths.run_dir)
         return 0
 
-    returncode, events = run_exec(command, scenario, paths, env)
-    summary = summarize(events, paths, returncode, command)
+    if server_context is None:
+        returncode, events, commands = run_with_env(None)
+        responses_requests: list[dict[str, Any]] = []
+    else:
+        with server_context as fake_server:
+            returncode, events, commands = run_with_env(fake_server)
+            responses_requests = list(fake_server.requests)
+
+    summary = summarize(events, paths, returncode, commands)
+    summary["commands"] = summary.get("commands", [])
+    summary["scenario_commands"] = commands
+    summary["responses_requests"] = responses_requests
     failures = assert_expectations(summary, scenario)
     summary["expectation_failures"] = failures
     put_json(paths.artifacts / "summary.json", summary)
