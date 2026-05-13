@@ -232,7 +232,7 @@ impl RolloutRecorder {
         let mut filtered: Vec<RolloutItem> = Vec::new();
         for item in items {
             if should_persist_rollout_item(item) {
-                filtered.push(compact_rollout_item_for_storage(item.clone()));
+                filtered.push(item.clone());
             }
         }
         if filtered.is_empty() {
@@ -256,11 +256,7 @@ impl RolloutRecorder {
             if event_msg_from_protocol(&event.msg)
                 .is_some_and(|msg| crate::rollout::policy::should_persist_event_msg(&msg))
             {
-                let mut event = event.clone();
-                event.msg = crate::history_compaction::compact_protocol_event_msg_for_rollout_storage(
-                    event.msg,
-                );
-                filtered.push(RolloutItem::Event(event));
+                filtered.push(RolloutItem::Event(event.clone()));
             }
         }
         if filtered.is_empty() {
@@ -431,26 +427,6 @@ impl RolloutRecorder {
                 )))
             }
         }
-    }
-}
-
-fn compact_rollout_item_for_storage(item: RolloutItem) -> RolloutItem {
-    match item {
-        RolloutItem::ResponseItem(response_item) => RolloutItem::ResponseItem(
-            crate::history_compaction::compact_response_item_for_rollout_storage(response_item),
-        ),
-        RolloutItem::Compacted(mut compacted) => {
-            if let Some(replacement_history) = compacted.replacement_history.take() {
-                compacted.replacement_history = Some(
-                    replacement_history
-                        .into_iter()
-                        .map(crate::history_compaction::compact_response_item_for_rollout_storage)
-                        .collect(),
-                );
-            }
-            RolloutItem::Compacted(compacted)
-        }
-        other => other,
     }
 }
 
