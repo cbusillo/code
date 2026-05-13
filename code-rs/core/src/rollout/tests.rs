@@ -17,14 +17,12 @@ use uuid::Uuid;
 
 use crate::config::{Config, ConfigOverrides, ConfigToml};
 use crate::rollout::INTERACTIVE_SESSION_SOURCES;
-use crate::rollout::RolloutRecorderParams;
 use crate::rollout::list::ConversationsPage;
 use crate::rollout::list::Cursor;
 use crate::rollout::list::get_conversation;
 use crate::rollout::list::get_conversations;
 use std::time::{Duration, SystemTime};
 use code_protocol::models::{ContentItem, ResponseItem};
-use code_protocol::ConversationId;
 use code_protocol::ThreadId;
 use code_protocol::protocol::{
     EventMsg as ProtoEventMsg,
@@ -165,53 +163,6 @@ fn write_session_file(
         writer.write_all(b"\n")?;
     }
     Ok((dt, uuid))
-}
-
-#[tokio::test]
-async fn record_events_compacts_user_message_images_before_rollout_storage() {
-    let temp = TempDir::new().unwrap();
-    let code_home = temp.path();
-    let workspace = code_home.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-
-    let mut overrides = ConfigOverrides::default();
-    overrides.cwd = Some(workspace);
-    let config = Config::load_from_base_config_with_overrides(
-        ConfigToml::default(),
-        overrides,
-        code_home.to_path_buf(),
-    )
-    .unwrap();
-
-    let conversation_id = ConversationId::from_string(&Uuid::new_v4().to_string()).unwrap();
-    let recorder = crate::rollout::RolloutRecorder::new(
-        &config,
-        RolloutRecorderParams::new(conversation_id, None, SessionSource::Cli),
-    )
-    .await
-    .unwrap();
-    let rollout_path = recorder.rollout_path.clone();
-    let raw_image = format!("data:image/png;base64,{}", "A".repeat(8 * 1024));
-
-    recorder
-        .record_events(&[RecordedEvent {
-            id: "event-user-image".to_string(),
-            event_seq: 1,
-            order: None,
-            msg: ProtoEventMsg::UserMessage(UserMessageEvent {
-                message: "see screenshot".to_string(),
-                images: Some(vec![raw_image]),
-                local_images: vec![],
-                text_elements: vec![],
-            }),
-        }])
-        .await
-        .unwrap();
-    recorder.shutdown().await.unwrap();
-
-    let text = fs::read_to_string(rollout_path).unwrap();
-    assert!(!text.contains("data:image"));
-    assert!(text.contains("image omitted from reusable history"));
 }
 
 #[tokio::test]

@@ -21,18 +21,14 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     lines.push(
         r###"- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- Mandatory triggers: If a skill description says it MUST be used, treat that as a hard requirement in the described context. Open its `SKILL.md` before taking other investigative or implementation actions for that turn.
-- Delegated triggers: If a skill description tells you to use another named skill for a subdomain, find that delegated skill in the Available Skills list above and open its `SKILL.md` before taking actions in that subdomain.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
-  1) Open the selected skill's `SKILL.md`. Read only enough to follow the workflow.
+  1) After deciding to use a skill, open its `SKILL.md`. Read only enough to follow the workflow.
   2) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
   3) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
   4) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
-  - Match skills independently against every part of the request. One relevant skill does not suppress another: for example, regression investigation and durable GitHub planning can require separate skills in the same turn.
-  - If multiple skills apply, use all relevant mandatory or delegated skills before ordinary work. Do not choose only one when another skill also matches the user's request.
-  - For non-binding matches, choose the minimal set that covers the request and state the order you'll use them.
+  - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
 - Context hygiene:
   - Keep context small: summarize long sections instead of pasting them; only load extra files when needed.
@@ -43,39 +39,4 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     );
 
     Some(lines.join("\n"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::skills::model::SkillScope;
-    use std::path::PathBuf;
-
-    #[test]
-    fn rendered_skill_guidance_includes_binding_trigger_rules() {
-        let rendered = render_skills_section(&[SkillMetadata {
-            name: "github".to_string(),
-            description:
-                "Use for repository work. For durable planning, use github-plan.".to_string(),
-            path: PathBuf::from("/skills/github/SKILL.md"),
-            scope: SkillScope::User,
-            content: String::new(),
-        }, SkillMetadata {
-            name: "chronicle".to_string(),
-            description: "Use when recent work is ambiguous. This skill MUST be used.".to_string(),
-            path: PathBuf::from("/skills/chronicle/SKILL.md"),
-            scope: SkillScope::User,
-            content: String::new(),
-        }])
-        .expect("skills section should render");
-
-        assert!(rendered.contains("hard requirement in the described context"));
-        assert!(rendered.contains("Open its `SKILL.md` before taking other investigative"));
-        assert!(rendered.contains("If a skill description tells you to use another named skill"));
-        assert!(rendered.contains("find that delegated skill in the Available Skills list"));
-        assert!(rendered.contains("Match skills independently against every part of the request"));
-        assert!(rendered.contains("regression investigation and durable GitHub planning"));
-        assert!(rendered.contains("use all relevant mandatory or delegated skills"));
-        assert!(!rendered.contains("After deciding to use a skill"));
-    }
 }

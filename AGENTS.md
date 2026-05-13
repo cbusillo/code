@@ -1,6 +1,6 @@
 # Rust/codex-rs
 
-Repo workflow metadata lives in `.github/github.json`; keep that
+Repo workflow metadata lives in `.github/github-repo-workflow.json`; keep that
 file aligned with branch roles, validation gates, GitHub signal capabilities,
 workflow names, docs routing, and local cleanup policy when those facts change.
 
