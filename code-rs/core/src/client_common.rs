@@ -8,6 +8,7 @@ use crate::model_family::ModelFamily;
 use crate::openai_tools::OpenAiTool;
 use crate::protocol::RateLimitSnapshotEvent;
 use crate::protocol::TokenUsage;
+use crate::truncate::truncate_middle;
 use crate::user_instructions::UserInstructions;
 use code_protocol::models::ContentItem;
 use code_protocol::models::FunctionCallOutputContentItem;
@@ -428,6 +429,7 @@ fn limit_screenshots_in_input(input: &mut Vec<ResponseItem>) {
 
 const SPARK_IMAGE_PLACEHOLDER: &str =
     "[image omitted: selected -spark model does not support image inputs]";
+const IMAGE_GENERATION_REVISED_PROMPT_MAX_BYTES: usize = 8 * 1024;
 
 /// Replace `input_image` payloads with text placeholders for models that are
 /// known not to accept image inputs.
@@ -463,24 +465,38 @@ pub(crate) fn replace_image_payloads_for_model(input: &mut Vec<ResponseItem>, mo
     }
 }
 
-/// Convert upstream `image_generation_call` output items into standard user
-/// `input_image` messages when we replay stateless history.
+/// Replace upstream `image_generation_call` output items with bounded text when
+/// we replay stateless history.
 pub(crate) fn rewrite_image_generation_calls_for_input(input: &mut Vec<ResponseItem>) {
     let original_items = std::mem::take(input);
     *input = original_items
         .into_iter()
         .map(|item| match item {
-            ResponseItem::ImageGenerationCall { result, .. } => {
-                let image_url = if result.starts_with("data:") {
-                    result
-                } else {
-                    format!("data:image/png;base64,{result}")
-                };
+            ResponseItem::ImageGenerationCall {
+                status,
+                revised_prompt,
+                result,
+                ..
+            } => {
+                let bytes = result.len();
+                let mut text = format!(
+                    "[image generation result omitted from conversation replay; status={status}; {bytes} bytes]"
+                );
+                if let Some(revised_prompt) = revised_prompt {
+                    text.push_str("\nRevised prompt: ");
+                    text.push_str(
+                        &truncate_middle(
+                            &revised_prompt,
+                            IMAGE_GENERATION_REVISED_PROMPT_MAX_BYTES,
+                        )
+                        .0,
+                    );
+                }
 
                 ResponseItem::Message {
                     id: None,
-                    role: "user".to_string(),
-                    content: vec![ContentItem::InputImage { image_url }],
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText { text }],
                     end_turn: None,
                     phase: None,
                 }
@@ -633,11 +649,11 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_image_generation_calls_for_input_converts_to_user_image_message() {
+    fn rewrite_image_generation_calls_for_input_converts_to_bounded_assistant_message() {
         let mut input = vec![ResponseItem::ImageGenerationCall {
             id: "ig_1".to_string(),
             status: "completed".to_string(),
-            revised_prompt: None,
+            revised_prompt: Some("a tidy diagram".to_string()),
             result: "Zm9v".to_string(),
         }];
 
@@ -647,12 +663,52 @@ mod tests {
         assert!(matches!(
             &input[0],
             ResponseItem::Message { role, content, .. }
-                if role == "user"
+                if role == "assistant"
                     && matches!(
                         content.first(),
-                        Some(ContentItem::InputImage { image_url })
-                            if image_url == "data:image/png;base64,Zm9v"
+                        Some(ContentItem::OutputText { text })
+                            if text.contains("image generation result omitted")
+                                && text.contains("status=completed")
+                                && text.contains("4 bytes")
+                                && text.contains("a tidy diagram")
+                                && !text.contains("Zm9v")
                     )
+        ));
+    }
+
+    #[test]
+    fn old_image_generation_results_are_not_replayed_as_full_images() {
+        let mut input = vec![
+            ResponseItem::ImageGenerationCall {
+                id: "ig_old".to_string(),
+                status: "completed".to_string(),
+                revised_prompt: None,
+                result: "A".repeat(64 * 1024),
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "continue".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+        ];
+
+        rewrite_image_generation_calls_for_input(&mut input);
+
+        assert!(matches!(
+            &input[0],
+            ResponseItem::Message { content, .. }
+                if matches!(
+                    content.first(),
+                    Some(ContentItem::OutputText { text })
+                        if text.contains("image generation result omitted")
+                            && text.contains("65536 bytes")
+                            && !text.contains("data:image")
+                            && !text.contains(&"A".repeat(1024))
+                )
         ));
     }
 
