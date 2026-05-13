@@ -1,0 +1,56 @@
+{
+  "name": "image-history-replay",
+  "model": "gpt-5.1-codex",
+  "files": {
+    "README.md": "# Image replay harness fixture\n"
+  },
+  "turns": [
+    {
+      "prompt": "Generate an image fixture. Do not run tools."
+    },
+    {
+      "prompt": "Continue without needing the previous image bytes."
+    }
+  ],
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-image",
+        "events": [
+          {
+            "item": {
+              "type": "image_generation_call",
+              "id": "ig_1",
+              "status": "completed",
+              "result": {
+                "$repeat": "A",
+                "count": 65536
+              }
+            }
+          }
+        ]
+      },
+      {
+        "response_id": "resp-next"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 2,
+    "responses": [
+      {
+        "request": 0,
+        "image_payload_bytes": 0
+      },
+      {
+        "request": 1,
+        "image_payload_bytes": 0,
+        "contains": "image generation result omitted",
+        "not_contains": "data:image/"
+      }
+    ]
+  },
+  "max_seconds": 30,
+  "timeout_seconds": 90
+}

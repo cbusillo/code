@@ -50,6 +50,11 @@ Scenarios are JSON files. Common fields:
 - `config_toml`: isolated `CODE_HOME/config.toml` contents
 - `config_overrides`: `-c key=value` arguments passed to `code exec`
 - `inherit_auth`: copy Code auth and GitHub CLI config for this scenario
+- `turns`: run multiple `code exec` turns in one isolated `CODE_HOME`; later
+  turns resume the first turn's session id
+- `responses_api`: start a local fake `/v1/responses` server and point the run
+  at it with a dummy API key, allowing request-body assertions without spending
+  live model tokens
 - `expect`: simple assertions over the final answer, commands, fake `gh` calls,
   and exit code
 
