@@ -42,6 +42,7 @@ class FakeResponsesServer:
         self.artifacts = artifacts
         self.requests: list[dict[str, Any]] = []
         self._responses = list(fixture.get("responses", []))
+        self._next_response_index = 0
         self._lock = threading.Lock()
         self._httpd: socketserver.ThreadingTCPServer | None = None
         self._thread: threading.Thread | None = None
@@ -75,9 +76,11 @@ class FakeResponsesServer:
             self._thread.join(timeout=5)
         self.write_artifacts()
 
-    def _next_response(self) -> dict[str, Any]:
+    def _record_request_and_next_response(self, request: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            index = len(self.requests)
+            index = self._next_response_index
+            self._next_response_index += 1
+            self.requests.append(request)
             if index >= len(self._responses):
                 return {"status": 500, "body": {"error": f"missing fake response for request {index + 1}"}}
             return self._responses[index]
@@ -90,9 +93,9 @@ class FakeResponsesServer:
             body = json.loads(raw_body) if raw_body else None
         except json.JSONDecodeError:
             body = {"_invalid_json": raw_body}
-        response = self._next_response()
-        with self._lock:
-            self.requests.append({"method": "POST", "path": parsed.path, "body": body})
+        response = self._record_request_and_next_response(
+            {"method": "POST", "path": parsed.path, "body": body}
+        )
 
         if not parsed.path.endswith("/responses"):
             self._send_json(handler, 404, {"error": f"unexpected path {parsed.path}"})
@@ -739,6 +742,16 @@ def request_at(summary: dict[str, Any], index: int) -> dict[str, Any]:
     return request
 
 
+def request_assertion_target(request: dict[str, Any], assertion: dict[str, Any]) -> Any:
+    body = request.get("body")
+    scope = str(assertion.get("scope", "body"))
+    if scope == "body":
+        return body
+    if scope == "input":
+        return body.get("input") if isinstance(body, dict) else None
+    raise HarnessError(f"unsupported responses assertion scope: {scope}")
+
+
 def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     expect = scenario.get("expect", {})
@@ -769,19 +782,28 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
         except HarnessError as exc:
             failures.append(str(exc))
             continue
-        body = request.get("body")
+        try:
+            target = request_assertion_target(request, assertion)
+        except HarnessError as exc:
+            failures.append(str(exc))
+            continue
         if "image_payload_bytes" in assertion:
-            actual = data_image_payload_bytes(body)
+            actual = data_image_payload_bytes(target)
             expected = int(assertion["image_payload_bytes"])
             if actual != expected:
                 failures.append(
                     f"responses request {assertion.get('request', 0)} image payload bytes expected {expected}, got {actual}"
                 )
-        if "contains" in assertion and not contains_text(body, str(assertion["contains"])):
+        if "contains" in assertion and not contains_text(target, str(assertion["contains"])):
             failures.append(
                 f"responses request {assertion.get('request', 0)} did not contain {assertion['contains']!r}"
             )
-        if "not_contains" in assertion and contains_text(body, str(assertion["not_contains"])):
+        for needle in assertion.get("contains_all", []):
+            if not contains_text(target, str(needle)):
+                failures.append(
+                    f"responses request {assertion.get('request', 0)} did not contain {needle!r}"
+                )
+        if "not_contains" in assertion and contains_text(target, str(assertion["not_contains"])):
             failures.append(
                 f"responses request {assertion.get('request', 0)} unexpectedly contained {assertion['not_contains']!r}"
             )
@@ -830,7 +852,9 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         else None
     )
 
-    def run_with_env(fake_server: FakeResponsesServer | None) -> tuple[int, list[dict[str, Any]], list[str]]:
+    def run_with_env(
+        fake_server: FakeResponsesServer | None,
+    ) -> tuple[int, list[dict[str, Any]], list[list[str]]]:
         run_env = env.copy()
         if fake_server is not None:
             run_env["OPENAI_BASE_URL"] = fake_server.base_url
@@ -840,13 +864,13 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         turn_prompts = scenario.get("turns")
         if isinstance(turn_prompts, list) and turn_prompts:
             all_events: list[dict[str, Any]] = []
-            commands: list[str] = []
+            commands: list[list[str]] = []
             session_id: str | None = None
             last_returncode = 0
             for index, turn in enumerate(turn_prompts, start=1):
                 prompt = str(turn.get("prompt", "") if isinstance(turn, dict) else turn)
                 command = build_command_for_prompt(scenario, args, paths, prompt, session_id)
-                commands.append(" ".join(command))
+                commands.append(command)
                 returncode, events = run_exec_capture(command, scenario, paths, run_env, f"turn-{index}")
                 all_events.extend(events)
                 last_returncode = returncode
@@ -860,7 +884,7 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
 
         command = build_command(scenario, args, paths)
         returncode, events = run_exec_capture(command, scenario, paths, run_env, "turn-1")
-        return returncode, events, [" ".join(command)]
+        return returncode, events, [command]
 
     put_json(paths.artifacts / "manifest.json", {
         "scenario": str(path),
@@ -879,9 +903,10 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
             returncode, events, commands = run_with_env(fake_server)
             responses_requests = list(fake_server.requests)
 
-    summary = summarize(events, paths, returncode, commands)
+    summary_command: list[str] = commands[-1] if commands else []
+    summary = summarize(events, paths, returncode, summary_command)
     summary["commands"] = summary.get("commands", [])
-    summary["scenario_commands"] = commands
+    summary["scenario_commands"] = [" ".join(command) for command in commands]
     summary["responses_requests"] = responses_requests
     failures = assert_expectations(summary, scenario)
     summary["expectation_failures"] = failures
