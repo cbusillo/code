@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 
@@ -346,6 +346,14 @@ def inherit_auth(paths: RunPaths) -> dict[str, str]:
         copy_or_link(source_gh_config, target_gh_config, symlink=False)
         env_overrides["GH_CONFIG_DIR"] = str(target_gh_config)
     return env_overrides
+
+
+def auth_inheritance_requested(scenario: dict[str, Any], args: argparse.Namespace) -> bool:
+    return bool(args.inherit_auth or scenario.get("inherit_auth", False))
+
+
+def fake_responses_enabled(scenario: dict[str, Any]) -> bool:
+    return isinstance(scenario.get("responses_api"), dict)
 
 
 FAKE_GH = r'''#!/usr/bin/env python3
@@ -820,8 +828,11 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
     materialize_workspace(scenario, paths)
     materialize_skills(scenario, paths, scenario_dir, extra_roots)
     write_config(scenario, paths)
+    use_fake_responses = fake_responses_enabled(scenario)
+    fake_responses = cast(dict[str, Any], scenario["responses_api"]) if use_fake_responses else None
+    inherit_requested = auth_inheritance_requested(scenario, args)
     inherited_env = {}
-    if args.inherit_auth or scenario.get("inherit_auth", False):
+    if inherit_requested and not use_fake_responses:
         inherited_env = inherit_auth(paths)
     gh_paths = write_fake_gh(scenario, paths)
 
@@ -845,12 +856,7 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         env["CODE_EXEC_HARNESS_GH_LOG"] = str(gh_paths["log"])
         env["CODE_EXEC_HARNESS_GH_STATE"] = str(gh_paths["state"])
 
-    fake_responses = scenario.get("responses_api")
-    server_context = (
-        FakeResponsesServer(fake_responses, paths.artifacts)
-        if isinstance(fake_responses, dict)
-        else None
-    )
+    server_context = FakeResponsesServer(fake_responses, paths.artifacts) if fake_responses is not None else None
 
     def run_with_env(
         fake_server: FakeResponsesServer | None,
@@ -858,8 +864,8 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         run_env = env.copy()
         if fake_server is not None:
             run_env["OPENAI_BASE_URL"] = fake_server.base_url
-            run_env.setdefault("OPENAI_API_KEY", "harness-test-key")
-            run_env.setdefault("OPENAI_WIRE_API", "responses")
+            run_env["OPENAI_API_KEY"] = "harness-test-key"
+            run_env["OPENAI_WIRE_API"] = "responses"
 
         turn_prompts = scenario.get("turns")
         if isinstance(turn_prompts, list) and turn_prompts:
@@ -889,6 +895,10 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
     put_json(paths.artifacts / "manifest.json", {
         "scenario": str(path),
         "code_home": str(paths.code_home),
+        "fake_responses": use_fake_responses,
+        "inherit_auth_applied": bool(inherited_env),
+        "inherit_auth_requested": inherit_requested,
+        "inherit_auth_suppressed": bool(inherit_requested and use_fake_responses),
         "workspace": str(paths.workspace),
     })
     if args.dry_run:
