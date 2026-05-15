@@ -333,19 +333,22 @@ def gh_config_source() -> Path:
     return Path.home() / ".config" / "gh"
 
 
-def inherit_auth(paths: RunPaths) -> dict[str, str]:
-    env_overrides: dict[str, str] = {}
+def inherit_code_auth(paths: RunPaths) -> None:
     source_home = Path(os.environ.get("CODE_HOME") or os.environ.get("CODEX_HOME") or Path.home() / ".code")
     for name in ("auth.json", ".credentials.json"):
         source = source_home / name
         if source.is_file():
             shutil.copy2(source, paths.code_home / name)
+
+
+def inherit_gh_auth(paths: RunPaths) -> dict[str, str]:
     source_gh_config = gh_config_source()
-    if source_gh_config.is_dir():
-        target_gh_config = paths.shell_home / ".config" / "gh"
-        copy_or_link(source_gh_config, target_gh_config, symlink=False)
-        env_overrides["GH_CONFIG_DIR"] = str(target_gh_config)
-    return env_overrides
+    if not source_gh_config.is_dir():
+        return {}
+
+    target_gh_config = paths.shell_home / ".config" / "gh"
+    copy_or_link(source_gh_config, target_gh_config, symlink=False)
+    return {"GH_CONFIG_DIR": str(target_gh_config)}
 
 
 def auth_inheritance_requested(scenario: dict[str, Any], args: argparse.Namespace) -> bool:
@@ -831,9 +834,13 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
     use_fake_responses = fake_responses_enabled(scenario)
     fake_responses = cast(dict[str, Any], scenario["responses_api"]) if use_fake_responses else None
     inherit_requested = auth_inheritance_requested(scenario, args)
-    inherited_env = {}
-    if inherit_requested and not use_fake_responses:
-        inherited_env = inherit_auth(paths)
+    code_auth_inherited = False
+    inherited_env: dict[str, str] = {}
+    if inherit_requested:
+        inherited_env = inherit_gh_auth(paths)
+        if not use_fake_responses:
+            inherit_code_auth(paths)
+            code_auth_inherited = True
     gh_paths = write_fake_gh(scenario, paths)
 
     env = os.environ.copy()
@@ -896,9 +903,12 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
         "scenario": str(path),
         "code_home": str(paths.code_home),
         "fake_responses": use_fake_responses,
-        "inherit_auth_applied": bool(inherited_env),
+        "code_auth_inherited": code_auth_inherited,
+        "gh_auth_inherited": bool(inherited_env),
         "inherit_auth_requested": inherit_requested,
+        "inherit_auth_applied": code_auth_inherited or bool(inherited_env),
         "inherit_auth_suppressed": bool(inherit_requested and use_fake_responses),
+        "code_auth_suppressed": bool(inherit_requested and use_fake_responses),
         "workspace": str(paths.workspace),
     })
     if args.dry_run:

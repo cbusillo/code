@@ -55,7 +55,8 @@ Scenarios are JSON files. Common fields:
 - `responses_api`: start a local fake `/v1/responses` server and point the run
   at it with a dummy API key, allowing request-body assertions without spending
   live model tokens. When `responses_api` is set, inherited Code auth is
-  suppressed even if `inherit_auth` is requested.
+  suppressed even if `inherit_auth` is requested, but inherited GitHub CLI
+  auth still applies.
 - `expect`: simple assertions over the final answer, commands, fake `gh` calls,
   and exit code
 
