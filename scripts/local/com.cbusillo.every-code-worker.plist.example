@@ -14,7 +14,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>LAUNCHPLANE_EVERY_CODE_SERVICE</key>
-    <string></string>
+    <string>https://YOUR-LAUNCHPLANE-SERVICE.example</string>
     <key>LAUNCHPLANE_EVERY_CODE_WORKSPACE</key>
     <string>/ABSOLUTE/PATH/TO/workspace</string>
     <key>LAUNCHPLANE_EVERY_CODE_WORKTREE</key>
