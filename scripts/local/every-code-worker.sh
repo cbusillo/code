@@ -11,10 +11,11 @@ opens visible tmux/Code sessions on this Mac.
 
 Environment overrides:
   LAUNCHPLANE_EVERY_CODE_WORKTREE   Launchplane checkout to run from
-  LAUNCHPLANE_EVERY_CODE_SERVICE    Launchplane service URL
+  LAUNCHPLANE_EVERY_CODE_SERVICE    Launchplane service URL; empty uses local Launchplane state
   LAUNCHPLANE_EVERY_CODE_WORKSPACE  Directory containing repo checkouts
   LAUNCHPLANE_EVERY_CODE_STATE_DIR  Local worker state directory
   LAUNCHPLANE_EVERY_CODE_TOKEN_ITEM macOS Keychain item name for worker token
+  LAUNCHPLANE_EVERY_CODE_HOST       Worker host name recorded on claims
 EOF
 }
 
@@ -43,12 +44,17 @@ for arg in "$@"; do
 done
 set -- "${remaining_args[@]}"
 
-service_url="${LAUNCHPLANE_EVERY_CODE_SERVICE:-https://launchplane.shinycomputers.com}"
-workspace_root="${LAUNCHPLANE_EVERY_CODE_WORKSPACE:-/Users/cbusillo/Developer}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/../.." && pwd -P)"
+default_workspace_root="$(cd "$repo_root/.." && pwd -P)"
+
+service_url="${LAUNCHPLANE_EVERY_CODE_SERVICE:-}"
+workspace_root="${LAUNCHPLANE_EVERY_CODE_WORKSPACE:-$default_workspace_root}"
 launchplane_worktree="${LAUNCHPLANE_EVERY_CODE_WORKTREE:-$workspace_root/launchplane}"
 state_dir="${LAUNCHPLANE_EVERY_CODE_STATE_DIR:-$HOME/.local/state/launchplane/every-code}"
 token_item="${LAUNCHPLANE_EVERY_CODE_TOKEN_ITEM:-launchplane-every-code-worker-token}"
-worker_host="${LAUNCHPLANE_EVERY_CODE_HOST:-Chris-Studio}"
+default_worker_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || uname -n)"
+worker_host="${LAUNCHPLANE_EVERY_CODE_HOST:-$default_worker_host}"
 launchd_label="${LAUNCHPLANE_EVERY_CODE_LAUNCHD_LABEL:-com.cbusillo.every-code-worker}"
 launchd_domain="gui/$(id -u)"
 
@@ -60,6 +66,16 @@ require_worker_token() {
 		exit 1
 	fi
 	export LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN="$worker_token"
+}
+
+require_service_auth() {
+	if [ -z "$service_url" ]; then
+		return 0
+	fi
+	if [ -n "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" ]; then
+		return 0
+	fi
+	require_worker_token
 }
 
 run_launchplane() {
@@ -160,7 +176,7 @@ PY
 
 case "$command_name" in
 start)
-	require_worker_token
+	require_service_auth
 	payload="$(run_launchplane start \
 		--service-url "$service_url" \
 		--workspace-root "$workspace_root" \
@@ -177,7 +193,7 @@ stop)
 	emit_result "$payload"
 	;;
 run-once)
-	require_worker_token
+	require_service_auth
 	payload="$(run_launchplane run-once \
 		--service-url "$service_url" \
 		--workspace-root "$workspace_root" \
@@ -186,7 +202,7 @@ run-once)
 	emit_result "$payload"
 	;;
 run)
-	require_worker_token
+	require_service_auth
 	exec uv --directory "$launchplane_worktree" run launchplane every-code run \
 		--service-url "$service_url" \
 		--workspace-root "$workspace_root" \

@@ -7,35 +7,35 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/cbusillo/Developer/code/scripts/local/every-code-worker.sh</string>
+    <string>/ABSOLUTE/PATH/TO/code/scripts/local/every-code-worker.sh</string>
     <string>run</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>LAUNCHPLANE_EVERY_CODE_SERVICE</key>
-    <string>https://launchplane.shinycomputers.com</string>
+    <string></string>
     <key>LAUNCHPLANE_EVERY_CODE_WORKSPACE</key>
-    <string>/Users/cbusillo/Developer</string>
+    <string>/ABSOLUTE/PATH/TO/workspace</string>
     <key>LAUNCHPLANE_EVERY_CODE_WORKTREE</key>
-    <string>/Users/cbusillo/Developer/launchplane</string>
+    <string>/ABSOLUTE/PATH/TO/workspace/launchplane</string>
     <key>LAUNCHPLANE_EVERY_CODE_STATE_DIR</key>
-    <string>/Users/cbusillo/.local/state/launchplane/every-code</string>
+    <string>/ABSOLUTE/PATH/TO/state/launchplane/every-code</string>
     <key>LAUNCHPLANE_EVERY_CODE_TOKEN_ITEM</key>
     <string>launchplane-every-code-worker-token</string>
     <key>LAUNCHPLANE_EVERY_CODE_HOST</key>
-    <string>Chris-Studio</string>
+    <string>LOCAL-HOST-NAME</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 
   <key>WorkingDirectory</key>
-  <string>/Users/cbusillo/Developer/code</string>
+  <string>/ABSOLUTE/PATH/TO/code</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/cbusillo/.local/state/launchplane/every-code/every-code-worker/launchd.out.log</string>
+  <string>/ABSOLUTE/PATH/TO/state/launchplane/every-code/every-code-worker/launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/cbusillo/.local/state/launchplane/every-code/every-code-worker/launchd.err.log</string>
+  <string>/ABSOLUTE/PATH/TO/state/launchplane/every-code/every-code-worker/launchd.err.log</string>
 
   <key>RunAtLoad</key>
   <true/>
