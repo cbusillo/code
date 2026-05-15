@@ -18,14 +18,15 @@ use crate::protocol::AgentMessageEvent;
 use crate::protocol::ErrorEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::InputItem;
+use crate::util::backoff;
 use code_protocol::models::ResponseInputItem;
 use code_protocol::models::ResponseItem;
 use code_protocol::protocol::CompactedItem;
 use code_protocol::protocol::RolloutItem;
-use crate::util::backoff;
 use std::time::Duration;
 
-const MAX_REMOTE_COMPACT_CONTEXT_OVERFLOW_TRIMS: usize = 32;
+const MAX_REMOTE_COMPACT_CONTEXT_OVERFLOW_RETRIES: usize = 1;
+const REMOTE_COMPACT_OVERFLOW_RECENT_ITEM_LIMIT: usize = 64;
 const MAX_REMOTE_COMPACT_USAGE_LIMIT_RETRIES: usize = 2;
 
 pub(super) async fn run_inline_remote_auto_compact_task(
@@ -91,7 +92,8 @@ async fn run_remote_compact_task_inner(
     });
 
     turn_items = sanitize_items_for_compact(turn_items);
-    let mut truncated_count = 0usize;
+    let mut overflow_retries = 0usize;
+    let mut overflow_trimmed_count = 0usize;
     let max_retries = turn_context.client.get_provider().stream_max_retries();
     let mut retries = 0;
     let mut usage_limit_retries = 0usize;
@@ -112,50 +114,49 @@ async fn run_remote_compact_task_inner(
             .await
         {
             Ok(history) => {
-                if truncated_count > 0 {
+                if overflow_trimmed_count > 0 {
                     tracing::warn!(
-                        "Context window exceeded during remote compact; trimmed {truncated_count} item(s) from prompt"
+                        "Context window exceeded during remote compact; retried after trimming {overflow_trimmed_count} item(s) from prompt"
                     );
                 }
                 break history;
             }
             Err(err) if is_context_overflow_error(&err) => {
-                if turn_items.len() > 1
-                    && truncated_count < MAX_REMOTE_COMPACT_CONTEXT_OVERFLOW_TRIMS
-                {
+                if overflow_retries < MAX_REMOTE_COMPACT_CONTEXT_OVERFLOW_RETRIES {
+                    let removed = trim_remote_compact_input_after_overflow(&mut turn_items);
+                    if removed == 0 {
+                        let reason = "Remote compact failed: context overflow even with minimal input.";
+                        return Ok(
+                            apply_emergency_compaction_fallback(
+                                sess,
+                                turn_context.as_ref(),
+                                sub_id,
+                                reason,
+                            )
+                            .await,
+                        );
+                    }
+
+                    overflow_retries = overflow_retries.saturating_add(1);
+                    overflow_trimmed_count = overflow_trimmed_count.saturating_add(removed);
                     tracing::warn!(
-                        "Context window exceeded while remote compacting; dropping oldest item ({} remaining)",
-                        turn_items.len().saturating_sub(1)
+                        "Context window exceeded while remote compacting; trimmed {removed} oldest item(s), retaining {} recent item(s)",
+                        turn_items.len()
                     );
-                    turn_items.remove(0);
-                    truncated_count = truncated_count.saturating_add(1);
                     retries = 0;
                     usage_limit_retries = 0;
                     continue;
                 }
 
-                if truncated_count >= MAX_REMOTE_COMPACT_CONTEXT_OVERFLOW_TRIMS {
-                    let reason = format!(
-                        "Remote compact trimmed {truncated_count} items but still exceeded the context window."
-                    );
-                    return Ok(
-                        apply_emergency_compaction_fallback(
-                            sess,
-                            turn_context.as_ref(),
-                            sub_id,
-                            &reason,
-                        )
-                        .await,
-                    );
-                }
-
-                let reason = "Remote compact failed: context overflow even with minimal input.";
+                let reason = format!(
+                    "Remote compact retried with reduced recent history but still exceeded the context window after trimming {overflow_trimmed_count} item(s)."
+                );
                 return Ok(
                     apply_emergency_compaction_fallback(
                         sess,
                         turn_context.as_ref(),
                         sub_id,
-                        reason,
+                        &reason,
                     )
                     .await,
                 );
@@ -229,4 +230,63 @@ async fn run_remote_compact_task_inner(
     sess.send_event(event).await;
 
     Ok(new_history)
+}
+
+fn trim_remote_compact_input_after_overflow(turn_items: &mut Vec<ResponseItem>) -> usize {
+    let before = turn_items.len();
+    if before <= 1 {
+        return 0;
+    }
+
+    let keep = (before / 2)
+        .max(1)
+        .min(REMOTE_COMPACT_OVERFLOW_RECENT_ITEM_LIMIT);
+    let remove_count = before.saturating_sub(keep);
+    turn_items.drain(0..remove_count);
+    remove_count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use code_protocol::models::ContentItem;
+
+    fn user_item(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    #[test]
+    fn overflow_retry_trims_to_recent_bounded_history() {
+        let mut items = (0..200)
+            .map(|idx| user_item(&format!("item {idx}")))
+            .collect::<Vec<_>>();
+
+        let removed = trim_remote_compact_input_after_overflow(&mut items);
+
+        assert_eq!(removed, 136);
+        assert_eq!(items.len(), 64);
+        assert!(matches!(
+            &items[0],
+            ResponseItem::Message { content, .. }
+                if matches!(content.first(), Some(ContentItem::InputText { text }) if text == "item 136")
+        ));
+    }
+
+    #[test]
+    fn overflow_retry_does_not_trim_minimal_input() {
+        let mut items = vec![user_item("current input")];
+
+        let removed = trim_remote_compact_input_after_overflow(&mut items);
+
+        assert_eq!(removed, 0);
+        assert_eq!(items.len(), 1);
+    }
 }
