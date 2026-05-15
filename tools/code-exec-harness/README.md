@@ -54,7 +54,8 @@ Scenarios are JSON files. Common fields:
   turns resume the first turn's session id
 - `responses_api`: start a local fake `/v1/responses` server and point the run
   at it with a dummy API key, allowing request-body assertions without spending
-  live model tokens
+  live model tokens. When `responses_api` is set, inherited Code auth is
+  suppressed even if `inherit_auth` is requested.
 - `expect`: simple assertions over the final answer, commands, fake `gh` calls,
   and exit code
 
