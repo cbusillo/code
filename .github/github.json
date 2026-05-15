@@ -57,9 +57,12 @@
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
-  "relatedRepos": [
-    "code-everywhere"
-  ],
+  "relatedRepos": ["code-everywhere"],
+  "jetbrains": {
+    "ide": "IntelliJ IDEA",
+    "openProjectPath": ".",
+    "scopePreference": "changed_files"
+  },
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
