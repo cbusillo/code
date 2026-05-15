@@ -58,6 +58,11 @@
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": ["code-everywhere"],
+  "jetbrains": {
+    "ide": "IntelliJ IDEA",
+    "openProjectPath": ".",
+    "scopePreference": "changed_files"
+  },
   "validatedThrough": [],
   "githubSignals": {
     "postMerge": {
