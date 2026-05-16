@@ -54,6 +54,11 @@
     "Issue Comment",
     "Issue Triage"
   ],
+  "jetbrains": {
+    "ide": "IntelliJ IDEA",
+    "openProjectPath": ".",
+    "scopePreference": "changed_files"
+  },
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
