@@ -780,6 +780,10 @@ pub(super) async fn submission_loop(
                     remote_models_manager,
                     tools_config,
                     dynamic_tools,
+                    skills: skills_outcome
+                        .as_ref()
+                        .map(|outcome| outcome.skills.clone())
+                        .unwrap_or_default(),
                     tx_event: tx_event.clone(),
                     user_instructions: effective_user_instructions.clone(),
                     base_instructions,
@@ -2443,21 +2447,26 @@ async fn run_agent(
     }
 
     let mut initial_response_item: Option<ResponseItem> = None;
+    let mut initial_skill_messages: Vec<ResponseItem> = Vec::new();
 
     if !pending_only_turn {
         // Convert input to ResponseInputItem
         let mut response_input = response_input_from_core_items(input.clone());
         sess.enforce_user_message_limits(&sub_id, &mut response_input);
         let response_item: ResponseItem = response_input.into();
+        let selected_skill_messages =
+            selected_skill_messages_from_input(&input, &sess.skills);
 
         if is_review_mode {
             review_history.push(response_item.clone());
+            review_history.extend(selected_skill_messages.clone());
         } else {
             // Record to history but we'll handle ephemeral images separately
             sess.record_conversation_items(&[response_item.clone()])
                 .await;
         }
         initial_response_item = Some(response_item);
+        initial_skill_messages = selected_skill_messages;
     }
 
     let mut last_task_message: Option<String> = None;
@@ -2584,13 +2593,21 @@ async fn run_agent(
             let existing_history = sess.state.lock().unwrap().history.contents();
             let pending_input_tail =
                 pending_items_not_already_recorded(&pending_input_tail, &existing_history);
-            sess.turn_input_with_history(pending_input_tail)
+            let mut turn_input = sess.turn_input_with_history(pending_input_tail);
+            if !initial_skill_messages.is_empty() {
+                turn_input.extend(initial_skill_messages.clone());
+            }
+            turn_input
         };
 
         let turn_input_messages: Vec<String> = turn_input
             .iter()
             .filter_map(|item| match item {
-                ResponseItem::Message { role, content, .. } if role == "user" => Some(content),
+                ResponseItem::Message { role, content, .. }
+                    if role == "user" && !is_skill_instructions_message(content) =>
+                {
+                    Some(content)
+                }
                 _ => None,
             })
             .flat_map(|content| {
@@ -2606,6 +2623,7 @@ async fn run_agent(
             &mut turn_diff_tracker,
             sub_id.clone(),
             initial_response_item.clone(),
+            initial_skill_messages.clone(),
             pending_input_tail,
             turn_input,
         )
@@ -2947,6 +2965,7 @@ async fn run_turn(
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
     initial_user_item: Option<ResponseItem>,
+    initial_skill_messages: Vec<ResponseItem>,
     pending_input_tail: Vec<ResponseItem>,
     mut input: Vec<ResponseItem>,
 ) -> CodexResult<Vec<ProcessedResponseItem>> {
@@ -3341,6 +3360,7 @@ async fn run_turn(
                             if let Some(initial_item) = initial_user_item.clone() {
                                 rebuilt.push(initial_item);
                             }
+                            rebuilt.extend(initial_skill_messages.clone());
                             if !pending_input_tail.is_empty() {
                                 let (missing_calls, filtered_outputs) =
                                     reconcile_pending_tool_outputs(&pending_input_tail, &rebuilt, &previous_input_snapshot);

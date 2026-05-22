@@ -363,6 +363,57 @@ fn response_input_from_core_items(items: Vec<InputItem>) -> ResponseInputItem {
     }
 }
 
+fn selected_skill_messages_from_input(
+    items: &[InputItem],
+    skills: &[crate::skills::SkillMetadata],
+) -> Vec<ResponseItem> {
+    let requested = selected_skill_names_from_input(items);
+    if requested.is_empty() {
+        return Vec::new();
+    }
+
+    let mut messages = Vec::new();
+    for skill in skills {
+        if requested
+            .iter()
+            .any(|requested_name| requested_name.eq_ignore_ascii_case(&skill.name))
+        {
+            messages.push(
+                SkillInstructions {
+                    name: skill.name.clone(),
+                    path: skill.path.to_string_lossy().replace('\\', "/"),
+                    contents: skill.content.clone(),
+                }
+                .into(),
+            );
+        }
+    }
+    messages
+}
+
+fn selected_skill_names_from_input(items: &[InputItem]) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in items {
+        let InputItem::Text { text } = item else {
+            continue;
+        };
+        for token in text.split_whitespace() {
+            let Some(name) = token.strip_prefix('$') else {
+                continue;
+            };
+            let name = name
+                .trim_matches(|ch: char| {
+                    !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+                })
+                .to_string();
+            if !name.is_empty() && !names.iter().any(|existing| existing == &name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 fn convert_call_tool_result_to_function_call_output_payload(
     result: &Result<CallToolResult, String>,
 ) -> FunctionCallOutputPayload {
@@ -855,6 +906,9 @@ fn should_include_browser_screenshot(
 mod tests {
     use super::*;
     use crate::codex::streaming::{process_rollout_env_item, TimelineReplayContext};
+    use crate::skills::SkillMetadata;
+    use crate::skills::model::SkillPolicy;
+    use crate::skills::model::SkillScope;
     use code_protocol::models::ContentItem;
     use pretty_assertions::assert_eq;
 
@@ -868,6 +922,36 @@ mod tests {
         assert!(should_include_browser_screenshot(&mut last, &path, Some(hash_one.clone())));
         assert!(!should_include_browser_screenshot(&mut last, &path, Some(hash_one.clone())));
         assert!(should_include_browser_screenshot(&mut last, &path, Some(hash_two)));
+    }
+
+    #[test]
+    fn selected_skill_messages_include_explicit_dollar_skill_once() {
+        let skills = vec![SkillMetadata {
+            name: "manual-skill".to_string(),
+            description: "Manual skill".to_string(),
+            path: PathBuf::from("/tmp/manual-skill/SKILL.md"),
+            scope: SkillScope::User,
+            content: "manual body".to_string(),
+            policy: Some(SkillPolicy {
+                allow_implicit_invocation: Some(false),
+            }),
+        }];
+        let input = vec![InputItem::Text {
+            text: "Please use $manual-skill for this turn, then reply.".to_string(),
+        }];
+
+        let messages = selected_skill_messages_from_input(&input, &skills);
+
+        assert_eq!(messages.len(), 1);
+        let ResponseItem::Message { role, content, .. } = &messages[0] else {
+            panic!("expected skill message");
+        };
+        assert_eq!(role, "user");
+        let [ContentItem::InputText { text }] = content.as_slice() else {
+            panic!("expected skill text");
+        };
+        assert!(text.contains("<name>manual-skill</name>"));
+        assert!(text.contains("manual body"));
     }
 
     fn make_snapshot(cwd: &str) -> EnvironmentContextSnapshot {
@@ -977,7 +1061,9 @@ use crate::environment_context::{
     EnvironmentContextTracker,
     ViewportDimensions,
 };
+use crate::user_instructions::SkillInstructions;
 use crate::user_instructions::UserInstructions;
+use crate::user_instructions::is_skill_instructions_message;
 use crate::config::{persist_model_selection, Config};
 use crate::timeboxed_exec_guidance::{
     AUTO_EXEC_TIMEBOXED_CLI_GUIDANCE,

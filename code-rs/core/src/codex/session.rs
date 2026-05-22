@@ -466,6 +466,7 @@ pub(crate) struct Session {
     pub(super) disable_response_storage: bool,
     pub(super) tools_config: ToolsConfig,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(super) skills: Vec<crate::skills::SkillMetadata>,
 
     /// Manager for external MCP servers/tools.
     pub(super) mcp_connection_manager: McpConnectionManager,
