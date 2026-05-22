@@ -38,6 +38,7 @@ pub(crate) async fn get_user_instructions(
     skills: Option<&[SkillMetadata]>,
 ) -> Option<String> {
     let skills_section = skills.and_then(render_skills_section);
+    let skills_section_key = skills_section.as_ref().map(|section| section.trim().to_string());
 
     let project_doc_parts = match read_project_doc_parts(config).await {
         Ok(Some(parts)) => parts,
@@ -49,6 +50,11 @@ pub(crate) async fn get_user_instructions(
     };
 
     let mut seen: HashSet<String> = HashSet::new();
+    let rendered_project_doc_parts = config
+        .user_instructions
+        .as_deref()
+        .and_then(rendered_project_doc_parts)
+        .map(str::to_string);
 
     let mut base_instructions: Option<String> = None;
     if let Some(original) = &config.user_instructions {
@@ -56,6 +62,11 @@ pub(crate) async fn get_user_instructions(
         if !key.is_empty() && seen.insert(key.to_string()) {
             base_instructions = Some(original.clone());
         }
+        mark_rendered_skills_section_seen(
+            rendered_project_doc_parts.as_deref(),
+            skills_section_key.as_deref(),
+            &mut seen,
+        );
     }
 
     let mut unique_project_docs: Vec<String> = Vec::new();
@@ -63,6 +74,13 @@ pub(crate) async fn get_user_instructions(
         let key = doc.trim();
         if key.is_empty() {
             continue;
+        }
+
+        if rendered_project_doc_parts
+            .as_deref()
+            .is_some_and(|rendered| rendered.contains(key))
+        {
+            seen.insert(key.to_string());
         }
 
         if seen.insert(key.to_string()) {
@@ -84,6 +102,27 @@ pub(crate) async fn get_user_instructions(
         (Some(base), false) => {
             let docs = unique_project_docs.join("\n\n");
             Some(format!("{base}{PROJECT_DOC_SEPARATOR}{docs}"))
+        }
+    }
+}
+
+fn rendered_project_doc_parts(rendered: &str) -> Option<&str> {
+    rendered.split_once(PROJECT_DOC_SEPARATOR).map(|(_, docs)| docs)
+}
+
+fn mark_rendered_skills_section_seen(
+    rendered_project_doc_parts: Option<&str>,
+    skills_section_key: Option<&str>,
+    seen: &mut HashSet<String>,
+) {
+    if let (Some(rendered_project_doc_parts), Some(skills_section_key)) =
+        (rendered_project_doc_parts, skills_section_key)
+    {
+        if rendered_project_doc_parts
+            .trim_end()
+            .ends_with(skills_section_key)
+        {
+            seen.insert(skills_section_key.to_string());
         }
     }
 }
@@ -269,6 +308,8 @@ mod tests {
     use super::*;
     use crate::config::ConfigOverrides;
     use crate::config::ConfigToml;
+    use crate::skills::SkillMetadata;
+    use crate::skills::model::SkillScope;
     use std::fs;
     use tempfile::TempDir;
 
@@ -410,6 +451,32 @@ mod tests {
             .expect("instructions expected");
 
         assert_eq!(res, "same text");
+    }
+
+    #[tokio::test]
+    async fn does_not_recompose_rendered_project_docs_and_skills() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("AGENTS.md"), "project guidance").unwrap();
+        let skill_path = tmp.path().join("skills").join("demo").join("SKILL.md");
+        let skills = vec![SkillMetadata {
+            name: "demo".to_string(),
+            description: "Demo skill".to_string(),
+            path: skill_path,
+            scope: SkillScope::User,
+            content: String::new(),
+            policy: None,
+        }];
+
+        let rendered = get_user_instructions(&make_config(&tmp, 4096, Some("base")), Some(&skills))
+            .await
+            .expect("instructions expected");
+        let recomposed = get_user_instructions(&make_config(&tmp, 4096, Some(&rendered)), Some(&skills))
+            .await
+            .expect("instructions expected");
+
+        assert_eq!(recomposed, rendered);
+        assert_eq!(recomposed.matches(PROJECT_DOC_SEPARATOR).count(), 1);
+        assert_eq!(recomposed.matches("### Available skills").count(), 1);
     }
 
     /// If the base instructions match the root doc but there is additional

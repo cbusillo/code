@@ -64,6 +64,14 @@ impl From<SkillInstructions> for ResponseItem {
     }
 }
 
+pub(crate) fn is_skill_instructions_message(message: &[ContentItem]) -> bool {
+    if let [ContentItem::InputText { text }] = message {
+        text.starts_with("<skill>\n")
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

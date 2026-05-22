@@ -4,6 +4,7 @@ use crate::git_info::resolve_root_git_project_for_trust;
 use crate::skills::model::SkillError;
 use crate::skills::model::SkillLoadOutcome;
 use crate::skills::model::SkillMetadata;
+use crate::skills::model::SkillPolicy;
 use crate::skills::model::SkillScope;
 use crate::skills::system::system_cache_root_dir;
 use crate::skills::system::install_system_skills;
@@ -22,6 +23,14 @@ use tracing::error;
 struct SkillFrontmatter {
     name: String,
     description: String,
+    #[serde(default)]
+    policy: Option<SkillFrontmatterPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterPolicy {
+    #[serde(default)]
+    allow_implicit_invocation: Option<bool>,
 }
 
 const SKILLS_FILENAME: &str = "SKILL.md";
@@ -320,6 +329,9 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         path: resolved_path,
         scope,
         content: contents,
+        policy: parsed.policy.map(|policy| SkillPolicy {
+            allow_implicit_invocation: policy.allow_implicit_invocation,
+        }),
     })
 }
 
@@ -444,8 +456,59 @@ mod tests {
         skill_path
     }
 
+    fn write_manual_skill_at(
+        skills_root: &Path,
+        dir: &str,
+        name: &str,
+        description: &str,
+    ) -> PathBuf {
+        let skill_dir = skills_root.join(dir);
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        let skill_path = skill_dir.join(SKILLS_FILENAME);
+        fs::write(
+            &skill_path,
+            format!(
+                "---\nname: {name}\ndescription: {description}\npolicy:\n  allow_implicit_invocation: false\n---\n\n# {name}\n"
+            ),
+        )
+        .expect("write skill file");
+        skill_path
+    }
+
     fn normalized(path: &Path) -> PathBuf {
         normalize_path(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    #[test]
+    fn loads_skill_policy_from_frontmatter() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_manual_skill_at(
+            skills_root.path(),
+            "manual",
+            "manual-skill",
+            "Manual skill",
+        );
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert_eq!(outcome.skills.len(), 1);
+        let skill = &outcome.skills[0];
+        assert_eq!(skill.path, normalized(&skill_path));
+        assert_eq!(
+            skill.policy,
+            Some(SkillPolicy {
+                allow_implicit_invocation: Some(false),
+            })
+        );
+        assert!(!skill.allow_implicit_invocation());
     }
 
     #[test]
