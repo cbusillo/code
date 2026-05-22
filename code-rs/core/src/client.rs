@@ -886,6 +886,14 @@ impl ModelClient {
         let mut input_with_instructions = prompt.get_formatted_input();
         rewrite_image_generation_calls_for_input(&mut input_with_instructions);
         replace_image_payloads_for_model(&mut input_with_instructions, request_model);
+        let context_ledger =
+            prompt.context_ledger_for_request(&request_family, &input_with_instructions, &tools_json);
+        debug!(
+            target: "code_core::context_ledger",
+            summary = %context_ledger.compact_summary(),
+            entries = ?context_ledger.entries(),
+            "assembled context ledger for responses request"
+        );
 
         let want_format = prompt.text_format.clone().or_else(|| {
             prompt.output_schema.as_ref().map(|schema| crate::client_common::TextFormat {
@@ -1438,6 +1446,14 @@ impl ModelClient {
         let mut input_with_instructions = prompt.get_formatted_input();
         rewrite_image_generation_calls_for_input(&mut input_with_instructions);
         replace_image_payloads_for_model(&mut input_with_instructions, request_model);
+        let context_ledger =
+            prompt.context_ledger_for_request(&request_family, &input_with_instructions, &tools_json);
+        debug!(
+            target: "code_core::context_ledger",
+            summary = %context_ledger.compact_summary(),
+            entries = ?context_ledger.entries(),
+            "assembled context ledger for responses request"
+        );
 
         // Build `text` parameter with conditional verbosity and optional format.
         // - Omit entirely for ChatGPT auth unless a `text.format` or output schema is present.
