@@ -770,6 +770,8 @@ def request_assertion_target(request: dict[str, Any], assertion: dict[str, Any])
         return body
     if scope == "input":
         return body.get("input") if isinstance(body, dict) else None
+    if scope == "instructions":
+        return body.get("instructions") if isinstance(body, dict) else None
     raise HarnessError(f"unsupported responses assertion scope: {scope}")
 
 

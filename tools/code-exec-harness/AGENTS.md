@@ -35,6 +35,15 @@ contains/not_contains checks. A project doc, skill manifest, memory block,
 summary, or large artifact placeholder should appear the intended number of
 times, usually once.
 
+Assert the request shape that the real executable sends, not the shape of a
+lower-level helper. For example, `code exec` renders project guidance as an
+`AGENTS.md instructions for ...` user-context message, while lower-level core
+helpers may use internal separators such as `--- project-doc ---`.
+
+When a harness scenario exposes a stale or ambiguous config surface, document it
+as a separate issue or issue comment instead of forcing a scenario to pass by
+asserting the wrong behavior. Keep each scenario focused on one product claim.
+
 Spending real OpenAI tokens in this harness is acceptable when it answers an
 effectiveness question. Try fake responses first, but do not optimize away the
 evidence needed to avoid larger token waste in real sessions.
