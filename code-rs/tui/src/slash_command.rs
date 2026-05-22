@@ -64,6 +64,7 @@ pub enum SlashCommand {
     Mention,
     Cmd,
     Status,
+    Context,
     Limits,
     #[strum(serialize = "update", serialize = "upgrade")]
     Update,
@@ -125,6 +126,7 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Cmd => "run a project command",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Context => "show request context composition",
             SlashCommand::Limits => "adjust session limits",
             SlashCommand::Update => "check for updates and optionally upgrade",
             SlashCommand::Notifications => "manage notification settings",

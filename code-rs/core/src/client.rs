@@ -1118,6 +1118,9 @@ impl ModelClient {
             )?;
 
             let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+            let _ = tx_event
+                .send(Ok(ResponseEvent::ContextLedger(context_ledger.clone())))
+                .await;
             let mut session = self.websocket_session.lock().await;
             if session.connection.is_none() {
                 let connect = timeout(
@@ -1702,6 +1705,9 @@ impl ModelClient {
                         );
                     }
                     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::ContextLedger(context_ledger.clone())))
+                        .await;
 
                     let response_headers = header_map_to_json(resp.headers());
                     if tx_event

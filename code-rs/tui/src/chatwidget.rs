@@ -43,6 +43,9 @@ use code_core::config_types::Notifications;
 use code_core::config_types::ReasoningEffort;
 use code_core::config_types::ServiceTier;
 use code_core::config_types::TextVerbosity;
+use code_core::context_ledger::ContextLedger;
+use code_core::context_ledger::ContextPersistence;
+use code_core::context_ledger::ContextSourceKind;
 use code_core::spawn::spawn_background_command_with_retry;
 use code_core::plan_tool::{PlanItemArg, StepStatus, UpdatePlanArgs};
 use code_core::model_family::derive_default_model_family;
@@ -1923,6 +1926,7 @@ pub(crate) struct ChatWidget<'a> {
     rate_limit_refresh_scheduled_for: Option<DateTime<Utc>>,
     rate_limit_refresh_schedule_id: Arc<AtomicU64>,
     rate_limit_refresh_task: Option<task::JoinHandle<()>>,
+    latest_context_ledger: Option<ContextLedger>,
     content_buffer: String,
     // Buffer for streaming assistant answer text; we do not surface partial
     // We wait for the final AgentMessage event and then emit the full text
@@ -7038,6 +7042,7 @@ impl ChatWidget<'_> {
             rate_limit_refresh_scheduled_for: None,
             rate_limit_refresh_schedule_id: Arc::new(AtomicU64::new(0)),
             rate_limit_refresh_task: None,
+            latest_context_ledger: None,
             content_buffer: String::new(),
             last_assistant_message: None,
             last_answer_stream_id_in_turn: None,
@@ -7413,6 +7418,7 @@ impl ChatWidget<'_> {
             rate_limit_refresh_scheduled_for: None,
             rate_limit_refresh_schedule_id: Arc::new(AtomicU64::new(0)),
             rate_limit_refresh_task: None,
+            latest_context_ledger: None,
             content_buffer: String::new(),
             last_assistant_message: None,
             last_answer_stream_id_in_turn: None,
@@ -14520,6 +14526,7 @@ impl ChatWidget<'_> {
                 // after every tool call.
                 self.turn_sequence = self.turn_sequence.saturating_add(1);
                 self.turn_had_code_edits = false;
+                self.latest_context_ledger = None;
                 self.current_task_lifecycle = self.pending_task_lifecycle.take();
                 self.current_turn_origin = if self.current_task_output_is_hidden() {
                     Some(TurnOrigin::Developer)
@@ -14823,6 +14830,9 @@ impl ChatWidget<'_> {
                     self.remote_inbox_send_compaction_started();
                 }
                 self.bottom_pane.set_auto_context_phase(event.phase);
+            }
+            EventMsg::ContextLedger(event) => {
+                self.latest_context_ledger = Some(event.ledger);
             }
             EventMsg::Warning(WarningEvent { message }) => {
                 self.history_push_plain_state(history_cell::new_warning_event(message));
@@ -16911,6 +16921,124 @@ impl ChatWidget<'_> {
             self.session_requested_model.as_deref(),
             self.session_latest_response_model.as_deref(),
         ));
+    }
+
+    pub(crate) fn add_context_output(&mut self) {
+        let state = match self.latest_context_ledger.as_ref() {
+            Some(ledger) => Self::context_ledger_message_state(ledger),
+            None => history_cell::plain_message_state_from_lines(
+                vec![
+                    Line::from("/context").fg(crate::colors::keyword()),
+                    Line::from(""),
+                    Line::from("No request context ledger is available yet."),
+                ],
+                HistoryCellType::Notice,
+            ),
+        };
+        self.history_push_plain_state(state);
+    }
+
+    fn context_ledger_message_state(ledger: &ContextLedger) -> PlainMessageState {
+        let lines = Self::context_ledger_display_lines(ledger)
+            .into_iter()
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        history_cell::plain_message_state_from_lines(lines, HistoryCellType::Notice)
+    }
+
+    fn context_ledger_display_lines(ledger: &ContextLedger) -> Vec<String> {
+        let mut rows = ledger
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    Self::source_label(entry.source),
+                    Self::persistence_label(entry.persistence),
+                    entry.label.as_str(),
+                    entry.item_count,
+                    entry.bytes,
+                    entry.estimated_tokens,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| right.5.cmp(&left.5).then_with(|| left.0.cmp(right.0)));
+
+        let mut lines = Vec::new();
+        lines.push("/context".to_string());
+        lines.push(String::new());
+        lines.push(format!(
+            "Total: ~{} tokens, {}",
+            format_with_separators_u64(ledger.total_estimated_tokens() as u64),
+            Self::format_context_bytes(ledger.total_bytes()),
+        ));
+        lines.push(String::new());
+        lines.push(format!(
+            "{:<24} {:>10} {:>9} {:<14} {}",
+            "Source", "Tokens", "Bytes", "Persistence", "Label"
+        ));
+
+        for (source, persistence, label, item_count, bytes, tokens) in rows.into_iter().take(12) {
+            let item_suffix = if item_count > 1 {
+                format!(" ({item_count} items)")
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "{:<24} {:>10} {:>9} {:<14} {}{}",
+                source,
+                format!("~{}", format_with_separators_u64(tokens as u64)),
+                Self::format_context_bytes(bytes),
+                persistence,
+                label,
+                item_suffix,
+            ));
+        }
+        if ledger.entries().len() > 12 {
+            lines.push(format!(
+                "... {} more entries",
+                ledger.entries().len().saturating_sub(12)
+            ));
+        }
+        lines
+    }
+
+    fn format_context_bytes(bytes: usize) -> String {
+        if bytes >= 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else if bytes >= 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{bytes} B")
+        }
+    }
+
+    fn source_label(source: ContextSourceKind) -> &'static str {
+        match source {
+            ContextSourceKind::BaseInstructions => "base instructions",
+            ContextSourceKind::DeveloperInstructions => "developer instructions",
+            ContextSourceKind::MemoryInstructions => "memory",
+            ContextSourceKind::UserInstructions => "user instructions",
+            ContextSourceKind::SkillsManifest => "skills manifest",
+            ContextSourceKind::ExplicitSkill => "explicit skill",
+            ContextSourceKind::EnvironmentContext => "environment",
+            ContextSourceKind::BrowserStatus => "browser status",
+            ContextSourceKind::StatusItem => "status item",
+            ContextSourceKind::ConversationHistory => "history",
+            ContextSourceKind::PendingInput => "pending input",
+            ContextSourceKind::ToolOutput => "tool output",
+            ContextSourceKind::ToolSchema => "tool schema",
+            ContextSourceKind::Unknown => "unknown",
+        }
+    }
+
+    fn persistence_label(persistence: ContextPersistence) -> &'static str {
+        match persistence {
+            ContextPersistence::Persisted => "persisted",
+            ContextPersistence::Contextual => "contextual",
+            ContextPersistence::RequestOnly => "request-only",
+            ContextPersistence::GeneratedPerAttempt => "per-attempt",
+            ContextPersistence::ToolResult => "tool-result",
+        }
     }
 
     pub(crate) fn show_limits_settings_ui(&mut self) {
@@ -31692,6 +31820,43 @@ use code_core::protocol::OrderMeta;
                 other => panic!("expected UserInput, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn context_ledger_display_sorts_by_token_weight() {
+        let mut ledger = ContextLedger::default();
+        ledger.push(
+            ContextSourceKind::ToolSchema,
+            ContextPersistence::Contextual,
+            "tool schemas",
+            2,
+            800,
+            Some("tools".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::ConversationHistory,
+            ContextPersistence::Persisted,
+            "history item",
+            1,
+            4_096,
+            Some("history".to_string()),
+        );
+
+        let lines = ChatWidget::context_ledger_display_lines(&ledger);
+
+        assert_eq!(lines[0], "/context");
+        assert!(lines[2].contains("~1,224 tokens"));
+        let history_row = lines
+            .iter()
+            .position(|line| line.contains("history"))
+            .expect("history row");
+        let tool_row = lines
+            .iter()
+            .position(|line| line.contains("tool schema"))
+            .expect("tool schema row");
+        assert!(history_row < tool_row);
+        assert!(lines[history_row].contains("persisted"));
+        assert!(lines[tool_row].contains("contextual"));
     }
 
     fn test_rate_limit_snapshot() -> RateLimitSnapshotEvent {
