@@ -15,6 +15,21 @@ pub struct SkillMetadata {
     pub path: PathBuf,
     pub scope: SkillScope,
     pub content: String,
+    pub policy: Option<SkillPolicy>,
+}
+
+impl SkillMetadata {
+    pub fn allow_implicit_invocation(&self) -> bool {
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.allow_implicit_invocation)
+            .unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillPolicy {
+    pub allow_implicit_invocation: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

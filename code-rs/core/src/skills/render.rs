@@ -1,6 +1,11 @@
 use crate::skills::model::SkillMetadata;
 
 pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
+    let skills: Vec<&SkillMetadata> = skills
+        .iter()
+        .filter(|skill| skill.allow_implicit_invocation())
+        .collect();
+
     if skills.is_empty() {
         return None;
     }
@@ -39,4 +44,44 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     );
 
     Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::model::SkillPolicy;
+    use crate::skills::model::SkillScope;
+    use std::path::PathBuf;
+
+    fn skill(name: &str, allow_implicit_invocation: Option<bool>) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            scope: SkillScope::User,
+            content: String::new(),
+            policy: allow_implicit_invocation.map(|allow_implicit_invocation| SkillPolicy {
+                allow_implicit_invocation: Some(allow_implicit_invocation),
+            }),
+        }
+    }
+
+    #[test]
+    fn render_skills_section_omits_manual_only_skills() {
+        let rendered = render_skills_section(&[
+            skill("implicit", None),
+            skill("manual", Some(false)),
+        ])
+        .expect("implicit skill should render");
+
+        assert!(rendered.contains("- implicit: implicit description"));
+        assert!(!rendered.contains("- manual: manual description"));
+    }
+
+    #[test]
+    fn render_skills_section_returns_none_for_only_manual_skills() {
+        let rendered = render_skills_section(&[skill("manual", Some(false))]);
+
+        assert!(rendered.is_none());
+    }
 }

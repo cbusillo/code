@@ -464,6 +464,7 @@ mod tests {
             path: skill_path,
             scope: SkillScope::User,
             content: String::new(),
+            policy: None,
         }];
 
         let rendered = get_user_instructions(&make_config(&tmp, 4096, Some("base")), Some(&skills))
