@@ -30,6 +30,7 @@ pub mod config_edit;
 pub mod config_profile;
 pub mod config_types;
 mod config_loader;
+mod context_ledger;
 mod conversation_history;
 pub mod context_timeline;
 pub mod acp;

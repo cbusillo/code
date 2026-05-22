@@ -2,6 +2,10 @@ use crate::agent_defaults::model_guide_markdown;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::config_types::TextVerbosity as TextVerbosityConfig;
+use crate::context_ledger::ContextLedger;
+use crate::context_ledger::ContextPersistence;
+use crate::context_ledger::ContextSourceKind;
+use crate::context_ledger::response_item_bytes;
 use crate::environment_context::EnvironmentContext;
 use crate::error::Result;
 use crate::model_family::ModelFamily;
@@ -18,6 +22,9 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::task::Context;
@@ -163,10 +170,23 @@ impl Prompt {
     }
 
     pub(crate) fn get_formatted_input(&self) -> Vec<ResponseItem> {
+        self.get_formatted_input_with_ledger().0
+    }
+
+    pub(crate) fn get_formatted_input_with_ledger(&self) -> (Vec<ResponseItem>, ContextLedger) {
         let mut input_with_instructions =
             Vec::with_capacity(self.input.len() + self.status_items.len() + 3);
+        let mut ledger = ContextLedger::default();
         if self.include_additional_instructions {
             let developer_text = self.additional_instructions().into_owned();
+            ledger.push(
+                ContextSourceKind::DeveloperInstructions,
+                ContextPersistence::Contextual,
+                "default developer instructions",
+                1,
+                developer_text.len(),
+                Some("developer:default".to_string()),
+            );
             input_with_instructions.push(ResponseItem::Message {
                 id: None,
                 role: "developer".to_string(),
@@ -176,6 +196,14 @@ impl Prompt {
                 if trimmed.is_empty() {
                     continue;
                 }
+                ledger.push(
+                    classify_prepend_developer_message(trimmed),
+                    ContextPersistence::RequestOnly,
+                    "prepended developer message",
+                    1,
+                    trimmed.len(),
+                    Some(format!("developer:prepend:{:016x}", stable_hash(trimmed))),
+                );
                 input_with_instructions.push(ResponseItem::Message {
                     id: None,
                     role: "developer".to_string(),
@@ -192,6 +220,14 @@ impl Prompt {
                             )))
                 });
                 if !has_environment_context {
+                    ledger.push(
+                        ContextSourceKind::EnvironmentContext,
+                        ContextPersistence::GeneratedPerAttempt,
+                        "environment context",
+                        1,
+                        ec.len(),
+                        Some("environment_context".to_string()),
+                    );
                     input_with_instructions.push(ResponseItem::Message {
                         id: None,
                         role: "user".to_string(),
@@ -204,6 +240,7 @@ impl Prompt {
                         if role == "user" && UserInstructions::is_user_instructions(content))
                 });
                 if !has_user_instructions {
+                    add_response_item_to_ledger(&mut ledger, &ui);
                     input_with_instructions.push(ui);
                 }
             }
@@ -224,16 +261,78 @@ impl Prompt {
                 }
                 _ => {}
             }
+            add_response_item_to_ledger(&mut ledger, item);
             input_with_instructions.push(item.clone());
         }
 
         // Add status items at the end so they're fresh for each request
-        input_with_instructions.extend(self.status_items.clone());
+        for item in &self.status_items {
+            ledger.push(
+                classify_status_item(item),
+                ContextPersistence::GeneratedPerAttempt,
+                "status item",
+                1,
+                response_item_bytes(item),
+                duplicate_key_for_status_item(item),
+            );
+            input_with_instructions.push(item.clone());
+        }
 
         // Limit screenshots to maximum 5 (keep first and last 4)
         limit_screenshots_in_input(&mut input_with_instructions);
 
-        input_with_instructions
+        (input_with_instructions, ledger)
+    }
+
+    pub(crate) fn context_ledger_for_request(
+        &self,
+        model: &ModelFamily,
+        input: &[ResponseItem],
+        tools_json: &[serde_json::Value],
+    ) -> ContextLedger {
+        let mut ledger = self.context_ledger_for_formatted_input(input);
+        let full_instructions = self.get_full_instructions(model);
+        ledger.push(
+            ContextSourceKind::BaseInstructions,
+            ContextPersistence::Contextual,
+            "base instructions",
+            1,
+            full_instructions.len(),
+            Some("base_instructions".to_string()),
+        );
+
+        let tools_bytes = tools_json
+            .iter()
+            .map(|tool| serde_json::to_string(tool).map(|s| s.len()).unwrap_or(0))
+            .sum::<usize>();
+        ledger.push(
+            ContextSourceKind::ToolSchema,
+            ContextPersistence::Contextual,
+            "tool schemas",
+            tools_json.len(),
+            tools_bytes,
+            Some("tool_schemas".to_string()),
+        );
+        ledger
+    }
+
+    fn context_ledger_for_formatted_input(&self, input: &[ResponseItem]) -> ContextLedger {
+        let mut ledger = ContextLedger::default();
+        for item in input {
+            if self.status_items.iter().any(|status_item| status_item == item) {
+                ledger.push(
+                    classify_status_item(item),
+                    ContextPersistence::GeneratedPerAttempt,
+                    "status item",
+                    1,
+                    response_item_bytes(item),
+                    duplicate_key_for_status_item(item),
+                );
+                continue;
+            }
+            add_response_item_to_ledger(&mut ledger, item);
+        }
+        ledger
     }
 
     pub fn set_tools(&mut self, tools: Vec<OpenAiTool>) {
@@ -249,6 +348,211 @@ impl Prompt {
         }
         .into()
     }
+}
+
+fn classify_prepend_developer_message(text: &str) -> ContextSourceKind {
+    if text.contains("<memory") || text.to_ascii_lowercase().contains("memory") {
+        ContextSourceKind::MemoryInstructions
+    } else {
+        ContextSourceKind::DeveloperInstructions
+    }
+}
+
+fn add_response_item_to_ledger(ledger: &mut ContextLedger, item: &ResponseItem) {
+    if let ResponseItem::Message { role, content, .. } = item {
+        if role == "user" && UserInstructions::is_user_instructions(content) {
+            add_user_instructions_to_ledger(ledger, content);
+            return;
+        }
+    }
+
+    ledger.push(
+        classify_input_item(item),
+        persistence_for_input_item(item),
+        label_for_input_item(item),
+        1,
+        response_item_bytes(item),
+        duplicate_key_for_input_item(item),
+    );
+}
+
+fn add_user_instructions_to_ledger(ledger: &mut ContextLedger, content: &[ContentItem]) {
+    let text = content_text(content);
+    let skills_marker = "## Skills";
+    if let Some((project_docs, skills_manifest)) = text.split_once(skills_marker) {
+        ledger.push(
+            ContextSourceKind::UserInstructions,
+            ContextPersistence::Contextual,
+            "user/project instructions",
+            1,
+            project_docs.len(),
+            Some("user_instructions".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::SkillsManifest,
+            ContextPersistence::Contextual,
+            "skills manifest",
+            1,
+            skills_marker.len() + skills_manifest.len(),
+            Some("skills_manifest".to_string()),
+        );
+    } else {
+        ledger.push(
+            ContextSourceKind::UserInstructions,
+            ContextPersistence::Contextual,
+            "user/project instructions",
+            1,
+            text.len(),
+            Some("user_instructions".to_string()),
+        );
+    }
+}
+
+fn classify_input_item(item: &ResponseItem) -> ContextSourceKind {
+    match item {
+        ResponseItem::Message { role, content, .. } if role == "user" => {
+            classify_user_message(content)
+        }
+        ResponseItem::Message { role, .. } if role == "developer" => {
+            ContextSourceKind::DeveloperInstructions
+        }
+        ResponseItem::Message { .. } => ContextSourceKind::ConversationHistory,
+        ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. } => ContextSourceKind::ToolOutput,
+        ResponseItem::FunctionCall { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. } => ContextSourceKind::ConversationHistory,
+        ResponseItem::Reasoning { .. }
+        | ResponseItem::GhostSnapshot { .. }
+        | ResponseItem::CompactionSummary { .. }
+        | ResponseItem::ContextCompaction { .. } => ContextSourceKind::ConversationHistory,
+        ResponseItem::Other => ContextSourceKind::Unknown,
+    }
+}
+
+fn classify_user_message(content: &[ContentItem]) -> ContextSourceKind {
+    let text = content_text(content);
+    if text.starts_with("<skill>\n") {
+        ContextSourceKind::ExplicitSkill
+    } else if text.contains(ENVIRONMENT_CONTEXT_START.trim()) {
+        ContextSourceKind::EnvironmentContext
+    } else if UserInstructions::is_user_instructions(content) {
+        if text.contains("### Available skills") {
+            ContextSourceKind::SkillsManifest
+        } else {
+            ContextSourceKind::UserInstructions
+        }
+    } else if content
+        .iter()
+        .any(|item| matches!(item, ContentItem::InputImage { .. }))
+    {
+        ContextSourceKind::BrowserStatus
+    } else {
+        ContextSourceKind::ConversationHistory
+    }
+}
+
+fn classify_status_item(item: &ResponseItem) -> ContextSourceKind {
+    match item {
+        ResponseItem::Message { content, .. }
+            if content
+                .iter()
+                .any(|item| matches!(item, ContentItem::InputImage { .. })) =>
+        {
+            ContextSourceKind::BrowserStatus
+        }
+        _ => ContextSourceKind::StatusItem,
+    }
+}
+
+fn persistence_for_input_item(item: &ResponseItem) -> ContextPersistence {
+    match classify_input_item(item) {
+        ContextSourceKind::ExplicitSkill => ContextPersistence::RequestOnly,
+        ContextSourceKind::DeveloperInstructions
+        | ContextSourceKind::UserInstructions
+        | ContextSourceKind::SkillsManifest => ContextPersistence::Contextual,
+        ContextSourceKind::EnvironmentContext | ContextSourceKind::BrowserStatus => {
+            ContextPersistence::GeneratedPerAttempt
+        }
+        ContextSourceKind::ToolOutput => ContextPersistence::ToolResult,
+        _ => ContextPersistence::Persisted,
+    }
+}
+
+fn label_for_input_item(item: &ResponseItem) -> &'static str {
+    match classify_input_item(item) {
+        ContextSourceKind::ExplicitSkill => "explicit skill",
+        ContextSourceKind::EnvironmentContext => "environment context",
+        ContextSourceKind::BrowserStatus => "browser/status context",
+        ContextSourceKind::ToolOutput => "tool output",
+        ContextSourceKind::DeveloperInstructions => "developer message",
+        ContextSourceKind::UserInstructions => "user/project instructions",
+        ContextSourceKind::SkillsManifest => "skills manifest",
+        ContextSourceKind::ConversationHistory => "conversation history",
+        _ => "input item",
+    }
+}
+
+fn duplicate_key_for_input_item(item: &ResponseItem) -> Option<String> {
+    match item {
+        ResponseItem::Message { role, content, .. } if role == "user" => {
+            let source = classify_user_message(content);
+            match source {
+                ContextSourceKind::ExplicitSkill => skill_name_from_content(content)
+                    .map(|name| format!("explicit_skill:{name}"))
+                    .or_else(|| Some(format!("explicit_skill:{:016x}", stable_hash(&content_text(content))))),
+                ContextSourceKind::EnvironmentContext => Some("environment_context".to_string()),
+                ContextSourceKind::UserInstructions | ContextSourceKind::SkillsManifest => {
+                    Some("user_instructions".to_string())
+                }
+                _ => None,
+            }
+        }
+        ResponseItem::FunctionCallOutput { call_id, .. }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(format!("tool_output:{call_id}")),
+        ResponseItem::ToolSearchOutput { call_id, .. } => {
+            call_id.as_ref().map(|call_id| format!("tool_output:{call_id}"))
+        }
+        _ => None,
+    }
+}
+
+fn duplicate_key_for_status_item(item: &ResponseItem) -> Option<String> {
+    match classify_status_item(item) {
+        ContextSourceKind::BrowserStatus => Some("browser_status".to_string()),
+        ContextSourceKind::StatusItem => Some(format!("status:{:016x}", stable_hash(&format!("{item:?}")))),
+        _ => None,
+    }
+}
+
+fn content_text(content: &[ContentItem]) -> String {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                Some(text.as_str())
+            }
+            ContentItem::InputImage { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn skill_name_from_content(content: &[ContentItem]) -> Option<String> {
+    let text = content_text(content);
+    text.lines()
+        .find_map(|line| line.strip_prefix("<name>")?.strip_suffix("</name>"))
+        .map(ToOwned::to_owned)
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug)]
@@ -572,10 +876,115 @@ impl Stream for ResponseStream {
 #[cfg(test)]
 mod tests {
     use crate::model_family::find_family_for_model;
+    use crate::context_ledger::ContextPersistence;
+    use crate::context_ledger::ContextSourceKind;
     use code_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    fn message(role: &str, text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: role.to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    #[test]
+    fn context_ledger_classifies_request_sources() {
+        let model_family = find_family_for_model("gpt-5.1").expect("model family");
+        let prompt = Prompt {
+            input: vec![
+                message("user", "hello"),
+                message(
+                    "user",
+                    "<skill>\n<name>manual-skill</name>\n<path>skills/manual/SKILL.md</path>\nbody\n</skill>",
+                ),
+                ResponseItem::FunctionCallOutput {
+                    call_id: "call-1".to_string(),
+                    output: code_protocol::models::FunctionCallOutputPayload::from_text(
+                        "tool output".to_string(),
+                    ),
+                },
+            ],
+            user_instructions: Some(
+                "project guidance\n\n## Skills\n### Available skills\n- demo: Demo skill".to_string(),
+            ),
+            status_items: vec![message("user", "status marker")],
+            include_additional_instructions: false,
+            ..Prompt::default()
+        };
+
+        let mut formatted = prompt.get_formatted_input();
+        rewrite_image_generation_calls_for_input(&mut formatted);
+        replace_image_payloads_for_model(&mut formatted, "gpt-5.1");
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "name": "demo_tool",
+            "parameters": {}
+        })];
+        let ledger = prompt.context_ledger_for_request(&model_family, &formatted, &tools);
+
+        assert!(ledger.total_bytes() > 0);
+        assert!(ledger.total_estimated_tokens() > 0);
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::BaseInstructions
+                && entry.persistence == ContextPersistence::Contextual
+        }));
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::ExplicitSkill
+                && entry.persistence == ContextPersistence::RequestOnly
+                && entry.duplicate_key.as_deref() == Some("explicit_skill:manual-skill")
+        }));
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::ToolOutput
+                && entry.persistence == ContextPersistence::ToolResult
+                && entry.duplicate_key.as_deref() == Some("tool_output:call-1")
+        }));
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::StatusItem
+                && entry.persistence == ContextPersistence::GeneratedPerAttempt
+        }));
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::ToolSchema
+                && entry.persistence == ContextPersistence::Contextual
+        }));
+    }
+
+    #[test]
+    fn context_ledger_sees_project_doc_skills_manifest() {
+        let prompt = Prompt {
+            user_instructions: Some(
+                "project guidance\n\n## Skills\n### Available skills\n- demo: Demo skill".to_string(),
+            ),
+            include_additional_instructions: true,
+            ..Prompt::default()
+        };
+
+        let (formatted, ledger) = prompt.get_formatted_input_with_ledger();
+
+        assert!(formatted.iter().any(|item| match item {
+            ResponseItem::Message { content, .. } => {
+                content.iter().any(|content| matches!(content,
+                    ContentItem::InputText { text } if text.contains("### Available skills")
+                ))
+            }
+            _ => false,
+        }));
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::UserInstructions
+                && entry.duplicate_key.as_deref() == Some("user_instructions")
+        }));
+        assert!(ledger.entries().iter().any(|entry| {
+            entry.source == ContextSourceKind::SkillsManifest
+                && entry.duplicate_key.as_deref() == Some("skills_manifest")
+        }));
+    }
 
     #[test]
     fn replace_image_payloads_for_spark_model_rewrites_images() {

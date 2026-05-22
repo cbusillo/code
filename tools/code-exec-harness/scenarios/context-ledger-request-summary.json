@@ -1,0 +1,46 @@
+{
+  "name": "context-ledger-request-summary",
+  "model": "gpt-5.1-codex",
+  "prompt": "Use $manual-skill and reply with exactly: ok",
+  "files": {
+    "AGENTS.md": "project guidance\n",
+    ".codex/skills/implicit/SKILL.md": "---\nname: implicit-skill\ndescription: Implicit skill\n---\nUse the implicit skill.\n",
+    ".codex/skills/manual/SKILL.md": "---\nname: manual-skill\ndescription: Manual skill\npolicy:\n  allow_implicit_invocation: false\n---\nMANUAL_SKILL_BODY_MARKER\n",
+    "README.md": "# Context ledger fixture\n"
+  },
+  "env": {
+    "RUST_LOG": "code_core::context_ledger=debug"
+  },
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-context-ledger"
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "stderr_contains": [
+      "assembled context ledger for responses request",
+      "SkillsManifest",
+      "ExplicitSkill",
+      "ToolSchema"
+    ],
+    "responses": [
+      {
+        "request": 0,
+        "scope": "input",
+        "count": {
+          "project guidance": 1,
+          "- implicit-skill: Implicit skill": 1,
+          "- manual-skill: Manual skill": 0,
+          "<name>manual-skill</name>": 1,
+          "MANUAL_SKILL_BODY_MARKER": 1
+        }
+      }
+    ]
+  },
+  "max_seconds": 30,
+  "timeout_seconds": 90
+}

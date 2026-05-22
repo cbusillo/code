@@ -789,6 +789,15 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
         text = "\n".join(" ".join(call.get("argv", [])) for call in summary.get("gh_calls", []))
         if str(needle) not in text:
             failures.append(f"no fake gh call contained {needle!r}")
+    stderr_log = ""
+    run_dir = summary.get("run_dir")
+    if isinstance(run_dir, str):
+        stderr_path = Path(run_dir) / "artifacts" / "stderr.log"
+        if stderr_path.exists():
+            stderr_log = read_text(stderr_path)
+    for needle in expect.get("stderr_contains", []):
+        if str(needle) not in stderr_log:
+            failures.append(f"stderr log did not contain {needle!r}")
     if "returncode" in expect and int(expect["returncode"]) != int(summary.get("returncode", -1)):
         failures.append(f"returncode expected {expect['returncode']}, got {summary.get('returncode')}")
     if "responses_request_count" in expect:
