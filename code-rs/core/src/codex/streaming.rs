@@ -2523,7 +2523,12 @@ async fn run_agent(
             first_iteration = false;
         } else {
             // Only record pending input to history on subsequent iterations
-            sess.record_conversation_items(&pending_input).await;
+            let existing_history = sess.state.lock().unwrap().history.contents();
+            let pending_input_to_record =
+                pending_items_not_already_recorded(&pending_input, &existing_history);
+            if !pending_input_to_record.is_empty() {
+                sess.record_conversation_items(&pending_input_to_record).await;
+            }
         }
 
         if auto_compact_pending && !is_review_mode {
@@ -2576,7 +2581,10 @@ async fn run_agent(
             }
             review_history.clone()
         } else {
-            sess.turn_input_with_history(pending_input_tail.clone())
+            let existing_history = sess.state.lock().unwrap().history.contents();
+            let pending_input_tail =
+                pending_items_not_already_recorded(&pending_input_tail, &existing_history);
+            sess.turn_input_with_history(pending_input_tail)
         };
 
         let turn_input_messages: Vec<String> = turn_input
@@ -3889,6 +3897,32 @@ fn collect_tool_call_ids(items: &[ResponseItem]) -> HashSet<String> {
         }
     }
     ids
+}
+
+fn pending_items_not_already_recorded(
+    pending_items: &[ResponseItem],
+    recorded_items: &[ResponseItem],
+) -> Vec<ResponseItem> {
+    if recorded_items.is_empty() {
+        return pending_items.to_vec();
+    }
+
+    pending_items
+        .iter()
+        .filter(|pending| {
+            !is_tool_output_item(pending) || !recorded_items.iter().any(|recorded| recorded == *pending)
+        })
+        .cloned()
+        .collect()
+}
+
+fn is_tool_output_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::FunctionCallOutput { .. }
+            | ResponseItem::CustomToolCallOutput { .. }
+            | ResponseItem::ToolSearchOutput { .. }
+    )
 }
 
 fn find_call_item_by_id(items: &[ResponseItem], call_id: &str) -> Option<ResponseItem> {
@@ -14193,6 +14227,7 @@ mod tests {
         save_image_generation_result,
         save_image_generation_sidecar,
         ImageGenerationTurnMetadata,
+        pending_items_not_already_recorded,
         spark_fallback_model,
         TRUNCATION_MARKER,
     };
@@ -14342,6 +14377,30 @@ mod tests {
 
         assert_eq!(text, "[image: hero]");
         assert!(!text.contains("base64"));
+    }
+
+    #[test]
+    fn pending_items_omit_tool_outputs_already_recorded() {
+        let output = FunctionCallOutputPayload::from_text("done".to_string());
+        let pending_output = code_protocol::models::ResponseItem::FunctionCallOutput {
+            call_id: "call-1".to_string(),
+            output: output.clone(),
+        };
+        let pending_message = code_protocol::models::ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![code_protocol::models::ContentItem::InputText {
+                text: "repeatable".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        };
+        let pending = vec![pending_output.clone(), pending_message.clone()];
+        let recorded = vec![pending_output];
+
+        let filtered = pending_items_not_already_recorded(&pending, &recorded);
+
+        assert_eq!(filtered, vec![pending_message]);
     }
 
     #[test]
