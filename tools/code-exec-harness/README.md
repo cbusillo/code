@@ -7,6 +7,12 @@ Use it to compare Every Code behavior across prompt, memory, skill, model, and
 configuration variants without writing to real GitHub or reusing the real
 `CODE_HOME`.
 
+Agent-specific testing policy lives in `AGENTS.md` in this directory. In short,
+use this harness as the proving ground for effectiveness-adjusted token
+efficiency work: prefer fake `/v1/responses` assertions first, use live tokens
+when model behavior is the question, and preserve evidence that future runs can
+compare.
+
 The harness defaults `code exec` to `danger-full-access` because external tool
 shims such as fake `gh` need to write logs and state outside the fixture
 workspace. Run it only with trusted scenarios.
