@@ -344,6 +344,13 @@ pub(crate) async fn stream_chat_completions(
     }
 
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
+    let context_ledger = prompt.context_ledger_for_request(model_family, &input, &tools_json);
+    debug!(
+        target: "code_core::context_ledger",
+        summary = %context_ledger.compact_summary(),
+        entries = ?context_ledger.entries(),
+        "assembled context ledger for chat completions request"
+    );
     let mut payload = json!({
         "model": model_slug,
         "messages": messages,
@@ -451,6 +458,9 @@ pub(crate) async fn stream_chat_completions(
                     );
                 }
                 let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::ContextLedger(context_ledger.clone())))
+                    .await;
                 let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
                 let debug_logger_clone = Arc::clone(&debug_logger);
                 let request_id_clone = request_id.clone();

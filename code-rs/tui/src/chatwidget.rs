@@ -14526,6 +14526,7 @@ impl ChatWidget<'_> {
                 // after every tool call.
                 self.turn_sequence = self.turn_sequence.saturating_add(1);
                 self.turn_had_code_edits = false;
+                self.latest_context_ledger = None;
                 self.current_task_lifecycle = self.pending_task_lifecycle.take();
                 self.current_turn_origin = if self.current_task_output_is_hidden() {
                     Some(TurnOrigin::Developer)
