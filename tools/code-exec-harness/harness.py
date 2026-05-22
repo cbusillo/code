@@ -148,6 +148,16 @@ def contains_text(value: Any, needle: str) -> bool:
     return False
 
 
+def count_text(value: Any, needle: str) -> int:
+    if isinstance(value, str):
+        return value.count(needle)
+    if isinstance(value, list):
+        return sum(count_text(item, needle) for item in value)
+    if isinstance(value, dict):
+        return sum(count_text(item, needle) for item in value.values())
+    return 0
+
+
 def expand_fixture_value(value: Any) -> Any:
     if isinstance(value, dict):
         if set(value.keys()) == {"$repeat", "count"}:
@@ -818,6 +828,14 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
             failures.append(
                 f"responses request {assertion.get('request', 0)} unexpectedly contained {assertion['not_contains']!r}"
             )
+        counts = assertion.get("count")
+        if isinstance(counts, dict):
+            for needle, expected in counts.items():
+                actual = count_text(target, str(needle))
+                if actual != int(expected):
+                    failures.append(
+                        f"responses request {assertion.get('request', 0)} count for {needle!r} expected {expected}, got {actual}"
+                    )
     return failures
 
 
