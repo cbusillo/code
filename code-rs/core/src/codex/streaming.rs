@@ -4135,6 +4135,10 @@ async fn try_run_turn(
         };
 
         match event {
+            ResponseEvent::ContextLedger(ledger) => {
+                let msg = EventMsg::ContextLedger(crate::protocol::ContextLedgerEvent { ledger });
+                sess.send_event(sess.make_event(&sub_id, msg)).await;
+            }
             ResponseEvent::Created {
                 response_id,
                 response_model,

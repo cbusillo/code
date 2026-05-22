@@ -557,6 +557,7 @@ fn stable_hash(value: &str) -> u64 {
 
 #[derive(Debug)]
 pub enum ResponseEvent {
+    ContextLedger(ContextLedger),
     Created {
         response_id: Option<String>,
         response_model: Option<String>,

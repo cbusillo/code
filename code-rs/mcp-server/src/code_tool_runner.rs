@@ -317,6 +317,7 @@ async fn run_code_tool_session_inner(
                     | EventMsg::TaskStarted
                     | EventMsg::TokenCount(_)
                     | EventMsg::AutoContextCheck(_)
+                    | EventMsg::ContextLedger(_)
                     | EventMsg::AgentReasoning(_)
                     | EventMsg::AgentReasoningSectionBreak(_)
                     | EventMsg::McpToolCallBegin(_)

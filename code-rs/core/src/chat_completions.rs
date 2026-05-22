@@ -1076,6 +1076,9 @@ where
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(Some(Ok(ResponseEvent::ContextLedger(ledger)))) => {
+                    return Poll::Ready(Some(Ok(ResponseEvent::ContextLedger(ledger))));
+                }
                 Poll::Ready(Some(Ok(ResponseEvent::OutputItemDone { item, sequence_number: _, .. }))) => {
                     // If this is an incremental assistant message chunk, accumulate but
                     // do NOT emit yet. Forward any other item (e.g. FunctionCall) right
@@ -1309,4 +1312,41 @@ fn header_map_to_json(headers: &HeaderMap) -> serde_json::Value {
     }
 
     serde_json::to_value(ordered).unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context_ledger::ContextLedger;
+    use crate::context_ledger::ContextPersistence;
+    use crate::context_ledger::ContextSourceKind;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn aggregate_forwards_context_ledger() {
+        let mut ledger = ContextLedger::default();
+        ledger.push(
+            ContextSourceKind::ToolSchema,
+            ContextPersistence::Contextual,
+            "tool schemas",
+            1,
+            40,
+            Some("tools".to_string()),
+        );
+        let stream = stream::iter(vec![
+            Ok(ResponseEvent::ContextLedger(ledger.clone())),
+            Ok(ResponseEvent::Completed {
+                response_id: "resp".to_string(),
+                token_usage: None,
+            }),
+        ]);
+
+        let events = stream.aggregate().collect::<Vec<_>>().await;
+
+        match &events[0] {
+            Ok(ResponseEvent::ContextLedger(observed)) => assert_eq!(observed, &ledger),
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        assert!(matches!(events[1], Ok(ResponseEvent::Completed { .. })));
+    }
 }

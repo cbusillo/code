@@ -760,6 +760,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 }
             }
             EventMsg::CompactionCheckpointWarning(_) => {}
+            EventMsg::ContextLedger(_) => {}
             EventMsg::ImageGenerationBegin(_) | EventMsg::ImageGenerationEnd(_) => {}
         }
         CodexStatus::Running

@@ -27,6 +27,7 @@ use crate::config_types::TextVerbosity as TextVerbosityConfig;
 use crate::message_history::HistoryEntry;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::client_common::TextFormat;
+use crate::context_ledger::ContextLedger;
 use crate::parse_command::ParsedCommand;
 use crate::plan_tool::UpdatePlanArgs;
 use code_protocol::dynamic_tools::DynamicToolCallRequest;
@@ -893,6 +894,9 @@ pub enum EventMsg {
     /// Auto Context is evaluating whether to compact before the next turn.
     AutoContextCheck(AutoContextCheckEvent),
 
+    /// Request composition ledger for the latest model request.
+    ContextLedger(ContextLedgerEvent),
+
     /// Agent text output message
     AgentMessage(AgentMessageEvent),
 
@@ -1077,6 +1081,11 @@ pub enum AutoContextPhase {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AutoContextCheckEvent {
     pub phase: Option<AutoContextPhase>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextLedgerEvent {
+    pub ledger: ContextLedger,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
