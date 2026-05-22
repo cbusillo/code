@@ -1017,7 +1017,6 @@ use crate::dry_run_guard::{analyze_command, DryRunAnalysis, DryRunDisposition, D
 use crate::parse_command::parse_command;
 use crate::plan_tool::handle_update_plan;
 use crate::project_doc::get_user_instructions;
-use crate::skills::loader::load_skills;
 use crate::project_features::{ProjectCommand, ProjectHook, ProjectHooks};
 use crate::protocol::AgentMessageDeltaEvent;
 use crate::protocol::AgentMessageEvent;
@@ -1060,6 +1059,7 @@ use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::Submission;
 use crate::protocol::TaskCompleteEvent;
+use crate::skills::loader::load_skills;
 use std::sync::OnceLock;
 use tokio::sync::Notify;
 use crate::protocol::TurnDiffEvent;
@@ -1118,19 +1118,6 @@ impl Codex {
         let (tx_sub, rx_sub) = async_channel::unbounded();
         let (tx_event, rx_event) = async_channel::unbounded();
 
-        let skills_outcome = config.skills_enabled.then(|| load_skills(&config));
-        if let Some(outcome) = &skills_outcome {
-            for err in &outcome.errors {
-                warn!("invalid skill {}: {}", err.path.display(), err.message);
-            }
-        }
-
-        let user_instructions = get_user_instructions(
-            &config,
-            skills_outcome.as_ref().map(|outcome| outcome.skills.as_slice()),
-        )
-        .await;
-
         let configure_session = Op::ConfigureSession {
             provider: config.model_provider.clone(),
             model: config.model.clone(),
@@ -1143,7 +1130,7 @@ impl Codex {
             context_mode: config.context_mode,
             model_context_window: config.model_context_window,
             model_auto_compact_token_limit: config.model_auto_compact_token_limit,
-            user_instructions,
+            user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
