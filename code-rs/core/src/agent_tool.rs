@@ -1619,10 +1619,13 @@ async fn execute_model_with_permissions(
     // especially on Windows where global shims may be missing.
     let model_lower = model.to_lowercase();
     let command_lower = command_for_spawn.to_ascii_lowercase();
+    // `gemini` remains here for explicitly configured Gemini CLI agents, but it
+    // is no longer advertised as a built-in default.
     fn is_known_family(s: &str) -> bool {
         matches!(
             s,
-            "claude" | "gemini" | "copilot" | "qwen" | "codex" | "code" | "cloud" | "coder"
+            "antigravity" | "claude" | "gemini" | "copilot" | "qwen" | "codex" | "code"
+            | "cloud" | "coder"
         )
     }
 
@@ -1680,9 +1683,9 @@ async fn execute_model_with_permissions(
         other => other,
     };
 
-    // Configuration overrides for Codex CLI families. External CLIs (claude,
-    // gemini, copilot, qwen) do not understand our config flags, so only attach these
-    // when launching Codex binaries.
+    // Configuration overrides for Codex CLI families. External CLIs
+    // (antigravity, claude, gemini, copilot, qwen) do not understand our config
+    // flags, so only attach these when launching Codex binaries.
     let effort_override = format!(
         "model_reasoning_effort={}",
         clamped_effort.to_string().to_ascii_lowercase()
@@ -1702,11 +1705,20 @@ async fn execute_model_with_permissions(
             final_args.push("-p".into());
             final_args.push(prompt.to_string());
         }
-        "claude" | "gemini" | "qwen" => {
+        "antigravity" | "claude" | "gemini" | "qwen" => {
             let mut defaults = default_params_for(slug_for_defaults, read_only);
             strip_model_flags(&mut defaults);
             final_args.extend(defaults);
             final_args.extend(spec_model_args.iter().cloned());
+            if family == "antigravity" {
+                let dir = working_dir
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok());
+                if let Some(dir) = dir {
+                    final_args.push("--add-dir".into());
+                    final_args.push(dir.display().to_string());
+                }
+            }
             final_args.push("-p".into());
             final_args.push(prompt.to_string());
         }
@@ -2431,7 +2443,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 },
             }),
                 description: Some(
-                    "Optional array of model names (e.g., ['code-gpt-5.4','claude-sonnet-4.6','code-gpt-5.3-codex-spark','gemini-3-flash-preview'])".to_string(),
+                    "Optional array of agent/model selectors (e.g., ['code-gpt-5.4','claude-sonnet-4.6','code-gpt-5.3-codex-spark','antigravity']; antigravity launches agy and uses Antigravity's configured model)".to_string(),
                 ),
         },
     );
@@ -3188,6 +3200,54 @@ mod tests {
                 "high",
                 "-p",
                 "hello from copilot",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn antigravity_receives_workspace_add_dir() {
+        let dir = tempdir().expect("tempdir");
+        let agy = script_path(dir.path(), "agy");
+        write_argv_script(&agy);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        let cfg = AgentConfig {
+            name: "antigravity".to_string(),
+            command: agy.display().to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "antigravity",
+            "hello from agy",
+            true,
+            Some(workspace.clone()),
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute antigravity agent");
+
+        let args: Vec<&str> = output.trim().split('|').collect();
+        assert_eq!(
+            args,
+            vec![
+                "--add-dir",
+                workspace.to_str().expect("workspace path utf-8"),
+                "-p",
+                "hello from agy",
             ]
         );
     }

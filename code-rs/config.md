@@ -381,7 +381,7 @@ env = { "API_KEY" = "value" }
 
 ## agents
 
-Agents are external CLI programs that Code can invoke to handle subtasks. Code includes built-in support for several agents (Claude, Gemini, Qwen, etc.) and allows you to configure custom agents as well.
+Agents are CLI programs that Code can invoke to handle subtasks. Code includes built-in support for several agent/model selectors (Claude, Antigravity, Qwen, etc.) and allows you to configure custom agents as well.
 
 Each agent is configured using an `[[agents]]` section in your `config.toml`. Here's the basic structure:
 
@@ -410,8 +410,8 @@ command = "claude"  # Code will search for "claude" in your PATH
 **2. Absolute path (recommended for Windows):**
 ```toml
 [[agents]]
-name = "gemini"
-command = "C:\\Users\\YourUser\\AppData\\Roaming\\npm\\gemini.cmd"
+name = "antigravity"
+command = "C:\\Users\\YourUser\\AppData\\Local\\Programs\\Antigravity\\agy.exe"
 ```
 
 **3. Relative path:**
@@ -461,9 +461,8 @@ Agents inherit your current environment and can have custom variables:
 
 ```toml
 [[agents]]
-name = "gemini"
-command = "gemini"
-env = { GEMINI_API_KEY = "your-key-here" }
+name = "antigravity"
+command = "agy"
 ```
 
 Code automatically mirrors common API key environment variables for convenience:
@@ -477,7 +476,7 @@ Code includes built-in support for these agents:
 
 - **code/codex** - Built-in Code CLI agents (use current executable)
 - **claude** - Claude AI assistant (requires `claude` CLI)
-- **gemini** - Google Gemini (requires `gemini` CLI)
+- **antigravity** - Google Antigravity (requires `agy` CLI; uses Antigravity's configured model)
 - **qwen** - Qwen AI assistant (requires `qwen` CLI)
 - **cloud** - Cloud-based agents (optional, gated by `CODE_ENABLE_CLOUD_AGENT_MODEL`)
 

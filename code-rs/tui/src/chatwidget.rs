@@ -19155,8 +19155,11 @@ fi\n\
             let lowercase = agent_name.trim().to_ascii_lowercase();
             let script = match lowercase.as_str() {
                 "claude" => linux_agent_install_script(&cmd, "@anthropic-ai/claude-code"),
-                "gemini" => linux_agent_install_script(&cmd, "@google/gemini-cli"),
                 "qwen" => linux_agent_install_script(&cmd, "@qwen-code/qwen-code"),
+                "agy" | "antigravity" => format!(
+                    "{cmd} --version || (echo \"Install Google Antigravity CLI from https://antigravity.google/download\" && false)",
+                    cmd = cmd
+                ),
                 _ => format!(
                     "{cmd} --version || (echo \"Please install {cmd} via your package manager\" && false)",
                     cmd = cmd
@@ -21185,7 +21188,7 @@ Have we met every part of this goal and is there no further work to do?"#
                     .filter(|list| !list.is_empty())
                 {
                     agent_lines.push(format!(
-                        "{LINE_PREFIX}Models: [{}]",
+                        "{LINE_PREFIX}Agent/model selectors: [{}]",
                         models.join(", ")
                     ));
                 }
@@ -36717,7 +36720,7 @@ use code_core::protocol::OrderMeta;
             write_requested: Some(false),
             models: Some(vec![
                 "claude-sonnet-4.6".to_string(),
-                "gemini-3.1-pro-preview".to_string(),
+                "antigravity".to_string(),
             ]),
         }];
         chat.auto_state.pending_agent_timing = Some(AutoTurnAgentsTiming::Blocking);
@@ -36731,7 +36734,9 @@ use code_core::protocol::OrderMeta;
         assert!(message.contains("Run diagnostics"));
         assert!(message.contains("Please run agent.create"));
         assert!(message.contains("write: false"));
-        assert!(message.contains("Models: [claude-sonnet-4.6, gemini-3.1-pro-preview]"));
+        assert!(message.contains(
+            "Agent/model selectors: [claude-sonnet-4.6, antigravity]"
+        ));
         assert!(message.contains("Draft alternative fix"));
         assert!(message.contains("Focus on parser module"));
         assert!(message.contains("agent.wait"));

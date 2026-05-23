@@ -1,7 +1,7 @@
-//! Defaults for agent model slugs and their CLI launch configuration.
+//! Defaults for agent selectors and their CLI launch configuration.
 //!
 //! The canonical catalog defined here is consumed by both the core executor
-//! (to assemble argv when the user has not overridden a model) and by the TUI
+//! (to assemble argv when the user has not overridden a selector) and by the TUI
 //! (to surface the available sub-agent options).
 
 use crate::config_types::AgentConfig;
@@ -23,10 +23,8 @@ const CLAUDE_OPUS_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS]
 const CLAUDE_OPUS_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const CLAUDE_HAIKU_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS];
 const CLAUDE_HAIKU_WRITE: &[&str] = &["--dangerously-skip-permissions"];
-const GEMINI_PRO_READ_ONLY: &[&str] = &[];
-const GEMINI_PRO_WRITE: &[&str] = &["-y"];
-const GEMINI_FLASH_READ_ONLY: &[&str] = &[];
-const GEMINI_FLASH_WRITE: &[&str] = &["-y"];
+const ANTIGRAVITY_READ_ONLY: &[&str] = &[];
+const ANTIGRAVITY_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const COPILOT_READ_ONLY: &[&str] = &["--autopilot", "--allow-all-tools", "--no-ask-user", "-s"];
 const COPILOT_WRITE: &[&str] = &["--autopilot", "--yolo", "--no-ask-user", "-s"];
 const QWEN_3_CODER_READ_ONLY: &[&str] = &[];
@@ -35,21 +33,19 @@ const CLOUD_GPT5_CODEX_READ_ONLY: &[&str] = &[];
 const CLOUD_GPT5_CODEX_WRITE: &[&str] = &[];
 const MODELS_MANIFEST: &str = include_str!("../../../codex-rs/models-manager/models.json");
 
-/// Canonical list of built-in agent model slugs used when no `[[agents]]`
+/// Canonical list of built-in agent selectors used when no `[[agents]]`
 /// entries are configured. The ordering here controls priority for legacy
 /// CLI-name lookups.
 pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     // Frontline for moderate/challenging tasks
     "code-gpt-5.4",
-    "code-gpt-5.4-mini",
     "code-gpt-5.3-codex",
     "code-gpt-5.3-codex-spark",
     "claude-opus-4.6",
-    "gemini-3.1-pro-preview",
+    "antigravity",
     // Straightforward / cost-aware
-    "code-gpt-5.1-codex-mini",
+    "code-gpt-5.4-mini",
     "claude-sonnet-4.6",
-    "gemini-3-flash-preview",
     "github-copilot",
     // Mixed/general and alternates
     "claude-haiku-4.5",
@@ -225,43 +221,17 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         pro_only: false,
     },
     AgentModelSpec {
-        slug: "gemini-3.1-pro-preview",
-        family: "gemini",
-        cli: "gemini",
-        read_only_args: GEMINI_PRO_READ_ONLY,
-        write_args: GEMINI_PRO_WRITE,
-        model_args: &["--model", "gemini-3.1-pro-preview"],
-        description: "Higher-capacity Gemini preview for harder tasks; use when gemini-3-flash-preview misses details.",
+        slug: "antigravity",
+        family: "antigravity",
+        cli: "agy",
+        read_only_args: ANTIGRAVITY_READ_ONLY,
+        write_args: ANTIGRAVITY_WRITE,
+        model_args: &[],
+        description: "Google Antigravity CLI agent; use as the Google-agent path after consumer Gemini CLI retirement.",
         enabled_by_default: true,
-        aliases: &[
-            "gemini-3-pro",
-            "gemini-3-pro-preview",
-            "gemini-3",
-            "gemini3",
-            "gemini-pro",
-            "gemini-2.5-pro",
-        ],
+        aliases: &["agy", "google-antigravity"],
         gating_env: None,
         is_frontline: true,
-        pro_only: false,
-    },
-    AgentModelSpec {
-        slug: "gemini-3-flash-preview",
-        family: "gemini",
-        cli: "gemini",
-        read_only_args: GEMINI_FLASH_READ_ONLY,
-        write_args: GEMINI_FLASH_WRITE,
-        model_args: &["--model", "gemini-3-flash-preview"],
-        description: "Primary Gemini preview default for most tasks; fast and low-cost with near gemini-3.1-pro-preview quality.",
-        enabled_by_default: true,
-        aliases: &[
-            "gemini",
-            "gemini-flash",
-            "gemini-3-flash",
-            "gemini-2.5-flash",
-        ],
-        gating_env: None,
-        is_frontline: false,
         pro_only: false,
     },
     AgentModelSpec {

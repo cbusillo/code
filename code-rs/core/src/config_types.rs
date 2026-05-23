@@ -542,14 +542,14 @@ pub struct McpToolId {
     pub tool_name: String,
 }
 
-/// Configuration for external agent models
+/// Configuration for external agents.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct AgentConfig {
-    /// Name of the agent (e.g., "claude", "gemini", "gpt-4")
+    /// Name of the agent (e.g., "claude", "antigravity", "code-gpt-5.4")
     pub name: String,
 
-    /// Command to execute the agent (e.g., "claude", "gemini").
+    /// Command to execute the agent (e.g., "claude", "agy").
     /// If omitted, defaults to the agent `name` during config load.
     #[serde(default)]
     pub command: String,
