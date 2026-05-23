@@ -19,9 +19,9 @@ instructions = "Preamble added to this agent’s prompt"
 Field recap: `name` (slug/alias), `command` (absolute paths ok), `args*` (RO/RW lists override base), `env`, `read_only`, `enabled`, optional `description` and `instructions`.
 
 ### Built-in defaults
-If no `[[agents]]` are configured, Code advertises built-ins (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.4`, `code-gpt-5.3-codex`, `code-gpt-5.3-codex-spark`, `claude-opus-4.6`, `gemini-3.1-pro-preview`, `code-gpt-5.1-codex-mini`, `claude-sonnet-4.6`, `gemini-3-flash-preview`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own.
+If no `[[agents]]` are configured, Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.4`, `code-gpt-5.4-mini`, `code-gpt-5.3-codex`, `code-gpt-5.3-codex-spark`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
 
-Tip: `gemini` resolves to `gemini-3-flash-preview` (fast/cheap). Use `gemini-3.1-pro-preview` when you want the higher-capacity Gemini preview.
+Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent path. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
 
 ## Subagents (`[[subagents.commands]]`)
 ```toml

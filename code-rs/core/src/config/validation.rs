@@ -138,16 +138,18 @@ pub(crate) fn upgrade_legacy_model_slugs(cfg: &mut ConfigToml) {
         }
     }
 
-    fn maybe_upgrade_name(field: &mut String) {
-        if let Some(new) = upgrade_legacy_model_slug(field) {
+    fn maybe_upgrade_name(field: &mut String) -> Option<String> {
+        if let Some(new) = upgrade_legacy_agent_selector(field) {
             tracing::info!(
                 target: "code.config",
                 old = field.as_str(),
-                new,
+                new = new.as_str(),
                 "upgrading legacy agent slug to newer default",
             );
             *field = new;
+            return Some(field.clone());
         }
+        None
     }
 
     maybe_upgrade(&mut cfg.model);
@@ -159,7 +161,17 @@ pub(crate) fn upgrade_legacy_model_slugs(cfg: &mut ConfigToml) {
     }
 
     for agent in &mut cfg.agents {
-        maybe_upgrade_name(&mut agent.name);
+        if maybe_upgrade_name(&mut agent.name).as_deref() == Some("antigravity")
+            && agent.command.eq_ignore_ascii_case("gemini")
+        {
+            tracing::info!(
+                target: "code.config",
+                old = agent.command.as_str(),
+                new = "agy",
+                "upgrading retired Gemini CLI command to Antigravity CLI",
+            );
+            agent.command = "agy".to_string();
+        }
     }
 
     if let Some(subagents) = cfg.subagents.as_mut() {
@@ -228,21 +240,6 @@ fn upgrade_legacy_model_slug(slug: &str) -> Option<String> {
         return Some("claude-sonnet-4.6".to_string());
     }
 
-    // Upgrade Gemini Pro slugs to the latest preview track.
-    if slug.eq_ignore_ascii_case("gemini-2.5-pro")
-        || slug.eq_ignore_ascii_case("gemini-3-pro")
-        || slug.eq_ignore_ascii_case("gemini-3-pro-preview")
-    {
-        return Some("gemini-3.1-pro-preview".to_string());
-    }
-
-    // Upgrade Gemini Flash slugs to the latest preview track.
-    if slug.eq_ignore_ascii_case("gemini-2.5-flash")
-        || slug.eq_ignore_ascii_case("gemini-3-flash")
-    {
-        return Some("gemini-3-flash-preview".to_string());
-    }
-
     // Upgrade the older Qwen coder slug to the current plus line.
     if slug.eq_ignore_ascii_case("qwen-3-coder") {
         return Some("qwen3-coder-plus".to_string());
@@ -271,4 +268,24 @@ fn upgrade_legacy_model_slug(slug: &str) -> Option<String> {
     }
 
     None
+}
+
+fn upgrade_legacy_agent_selector(selector: &str) -> Option<String> {
+    // Consumer Gemini CLI is retired in favor of Google Antigravity CLI. Keep
+    // this agent-only so chat/review `model` config can still name Gemini APIs.
+    if selector.eq_ignore_ascii_case("gemini")
+        || selector.eq_ignore_ascii_case("gemini-flash")
+        || selector.eq_ignore_ascii_case("gemini-pro")
+        || selector.eq_ignore_ascii_case("gemini-2.5-pro")
+        || selector.eq_ignore_ascii_case("gemini-2.5-flash")
+        || selector.eq_ignore_ascii_case("gemini-3-pro")
+        || selector.eq_ignore_ascii_case("gemini-3-pro-preview")
+        || selector.eq_ignore_ascii_case("gemini-3.1-pro-preview")
+        || selector.eq_ignore_ascii_case("gemini-3-flash")
+        || selector.eq_ignore_ascii_case("gemini-3-flash-preview")
+    {
+        return Some("antigravity".to_string());
+    }
+
+    upgrade_legacy_model_slug(selector)
 }

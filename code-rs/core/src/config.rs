@@ -1466,6 +1466,7 @@ impl Config {
         for agent in &agents {
             if agent.name.eq_ignore_ascii_case("code")
                 || agent.name.eq_ignore_ascii_case("codex")
+                || agent.name.eq_ignore_ascii_case("antigravity")
                 || agent.name.eq_ignore_ascii_case("claude")
                 || agent.name.eq_ignore_ascii_case("gemini")
                 || agent.name.eq_ignore_ascii_case("copilot")
@@ -3241,6 +3242,32 @@ model_verbosity = "high"
     }
 
     #[test]
+    fn upgrade_legacy_model_slugs_keeps_gemini_chat_models() {
+        let mut cfg = ConfigToml {
+            model: Some("gemini-3-pro".to_string()),
+            review_model: Some("gemini-3-flash-preview".to_string()),
+            ..Default::default()
+        };
+
+        cfg.profiles.insert(
+            "legacy".to_string(),
+            ConfigProfile {
+                model: Some("gemini-2.5-pro".to_string()),
+                review_model: Some("gemini-3.1-pro-preview".to_string()),
+                ..Default::default()
+            },
+        );
+
+        upgrade_legacy_model_slugs(&mut cfg);
+
+        assert_eq!(cfg.model.as_deref(), Some("gemini-3-pro"));
+        assert_eq!(cfg.review_model.as_deref(), Some("gemini-3-flash-preview"));
+        let legacy = cfg.profiles.get("legacy").expect("profile exists");
+        assert_eq!(legacy.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(legacy.review_model.as_deref(), Some("gemini-3.1-pro-preview"));
+    }
+
+    #[test]
     fn upgrade_legacy_model_slugs_updates_profiles() {
         let mut cfg = ConfigToml::default();
         cfg.profiles.insert(
@@ -3304,7 +3331,8 @@ model_verbosity = "high"
         upgrade_legacy_model_slugs(&mut cfg);
 
         assert_eq!(cfg.agents[0].name, "claude-sonnet-4.6");
-        assert_eq!(cfg.agents[1].name, "gemini-3.1-pro-preview");
+        assert_eq!(cfg.agents[1].name, "antigravity");
+        assert_eq!(cfg.agents[1].command, "agy");
         assert_eq!(cfg.agents[2].name, "qwen3-coder-plus");
     }
 
@@ -3337,7 +3365,7 @@ model_verbosity = "high"
             command.agents,
             vec![
                 "claude-sonnet-4.6".to_string(),
-                "gemini-3-flash-preview".to_string(),
+                "antigravity".to_string(),
                 "qwen3-coder-plus".to_string(),
             ]
         );
@@ -3458,7 +3486,7 @@ model_verbosity = "high"
         assert!(enabled_names.contains("code-gpt-5.3-codex"));
         assert!(enabled_names.contains("code-gpt-5.4"));
         assert!(enabled_names.contains("claude-sonnet-4.6"));
-        assert!(enabled_names.contains("gemini-3.1-pro-preview"));
+        assert!(enabled_names.contains("antigravity"));
         assert!(enabled_names.contains("qwen3-coder-plus"));
         Ok(())
     }
@@ -3667,50 +3695,50 @@ mod agent_merge_tests {
     }
 
     #[test]
-    fn gemini_alias_and_canonical_dedupe_prefers_last_state() {
+    fn antigravity_alias_and_canonical_dedupe_prefers_last_state() {
         let agents = vec![
-            agent("gemini-2.5-pro", "gemini", true),
-            agent("gemini-3.1-pro-preview", "gemini", false),
+            agent("gemini-2.5-pro", "agy", true),
+            agent("antigravity", "agy", false),
         ];
         let merged = merge_with_default_agents(agents);
 
-        let gemini = merged
+        let antigravity = merged
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case("gemini-3.1-pro-preview"))
-            .expect("gemini present");
+            .find(|a| a.name.eq_ignore_ascii_case("antigravity"))
+            .expect("antigravity present");
 
-        assert!(!gemini.enabled, "later canonical disable should win");
+        assert!(!antigravity.enabled, "later canonical disable should win");
         assert_eq!(
             merged
                 .iter()
-                .filter(|a| a.name.eq_ignore_ascii_case("gemini-3.1-pro-preview"))
+                .filter(|a| a.name.eq_ignore_ascii_case("antigravity"))
                 .count(),
             1,
-            "should dedupe gemini alias/canonical"
+            "should dedupe antigravity alias/canonical"
         );
     }
 
     #[test]
-    fn gemini_alias_disable_overrides_prior_canonical_enable() {
+    fn antigravity_alias_disable_overrides_prior_canonical_enable() {
         let agents = vec![
-            agent("gemini-3.1-pro-preview", "gemini", true),
-            agent("gemini-2.5-pro", "gemini", false),
+            agent("antigravity", "agy", true),
+            agent("gemini-2.5-pro", "agy", false),
         ];
         let merged = merge_with_default_agents(agents);
 
-        let gemini = merged
+        let antigravity = merged
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case("gemini-3.1-pro-preview"))
-            .expect("gemini present");
+            .find(|a| a.name.eq_ignore_ascii_case("antigravity"))
+            .expect("antigravity present");
 
-        assert!(!gemini.enabled, "later alias disable should win");
+        assert!(!antigravity.enabled, "later alias disable should win");
         assert_eq!(
             merged
                 .iter()
-                .filter(|a| a.name.eq_ignore_ascii_case("gemini-3.1-pro-preview"))
+                .filter(|a| a.name.eq_ignore_ascii_case("antigravity"))
                 .count(),
             1,
-            "should dedupe gemini alias/canonical"
+            "should dedupe antigravity alias/canonical"
         );
     }
 

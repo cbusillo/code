@@ -8063,6 +8063,13 @@ mod resolve_agent_command_for_check_tests {
         assert_eq!(cmd, "claude");
         assert!(!is_builtin, "Claude should not be treated as a built-in family");
     }
+
+    #[test]
+    fn antigravity_fallback_uses_agy_for_command_checks() {
+        let (cmd, is_builtin) = resolve_agent_command_for_check("antigravity", None);
+        assert_eq!(cmd, "agy");
+        assert!(!is_builtin, "Antigravity should not be treated as a built-in family");
+    }
 }
 
 fn parse_container_exec_arguments(
@@ -8516,6 +8523,7 @@ fn resolve_agent_command_for_check(
     let m = model.to_lowercase();
     match m.as_str() {
         "code" | "codex" | "cloud" => ("coder".to_string(), true),
+        "antigravity" => ("agy".to_string(), false),
         "claude" => ("claude".to_string(), false),
         "gemini" => ("gemini".to_string(), false),
         "qwen" => ("qwen".to_string(), false),

@@ -37,8 +37,8 @@ command = "C:\\Users\\YourUser\\AppData\\Roaming\\npm\\claude.cmd"
 enabled = true
 
 [[agents]]
-name = "gemini"
-command = "C:\\Users\\YourUser\\AppData\\Roaming\\npm\\gemini.cmd"
+name = "antigravity"
+command = "C:\\Users\\YourUser\\AppData\\Local\\Programs\\Antigravity\\agy.exe"
 enabled = true
 ```
 
@@ -53,7 +53,7 @@ npm config get prefix
 
 The executables will be in the returned directory. For example, if it returns `C:\Users\YourUser\AppData\Roaming\npm`, your agent commands will be at:
 - `C:\Users\YourUser\AppData\Roaming\npm\claude.cmd`
-- `C:\Users\YourUser\AppData\Roaming\npm\gemini.cmd`
+- `C:\Users\YourUser\AppData\Local\Programs\Antigravity\agy.exe`
 - `C:\Users\YourUser\AppData\Roaming\npm\coder.cmd`
 
 **3. Verify PATH includes npm directory:**
