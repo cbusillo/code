@@ -1,12 +1,12 @@
 {
   "defaultBranch": "local/cbusillo-overlay",
-  "projectType": "codex-cli-local-overlay",
+  "projectType": "every-code-product",
   "upstreamForkBaseBranch": "fork-main",
   "overlayBranch": "local/cbusillo-overlay",
   "docs": {
     "overview": "README.md",
     "agentGuide": "AGENTS.md",
-    "localOverlay": "docs/local-overlay.md",
+    "upstreamImportPolicy": "docs/local-overlay.md",
     "execution": "docs/exec.md",
     "sandboxing": "docs/platform-sandboxing.md",
     "tuiComposer": "docs/tui-chat-composer.md",
@@ -36,7 +36,8 @@
       "TUI behavior changes",
       "sandbox or execution behavior changes",
       "release behavior changes",
-      "local overlay behavior changes",
+      "Every Code product identity changes",
+      "upstream import policy changes",
       "Every Code remote inbox behavior changes",
       "upstream mirror behavior changes"
     ]
@@ -97,7 +98,7 @@
       "repo relationship changes",
       "cleanup policy changes",
       "GitHub default branch changes",
-      "overlay branch changes",
+      "Every Code default branch changes",
       "release workflow changes",
       "upstream mirror policy changes"
     ]

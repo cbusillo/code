@@ -2,7 +2,7 @@
 
 &ensp;
 
-**Every Code** (Code for short) is a fast, local coding agent for your terminal. It's a community-driven fork of `openai/codex` focused on real developer ergonomics: Browser integration, multi-agents, theming, and reasoning control — all while staying compatible with upstream.
+**Every Code** (Code for short) is a fast, local coding agent for your terminal. It owns its product direction, defaults, releases, and UX while preserving useful compatibility with Codex CLI and importing upstream improvements when they make the product better.
 
 &ensp;
 ## What's new
@@ -27,7 +27,7 @@
 
 
 - **Auto Review** – background ghost-commit watcher runs reviews in a separate worktree whenever a turn changes code; uses `codex-5.1-mini-high` and reports issues plus ready-to-apply fixes without blocking the main thread.
-- **Code Bridge** – Sentry-style local bridge that streams errors, console, screenshots, and control from running apps into Code; ships an MCP server; install by asking Code to pull `https://github.com/just-every/code-bridge`.
+- **Code Bridge** – Sentry-style local bridge that streams errors, console, screenshots, and control from running apps into Code; ships an MCP server.
 - **Plays well with Auto Drive** – reviews run in parallel with long Auto Drive tasks so quality checks land while the flow keeps moving.
 - **Quality-first focus** – the release shifts emphasis from "can the model write this file" to "did we verify it works".
 - _From v0.5.0:_ rename to Every Code, upgraded `/auto` planning/recovery, unified `/settings`, faster streaming/history with card-based activity, and more reliable `/resume` + `/undo`.
@@ -98,7 +98,7 @@ Note: If another tool already provides a `code` command (e.g. VS Code), our CLI 
 - **API key** (usage-based)
   - Set `export OPENAI_API_KEY=xyz` and run `code`
 
-### Install Claude & Gemini (optional)
+### Install External Agents (optional)
 
 Every Code supports orchestrating other AI CLI tools. Install these and config to use alongside Code.
 
@@ -293,7 +293,7 @@ model_reasoning_summary = "detailed"
 ## FAQ
 
 **How is this different from the original?**
-> This fork adds browser integration, multi-agent commands (`/plan`, `/solve`, `/code`), theme system, and enhanced reasoning controls while maintaining full compatibility.
+> Every Code is an independent product that keeps useful Codex CLI compatibility while owning its browser integration, multi-agent commands (`/plan`, `/solve`, `/code`), theme system, Auto Drive flows, and release defaults.
 
 **Can I use my existing Codex configuration?**
 > Yes. Every Code reads from both `~/.code/` (primary) and legacy `~/.codex/` directories. We only write to `~/.code/`, so Codex will keep running if you switch back; copy or remove legacy files if you notice conflicts.
@@ -307,13 +307,13 @@ model_reasoning_summary = "detailed"
 &ensp;
 ## Contributing
 
-We welcome contributions! Every Code maintains compatibility with upstream while adding community-requested features.
+We welcome contributions! Every Code accepts upstream improvements when they fit the product, but product direction, defaults, and release quality are decided here.
 
 ### Development workflow
 
 ```bash
 # Clone and setup
-git clone https://github.com/just-every/code.git
+git clone https://github.com/cbusillo/code.git
 cd code
 npm install
 
@@ -348,7 +348,7 @@ The `pre-push` hook runs `./pre-release.sh` automatically when pushing to `main`
 ## Legal & Use
 
 ### License & attribution
-- This project is a community fork of `openai/codex` under **Apache-2.0**. We preserve upstream LICENSE and NOTICE files.
+- This project descends from `openai/codex` under **Apache-2.0**. We preserve upstream LICENSE and NOTICE files.
 - **Every Code** (Code) is **not** affiliated with, sponsored by, or endorsed by OpenAI.
 
 ### Your responsibilities
@@ -370,8 +370,8 @@ AI providers can change eligibility, limits, models, or authentication flows. Ev
 
 Apache 2.0 - See [LICENSE](LICENSE) file for details.
 
-Every Code is a community fork of the original Codex CLI. We maintain compatibility while adding enhanced features requested by the developer community.
+Every Code is an independent coding agent descended from the original Codex CLI. We maintain compatibility where it helps users while developing Every Code's own product direction.
 
 &ensp;
 ---
-**Need help?** Open an issue on [GitHub](https://github.com/just-every/code/issues) or check our documentation.
+**Need help?** Open an issue on [GitHub](https://github.com/cbusillo/code/issues) or check our documentation.
