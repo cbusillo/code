@@ -1,12 +1,16 @@
-# Rust/codex-rs
+# Every Code Repository Guidance
 
 Repo workflow metadata lives in `.github/github.json`; keep that
 file aligned with branch roles, validation gates, GitHub signal capabilities,
 workflow names, docs routing, and local cleanup policy when those facts change.
 
-In the codex-rs folder where the rust code lives:
+Every Code is the product in this repository; `code` is the CLI shorthand.
+Upstream Codex and just-every/code are provenance and import sources, not the
+repo's product identity.
 
-- Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`
+Rust implementation lives under `code-rs`:
+
+- Crate names are prefixed with `code-`. For example, the `core` folder's crate is named `code-core`.
 - When using format! and you can inline variables into {}, always do that.
 - Treat `codex-rs` as a read-only mirror of `openai/codex:main`; edit Rust sources under `code-rs` instead.
 
@@ -60,21 +64,21 @@ Examples:
 - `fix(core/codex): handle SIGINT in on_exec_command_begin to avoid orphaned child`
 - `docs(agents): clarify commit-message expectations`
 
-## Local Overlay Workflow
+## Upstream Import Workflow
 
-- The canonical local-carry branch is `local/cbusillo-overlay`. Treat it as the source of truth for the `code` binary installed on this machine.
+- Until #87 renames the default branch, `local/cbusillo-overlay` is the canonical Every Code branch and source of truth for the `code` binary installed on this machine.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary that reports `0.0.0`.
 - Before leaving a local work session, run `just local-cleanup-space --apply`
   to remove rebuildable target/cache artifacts while preserving
   `code-rs/target/release/code`.
-- Use `just local-overlay-update` only from a clean `local/*` branch. It fetches `upstream/main`, merges it into the current overlay branch, replays any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release binary.
-- Commits already on `local/cbusillo-overlay` persist automatically across future upstream merges. They do not need to be duplicated in `scripts/local/overlay-picks.txt`.
-- If you make a new local fix that should remain part of the carried overlay, commit it onto `local/cbusillo-overlay` first. Do not leave important local changes only as an unmerged side branch.
+- Use `just local-overlay-update` only from a clean `local/*` branch. It fetches `upstream/main`, merges it into the current Every Code branch, replays any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release binary.
+- Commits already on `local/cbusillo-overlay` persist automatically across future upstream imports. They do not need to be duplicated in `scripts/local/overlay-picks.txt`.
+- If you make a new Every Code fix that should remain part of the product, commit it through the normal task-branch/PR flow into `local/cbusillo-overlay` first. Do not leave important local changes only as an unmerged side branch.
 - Add a commit SHA to `scripts/local/overlay-picks.txt` only for a patch that intentionally lives outside the overlay branch and still needs to be cherry-picked in during `just local-overlay-update`. Keep the list ordered and comment each entry with the source branch or purpose.
 - Old side branches are archival context, not the runtime source of truth. They do not need to merge cleanly as branches; only the specific carried commits must cherry-pick cleanly onto the current overlay branch.
 - If a legacy pick no longer cherry-picks cleanly, leave it commented out in `scripts/local/overlay-picks.txt`, manually re-port the fix against current upstream, commit the new port on `local/cbusillo-overlay`, then replace the old SHA in the manifest if you still want automatic replay.
-- For overlay-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/local-overlay.md`.
+- For Every Code-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/local-overlay.md`.
 
 ## How to Git Push
 
@@ -103,18 +107,18 @@ Quick procedure (merge-only):
 
 ## Command Execution Architecture
 
-The command execution flow in Codex follows an event-driven pattern:
+The command execution flow in Code follows an event-driven pattern:
 
-1. **Core Layer** (`codex-core/src/codex.rs`):
+1. **Core Layer** (`code-rs/core/src/codex.rs`):
    - `on_exec_command_begin()` initiates command execution
    - Creates `EventMsg::ExecCommandBegin` events with command details
 
-2. **TUI Layer** (`codex-tui/src/chatwidget.rs`):
+2. **TUI Layer** (`code-rs/tui/src/chatwidget.rs`):
    - `handle_codex_event()` processes execution events
    - Manages `RunningCommand` state for active commands
    - Creates `HistoryCell::Exec` for UI rendering
 
-3. **History Cell** (`codex-tui/src/history_cell.rs`):
+3. **History Cell** (`code-rs/tui/src/history_cell.rs`):
    - `new_active_exec_command()` - Creates cell for running command
    - `new_completed_exec_command()` - Updates with final output
    - Handles syntax highlighting via `ParsedCommand`
