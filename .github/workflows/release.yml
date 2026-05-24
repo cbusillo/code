@@ -43,16 +43,15 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
       - name: Validate npm authentication (must fail fast if missing/invalid)
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+          publish_token="${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}"
+          if [ -z "$publish_token" ]; then
             echo "::warning::NPM_TOKEN is missing; skipping npm publish for this GitHub-release-only run." >&2
             exit 0
           fi
 
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          echo "//registry.npmjs.org/:_authToken=${publish_token}" > ~/.npmrc
 
           if npm whoami >/dev/null 2>&1; then
             echo "npm auth ok"
@@ -965,7 +964,7 @@ jobs:
         id: should_publish
         shell: bash
         run: |
-          if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
+          if [ -z "${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}" ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -1079,14 +1078,17 @@ jobs:
 
       - name: Publish per-target npm binary packages (last)
         if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+          publish_token="${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}"
+          if [ -z "$publish_token" ]; then
+            echo "npm auth token missing; cannot publish binary packages" >&2
+            exit 1
+          fi
           config_path="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
           mkdir -p "$(dirname "$config_path")"
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$config_path"
+          echo "//registry.npmjs.org/:_authToken=${publish_token}" > "$config_path"
           npm whoami >/dev/null 2>&1 || { echo "npm auth failed (npm whoami). Ensure NPM_TOKEN is a granular/automation token with publish rights to @just-every/* and bypass 2FA enabled; update the secret via npmjs.com." >&2; exit 1; }
           shopt -s nullglob
           for dir in npm-binaries/*; do
@@ -1105,14 +1107,17 @@ jobs:
       - name: Publish main npm package (last)
         if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
         working-directory: codex-cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+          publish_token="${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}"
+          if [ -z "$publish_token" ]; then
+            echo "npm auth token missing; cannot publish main package" >&2
+            exit 1
+          fi
           config_path="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
           mkdir -p "$(dirname "$config_path")"
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$config_path"
+          echo "//registry.npmjs.org/:_authToken=${publish_token}" > "$config_path"
           npm whoami >/dev/null 2>&1 || { echo "npm auth failed (npm whoami). Ensure NPM_TOKEN is a granular/automation token with publish rights to @just-every/* and bypass 2FA enabled; update the secret via npmjs.com." >&2; exit 1; }
           name="@just-every/code"
           version=$(jq -r '.version' package.json)
