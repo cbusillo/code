@@ -66,7 +66,7 @@ jobs:
 
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
-    runs-on: [self-hosted, Linux, X64, chris-testing]
+    runs-on: ubuntu-24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
