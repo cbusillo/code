@@ -3339,16 +3339,7 @@ mod tests {
     #[cfg(unix)]
     fn write_stdin_mode_script(path: &Path) {
         let script = r#"#!/bin/sh
-python3 - <<'PY'
-import os
-import stat
-
-mode = os.fstat(0).st_mode
-if stat.S_ISFIFO(mode):
-    print("fifo")
-else:
-    print("detached")
-PY
+python3 -c 'import os, stat; print("fifo" if stat.S_ISFIFO(os.fstat(0).st_mode) else "detached")'
 exit 0
 "#;
         std::fs::write(path, script).expect("write stdin mode script");
