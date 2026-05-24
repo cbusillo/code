@@ -1110,6 +1110,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "supports-color 3.0.2",
  "tar",
  "tempfile",
