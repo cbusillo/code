@@ -11,8 +11,8 @@ if [[ -z "$branch" ]]; then
 	exit 1
 fi
 
-if [[ "$branch" != local/* ]]; then
-	echo "error: expected a local/* overlay branch, got '$branch'" >&2
+if [[ "$branch" != local/* && "$branch" != main ]]; then
+	echo "error: expected main or a local/* product branch, got '$branch'" >&2
 	exit 1
 fi
 
@@ -22,7 +22,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 if [[ ! -f "$manifest" ]]; then
-	echo "error: overlay branch manifest not found: $manifest" >&2
+	echo "error: upstream import manifest not found: $manifest" >&2
 	exit 1
 fi
 
@@ -33,7 +33,7 @@ echo "Merging upstream/main into $branch"
 git merge --no-edit upstream/main
 
 echo
-echo "Applying overlay commit stack from $(basename "$manifest")"
+echo "Applying carried commit stack from $(basename "$manifest")"
 while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
 	line="${raw_line%%#*}"
 	pick_commit="$(printf '%s' "$line" | xargs)"
@@ -42,7 +42,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
 	fi
 
 	if ! git cat-file -e "$pick_commit^{commit}" 2>/dev/null; then
-		echo "error: overlay commit '$pick_commit' does not exist" >&2
+		echo "error: carried commit '$pick_commit' does not exist" >&2
 		exit 1
 	fi
 

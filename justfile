@@ -68,8 +68,16 @@ local-code-rebuild:
     ./scripts/local/rebuild-path-code.sh
 
 [no-cd]
+local-upstream-import:
+    ./scripts/local/update-overlay-from-upstream.sh
+
+[no-cd]
 local-overlay-update:
     ./scripts/local/update-overlay-from-upstream.sh
+
+[no-cd]
+local-product-health:
+    ./scripts/local/fork-health.sh
 
 [no-cd]
 local-fork-health:

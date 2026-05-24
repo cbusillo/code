@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag to create or update, for example overlay-v0.6.93.1
+        description: Example every-code-v0.6.98.1
         required: true
       release_name:
         description: Optional display name for the GitHub release
@@ -17,6 +17,7 @@ on:
         default: true
   push:
     tags:
+      - every-code-v*
       - overlay-v*
 
 concurrency:
@@ -54,13 +55,13 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             tag="${GITHUB_REF_NAME}"
             prerelease=false
-            release_name="Code ${tag}"
+            release_name="Every Code ${tag}"
           else
             tag="${RELEASE_TAG}"
             prerelease="${PRERELEASE}"
             release_name="${RELEASE_NAME}"
             if [[ -z "${release_name}" ]]; then
-              release_name="Code ${tag}"
+              release_name="Every Code ${tag}"
             fi
           fi
 

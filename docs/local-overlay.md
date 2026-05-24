@@ -1,10 +1,15 @@
 # Upstream Import And Local Runtime Policy
 
-Every Code owns its product direction, defaults, releases, and UX. Until the
-default branch is renamed in #87, `local/cbusillo-overlay` remains the canonical
-branch for the local `code` binary on this machine. It imports useful upstream
-changes from `just-every/code` while keeping Every Code-specific behavior in the
-product branch.
+Every Code owns its product direction, defaults, releases, and UX. The product
+branch is moving from `local/cbusillo-overlay` to `main` in #87. Until GitHub's
+default branch and protection rules are changed together, `local/cbusillo-overlay`
+remains the canonical branch for the local `code` binary on this machine.
+
+Important cutover blocker: `origin/main` already exists and diverges heavily
+from `origin/local/cbusillo-overlay`. Do not overwrite, delete, or repoint it as
+an experiment. The branch cutover must explicitly choose `local/cbusillo-overlay`
+as the source-of-truth commit, move branch protection to `main`, update the
+GitHub default branch, and verify Actions before retiring the old branch name.
 
 Treat `codex-rs/` as a read-only mirror of `openai/codex`; put editable Rust
 changes under `code-rs/`.
@@ -12,8 +17,8 @@ changes under `code-rs/`.
 Remote map:
 
 - `upstream`: `just-every/code`, the normal import source.
-- `origin` / `fork`: `cbusillo/code`, where Every Code branches and tags are
-  pushed until the repository identity transition finishes.
+- `origin` / `fork`: `cbusillo/code`, where Every Code product branches and tags
+  are pushed.
 - `openai`: reference remote for `openai/codex`; do not use it for routine
   imports or pushes.
 
@@ -28,16 +33,18 @@ Remote map:
 - **Patch harness:** local validation for changed files, project tool discovery,
   and workspace-aware validator execution.
 - **Release workflow:** binary releases and local PATH rebuilds are Every Code
-  infrastructure. The `overlay-v*` tag format remains temporary until #87.
+  infrastructure. New releases should use `every-code-v*`; legacy `overlay-v*`
+  tags remain supported only so existing release history and notes keep working.
 - **Model defaults:** local defaults may intentionally differ from upstream, but
   request wire compatibility should use upstream model metadata when available.
 
 ## Upstream Sync
 
-Use the import helper from a clean `local/*` branch:
+Use the import helper from a clean product branch. Today that is
+`local/cbusillo-overlay`; after #87 completes it should be `main`:
 
 ```sh
-just local-overlay-update
+just local-upstream-import
 ```
 
 After conflicts are resolved, preserve upstream fixes unless they contradict an
@@ -51,17 +58,17 @@ outside the product branch and must be replayed.
 Cut an Every Code release after every successful upstream import or local hotfix
 that should be installed elsewhere.
 
-Temporary tag format, pending #87:
+Tag format:
 
 ```text
-overlay-v<upstream-version>.<fork-patch>
+every-code-v<upstream-version>.<product-patch>
 ```
 
 Examples:
 
-- `overlay-v0.6.95.1` for the first Every Code release on upstream `0.6.95`
-- `overlay-v0.6.95.2` for a second Every Code hotfix on the same upstream base
-- `overlay-v0.6.96.1` after the next upstream version bump
+- `every-code-v0.6.98.1` for the first Every Code release on upstream `0.6.98`.
+- `every-code-v0.6.98.2` for a second hotfix on the same upstream base.
+- `every-code-v0.6.99.1` after the next upstream version bump.
 
 Required release gate:
 
@@ -102,9 +109,9 @@ Run without `--apply` to preview deletions. Use `--keep-current-fast-cache` or
 Then push the product branch and tag to `origin`, and monitor `Binary Release`:
 
 ```sh
-git tag overlay-v0.6.96.1
-git push origin local/cbusillo-overlay
-git push origin overlay-v0.6.96.1
+git tag every-code-v0.6.98.1
+git push origin HEAD
+git push origin every-code-v0.6.98.1
 ```
 
 Do not push Every Code releases to `upstream` or `openai`.
@@ -114,7 +121,7 @@ Do not push Every Code releases to `upstream` or `openai`.
 Run this before and after upstream syncs:
 
 ```sh
-scripts/local/fork-health.sh
+just local-product-health
 ```
 
 Pay particular attention to changes under `code-rs/tui/src/chatwidget.rs`,

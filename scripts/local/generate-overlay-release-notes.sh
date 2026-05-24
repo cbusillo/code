@@ -11,8 +11,26 @@ Usage: scripts/local/generate-overlay-release-notes.sh \
   --dist-dir DIR \
   --output FILE
 
-Generates GitHub release notes for fork-owned overlay binary releases.
+Generates GitHub release notes for Every Code binary releases.
 USAGE
+}
+
+strip_release_tag_version() {
+  local release_tag="$1"
+  case "$release_tag" in
+    every-code-v*)
+      printf '%s\n' "${release_tag#every-code-v}"
+      ;;
+    overlay-v*)
+      printf '%s\n' "${release_tag#overlay-v}"
+      ;;
+    v*)
+      printf '%s\n' "${release_tag#v}"
+      ;;
+    *)
+      printf '%s\n' "$release_tag"
+      ;;
+  esac
 }
 
 tag=""
@@ -65,14 +83,16 @@ if [[ -z "$tag" || -z "$code_version" || -z "$commit" || -z "$ref_name" || -z "$
   exit 2
 fi
 
-previous_tag="$(git tag --list 'overlay-v*' --merged "$commit" --sort=-v:refname \
+previous_tag="$(git tag --list 'every-code-v*' 'overlay-v*' \
+  --merged "$commit" --sort=-v:refname \
   | grep -Fxv "$tag" \
   | head -n 1 || true)"
 
 if [[ -n "$previous_tag" ]]; then
   range_base="$previous_tag"
 else
-  upstream_tag="v${tag#overlay-v}"
+  tag_version="$(strip_release_tag_version "$tag")"
+  upstream_tag="v${tag_version}"
   upstream_tag="${upstream_tag%.*}"
   if git rev-parse --verify --quiet "${upstream_tag}^{commit}" >/dev/null \
     && git merge-base --is-ancestor "$upstream_tag" "$commit"; then
@@ -152,7 +172,7 @@ write_section() {
 {
   echo "## What's Changed"
   echo ""
-  echo "This overlay release carries local fork updates on top of upstream Code $code_version."
+  echo "This Every Code release carries product updates on top of upstream Code $code_version."
   if [[ -n "$previous_tag" ]]; then
     echo "It includes $listed_entry_count listed changes since $previous_tag."
   fi
@@ -175,7 +195,7 @@ write_section() {
   echo ""
   echo "Built from \`$ref_name\` at \`$commit\`."
   if [[ -n "$previous_tag" ]]; then
-    echo "Previous overlay release: \`$previous_tag\`."
+    echo "Previous Every Code release: \`$previous_tag\`."
   fi
   echo ""
   echo "### Assets"
