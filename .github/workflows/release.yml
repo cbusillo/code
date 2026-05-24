@@ -68,9 +68,9 @@ jobs:
     name: Preflight Tests (Linux fast E2E)
     runs-on: [self-hosted, Linux, X64, chris-testing]
     env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-home
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
-      RUSTUP_HOME: ${{ runner.temp }}/rustup-home
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
     steps:
       - name: Prepare cargo target dir on data disk
         shell: bash
@@ -218,8 +218,8 @@ jobs:
     needs: [determine-version]
     runs-on: ${{ fromJson(matrix.runs_on) }}
     env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-home
-      RUSTUP_HOME: ${{ runner.temp }}/rustup-home
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
     strategy:
       matrix:
         include:
