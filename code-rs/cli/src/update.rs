@@ -214,6 +214,7 @@ fn http_client(user_agent: &str) -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
+#[cfg(target_family = "unix")]
 async fn install_direct_binary(asset: &PlatformAsset, exe: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
