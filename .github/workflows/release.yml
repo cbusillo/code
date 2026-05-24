@@ -570,7 +570,7 @@ jobs:
           # Show what we collected
           ls -la release-assets/ || true
 
-      - name: Install zstd (package assembly)
+      - name: Normalize release assets for package assembly
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -578,16 +578,18 @@ jobs:
           if command -v zstd >/dev/null 2>&1; then
             exit 0
           fi
-          if command -v sudo >/dev/null 2>&1; then
-            SUDO=(sudo)
-          elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-            SUDO=()
-          else
-            echo "zstd is required but this runner cannot install packages without sudo/root." >&2
-            exit 1
-          fi
-          "${SUDO[@]}" apt-get update -qq
-          "${SUDO[@]}" apt-get install -y zstd
+
+          shopt -s nullglob
+          for zst in release-assets/*.zst; do
+            fallback="${zst%.zst}.tar.gz"
+            if [ -f "$fallback" ]; then
+              echo "zstd is unavailable; using fallback $(basename "$fallback") for package assembly"
+              rm -f "$zst"
+            else
+              echo "zstd is unavailable and no fallback exists for $(basename "$zst")" >&2
+              exit 1
+            fi
+          done
 
       - name: Build per-target npm binary packages
         shell: bash
@@ -739,7 +741,7 @@ jobs:
       #  - Review changes between the previous tag and the new version
       #  - Update CHANGELOG.md with a new section for vNEW_VERSION
       #  - Write rich release notes to docs/release-notes/RELEASE_NOTES.md
-      - name: Install zstd (CHANGELOG generation)
+      - name: Normalize release assets for changelog generation
         if: runner.os == 'Linux' && env.OPENAI_API_KEY != ''
         shell: bash
         run: |
@@ -747,16 +749,18 @@ jobs:
           if command -v zstd >/dev/null 2>&1; then
             exit 0
           fi
-          if command -v sudo >/dev/null 2>&1; then
-            SUDO=(sudo)
-          elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-            SUDO=()
-          else
-            echo "zstd is required but this runner cannot install packages without sudo/root." >&2
-            exit 1
-          fi
-          "${SUDO[@]}" apt-get update -qq
-          "${SUDO[@]}" apt-get install -y zstd
+
+          shopt -s nullglob
+          for zst in release-assets/*.zst; do
+            fallback="${zst%.zst}.tar.gz"
+            if [ -f "$fallback" ]; then
+              echo "zstd is unavailable; using fallback $(basename "$fallback") for changelog generation"
+              rm -f "$zst"
+            else
+              echo "zstd is unavailable and no fallback exists for $(basename "$zst")" >&2
+              exit 1
+            fi
+          done
 
       - name: Generate CHANGELOG + release notes (Code)
         if: env.OPENAI_API_KEY != ''
