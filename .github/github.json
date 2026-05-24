@@ -2,7 +2,8 @@
   "defaultBranch": "local/cbusillo-overlay",
   "projectType": "every-code-product",
   "upstreamForkBaseBranch": "fork-main",
-  "overlayBranch": "local/cbusillo-overlay",
+  "currentProductBranch": "local/cbusillo-overlay",
+  "plannedProductBranch": "main",
   "docs": {
     "overview": "README.md",
     "agentGuide": "AGENTS.md",
@@ -29,7 +30,7 @@
     "scripts": {
       "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch local/cbusillo-overlay",
       "cleanupSpace": "just local-cleanup-space --apply",
-      "overlayUpdate": "just local-overlay-update"
+      "upstreamImport": "just local-upstream-import"
     },
     "docsRequiredWhen": [
       "CLI behavior changes",

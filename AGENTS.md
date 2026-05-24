@@ -66,18 +66,37 @@ Examples:
 
 ## Upstream Import Workflow
 
-- Until #87 renames the default branch, `local/cbusillo-overlay` is the canonical Every Code branch and source of truth for the `code` binary installed on this machine.
+- `main` is the planned Every Code product branch. Until #87 completes the
+  GitHub default-branch cutover, `local/cbusillo-overlay` remains the factual
+  protected/default branch and source of truth for the `code` binary installed
+  on this machine.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary that reports `0.0.0`.
 - Before leaving a local work session, run `just local-cleanup-space --apply`
   to remove rebuildable target/cache artifacts while preserving
   `code-rs/target/release/code`.
-- Use `just local-overlay-update` only from a clean `local/*` branch. It fetches `upstream/main`, merges it into the current Every Code branch, replays any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release binary.
-- Commits already on `local/cbusillo-overlay` persist automatically across future upstream imports. They do not need to be duplicated in `scripts/local/overlay-picks.txt`.
-- If you make a new Every Code fix that should remain part of the product, commit it through the normal task-branch/PR flow into `local/cbusillo-overlay` first. Do not leave important local changes only as an unmerged side branch.
-- Add a commit SHA to `scripts/local/overlay-picks.txt` only for a patch that intentionally lives outside the overlay branch and still needs to be cherry-picked in during `just local-overlay-update`. Keep the list ordered and comment each entry with the source branch or purpose.
-- Old side branches are archival context, not the runtime source of truth. They do not need to merge cleanly as branches; only the specific carried commits must cherry-pick cleanly onto the current overlay branch.
-- If a legacy pick no longer cherry-picks cleanly, leave it commented out in `scripts/local/overlay-picks.txt`, manually re-port the fix against current upstream, commit the new port on `local/cbusillo-overlay`, then replace the old SHA in the manifest if you still want automatic replay.
+- Use `just local-upstream-import` only from a clean product branch. Today that
+  means `local/cbusillo-overlay`; after #87 it means `main`. The helper fetches
+  `upstream/main`, merges it into the current Every Code branch, replays any
+  commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release
+  binary.
+- Commits already on the product branch persist automatically across future
+  upstream imports. They do not need to be duplicated in
+  `scripts/local/overlay-picks.txt`.
+- If you make a new Every Code fix that should remain part of the product,
+  commit it through the normal task-branch/PR flow into the product branch
+  first. Do not leave important local changes only as an unmerged side branch.
+- Add a commit SHA to `scripts/local/overlay-picks.txt` only for a patch that
+  intentionally lives outside the product branch and still needs to be
+  cherry-picked in during `just local-upstream-import`. Keep the list ordered
+  and comment each entry with the source branch or purpose.
+- Old side branches are archival context, not the runtime source of truth. They
+  do not need to merge cleanly as branches; only the specific carried commits
+  must cherry-pick cleanly onto the current product branch.
+- If a legacy pick no longer cherry-picks cleanly, leave it commented out in
+  `scripts/local/overlay-picks.txt`, manually re-port the fix against current
+  upstream, commit the new port on the product branch, then replace the old SHA
+  in the manifest if you still want automatic replay.
 - For Every Code-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/local-overlay.md`.
 
 ## How to Git Push

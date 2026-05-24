@@ -1,21 +1,21 @@
-# Ordered local fixes/features to replay onto local/cbusillo-overlay.
+# Ordered Every Code fixes/features to replay during upstream imports.
 #
 # Format:
 #   <commit-sha>  # optional note
 #
 # Workflow:
-# - Commits already present on local/cbusillo-overlay survive future upstream
-#   merges automatically; do not list them again here.
-# - Commit new local fixes onto local/cbusillo-overlay first.
+# - Commits already present on the product branch survive future upstream
+#   imports automatically; do not list them again here.
+# - Commit new product fixes onto the product branch first.
 # - Add a SHA here only if the fix intentionally lives outside the overlay
-#   branch and should be auto-replayed during future `just local-overlay-update`
+#   branch and should be auto-replayed during future `just local-upstream-import`
 #   runs.
 # - If an old carried fix stops cherry-picking cleanly, keep it commented out,
 #   manually re-port it to current upstream, then replace the SHA here with the
 #   new ported commit once it is known-good.
 
 # Current state:
-# - The previously reviewed legacy backlog is now either already present on
-#   local/cbusillo-overlay or manually re-ported there.
+# - The previously reviewed legacy backlog is now either already present on the
+#   product branch or manually re-ported there.
 # - Leave this file empty until a future patch intentionally lives outside the
-#   overlay branch and must be auto-replayed after `just local-overlay-update`.
+#   product branch and must be auto-replayed after `just local-upstream-import`.
