@@ -996,59 +996,43 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Defer npm publish until after pushing changes and tags; platform packages first
+      - name: Open release metadata pull request
+        if: steps.version.outputs.skip_push != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_branch="release/v${NEW_VERSION}-${GITHUB_RUN_ID}"
+          git switch -c "$release_branch"
+          git push -u origin "$release_branch"
+          gh pr create \
+            --base main \
+            --head "$release_branch" \
+            --title "chore(release): prepare v${NEW_VERSION}" \
+            --body "This automated release PR contains the version and release-notes changes for v${NEW_VERSION}. Merge this PR to let the protected main-branch Release workflow create the tag, GitHub Release, Homebrew update, and npm packages from main." \
+          || gh pr view "$release_branch" --json url --jq .url
+
+          echo "Release metadata changes require PR review because main is protected."
+          echo "Merge the generated PR, then the next main Release run will continue publishing."
+
+      # Defer tag/release/npm publish until release metadata has landed on main.
 
       - name: Push tag
+        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: git push origin "v${{ steps.version.outputs.version }}" || true
 
-      - name: Push changes (fast-forward or policy merge)
-        if: steps.version.outputs.skip_push != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # First attempt a simple push
-          if git push origin main; then
-            git push origin --tags || true
-            exit 0
-          fi
-          echo "Push rejected (non-fast-forward). Attempting fetch + fast-forward..."
-          git fetch origin --tags
-          # Try fast-forward only; succeeds when our HEAD is descendant of origin/main
-          if git merge --ff-only origin/main; then
-            echo "Fast-forward merge succeeded; retrying push."
-            git push origin main
-            git push origin --tags || true
-            exit 0
-          fi
-          echo "Non-FF merge required; applying merge-with-policy fallback."
-          # Non-interactive merge that prefers our current changes, but adopts remote for workflow files.
-          git merge --no-ff --no-commit origin/main || true
-          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-            # Default to ours for all files
-            git checkout --ours . || true
-            # Adopt remote version for workflow files (release-ignore path)
-            # Only adjust if those files are in conflict/unmerged
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              case "$f" in
-                .github/workflows/*) git checkout --theirs -- "$f" || true ;;
-              esac
-            done < <(git ls-files --unmerged | cut -f2 | sort -u)
-            git add -A
-            git commit -m "Merge origin/main: adopt remote workflow changes; keep release changes [skip ci]"
-          fi
-          echo "Retrying push after policy merge..."
-          git push origin main
-          git push origin --tags || true
-
       - name: Verify release notes header matches version
+        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: |
           set -euo pipefail
           scripts/check-release-notes-version.sh
 
       - name: Create GitHub Release
+        if: steps.version.outputs.skip_push == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
@@ -1061,6 +1045,7 @@ jobs:
 
       # --- Homebrew Tap Update -------------------------------------------------
       - name: Generate Homebrew formula (Code.rb)
+        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1068,6 +1053,7 @@ jobs:
           test -s Formula/Code.rb || { echo "Formula/Code.rb missing" >&2; exit 1; }
 
       - name: Publish Homebrew formula to just-every/homebrew-tap
+        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
@@ -1098,7 +1084,7 @@ jobs:
           git push -u origin HEAD:main
 
       - name: Publish per-target npm binary packages (last)
-        if: steps.should_publish.outputs.publish == 'true'
+        if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         shell: bash
@@ -1123,7 +1109,7 @@ jobs:
           done
 
       - name: Publish main npm package (last)
-        if: steps.should_publish.outputs.publish == 'true'
+        if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
         working-directory: codex-cli
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
