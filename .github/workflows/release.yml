@@ -1070,7 +1070,12 @@ jobs:
           if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
             git branch -M main || true
           fi
-          git push -u origin HEAD:main
+          if git push -u origin HEAD:main; then
+            echo "Published Homebrew formula update to just-every/homebrew-tap."
+          else
+            echo "::warning::Could not push Homebrew formula to just-every/homebrew-tap; check GH_PAT cross-repo write access."
+            exit 0
+          fi
 
       - name: Publish per-target npm binary packages (last)
         if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
