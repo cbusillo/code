@@ -4,11 +4,15 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
+# shellcheck source=scripts/local/release-tag-utils.sh
+# shellcheck disable=SC1091
+source "$repo_root/scripts/local/release-tag-utils.sh"
+
 current_branch="$(git symbolic-ref --quiet --short HEAD || echo HEAD)"
 upstream_ref="${UPSTREAM_REF:-upstream/main}"
 product_branch="${PRODUCT_BRANCH:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
 product_branch="${product_branch:-main}"
-latest_product_tag="$(git tag --list 'every-code-v*' 'overlay-v*' --sort=-v:refname | head -n 1 || true)"
+latest_product_tag="$(git tag --list 'every-code-v*' 'overlay-v*' | latest_release_tag || true)"
 latest_upstream_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
 package_version="$(node -p "require('$repo_root/codex-cli/package.json').version" 2>/dev/null || true)"
 

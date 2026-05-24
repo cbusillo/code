@@ -15,23 +15,9 @@ Generates GitHub release notes for Every Code binary releases.
 USAGE
 }
 
-strip_release_tag_version() {
-  local release_tag="$1"
-  case "$release_tag" in
-    every-code-v*)
-      printf '%s\n' "${release_tag#every-code-v}"
-      ;;
-    overlay-v*)
-      printf '%s\n' "${release_tag#overlay-v}"
-      ;;
-    v*)
-      printf '%s\n' "${release_tag#v}"
-      ;;
-    *)
-      printf '%s\n' "$release_tag"
-      ;;
-  esac
-}
+# shellcheck source=release-tag-utils.sh
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-tag-utils.sh"
 
 tag=""
 code_version=""
@@ -83,10 +69,13 @@ if [[ -z "$tag" || -z "$code_version" || -z "$commit" || -z "$ref_name" || -z "$
   exit 2
 fi
 
-previous_tag="$(git tag --list 'every-code-v*' 'overlay-v*' \
-  --merged "$commit" --sort=-v:refname \
-  | grep -Fxv "$tag" \
-  | head -n 1 || true)"
+previous_tag="$(
+  git tag --list 'every-code-v*' 'overlay-v*' \
+    --merged "$commit" \
+    | grep -Fxv -- "$tag" \
+    | latest_release_tag \
+    || true
+)"
 
 if [[ -n "$previous_tag" ]]; then
   range_base="$previous_tag"

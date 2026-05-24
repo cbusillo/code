@@ -769,7 +769,7 @@ jobs:
 
           # Determine previous tag (the most recent tag before the new one).
           # If none exists, use the initial commit as the base.
-          PREV_TAG=$(git tag --sort=-v:refname | sed -n '2p' || true)
+          PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | sed -n '2p' || true)
           if [ -z "$PREV_TAG" ]; then
             BASE=$(git rev-list --max-parents=0 HEAD | tail -n1)
             RANGE="$BASE..HEAD"
