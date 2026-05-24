@@ -17,6 +17,7 @@ Use these docs to install, configure, and operate Every Code (Code).
 - [Auto Drive](auto-drive.md)
 - [Agents & Subagents](agents.md)
 - [Settings overlay](settings.md)
+- [Update manifest](update-manifest.md)
 - [Prompts](prompts.md)
 - [Advanced usage](advanced.md)
 - [Zed integration](integration-zed.md)

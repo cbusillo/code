@@ -10,6 +10,7 @@
     "execution": "docs/exec.md",
     "sandboxing": "docs/platform-sandboxing.md",
     "tuiComposer": "docs/tui-chat-composer.md",
+    "updateManifest": "docs/update-manifest.md",
     "rustWorkspace": "code-rs",
     "upstreamMirror": "codex-rs"
   },

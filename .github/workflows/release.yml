@@ -805,6 +805,20 @@ jobs:
           set -euo pipefail
           scripts/check-release-notes-version.sh
 
+      - name: Generate update manifest
+        if: steps.version.outputs.skip_push == 'true'
+        shell: bash
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release/generate-update-manifest.sh \
+            --version "$NEW_VERSION" \
+            --commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --assets-dir release-assets \
+            --output release-assets/update-manifest.json
+
       - name: Create GitHub Release
         if: steps.version.outputs.skip_push == 'true'
         uses: softprops/action-gh-release@v2
