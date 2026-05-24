@@ -49,6 +49,17 @@ pub struct ContextLedgerEntry {
     pub duplicate_key: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextDuplicateGroup {
+    pub duplicate_key: String,
+    pub entry_count: usize,
+    pub item_count: usize,
+    pub bytes: usize,
+    pub estimated_tokens: usize,
+    pub labels: Vec<String>,
+    pub sources: Vec<ContextSourceKind>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextLedger {
     entries: Vec<ContextLedgerEntry>,
@@ -112,6 +123,60 @@ impl ContextLedger {
             self.total_estimated_tokens(),
             parts.join("; ")
         )
+    }
+
+    pub fn duplicate_groups(&self) -> Vec<ContextDuplicateGroup> {
+        let mut groups: BTreeMap<String, Vec<&ContextLedgerEntry>> = BTreeMap::new();
+        for entry in &self.entries {
+            let Some(key) = entry.duplicate_key.as_ref().filter(|key| !key.is_empty()) else {
+                continue;
+            };
+            groups.entry(key.clone()).or_default().push(entry);
+        }
+
+        let mut duplicates = groups
+            .into_iter()
+            .filter_map(|(duplicate_key, entries)| {
+                if entries.len() < 2 {
+                    return None;
+                }
+
+                let item_count = entries
+                    .iter()
+                    .map(|entry| entry.item_count)
+                    .sum::<usize>();
+                let bytes = entries.iter().map(|entry| entry.bytes).sum::<usize>();
+                let mut labels = Vec::new();
+                let mut sources = Vec::new();
+                for entry in entries.iter() {
+                    if !labels.iter().any(|label| label == &entry.label) {
+                        labels.push(entry.label.clone());
+                    }
+                    if !sources.contains(&entry.source) {
+                        sources.push(entry.source);
+                    }
+                }
+
+                Some(ContextDuplicateGroup {
+                    duplicate_key,
+                    entry_count: entries.len(),
+                    item_count,
+                    bytes,
+                    estimated_tokens: estimate_tokens(bytes),
+                    labels,
+                    sources,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        duplicates.sort_by(|left, right| {
+            right
+                .estimated_tokens
+                .cmp(&left.estimated_tokens)
+                .then_with(|| right.entry_count.cmp(&left.entry_count))
+                .then_with(|| left.duplicate_key.cmp(&right.duplicate_key))
+        });
+        duplicates
     }
 }
 
@@ -250,5 +315,65 @@ fn function_call_output_bytes(body: &FunctionCallOutputBody) -> usize {
                 FunctionCallOutputContentItem::InputImage { image_url, .. } => image_url.len(),
             })
             .sum(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_groups_collect_repeated_keys_by_weight() {
+        let mut ledger = ContextLedger::default();
+        ledger.push(
+            ContextSourceKind::UserInstructions,
+            ContextPersistence::Contextual,
+            "project instructions",
+            1,
+            400,
+            Some("user_instructions".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::UserInstructions,
+            ContextPersistence::Contextual,
+            "prepended instructions",
+            2,
+            600,
+            Some("user_instructions".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::ToolSchema,
+            ContextPersistence::Contextual,
+            "tool schemas",
+            4,
+            2_000,
+            Some("tool_schemas".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::EnvironmentContext,
+            ContextPersistence::GeneratedPerAttempt,
+            "environment context",
+            1,
+            20,
+            None,
+        );
+
+        let groups = ledger.duplicate_groups();
+
+        assert_eq!(groups.len(), 1);
+        let group = &groups[0];
+        assert_eq!(group.duplicate_key, "user_instructions");
+        assert_eq!(group.entry_count, 2);
+        assert_eq!(group.item_count, 3);
+        assert_eq!(group.bytes, 1_000);
+        assert_eq!(group.estimated_tokens, 250);
+        assert_eq!(
+            group.labels,
+            vec![
+                "project instructions".to_string(),
+                "prepended instructions".to_string(),
+            ]
+        );
+        assert_eq!(group.sources, vec![ContextSourceKind::UserInstructions]);
     }
 }

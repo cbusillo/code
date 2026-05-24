@@ -35,14 +35,6 @@ impl ClipboardLease {
             _clipboard: Some(clipboard),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn test() -> Self {
-        Self {
-            #[cfg(target_os = "linux")]
-            _clipboard: None,
-        }
-    }
 }
 
 fn copy_to_clipboard_with(

@@ -16971,6 +16971,36 @@ impl ChatWidget<'_> {
             format_with_separators_u64(ledger.total_estimated_tokens() as u64),
             Self::format_context_bytes(ledger.total_bytes()),
         ));
+        let duplicate_groups = ledger.duplicate_groups();
+        if !duplicate_groups.is_empty() {
+            lines.push(String::new());
+            let duplicate_count = duplicate_groups.len();
+            let suffix = if duplicate_count == 1 { "" } else { "s" };
+            lines.push(format!(
+                "Possible duplicates: {duplicate_count} group{suffix}"
+            ));
+            for group in duplicate_groups.iter().take(3) {
+                let labels = group.labels.join(", ");
+                lines.push(format!(
+                    "  {}: {} entries, ~{} tokens, {}{}",
+                    group.duplicate_key,
+                    group.entry_count,
+                    format_with_separators_u64(group.estimated_tokens as u64),
+                    Self::format_context_bytes(group.bytes),
+                    if labels.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({labels})")
+                    },
+                ));
+            }
+            if duplicate_groups.len() > 3 {
+                lines.push(format!(
+                    "  ... {} more duplicate groups",
+                    duplicate_groups.len().saturating_sub(3)
+                ));
+            }
+        }
         lines.push(String::new());
         lines.push(format!(
             "{:<24} {:>10} {:>9} {:<14} {}",
@@ -31860,6 +31890,52 @@ use code_core::protocol::OrderMeta;
         assert!(history_row < tool_row);
         assert!(lines[history_row].contains("persisted"));
         assert!(lines[tool_row].contains("contextual"));
+    }
+
+    #[test]
+    fn context_ledger_display_surfaces_duplicate_groups() {
+        let mut ledger = ContextLedger::default();
+        ledger.push(
+            ContextSourceKind::UserInstructions,
+            ContextPersistence::Contextual,
+            "user/project instructions",
+            1,
+            1_024,
+            Some("user_instructions".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::UserInstructions,
+            ContextPersistence::Contextual,
+            "prepended project instructions",
+            1,
+            512,
+            Some("user_instructions".to_string()),
+        );
+        ledger.push(
+            ContextSourceKind::ToolSchema,
+            ContextPersistence::Contextual,
+            "tool schemas",
+            2,
+            800,
+            Some("tool_schemas".to_string()),
+        );
+
+        let lines = ChatWidget::context_ledger_display_lines(&ledger);
+
+        let duplicate_header = lines
+            .iter()
+            .position(|line| line == "Possible duplicates: 1 group")
+            .expect("duplicate header");
+        let duplicate_row = lines
+            .iter()
+            .skip(duplicate_header)
+            .find(|line| line.contains("user_instructions"))
+            .expect("duplicate row");
+        assert!(duplicate_row.contains("2 entries"));
+        assert!(duplicate_row.contains("~384 tokens"));
+        assert!(duplicate_row.contains("user/project instructions"));
+        assert!(duplicate_row.contains("prepended project instructions"));
+        assert!(lines.iter().any(|line| line.starts_with("Source")));
     }
 
     fn test_rate_limit_snapshot() -> RateLimitSnapshotEvent {
