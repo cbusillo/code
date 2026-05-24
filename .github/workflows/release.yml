@@ -224,8 +224,8 @@ jobs:
       matrix:
         include:
           # Linux builds
-          - os: linux-self-hosted
-            runs_on: '["self-hosted","Linux","X64","chris-testing"]'
+          - os: ubuntu-24.04
+            runs_on: '["ubuntu-24.04"]'
             target: x86_64-unknown-linux-musl
             artifact: code-x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
