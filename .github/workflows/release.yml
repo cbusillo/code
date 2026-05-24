@@ -74,25 +74,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo mkdir -p "$CARGO_TARGET_DIR"
-          sudo chown "$USER":"$USER" "$CARGO_TARGET_DIR"
+          mkdir -p "$CARGO_TARGET_DIR"
 
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Read Rust toolchain channel
         id: rust_toolchain
         shell: bash
         run: |
           set -euo pipefail
-          TOOLCHAIN=$(python -c "import sys, pathlib; p=pathlib.Path('code-rs/rust-toolchain.toml').read_text();
+          TOOLCHAIN=$(python3 -c "import sys, pathlib; p=pathlib.Path('code-rs/rust-toolchain.toml').read_text();
           try:
               import tomllib as tl
           except ModuleNotFoundError:
@@ -257,17 +251,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Read Rust toolchain channel
         id: rust_toolchain
         shell: bash
         run: |
           set -euo pipefail
-          TOOLCHAIN=$(python -c "import sys, pathlib; p=pathlib.Path('code-rs/rust-toolchain.toml').read_text();
+          TOOLCHAIN=$(python3 -c "import sys, pathlib; p=pathlib.Path('code-rs/rust-toolchain.toml').read_text();
           try:
               import tomllib as tl
           except ModuleNotFoundError:
