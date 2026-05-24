@@ -1,15 +1,13 @@
 # Upstream Import And Local Runtime Policy
 
-Every Code owns its product direction, defaults, releases, and UX. The product
-branch is moving from `local/cbusillo-overlay` to `main` in #87. Until GitHub's
-default branch and protection rules are changed together, `local/cbusillo-overlay`
-remains the canonical branch for the local `code` binary on this machine.
+Every Code owns its product direction, defaults, releases, and UX. `main` is the
+canonical product branch and GitHub default branch for the local `code` binary on
+this machine.
 
-Important cutover blocker: `origin/main` already exists and diverges heavily
-from `origin/local/cbusillo-overlay`. Do not overwrite, delete, or repoint it as
-an experiment. The branch cutover must explicitly choose `local/cbusillo-overlay`
-as the source-of-truth commit, move branch protection to `main`, update the
-GitHub default branch, and verify Actions before retiring the old branch name.
+The pre-cutover `origin/main` history was archived at
+`archive/pre-every-code-main-2026-05-24` before `main` was repointed to the Every
+Code product branch. Treat `local/cbusillo-overlay` as a retired branch name;
+do not revive it for new work.
 
 Treat `codex-rs/` as a read-only mirror of `openai/codex`; put editable Rust
 changes under `code-rs/`.
@@ -40,8 +38,7 @@ Remote map:
 
 ## Upstream Sync
 
-Use the import helper from a clean product branch. Today that is
-`local/cbusillo-overlay`; after #87 completes it should be `main`:
+Use the import helper from a clean `main` branch:
 
 ```sh
 just local-upstream-import
