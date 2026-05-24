@@ -10,7 +10,6 @@
     "execution": "docs/exec.md",
     "sandboxing": "docs/platform-sandboxing.md",
     "tuiComposer": "docs/tui-chat-composer.md",
-    "homebrew": "docs/homebrew.md",
     "rustWorkspace": "code-rs",
     "upstreamMirror": "codex-rs"
   },
@@ -47,7 +46,6 @@
     "Preview Build",
     "Release",
     "Upstream Merge",
-    "binary-release",
     "CodeQL",
     "Dependabot Updates",
     "Dependency Graph",

@@ -3,12 +3,14 @@
 Use these docs to install, configure, and operate Every Code (Code).
 
 ## Start Here
+
 - [Getting started](getting-started.md)
-- [Install](install.md) · [Homebrew](homebrew.md)
+- [Install](install.md)
 - [Authentication](authentication.md)
 - [FAQ](faq.md)
 
 ## Using Code
+
 - [Executing commands](exec.md)
 - [Execution policy](execpolicy.md)
 - [Slash commands](slash-commands.md)
@@ -20,6 +22,7 @@ Use these docs to install, configure, and operate Every Code (Code).
 - [Zed integration](integration-zed.md)
 
 ## Configuration & Security
+
 - [Configuration](config.md)
 - [Sandboxing overview](sandbox.md)
 - [Platform sandboxing](platform-sandboxing.md)
