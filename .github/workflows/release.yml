@@ -1005,14 +1005,28 @@ jobs:
         run: |
           set -euo pipefail
           release_branch="release/v${NEW_VERSION}-${GITHUB_RUN_ID}"
+
+          git add codex-cli/package.json codex-cli/README.md CHANGELOG.md docs/release-notes/RELEASE_NOTES.md 2>/dev/null || true
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(release): prepare v${NEW_VERSION} [skip ci]"
+          fi
+
+          # Keep the release handoff branch clean; downloaded artifacts and
+          # model context files are recreated by each release run.
+          rm -rf .code-bin .github/auto artifacts npm-binaries release-assets docs/release-notes/context.md docs/release-notes/prompt.expanded.txt || true
+
           git switch -c "$release_branch"
           git push -u origin "$release_branch"
-          gh pr create \
+          if gh pr create \
             --base main \
             --head "$release_branch" \
             --title "chore(release): prepare v${NEW_VERSION}" \
-            --body "This automated release PR contains the version and release-notes changes for v${NEW_VERSION}. Merge this PR to let the protected main-branch Release workflow create the tag, GitHub Release, Homebrew update, and npm packages from main." \
-          || gh pr view "$release_branch" --json url --jq .url
+            --body "This automated release PR contains the version and release-notes changes for v${NEW_VERSION}. Merge this PR to let the protected main-branch Release workflow create the tag, GitHub Release, Homebrew update, and npm packages from main."; then
+            :
+          else
+            echo "::warning::GitHub Actions could not create the release PR; create it from branch ${release_branch}."
+            gh pr view "$release_branch" --json url --jq .url || true
+          fi
 
           echo "Release metadata changes require PR review because main is protected."
           echo "Merge the generated PR, then the next main Release run will continue publishing."
