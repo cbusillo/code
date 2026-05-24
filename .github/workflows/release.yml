@@ -68,7 +68,9 @@ jobs:
     name: Preflight Tests (Linux fast E2E)
     runs-on: [self-hosted, Linux, X64, chris-testing]
     env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTUP_HOME: ${{ runner.temp }}/rustup-home
     steps:
       - name: Prepare cargo target dir on data disk
         shell: bash
@@ -149,8 +151,6 @@ jobs:
         run: |
           echo "Disk usage before cleanup" && df -h
           rm -rf ~/.cache/sccache || true
-          rm -rf ~/.cargo/registry/index || true
-          rm -rf ~/.cargo/git/db || true
           rm -rf "$CARGO_TARGET_DIR" || true
           echo "Disk usage after cleanup" && df -h
 
@@ -217,6 +217,9 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: [determine-version]
     runs-on: ${{ fromJson(matrix.runs_on) }}
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home
+      RUSTUP_HOME: ${{ runner.temp }}/rustup-home
     strategy:
       matrix:
         include:
@@ -306,8 +309,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config mold || true
+          if command -v apt-get >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1; then
+              SUDO=(sudo)
+            elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+              SUDO=()
+            else
+              echo "apt-get is available but neither sudo nor root is available; using preinstalled GNU build packages." >&2
+              SUDO=(false)
+            fi
+            if [[ ${SUDO[0]:-} != false ]]; then
+              "${SUDO[@]}" apt-get update || true
+              "${SUDO[@]}" apt-get install -y libssl-dev pkg-config mold || true
+            fi
+          fi
           if command -v clang >/dev/null 2>&1; then
             echo 'CC=sccache clang'    >> "$GITHUB_ENV"
             echo 'CXX=sccache clang++' >> "$GITHUB_ENV"
@@ -324,8 +339,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config
+          if command -v apt-get >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1; then
+              SUDO=(sudo)
+            elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+              SUDO=()
+            else
+              echo "musl-gcc is required but this runner cannot install packages without sudo/root." >&2
+              exit 1
+            fi
+            "${SUDO[@]}" apt-get update
+            "${SUDO[@]}" apt-get install -y musl-tools pkg-config
+          fi
           echo 'CC=musl-gcc' >> "$GITHUB_ENV"
           case "${{ matrix.target }}" in
             x86_64-unknown-linux-musl) echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV" ;;
@@ -431,7 +456,21 @@ jobs:
       - name: Install zstd (Linux)
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo apt-get update -qq && sudo apt-get install -y zstd
+        run: |
+          set -euo pipefail
+          if command -v zstd >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO=(sudo)
+          elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+            SUDO=()
+          else
+            echo "zstd is required but this runner cannot install packages without sudo/root." >&2
+            exit 1
+          fi
+          "${SUDO[@]}" apt-get update -qq
+          "${SUDO[@]}" apt-get install -y zstd
 
       - name: Compress artifacts (Linux dual-format)
         if: runner.os == 'Linux'
@@ -534,7 +573,21 @@ jobs:
       - name: Install zstd (package assembly)
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo apt-get update -qq && sudo apt-get install -y zstd
+        run: |
+          set -euo pipefail
+          if command -v zstd >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO=(sudo)
+          elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+            SUDO=()
+          else
+            echo "zstd is required but this runner cannot install packages without sudo/root." >&2
+            exit 1
+          fi
+          "${SUDO[@]}" apt-get update -qq
+          "${SUDO[@]}" apt-get install -y zstd
 
       - name: Build per-target npm binary packages
         shell: bash
@@ -689,7 +742,21 @@ jobs:
       - name: Install zstd (CHANGELOG generation)
         if: runner.os == 'Linux' && env.OPENAI_API_KEY != ''
         shell: bash
-        run: sudo apt-get update -qq && sudo apt-get install -y zstd
+        run: |
+          set -euo pipefail
+          if command -v zstd >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO=(sudo)
+          elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+            SUDO=()
+          else
+            echo "zstd is required but this runner cannot install packages without sudo/root." >&2
+            exit 1
+          fi
+          "${SUDO[@]}" apt-get update -qq
+          "${SUDO[@]}" apt-get install -y zstd
 
       - name: Generate CHANGELOG + release notes (Code)
         if: env.OPENAI_API_KEY != ''
