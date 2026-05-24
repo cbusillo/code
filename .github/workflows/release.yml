@@ -34,8 +34,9 @@ jobs:
     name: Validate npm auth
     runs-on: [self-hosted, Linux, X64, chris-testing]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    continue-on-error: true
     timeout-minutes: 5
-    # Fail fast if npm auth is not usable; downstream jobs should not continue.
+    # NPM publishing is optional for Every Code; keep this as an advisory signal.
     env:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
@@ -50,8 +51,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN is missing. Create a granular automation token with publish + bypass-2FA: https://docs.npmjs.com/creating-and-viewing-access-tokens#creating-access-tokens ; add/update the secret: https://github.com/organizations/just-every/settings/secrets/actions/NPM_TOKEN" >&2
-            exit 1
+            echo "::warning::NPM_TOKEN is missing; skipping npm publish for this GitHub-release-only run." >&2
+            exit 0
           fi
 
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
@@ -65,7 +66,6 @@ jobs:
 
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
-    needs: [npm-auth-check]
     runs-on: [self-hosted, Linux, X64, chris-testing]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
@@ -162,7 +162,6 @@ jobs:
 
   determine-version:
     name: Determine Version
-    needs: [npm-auth-check]
     runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -1039,6 +1038,7 @@ jobs:
           git push -u origin HEAD:main
 
       - name: Publish per-target npm binary packages (last)
+        if: steps.should_publish.outputs.publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         shell: bash
