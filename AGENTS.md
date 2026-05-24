@@ -66,20 +66,16 @@ Examples:
 
 ## Upstream Import Workflow
 
-- `main` is the planned Every Code product branch. Until #87 completes the
-  GitHub default-branch cutover, `local/cbusillo-overlay` remains the factual
-  protected/default branch and source of truth for the `code` binary installed
-  on this machine.
+- `main` is the Every Code product branch and the GitHub default branch.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary that reports `0.0.0`.
 - Before leaving a local work session, run `just local-cleanup-space --apply`
   to remove rebuildable target/cache artifacts while preserving
   `code-rs/target/release/code`.
-- Use `just local-upstream-import` only from a clean product branch. Today that
-  means `local/cbusillo-overlay`; after #87 it means `main`. The helper fetches
-  `upstream/main`, merges it into the current Every Code branch, replays any
-  commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the release
-  binary.
+- Use `just local-upstream-import` only from a clean `main` branch. The helper
+  fetches `upstream/main`, merges it into the current Every Code branch, replays
+  any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the
+  release binary.
 - Commits already on the product branch persist automatically across future
   upstream imports. They do not need to be duplicated in
   `scripts/local/overlay-picks.txt`.

@@ -1,9 +1,8 @@
 {
-  "defaultBranch": "local/cbusillo-overlay",
+  "defaultBranch": "main",
   "projectType": "every-code-product",
   "upstreamForkBaseBranch": "fork-main",
-  "currentProductBranch": "local/cbusillo-overlay",
-  "plannedProductBranch": "main",
+  "productBranch": "main",
   "docs": {
     "overview": "README.md",
     "agentGuide": "AGENTS.md",
@@ -28,7 +27,7 @@
       "mcpTypesFocused": "cd code-rs && cargo test -p mcp-types --tests"
     },
     "scripts": {
-      "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch local/cbusillo-overlay",
+      "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch main",
       "cleanupSpace": "just local-cleanup-space --apply",
       "upstreamImport": "just local-upstream-import"
     },
