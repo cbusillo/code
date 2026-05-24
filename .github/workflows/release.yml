@@ -13,9 +13,6 @@ on:
       - '**/*.test.ts'
       - 'test/**'
       - '*.md'
-      - 'CHANGELOG.md'
-      - 'docs/release-notes/**'
-      - 'codex-cli/package.json'
 
 concurrency:
   group: release-${{ github.ref }}
@@ -706,7 +703,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "skip_push=true" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "chore(release): ${NEW_VERSION} [skip ci]"
+            git commit -m "chore(release): ${NEW_VERSION}"
             echo "skip_push=false" >> "$GITHUB_OUTPUT"
           fi
           if ! git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
@@ -869,7 +866,7 @@ jobs:
           - Explore codebase directly if commit messages are unclear or need additional context.
           - Keep formatting minimal (headers + list bullets). No emojis ever! Basic markdown only.
           - Never reorder older versions. Only touch the section for v${NEW_VERSION}.
-          - After writing files, stage and commit with message: docs(changelog): update for v${NEW_VERSION} [skip ci]
+          - After writing files, stage and commit with message: docs(changelog): update for v${NEW_VERSION}
 
           Context (git log excerpt follows):
           PROMPT
@@ -941,29 +938,7 @@ jobs:
           # Commit CHANGELOG changes if any.
           if ! git diff --quiet -- CHANGELOG.md; then
             git add CHANGELOG.md docs/release-notes/RELEASE_NOTES.md || true
-            git commit -m "docs(changelog): update for v${NEW_VERSION} [skip ci]" || true
-          fi
-
-      - name: Enforce [skip ci] on notes-only commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          # If HEAD only touched notes files and lacks [skip ci], amend the subject to include it.
-          mapfile -t files < <(git show --name-only --pretty="" HEAD)
-          notes_only=true
-          for f in "${files[@]}"; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              CHANGELOG.md|docs/release-notes/RELEASE_NOTES.md) ;; # allowed
-              *) notes_only=false ;;
-            esac
-          done
-          if [ "$notes_only" = true ]; then
-            subj=$(git log -1 --pretty=%s || true)
-            if ! grep -q '\[skip ci\]' <<<"$subj"; then
-              body=$(git log -1 --pretty=%b || true)
-              git commit --amend -m "${subj} [skip ci]" -m "$body"
-            fi
+            git commit -m "docs(changelog): update for v${NEW_VERSION}" || true
           fi
 
       - name: Fallback release notes from CHANGELOG (no OPENAI_API_KEY)
@@ -1008,7 +983,7 @@ jobs:
 
           git add codex-cli/package.json codex-cli/README.md CHANGELOG.md docs/release-notes/RELEASE_NOTES.md 2>/dev/null || true
           if ! git diff --staged --quiet; then
-            git commit -m "chore(release): prepare v${NEW_VERSION} [skip ci]"
+            git commit -m "chore(release): prepare v${NEW_VERSION}"
           fi
 
           # Keep the release handoff branch clean; downloaded artifacts and
