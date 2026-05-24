@@ -4,15 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-# shellcheck source=scripts/local/release-tag-utils.sh
-# shellcheck disable=SC1091
-source "$repo_root/scripts/local/release-tag-utils.sh"
-
 current_branch="$(git symbolic-ref --quiet --short HEAD || echo HEAD)"
 upstream_ref="${UPSTREAM_REF:-upstream/main}"
 product_branch="${PRODUCT_BRANCH:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
 product_branch="${product_branch:-main}"
-latest_product_tag="$(git tag --list 'every-code-v*' 'overlay-v*' | latest_release_tag || true)"
+latest_product_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
 latest_upstream_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
 package_version="$(node -p "require('$repo_root/codex-cli/package.json').version" 2>/dev/null || true)"
 
@@ -35,7 +31,7 @@ echo
 
 if git rev-parse --verify --quiet "$upstream_ref" >/dev/null; then
 	echo "fork delta vs $upstream_ref:"
-	git diff --shortstat "$upstream_ref"..HEAD -- code-rs scripts/local .github/workflows/binary-release.yml docs/local-overlay.md || true
+	git diff --shortstat "$upstream_ref"..HEAD -- code-rs scripts/local .github/workflows/release.yml docs/local-overlay.md || true
 	echo
 	echo "hotspot files:"
 	git diff --name-only "$upstream_ref"..HEAD -- \
@@ -44,7 +40,7 @@ if git rev-parse --verify --quiet "$upstream_ref" >/dev/null; then
 		code-rs/core/src/config.rs \
 		code-rs/core/src/model_family.rs \
 		code-rs/common/src/model_presets.rs \
-		.github/workflows/binary-release.yml \
+		.github/workflows/release.yml \
 		scripts/local \
 		docs/local-overlay.md || true
 else

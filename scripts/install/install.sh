@@ -227,8 +227,8 @@ resolve_version() {
 }
 
 pick_profile() {
-  # Use the same shell-specific split Homebrew documents because there is no
-  # universal startup file across macOS/Linux login and interactive shells.
+  # There is no universal startup file across macOS/Linux login and interactive
+  # shells, so pick the profile that matches the current shell convention.
   case "$os:${SHELL:-}" in
     darwin:*/zsh)
       printf '%s\n' "$HOME/.zprofile"

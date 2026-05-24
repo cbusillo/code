@@ -30,9 +30,10 @@ Remote map:
   consistent with `AGENTS.md`.
 - **Patch harness:** local validation for changed files, project tool discovery,
   and workspace-aware validator execution.
-- **Release workflow:** binary releases and local PATH rebuilds are Every Code
-  infrastructure. New releases should use `every-code-v*`; legacy `overlay-v*`
-  tags remain supported only so existing release history and notes keep working.
+- **Release workflow:** GitHub Releases and local PATH rebuilds are Every Code
+  infrastructure. GitHub Releases are the canonical internal update source;
+  npm and Homebrew publishing are deferred unless package-manager distribution
+  becomes intentional again.
 - **Model defaults:** local defaults may intentionally differ from upstream, but
   request wire compatibility should use upstream model metadata when available.
 
@@ -53,19 +54,11 @@ outside the product branch and must be replayed.
 ## Release Cadence
 
 Cut an Every Code release after every successful upstream import or local hotfix
-that should be installed elsewhere.
+that should be installed by dogfood users. The active Release workflow runs from
+`main`, opens a release metadata PR when the package version or notes need to be
+updated, and publishes GitHub Release assets after that metadata lands.
 
-Tag format:
-
-```text
-every-code-v<upstream-version>.<product-patch>
-```
-
-Examples:
-
-- `every-code-v0.6.98.1` for the first Every Code release on upstream `0.6.98`.
-- `every-code-v0.6.98.2` for a second hotfix on the same upstream base.
-- `every-code-v0.6.99.1` after the next upstream version bump.
+Release tags use the plain `v<version>` format, for example `v0.6.101`.
 
 Required release gate:
 
@@ -103,12 +96,12 @@ cache buckets, and release dependency cache. It preserves
 Run without `--apply` to preview deletions. Use `--keep-current-fast-cache` or
 `--keep-release-cache` only when you intentionally want a warmer next build.
 
-Then push the product branch and tag to `origin`, and monitor `Binary Release`:
+Then push the product branch to `origin`, open or merge the release metadata PR,
+and monitor the `Release` workflow:
 
 ```sh
-git tag every-code-v0.6.98.1
 git push origin HEAD
-git push origin every-code-v0.6.98.1
+scripts/wait-for-gh-run.sh --workflow Release --branch main
 ```
 
 Do not push Every Code releases to `upstream` or `openai`.

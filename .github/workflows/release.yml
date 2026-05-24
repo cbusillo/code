@@ -20,45 +20,12 @@ concurrency:
 
 permissions:
   contents: write
-  packages: write
   id-token: write
   issues: write
   pull-requests: write
   statuses: write
 
 jobs:
-  npm-auth-check:
-    name: Validate npm auth
-    runs-on: [self-hosted, Linux, X64, chris-testing]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    continue-on-error: true
-    timeout-minutes: 5
-    # NPM publishing is optional for Every Code; keep this as an advisory signal.
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-    steps:
-      - name: Setup Node.js for auth check
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-      - name: Validate npm authentication (must fail fast if missing/invalid)
-        run: |
-          set -euo pipefail
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "::warning::NPM_TOKEN is missing; skipping npm publish for this GitHub-release-only run." >&2
-            exit 0
-          fi
-
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-
-          if npm whoami >/dev/null 2>&1; then
-            echo "npm auth ok"
-          else
-            echo "::error::npm auth failed (npm whoami). Ensure NPM_TOKEN is a granular/automation token with publish rights to @just-every/*, bypass 2FA enabled: https://docs.npmjs.com/creating-and-viewing-access-tokens#creating-access-tokens ; update the secret: https://github.com/organizations/just-every/settings/secrets/actions/NPM_TOKEN" >&2
-            exit 1
-          fi
-
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
     runs-on: ubuntu-24.04
@@ -163,47 +130,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
 
-      - name: Determine next version (across all npm packages; ensure unique)
+      - name: Determine next GitHub Release version
         id: version
         working-directory: codex-cli
         shell: bash
         run: |
           set -euo pipefail
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          PKGS=(
-            "@just-every/code"
-            "@just-every/code-darwin-arm64"
-            "@just-every/code-darwin-x64"
-            "@just-every/code-linux-x64-musl"
-            "@just-every/code-linux-arm64-musl"
-            "@just-every/code-win32-x64"
-          )
-          # Find the highest published version across all packages
-          MAX_PUBLISHED="0.0.0"
-          for p in "${PKGS[@]}"; do
-            v=$(npm view "$p" version 2>/dev/null || echo "0.0.0")
-            if [ "$(printf '%s\n%s\n' "$MAX_PUBLISHED" "$v" | sort -V | tail -n1)" != "$MAX_PUBLISHED" ]; then
-              MAX_PUBLISHED="$v"
-            fi
-          done
-          # Start with whichever is higher: CURRENT_VERSION or MAX_PUBLISHED
-          CANDIDATE=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$MAX_PUBLISHED" | sort -V | tail -n1)
-          # If equal to MAX_PUBLISHED, bump patch once
-          if [ "$CANDIDATE" = "$MAX_PUBLISHED" ]; then
-            IFS='.' read -ra V <<< "$CANDIDATE"; CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
+          latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -n 1 | sed 's/^v//' || true)
+          latest_tag="${latest_tag:-0.0.0}"
+          CANDIDATE=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$latest_tag" | sort -V | tail -n1)
+          if git rev-parse "v${CANDIDATE}" >/dev/null 2>&1; then
+            IFS='.' read -ra V <<< "$CANDIDATE"
+            CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
           fi
-          # Ensure candidate is globally unused; keep bumping until unique
-          while :; do
-            used=false
-            for p in "${PKGS[@]}"; do
-              if [ "$(npm view "$p@$CANDIDATE" version 2>/dev/null || true)" = "$CANDIDATE" ]; then
-                used=true; break
-              fi
-            done
-            if [ "$used" = false ]; then break; fi
-            IFS='.' read -ra V <<< "$CANDIDATE"; CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
+          while git rev-parse "v${CANDIDATE}" >/dev/null 2>&1; do
+            IFS='.' read -ra V <<< "$CANDIDATE"
+            CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
           done
           NEW_VERSION="$CANDIDATE"
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
@@ -227,7 +171,7 @@ jobs:
             runs_on: '["ubuntu-24.04-arm"]'
             target: aarch64-unknown-linux-musl
             artifact: code-aarch64-unknown-linux-musl
-          # (GNU variants omitted to reduce asset duplication; npm defaults to musl)
+          # GNU variants omitted to reduce asset duplication.
           # macOS builds
           - os: macos-14
             runs_on: '["macos-14"]'
@@ -515,13 +459,12 @@ jobs:
           compression-level: 0
 
   release:
-    name: Publish to npm
+    name: Publish GitHub Release
     needs: [determine-version, build-binaries, preflight-tests]
     runs-on: [self-hosted, Linux, X64, chris-testing]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 30
     env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
@@ -535,7 +478,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Start local OpenAI proxy for release (hardened)
         if: env.OPENAI_API_KEY != ''
@@ -565,118 +507,6 @@ jobs:
           # Show what we collected
           ls -la release-assets/ || true
 
-      - name: Normalize release assets for package assembly
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v zstd >/dev/null 2>&1; then
-            exit 0
-          fi
-
-          shopt -s nullglob
-          for zst in release-assets/*.zst; do
-            fallback="${zst%.zst}.tar.gz"
-            if [ -f "$fallback" ]; then
-              echo "zstd is unavailable; using fallback $(basename "$fallback") for package assembly"
-              rm -f "$zst"
-            else
-              echo "zstd is unavailable and no fallback exists for $(basename "$zst")" >&2
-              exit 1
-            fi
-          done
-
-      - name: Build per-target npm binary packages
-        shell: bash
-        env:
-          NEW_VERSION: ${{ needs.determine-version.outputs.version }}
-        run: |
-          set -euo pipefail
-          stage_root="npm-binaries"
-          rm -rf "$stage_root" && mkdir -p "$stage_root"
-
-          map_target() {
-            case "$1" in
-              aarch64-apple-darwin) echo "os=darwin cpu=arm64 pkg=@just-every/code-darwin-arm64" ;;
-              x86_64-apple-darwin) echo "os=darwin cpu=x64 pkg=@just-every/code-darwin-x64" ;;
-              x86_64-unknown-linux-musl) echo "os=linux cpu=x64 pkg=@just-every/code-linux-x64-musl" ;;
-              aarch64-unknown-linux-musl) echo "os=linux cpu=arm64 pkg=@just-every/code-linux-arm64-musl" ;;
-              x86_64-pc-windows-msvc.exe) echo "os=win32 cpu=x64 pkg=@just-every/code-win32-x64" ;;
-              *) echo "" ;;
-            esac
-          }
-
-          decompress_to() {
-            local input="$1" outdir="$2" base
-            base="$(basename "$input")"
-            mkdir -p "$outdir"
-            case "$base" in
-              *.zst)
-                # decompress to raw binary
-                local raw="${outdir}/${base%.zst}"
-                zstd -d -q --force "$input" -o "$raw"
-                echo "$raw"
-                ;;
-              *.tar.gz)
-                tar -xzf "$input" -C "$outdir"
-                echo "$outdir/${base%.tar.gz}"
-                ;;
-              *.zip)
-                unzip -q -o "$input" -d "$outdir"
-                echo "$outdir/${base%.zip}"
-                ;;
-              *)
-                # already raw
-                cp "$input" "$outdir/"
-                echo "$outdir/$base"
-                ;;
-            esac
-          }
-
-          for f in release-assets/*; do
-            b="$(basename "$f")"
-            # Derive target triple from the filename while preserving optional .exe (Windows):
-            # code-<triple>[.exe].(zst|tar.gz|zip) -> <triple>[.exe]
-            case "$b" in
-              *.tar.gz) base="${b%.tar.gz}" ;;
-              *.zst)    base="${b%.zst}" ;;
-              *.zip)    base="${b%.zip}" ;;
-              *)        base="$b" ;;
-            esac
-            t="${base#code-}"
-            meta="$(map_target "$t")" || true
-            if [ -z "$meta" ]; then
-              echo "Skipping unrecognized artifact: $b"
-              continue
-            fi
-            eval "$meta" # sets os, cpu, pkg
-            workdir="$stage_root/${pkg##*/}"
-            rm -rf "$workdir" && mkdir -p "$workdir/bin"
-            rawbin="$(decompress_to "$f" "$workdir/bin")"
-            chmod +x "$rawbin" || true
-            # package.json
-            printf '{\n  "name": "%s",\n  "version": "%s",\n  "license": "Apache-2.0",\n  "description": "Platform binary for @just-every/code (%s)",\n  "os": ["%s"],\n  "cpu": ["%s"],\n  "files": ["bin/"],\n  "private": false\n}\n' \
-              "$pkg" "$NEW_VERSION" "$t" "$os" "$cpu" > "$workdir/package.json"
-          done
-
-          ls -R "$stage_root"
-
-      - name: Publish per-target npm binary packages (disabled; moved to end)
-        if: ${{ false }}
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for dir in npm-binaries/*; do
-            echo "Publishing $(basename "$dir")"
-            (cd "$dir" && npm publish --access public)
-          done
-
-      - name: Sync README for npm
-        shell: bash
-        run: cp README.md codex-cli/README.md
-
       - name: Update package.json version
         id: version
         working-directory: codex-cli
@@ -687,16 +517,6 @@ jobs:
           NEW_VERSION="${{ needs.determine-version.outputs.version }}"
           npm version "$NEW_VERSION" --no-git-tag-version --allow-same-version
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-          # Inject optionalDependencies pointing to per-target packages
-          # Note: These are platform-filtered in the target packages, so npm will fetch only one.
-          tmp=$(mktemp)
-          jq '.optionalDependencies = {
-            "@just-every/code-darwin-arm64": "'"$NEW_VERSION"'",
-            "@just-every/code-darwin-x64": "'"$NEW_VERSION"'",
-            "@just-every/code-linux-x64-musl": "'"$NEW_VERSION"'",
-            "@just-every/code-linux-arm64-musl": "'"$NEW_VERSION"'",
-            "@just-every/code-win32-x64": "'"$NEW_VERSION"'"
-          }' package.json > "$tmp" && mv "$tmp" package.json
           git add package.json
           if git diff --staged --quiet; then
             echo "skip_push=true" >> "$GITHUB_OUTPUT"
@@ -708,28 +528,6 @@ jobs:
             git tag "v${NEW_VERSION}"
           fi
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify ESM bin integrity (no require in coder.js)
-        shell: bash
-        working-directory: codex-cli
-        run: |
-          set -euo pipefail
-          tgz=$(npm pack --json | jq -r '.[0].filename')
-          mkdir -p .pack && tar -xzf "$tgz" -C .pack
-          BIN=".pack/package/bin/coder.js"
-          test -f "$BIN" || { echo "coder.js missing in packed tarball" >&2; exit 1; }
-          if grep -q "require(\"fs\").createWriteStream" "$BIN"; then
-            echo "Found CommonJS require in coder.js; expected ESM. Failing." >&2
-            sed -n '1,60p' "$BIN" >&2 || true
-            exit 1
-          fi
-          # Sanity: ensure ESM import of fs functions exists
-          if ! grep -q "import .*from \"fs\"" "$BIN"; then
-            echo "Missing ESM import from fs in coder.js; unexpected content." >&2
-            sed -n '1,80p' "$BIN" >&2 || true
-            exit 1
-          fi
-          echo "ESM integrity OK for coder.js"
 
       # Generate CHANGELOG and release notes by running our own `code` CLI in headless mode.
       # It will:
@@ -847,8 +645,7 @@ jobs:
                - The same 2–5 bullets as in the changelog (you may omit SHAs).
             4) Section header: ### Install
                Code block with exactly:
-               npm install -g @just-every/code@latest
-               code
+               gh release download v${NEW_VERSION} --repo ${GITHUB_REPOSITORY}
             5) Optional section header: ### Thanks
                - Include ONE line like: "Thanks to @alice and @bob for contributions!"
                - Only include if at least one merged PR in ${RANGE} is authored by an external contributor.
@@ -959,16 +756,6 @@ jobs:
         run: |
           test -s docs/release-notes/RELEASE_NOTES.md || { echo "docs/release-notes/RELEASE_NOTES.md missing" >&2; exit 1; }
 
-      - name: Check if we should publish
-        id: should_publish
-        shell: bash
-        run: |
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Open release metadata pull request
         if: steps.version.outputs.skip_push != 'true'
         shell: bash
@@ -979,14 +766,14 @@ jobs:
           set -euo pipefail
           release_branch="release/v${NEW_VERSION}-${GITHUB_RUN_ID}"
 
-          git add codex-cli/package.json codex-cli/README.md CHANGELOG.md docs/release-notes/RELEASE_NOTES.md 2>/dev/null || true
+          git add codex-cli/package.json CHANGELOG.md docs/release-notes/RELEASE_NOTES.md 2>/dev/null || true
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): prepare v${NEW_VERSION}"
           fi
 
           # Keep the release handoff branch clean; downloaded artifacts and
           # model context files are recreated by each release run.
-          rm -rf .code-bin .github/auto artifacts npm-binaries release-assets docs/release-notes/context.md docs/release-notes/prompt.expanded.txt || true
+          rm -rf .code-bin .github/auto artifacts release-assets docs/release-notes/context.md docs/release-notes/prompt.expanded.txt || true
 
           git switch -c "$release_branch"
           git push -u origin "$release_branch"
@@ -994,7 +781,7 @@ jobs:
             --base main \
             --head "$release_branch" \
             --title "chore(release): prepare v${NEW_VERSION}" \
-            --body "This automated release PR contains the version and release-notes changes for v${NEW_VERSION}. Merge this PR to let the protected main-branch Release workflow create the tag, GitHub Release, Homebrew update, and npm packages from main."; then
+            --body "This automated release PR contains the version and release-notes changes for v${NEW_VERSION}. Merge this PR to let the protected main-branch Release workflow create the tag and GitHub Release assets from main."; then
             :
           else
             echo "::warning::GitHub Actions could not create the release PR; create it from branch ${release_branch}."
@@ -1002,9 +789,9 @@ jobs:
           fi
 
           echo "Release metadata changes require PR review because main is protected."
-          echo "Merge the generated PR, then the next main Release run will continue publishing."
+          echo "Merge the generated PR, then the next main Release run will publish the GitHub Release."
 
-      # Defer tag/release/npm publish until release metadata has landed on main.
+      # Defer tag and GitHub Release publication until release metadata has landed on main.
 
       - name: Push tag
         if: steps.version.outputs.skip_push == 'true'
@@ -1029,99 +816,3 @@ jobs:
             release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
-      # --- Homebrew Tap Update -------------------------------------------------
-      - name: Generate Homebrew formula (Code.rb)
-        if: steps.version.outputs.skip_push == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/generate-homebrew-formula.sh
-          test -s Formula/Code.rb || { echo "Formula/Code.rb missing" >&2; exit 1; }
-
-      - name: Publish Homebrew formula to just-every/homebrew-tap
-        if: steps.version.outputs.skip_push == 'true'
-        shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_PAT:-}" ]; then
-            echo "GH_PAT/GITHUB_TOKEN not available; skipping tap publish" >&2
-            exit 0
-          fi
-          tmpdir=$(mktemp -d)
-          git clone "https://x-access-token:${GH_PAT}@github.com/just-every/homebrew-tap.git" "$tmpdir"
-          mkdir -p "$tmpdir/Formula"
-          cp -f Formula/Code.rb "$tmpdir/Formula/Code.rb"
-          cd "$tmpdir"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name  "github-actions[bot]"
-          git add -A
-          if git diff --staged --quiet; then
-            echo "No tap changes to commit." >&2
-            exit 0
-          fi
-          ver="${{ steps.version.outputs.version }}"
-          git commit -m "chore(homebrew): bump Code formula to v${ver}"
-          # Ensure default branch exists
-          if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
-            git branch -M main || true
-          fi
-          if git push -u origin HEAD:main; then
-            echo "Published Homebrew formula update to just-every/homebrew-tap."
-          else
-            echo "::warning::Could not push Homebrew formula to just-every/homebrew-tap; check GH_PAT cross-repo write access."
-            exit 0
-          fi
-
-      - name: Publish per-target npm binary packages (last)
-        if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "npm auth token missing; cannot publish binary packages" >&2
-            exit 1
-          fi
-          config_path="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
-          mkdir -p "$(dirname "$config_path")"
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$config_path"
-          npm whoami >/dev/null 2>&1 || { echo "npm auth failed (npm whoami). Ensure NPM_TOKEN is a granular/automation token with publish rights to @just-every/* and bypass 2FA enabled; update the secret via npmjs.com." >&2; exit 1; }
-          shopt -s nullglob
-          for dir in npm-binaries/*; do
-            name=$(jq -r '.name' "$dir/package.json")
-            version=$(jq -r '.version' "$dir/package.json")
-            echo "Preparing to publish $name@$version"
-            existing=$(npm view "$name@$version" version 2>/dev/null || true)
-            if [ "$existing" = "$version" ]; then
-              echo "Skip: $name@$version already published"
-              continue
-            fi
-            echo "Publishing $(basename \"$dir\")"
-            (cd "$dir" && npm publish --access public)
-          done
-
-      - name: Publish main npm package (last)
-        if: steps.version.outputs.skip_push == 'true' && steps.should_publish.outputs.publish == 'true'
-        working-directory: codex-cli
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "npm auth token missing; cannot publish main package" >&2
-            exit 1
-          fi
-          config_path="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
-          mkdir -p "$(dirname "$config_path")"
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$config_path"
-          npm whoami >/dev/null 2>&1 || { echo "npm auth failed (npm whoami). Ensure NPM_TOKEN is a granular/automation token with publish rights to @just-every/* and bypass 2FA enabled; update the secret via npmjs.com." >&2; exit 1; }
-          name="@just-every/code"
-          version=$(jq -r '.version' package.json)
-          echo "Preparing to publish $name@$version"
-          existing=$(npm view "$name@$version" version 2>/dev/null || true)
-          if [ "$existing" = "$version" ]; then
-            echo "Skip: $name@$version already published"
-            exit 0
-          fi
-          npm publish --access public
