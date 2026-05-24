@@ -17,7 +17,9 @@ use code_cli::login::run_login_with_device_code;
 use code_cli::login::run_logout;
 mod bridge;
 mod llm;
+mod update;
 use llm::{LlmCli, run_llm};
+use update::{UpdateCheckCommand, UpdateCommand, run_update, run_update_check};
 use code_common::CliConfigOverrides;
 use code_core::{entry_to_rollout_path, SessionCatalog, SessionQuery};
 use code_core::spawn::spawn_std_command_with_retry;
@@ -155,6 +157,13 @@ enum Subcommand {
 
     /// Download and run preview artifact by slug.
     Preview(PreviewArgs),
+
+    /// Check the GitHub Release update manifest for a newer build.
+    #[clap(name = "update-check")]
+    UpdateCheck(UpdateCheckCommand),
+
+    /// Update a directly managed dogfood binary after checksum verification.
+    Update(UpdateCommand),
 
     /// Side-channel LLM utilities (no TUI events).
     Llm(LlmCli),
@@ -618,6 +627,12 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
         }
         Some(Subcommand::Preview(args)) => {
             preview_main(args).await?;
+        }
+        Some(Subcommand::UpdateCheck(args)) => {
+            run_update_check(args).await?;
+        }
+        Some(Subcommand::Update(args)) => {
+            run_update(args).await?;
         }
         Some(Subcommand::Bridge(bridge_cli)) => {
             run_bridge_command(bridge_cli).await?;
