@@ -28,5 +28,4 @@ Get-ChildItem -LiteralPath (Join-Path $npmRoot "@just-every") -Force -ErrorActio
     try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop } catch {}
   }
 
-Write-Host "Cleanup complete. You can now run: npm install -g @just-every/code@latest"
-
+Write-Host "Cleanup complete. Install the current GitHub Release or run: code update --yes"

@@ -286,6 +286,12 @@ jobs:
           PORT=5056 LOG_DEST=stdout EXIT_ON_5XX=1 RESPONSES_BETA="responses=v1" node scripts/openai-proxy.js > .github/auto/openai-proxy.log 2>&1 &
           for i in {1..30}; do if nc -z 127.0.0.1 5056; then break; else sleep 0.2; fi; done || true
 
+      - name: Install Code from GitHub Release
+        if: steps.meta.outputs.pr_number && env.OPENAI_API_KEY != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .github/scripts/install-code-release.sh .github/auto/code-bin
+
       - name: Print proxy startup log tail
         if: steps.meta.outputs.pr_number && env.OPENAI_API_KEY != ''
         run: |
@@ -340,7 +346,7 @@ jobs:
           set +e
           { printf '%s' "$PROMPT" | env -i PATH="$SAFE_PATH" HOME="$SAFE_HOME" \
               OPENAI_API_KEY="x" OPENAI_BASE_URL="http://127.0.0.1:5056/v1" \
-              npx -y @just-every/code@latest exec -s read-only --cd "$GITHUB_WORKSPACE" --skip-git-repo-check -; } \
+              .github/auto/code-bin/code exec -s read-only --cd "$GITHUB_WORKSPACE" --skip-git-repo-check -; } \
             2>&1 | tee .github/auto/AGENT_OUT.txt
           true
           set -e
@@ -543,6 +549,12 @@ jobs:
           PORT=5056 LOG_DEST=stdout EXIT_ON_5XX=1 RESPONSES_BETA="responses=v1" node scripts/openai-proxy.js > .github/auto/openai-proxy.log 2>&1 &
           for i in {1..30}; do if nc -z 127.0.0.1 5056; then break; else sleep 0.2; fi; done || true
 
+      - name: Install Code from GitHub Release
+        if: env.OPENAI_API_KEY != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .github/scripts/install-code-release.sh .github/auto/code-bin
+
       - name: Print proxy startup log tail
         if: env.OPENAI_API_KEY != ''
         run: |
@@ -578,7 +590,7 @@ jobs:
               RUSTUP_HOME="$GITHUB_WORKSPACE/.cargo-home/rustup" \
               CARGO_TARGET_DIR="$GITHUB_WORKSPACE/${RUST_WORKSPACE_DIR}/target" \
               STRICT_CARGO_HOME="1" \
-              npx -y @just-every/code@latest exec -s read-only --cd "$GITHUB_WORKSPACE" --skip-git-repo-check -; } \
+              .github/auto/code-bin/code exec -s read-only --cd "$GITHUB_WORKSPACE" --skip-git-repo-check -; } \
             2>&1 | tee .github/auto/TRIAGE_AGENT_OUT.txt
           true
           set -e

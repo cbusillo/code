@@ -16,7 +16,7 @@ GitHub Releases also contain a [DotSlash](https://dotslash-cli.com/) shim named 
 
 ```bash
 # Clone the repository and navigate to the workspace root.
-git clone https://github.com/just-every/code.git
+git clone https://github.com/cbusillo/code.git
 cd code
 
 # Install the Rust toolchain, if necessary.
@@ -26,8 +26,9 @@ source "$HOME/.cargo/env"
 # Build everything (CLI, TUI, MCP servers). This is the same check CI runs.
 ./build-fast.sh
 
-# Launch the TUI with a sample prompt.
-./target/debug/code -- "explain this codebase to me"
+# Install the PATH-resolved local binary and launch the TUI.
+just local-code-rebuild
+code -- "explain this codebase to me"
 ```
 
 > [!NOTE]

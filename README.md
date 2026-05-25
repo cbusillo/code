@@ -80,17 +80,20 @@
 ### Run
 
 ```bash
-npx -y @just-every/code
+code
 ```
 
 ### Install & Run
 
 ```bash
-npm install -g @just-every/code
-code // or `coder` if you're using VS Code
+just local-code-rebuild
+code
 ```
 
-Note: If another tool already provides a `code` command (e.g. VS Code), our CLI is also installed as `coder`. Use `coder` to avoid conflicts.
+Use `code update-check` to inspect the current GitHub Release manifest and
+`code update --yes` to install a newer verified direct binary when one is
+available. npm and Homebrew publishing are deferred unless package-manager
+distribution becomes intentional again.
 
 **Authenticate** (one of the following):
 - **Sign in with ChatGPT** (Plus/Pro/Team; uses models available to your plan)
