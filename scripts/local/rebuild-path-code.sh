@@ -12,6 +12,10 @@ resolve_code_version() {
 code_version="${CODE_VERSION:-$(resolve_code_version || true)}"
 
 echo "Building release binary from $code_rs_root"
+if [[ -L "$release_bin" ]]; then
+	echo "Replacing release-bin symlink with a real binary: $release_bin"
+	rm -f "$release_bin"
+fi
 if [[ -n "$code_version" ]]; then
 	echo "Embedding CODE_VERSION=$code_version"
 	CODE_VERSION="$code_version" cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release

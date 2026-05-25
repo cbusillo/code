@@ -68,6 +68,10 @@ local-code-rebuild:
     ./scripts/local/rebuild-path-code.sh
 
 [no-cd]
+local-remove-homebrew-code-link:
+    ./scripts/local/remove-homebrew-code-link.sh
+
+[no-cd]
 local-upstream-import:
     ./scripts/local/update-overlay-from-upstream.sh
 

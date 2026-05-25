@@ -68,7 +68,7 @@ Examples:
 
 - `main` is the Every Code product branch and the GitHub default branch.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
-- After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary that reports `0.0.0`.
+- After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build validates dev-fast artifacts, while the rebuild recipe owns the PATH-resolved release binary and embeds the package version.
 - Before leaving a local work session, run `just local-cleanup-space --apply`
   to remove rebuildable target/cache artifacts while preserving
   `code-rs/target/release/code`.

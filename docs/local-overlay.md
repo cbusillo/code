@@ -76,8 +76,15 @@ code exec -m gpt-5.5 --sandbox read-only --max-seconds 30 "Reply with exactly OK
 ```
 
 Run `just local-code-rebuild` after any release-readiness `./build-fast.sh` run:
-the fast build can leave the PATH-resolved `code` pointing at a dev-fast binary
-that reports `0.0.0`.
+the fast build creates dev-fast artifacts for validation, while the rebuild
+recipe owns the PATH-resolved release binary and embeds the package version.
+
+If an old manual Homebrew link exists, remove it so PATH resolution stays
+repo-owned and predictable:
+
+```sh
+just local-remove-homebrew-code-link
+```
 
 ## Session Exit Cleanup
 
