@@ -723,11 +723,13 @@ if [ $? -eq 0 ]; then
       fi
     fi
 
-    mkdir -p ./target/release
-    if [ -e "./target/release/${CRATE_PREFIX}" ]; then
-        rm -f "./target/release/${CRATE_PREFIX}"
+    if [ "$PROFILE" = "release" ] || [ "$PROFILE" = "release-prod" ]; then
+      mkdir -p ./target/release
+      if [ -e "./target/release/${CRATE_PREFIX}" ]; then
+          rm -f "./target/release/${CRATE_PREFIX}"
+      fi
+      ln -sf "${release_link_target}" "./target/release/${CRATE_PREFIX}"
     fi
-    ln -sf "${release_link_target}" "./target/release/${CRATE_PREFIX}"
 
     # Update the symlinks in CLI wrapper directories
     if [ -d "../codex-cli/bin" ]; then
