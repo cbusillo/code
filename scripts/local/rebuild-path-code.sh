@@ -11,8 +11,21 @@ resolve_code_version() {
 
 code_version="${CODE_VERSION:-$(resolve_code_version || true)}"
 
+removed_release_symlink_target=""
+restore_release_symlink_on_error() {
+	local exit_code="$?"
+	if [[ "$exit_code" -ne 0 && -n "$removed_release_symlink_target" && ! -e "$release_bin" && ! -L "$release_bin" ]]; then
+		mkdir -p "$(dirname "$release_bin")"
+		ln -s "$removed_release_symlink_target" "$release_bin"
+		echo "Restored release-bin symlink after failed rebuild: $release_bin -> $removed_release_symlink_target" >&2
+	fi
+	exit "$exit_code"
+}
+
 echo "Building release binary from $code_rs_root"
 if [[ -L "$release_bin" ]]; then
+	removed_release_symlink_target="$(readlink "$release_bin")"
+	trap restore_release_symlink_on_error EXIT
 	echo "Replacing release-bin symlink with a real binary: $release_bin"
 	rm -f "$release_bin"
 fi
@@ -23,6 +36,7 @@ else
 	echo "warning: could not resolve CODE_VERSION from rust-v tags; building without override" >&2
 	cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release
 fi
+trap - EXIT
 
 path_code="$(command -v code || true)"
 if [[ -z "$path_code" ]]; then
