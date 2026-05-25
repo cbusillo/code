@@ -349,6 +349,7 @@ jobs:
         run: |
           set -euo pipefail
           ./build-fast.sh
+          echo "CODE_BIN=${CARGO_TARGET_DIR}/dev-fast/code" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         if: steps.check_upstream.outputs.skip != 'true'
@@ -621,8 +622,7 @@ jobs:
             OPENAI_BASE_URL="http://127.0.0.1:5055/v1" \
             OPENAI_API_BASE="http://127.0.0.1:5055/v1" \
             GH_TOKEN="$GH_TOKEN" \
-            npm_config_cache="$SAFE_HOME/.npm" \
-            npx -y @just-every/code@latest \
+            "$CODE_BIN" \
             auto \
             --goal-file .github/auto/AUTO_GOAL.md \
             --max-attempts 3 \
@@ -738,8 +738,7 @@ jobs:
               OPENAI_API_BASE="http://127.0.0.1:5055/v1" \
               GH_TOKEN="$GH_TOKEN" \
               RUSTC_WRAPPER="sccache" SCCACHE_GHA_ENABLED="true" SCCACHE_IDLE_TIMEOUT="1800" SCCACHE_CACHE_SIZE="5G" \
-              npm_config_cache="$SAFE_HOME/.npm" \
-              npx -y @just-every/code@latest \
+              "$CODE_BIN" \
               exec \
               -s workspace-write \
               -c sandbox_workspace_write.allow_git_writes=true \

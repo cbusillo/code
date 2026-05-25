@@ -170,6 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           ./build-fast.sh
+          echo "CODE_BIN=${CARGO_TARGET_DIR}/dev-fast/code" >> "$GITHUB_ENV"
 
       - name: Prepare agent workspace files
         env:
@@ -273,7 +274,7 @@ jobs:
               STRICT_CARGO_HOME="1" \
               GIT_TERMINAL_PROMPT="0" \
               GIT_ASKPASS="/bin/false" \
-              npx -y @just-every/code@latest \
+              "$CODE_BIN" \
               exec \
               -s workspace-write \
               -c sandbox_workspace_write.network_access=true \

@@ -33,7 +33,7 @@ if [[ -n "$code_version" ]]; then
 	echo "Embedding CODE_VERSION=$code_version"
 	CODE_VERSION="$code_version" cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release
 else
-	echo "warning: could not resolve CODE_VERSION from rust-v tags; building without override" >&2
+	echo "warning: could not resolve CODE_VERSION from package metadata; building without override" >&2
 	cargo build --manifest-path "$code_rs_root/Cargo.toml" -p code-cli --release
 fi
 trap - EXIT

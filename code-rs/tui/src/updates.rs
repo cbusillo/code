@@ -144,10 +144,10 @@ struct ReleaseInfo {
 }
 
 const VERSION_FILENAME: &str = "version.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/just-every/code/releases/latest";
-const CURRENT_RELEASE_REPO: &str = "just-every/code";
-const LEGACY_RELEASE_REPO: &str = "openai/codex";
-pub const CODE_RELEASE_URL: &str = "https://github.com/just-every/code/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/cbusillo/code/releases/latest";
+const CURRENT_RELEASE_REPO: &str = "cbusillo/code";
+const LEGACY_RELEASE_REPO: &str = "just-every/code";
+pub const CODE_RELEASE_URL: &str = "https://github.com/cbusillo/code/releases/latest";
 
 const CACHE_TTL_HOURS: i64 = 20;
 const MAX_CLOCK_SKEW_MINUTES: i64 = 5;
@@ -179,37 +179,20 @@ fn version_filepath(config: &Config) -> PathBuf {
 }
 
 pub fn resolve_upgrade_resolution() -> UpgradeResolution {
-    if std::env::var_os("CODEX_MANAGED_BY_NPM").is_some() {
+    if let Ok(exe_path) = std::env::current_exe() {
         return UpgradeResolution::Command {
             command: vec![
-                "npm".to_string(),
-                "install".to_string(),
-                "-g".to_string(),
-                "@just-every/code@latest".to_string(),
+                exe_path.display().to_string(),
+                "update".to_string(),
+                "--yes".to_string(),
             ],
-            display: "npm install -g @just-every/code@latest".to_string(),
+            display: "code update --yes".to_string(),
         };
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(exe_path) = std::env::current_exe() {
-            if exe_path.starts_with("/opt/homebrew") || exe_path.starts_with("/usr/local") {
-                return UpgradeResolution::Command {
-                    command: vec![
-                        "brew".to_string(),
-                        "upgrade".to_string(),
-                        "code".to_string(),
-                    ],
-                    display: "brew upgrade code".to_string(),
-                };
-            }
-        }
     }
 
     UpgradeResolution::Manual {
         instructions: format!(
-            "Download the latest release from {CODE_RELEASE_URL} and replace the installed binary."
+            "Run `code update --yes`, or download the latest release from {CODE_RELEASE_URL} and replace the installed binary."
         ),
     }
 }
@@ -598,12 +581,7 @@ async fn fetch_latest_version(originator: &str) -> anyhow::Result<VersionInfo> {
         .json::<ReleaseInfo>()
         .await?;
 
-    // Support both tagging schemes:
-    // - "rust-vX.Y.Z" (legacy Rust-release workflow)
-    // - "vX.Y.Z" (general release workflow)
-    let latest_version = if let Some(v) = latest_tag_name.strip_prefix("rust-v") {
-        v.to_string()
-    } else if let Some(v) = latest_tag_name.strip_prefix('v') {
+    let latest_version = if let Some(v) = latest_tag_name.strip_prefix('v') {
         v.to_string()
     } else {
         // As a last resort, accept the raw tag if it looks like semver
@@ -611,7 +589,7 @@ async fn fetch_latest_version(originator: &str) -> anyhow::Result<VersionInfo> {
         match parse_version(&latest_tag_name) {
             Some(_) => latest_tag_name.clone(),
             None => anyhow::bail!(
-                "Failed to parse latest tag name '{}': expected 'rust-vX.Y.Z' or 'vX.Y.Z'",
+                "Failed to parse latest tag name '{}': expected 'vX.Y.Z'",
                 latest_tag_name
             ),
         }
@@ -700,6 +678,21 @@ mod tests {
 
     fn write_cache(path: &Path, info: &serde_json::Value) {
         fs::write(path, format!("{}\n", info)).expect("write version cache");
+    }
+
+    #[test]
+    fn upgrade_resolution_uses_cli_updater() {
+        match resolve_upgrade_resolution() {
+            UpgradeResolution::Command { command, display } => {
+                assert!(command.len() >= 3);
+                assert_eq!(command[command.len() - 2], "update");
+                assert_eq!(command[command.len() - 1], "--yes");
+                assert_eq!(display, "code update --yes");
+            }
+            UpgradeResolution::Manual { instructions } => {
+                assert!(instructions.contains("code update --yes"));
+            }
+        }
     }
 
     #[test]

@@ -6,20 +6,20 @@ To point Zed at Every Code's (Code) ACP server, add this block to `settings.json
 {
   "agent_servers": {
     "Code": {
-      "command": "npx",
-      "args": ["-y", "@just-every/code", "acp"]
+      "command": "code",
+      "args": ["acp"]
     }
   }
 }
 ```
 
-Adjust the `command` or `args` only if you pin a different version or use a globally installed binary.
+Adjust `command` to an absolute binary path if Zed cannot find `code` on PATH.
 
 ## Zed prerequisites
 
 - Zed Stable `0.201.5` (released August 27, 2025) or newer adds ACP support with the Agent Panel. Update via `Zed → Check for Updates` before wiring Every Code in. Zed’s docs call out ACP as the mechanism powering Gemini CLI and other external agents.
 - External agents live inside the Agent Panel (`cmd-?`). Use the `+` button to start a new thread and pick `Code` (Every Code) from the external agent list. Zed runs our CLI as a subprocess over JSON‑RPC, so all prompts and diff previews stay local.
-- Zed installs dependencies per entry automatically. If you keep `command = "npx"`, Zed will download the published `@just-every/code` package the first time you trigger the integration.
+- Zed launches the configured command directly. Use the repo-built or GitHub Release binary instead of package-manager shims so the integration follows the same update source as the terminal CLI.
 
 ## How Every Code implements ACP
 
@@ -35,7 +35,7 @@ write_text_file = { mcp_server = "zed", tool_name = "writeTextFile" }
 ```
 
 Zed wires these tools automatically when you add the Code (Every Code) agent, so the identifiers above match the defaults.
-- The CLI entry point (`npx @just-every/code acp`) is a thin wrapper over the Rust binary (`cargo run -p code-mcp-server -- --stdio`) that ships alongside the rest of Every Code. Build-from-source workflows plug in by swapping `command` for an absolute path to that binary.
+- The CLI entry point (`code acp`) runs the Rust MCP server that ships alongside the rest of Every Code. Build-from-source workflows plug in by swapping `command` for an absolute path to that binary.
 
 ## Tips and troubleshooting
 

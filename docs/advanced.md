@@ -7,7 +7,7 @@ Run Every Code headless in pipelines. Example GitHub Action step:
 ```yaml
 - name: Update changelog via Code
   run: |
-    npm install -g @just-every/code
+    just local-code-rebuild
     export OPENAI_API_KEY="${{ secrets.OPENAI_KEY }}"
     code exec --full-auto "update CHANGELOG for next release"
 ```
