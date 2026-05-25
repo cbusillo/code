@@ -81,7 +81,9 @@ pub async fn run_update(args: UpdateCommand) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let install = detect_install_source()?;
+    let exe = env::current_exe().context("failed to resolve current executable")?;
+    let install_target = resolve_install_target(&exe);
+    let install = detect_install_source_for_path(&install_target);
     println!("install source: {}", install.description());
     if !install.can_self_update() {
         bail!(
@@ -94,17 +96,25 @@ pub async fn run_update(args: UpdateCommand) -> anyhow::Result<()> {
         bail!("pass --yes to replace the current binary after checksum verification");
     }
 
-    let exe = env::current_exe().context("failed to resolve current executable")?;
     #[cfg(target_family = "windows")]
     {
-        let _ = exe;
+        let _ = install_target;
         bail!("self-update is not implemented for Windows yet");
     }
 
     #[cfg(target_family = "unix")]
     {
-        install_direct_binary(&report.asset, &exe).await?;
-        println!("Updated {} to {}", exe.display(), report.manifest.version);
+        install_direct_binary(&report.asset, &install_target).await?;
+        if install_target == exe {
+            println!("Updated {} to {}", install_target.display(), report.manifest.version);
+        } else {
+            println!(
+                "Updated {} to {} (launched via {})",
+                install_target.display(),
+                report.manifest.version,
+                exe.display()
+            );
+        }
         Ok(())
     }
 }
@@ -341,9 +351,8 @@ impl InstallSource {
     }
 }
 
-fn detect_install_source() -> anyhow::Result<InstallSource> {
-    let exe = env::current_exe().context("failed to resolve current executable")?;
-    Ok(detect_install_source_for_path(&exe))
+fn resolve_install_target(exe: &Path) -> PathBuf {
+    fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf())
 }
 
 fn detect_install_source_for_path(exe: &Path) -> InstallSource {
@@ -524,5 +533,18 @@ mod tests {
             )),
             InstallSource::Unknown(_)
         ));
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn resolve_install_target_follows_symlinks() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("code-target");
+        let link = dir.path().join("code-link");
+        fs::write(&target, b"code")?;
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        assert_eq!(resolve_install_target(&link), fs::canonicalize(target)?);
+        Ok(())
     }
 }
