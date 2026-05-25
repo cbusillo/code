@@ -8,6 +8,36 @@ homebrew_links=(
 	"/usr/local/bin/code"
 )
 
+canonical_path() {
+	local path="$1"
+	if realpath "$path" 2>/dev/null; then
+		return 0
+	fi
+
+	local parent
+	parent="$(dirname "$path")"
+	if parent="$(cd "$parent" >/dev/null 2>&1 && pwd -P)"; then
+		printf '%s/%s\n' "$parent" "$(basename "$path")"
+		return 0
+	fi
+
+	printf '%s\n' "$path"
+}
+
+repo_release_bin_real="$(canonical_path "$repo_release_bin")"
+
+resolve_link_target() {
+	local link_path="$1"
+	local link_target="$2"
+	case "$link_target" in
+	/*) ;;
+	*)
+		link_target="$(dirname "$link_path")/$link_target"
+		;;
+	esac
+	canonical_path "$link_target"
+}
+
 removed=0
 for homebrew_link in "${homebrew_links[@]}"; do
 	if [[ ! -L "$homebrew_link" ]]; then
@@ -15,7 +45,8 @@ for homebrew_link in "${homebrew_links[@]}"; do
 	fi
 
 	link_target="$(readlink "$homebrew_link")"
-	if [[ "$link_target" != "$repo_release_bin" ]]; then
+	link_target_real="$(resolve_link_target "$homebrew_link" "$link_target")"
+	if [[ "$link_target_real" != "$repo_release_bin_real" ]]; then
 		echo "Skipping unrelated Homebrew code symlink: $homebrew_link -> $link_target"
 		continue
 	fi
