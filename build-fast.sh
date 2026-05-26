@@ -723,7 +723,7 @@ if [ $? -eq 0 ]; then
       fi
     fi
 
-    if [ "$PROFILE" = "release" ] || [ "$PROFILE" = "release-prod" ]; then
+    if [ "$PROFILE" = "release" ] || [ "$PROFILE" = "release-prod" ] || [ "$PROFILE" = "perf" ]; then
       mkdir -p ./target/release
       if [ -e "./target/release/${CRATE_PREFIX}" ]; then
           rm -f "./target/release/${CRATE_PREFIX}"
