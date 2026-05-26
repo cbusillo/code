@@ -174,15 +174,33 @@ pub enum UpgradeResolution {
     Manual { instructions: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeInstallSource {
+    Direct,
+    Managed,
+    Unknown,
+}
+
 fn version_filepath(config: &Config) -> PathBuf {
     config.code_home.join(VERSION_FILENAME)
 }
 
 pub fn resolve_upgrade_resolution() -> UpgradeResolution {
     if let Ok(exe_path) = std::env::current_exe() {
+        return resolve_upgrade_resolution_for_exe(&exe_path);
+    }
+
+    UpgradeResolution::Manual {
+        instructions: manual_upgrade_instructions(),
+    }
+}
+
+fn resolve_upgrade_resolution_for_exe(exe_path: &Path) -> UpgradeResolution {
+    let install_target = resolve_install_target(exe_path);
+    if detect_upgrade_install_source(&install_target) == UpgradeInstallSource::Direct {
         return UpgradeResolution::Command {
             command: vec![
-                exe_path.display().to_string(),
+                install_target.display().to_string(),
                 "update".to_string(),
                 "--yes".to_string(),
             ],
@@ -191,10 +209,37 @@ pub fn resolve_upgrade_resolution() -> UpgradeResolution {
     }
 
     UpgradeResolution::Manual {
-        instructions: format!(
-            "Run `code update --yes`, or download the latest release from {CODE_RELEASE_URL} and replace the installed binary."
-        ),
+        instructions: manual_upgrade_instructions(),
     }
+}
+
+fn manual_upgrade_instructions() -> String {
+    format!(
+        "This install cannot be self-updated automatically. Download the latest release from {CODE_RELEASE_URL} and replace the installed binary."
+    )
+}
+
+fn resolve_install_target(exe_path: &Path) -> PathBuf {
+    fs::canonicalize(exe_path).unwrap_or_else(|_| exe_path.to_path_buf())
+}
+
+fn detect_upgrade_install_source(exe_path: &Path) -> UpgradeInstallSource {
+    let path = exe_path.to_string_lossy();
+    if path.contains("/Cellar/") || path.contains("/Homebrew/") || path.contains("/homebrew/") {
+        return UpgradeInstallSource::Managed;
+    }
+    if path.contains("/node_modules/") || path.contains("/.bun/") || path.contains("/.cargo/bin/")
+    {
+        return UpgradeInstallSource::Managed;
+    }
+    if path.contains("/.code/bin/")
+        || path.contains("/.local/bin/")
+        || path.contains("/code-rs/target/release/")
+    {
+        return UpgradeInstallSource::Direct;
+    }
+
+    UpgradeInstallSource::Unknown
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -681,16 +726,31 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_resolution_uses_cli_updater() {
-        match resolve_upgrade_resolution() {
+    fn upgrade_resolution_uses_cli_updater_for_direct_installs() {
+        match resolve_upgrade_resolution_for_exe(Path::new(
+            "/Users/me/.local/bin/code",
+        )) {
             UpgradeResolution::Command { command, display } => {
                 assert!(command.len() >= 3);
                 assert_eq!(command[command.len() - 2], "update");
                 assert_eq!(command[command.len() - 1], "--yes");
                 assert_eq!(display, "code update --yes");
             }
+            UpgradeResolution::Manual { instructions } => panic!("unexpected manual resolution: {instructions}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_resolution_uses_manual_instructions_for_managed_installs() {
+        match resolve_upgrade_resolution_for_exe(Path::new(
+            "/opt/homebrew/Cellar/code/0.6.105/bin/code",
+        )) {
+            UpgradeResolution::Command { display, .. } => {
+                panic!("unexpected command resolution: {display}");
+            }
             UpgradeResolution::Manual { instructions } => {
-                assert!(instructions.contains("code update --yes"));
+                assert!(!instructions.contains("code update --yes"));
+                assert!(instructions.contains(CODE_RELEASE_URL));
             }
         }
     }
