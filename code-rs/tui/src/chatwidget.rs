@@ -16442,7 +16442,7 @@ impl ChatWidget<'_> {
                     "streaming preview: validating release artifacts…",
                     "streaming preview: preparing announcement copy…",
                 ],
-                "**Release rehearsal:**\n\n1. Run `./scripts/create_github_release.sh --dry-run`.\n2. Capture artifact hashes in the notes.\n3. Schedule follow-up validation in automation.\n\n```bash\n./scripts/create_github_release.sh 1.2.3 --dry-run\n```",
+                "**Release rehearsal:**\n\n1. Run `./build-fast.sh`.\n2. Merge the release metadata PR if one is opened.\n3. Watch the protected `Release` workflow publish GitHub Release assets.\n\n```bash\nscripts/wait-for-gh-run.sh --workflow Release --branch main\n```",
                 vec![
                     (vec!["git", "--no-pager", "diff", "--stat"], " src/lib.rs | 10 ++++++----\n 1 file changed, 6 insertions(+), 4 deletions(-)\n"),
                     (vec!["ls", "-1"], "Cargo.lock\nREADME.md\nsrc\ntarget\n"),
