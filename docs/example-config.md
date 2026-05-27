@@ -37,7 +37,8 @@ model_provider = "openai"
 # Reasoning & Verbosity (Responses API capable models)
 ################################################################################
 
-# Reasoning effort: minimal | low | medium | high | xhigh (default: medium; xhigh on gpt-5.1-codex-max and gpt-5.2)
+# Reasoning effort: minimal | low | medium | high | xhigh.
+# Defaults to medium; xhigh is supported on gpt-5.5 and gpt-5.4.
 model_reasoning_effort = "medium"
 
 # Reasoning summary: auto | concise | detailed | none (default: auto)

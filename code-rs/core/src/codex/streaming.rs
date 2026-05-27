@@ -1666,23 +1666,6 @@ fn is_context_overflow_stream_error(message: &str) -> bool {
                 || lower.contains("too long")))
 }
 
-fn is_usage_limit_stream_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("usage limit")
-        || lower.contains("usage_limit_reached")
-        || lower.contains("usage_not_included")
-}
-
-fn spark_fallback_model(model: &str) -> Option<String> {
-    if model.eq_ignore_ascii_case("gpt-5.3-codex-spark") {
-        Some("gpt-5.3-codex".to_string())
-    } else if model.eq_ignore_ascii_case("code-gpt-5.3-codex-spark") {
-        Some("code-gpt-5.3-codex".to_string())
-    } else {
-        None
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AutoContextPressureBand {
@@ -2983,7 +2966,6 @@ async fn run_turn(
     // Ensure we only auto-compact once per turn to avoid loops
     let mut did_auto_compact = false;
     let mut did_context_model_fallback = false;
-    let mut did_usage_limit_model_fallback = false;
     let mut forced_model_override: Option<String> = None;
     let mut fallback_metadata_warning_sent = false;
     // Attempt input starts as the provided input, and may be augmented with
@@ -3228,29 +3210,6 @@ async fn run_turn(
                     continue;
                 }
 
-                if !did_usage_limit_model_fallback {
-                    let active_model = prompt
-                        .model_override
-                        .clone()
-                        .unwrap_or_else(|| tc.client.get_model());
-                    if let Some(fallback_model) = spark_fallback_model(&active_model) {
-                        did_usage_limit_model_fallback = true;
-                        forced_model_override = Some(fallback_model.clone());
-                        retries = 0;
-                        sess.clear_scratchpad();
-                        attempt_input = input.clone();
-                        sess
-                            .notify_stream_error(
-                                &sub_id,
-                                format!(
-                                    "Usage limit reached for {active_model}; retrying with {fallback_model}…"
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                }
-
                 let now = Utc::now();
                 let retry_after = limit_err
                     .retry_after(now)
@@ -3267,59 +3226,10 @@ async fn run_turn(
                 continue;
             }
             Err(CodexErr::UsageNotIncluded) => {
-                if !did_usage_limit_model_fallback {
-                    let active_model = prompt
-                        .model_override
-                        .clone()
-                        .unwrap_or_else(|| tc.client.get_model());
-                    if let Some(fallback_model) = spark_fallback_model(&active_model) {
-                        did_usage_limit_model_fallback = true;
-                        forced_model_override = Some(fallback_model.clone());
-                        retries = 0;
-                        sess.clear_scratchpad();
-                        attempt_input = input.clone();
-                        sess
-                            .notify_stream_error(
-                                &sub_id,
-                                format!(
-                                    "Usage limit reached for {active_model}; retrying with {fallback_model}…"
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                }
-
                 return Err(CodexErr::UsageNotIncluded);
             }
             Err(CodexErr::QuotaExceeded) => return Err(CodexErr::QuotaExceeded),
             Err(e) => {
-                if let CodexErr::Stream(msg, _maybe_delay, _req_id) = &e
-                    && is_usage_limit_stream_error(msg)
-                    && !did_usage_limit_model_fallback
-                {
-                    let active_model = prompt
-                        .model_override
-                        .clone()
-                        .unwrap_or_else(|| tc.client.get_model());
-                    if let Some(fallback_model) = spark_fallback_model(&active_model) {
-                        did_usage_limit_model_fallback = true;
-                        forced_model_override = Some(fallback_model.clone());
-                        retries = 0;
-                        sess.clear_scratchpad();
-                        attempt_input = input.clone();
-                        sess
-                            .notify_stream_error(
-                                &sub_id,
-                                format!(
-                                    "Usage limit reached for {active_model}; retrying with {fallback_model}…"
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                }
-
                 if let CodexErr::Stream(msg, _maybe_delay, _req_id) = &e
                     && is_context_overflow_stream_error(msg)
                 {
@@ -14260,7 +14170,6 @@ mod tests {
         save_image_generation_sidecar,
         ImageGenerationTurnMetadata,
         pending_items_not_already_recorded,
-        spark_fallback_model,
         TRUNCATION_MARKER,
     };
     use crate::exec::{ExecToolCallOutput, StreamOutput};
@@ -14515,24 +14424,24 @@ mod tests {
             "o3",
             vec![
                 ContextFallbackCandidate {
-                    model: "gpt-5.3-codex".to_string(),
+                    model: "gpt-5.4".to_string(),
                     context_window: Some(272_000),
                     priority: 10,
                 },
                 ContextFallbackCandidate {
-                    model: "gpt-5.2-codex".to_string(),
+                    model: "gpt-5.5".to_string(),
                     context_window: Some(272_000),
                     priority: 20,
                 },
             ],
         );
-        assert_eq!(chosen.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(chosen.as_deref(), Some("gpt-5.5"));
     }
 
     #[test]
     fn larger_context_fallback_skips_gpt_4_1_family() {
         let chosen = choose_larger_context_model_from_candidates(
-            "gpt-5.3-codex-spark",
+            "gpt-5.4",
             vec![
                 ContextFallbackCandidate {
                     model: "gpt-4.1".to_string(),
@@ -14540,21 +14449,13 @@ mod tests {
                     priority: 100,
                 },
                 ContextFallbackCandidate {
-                    model: "gpt-5.2-codex".to_string(),
+                    model: "gpt-5.5".to_string(),
                     context_window: Some(400_000),
                     priority: 10,
                 },
             ],
         );
-        assert_eq!(chosen.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(chosen.as_deref(), Some("gpt-5.5"));
     }
 
-    #[test]
-    fn spark_usage_limit_falls_back_to_non_spark_model() {
-        assert_eq!(
-            spark_fallback_model("gpt-5.3-codex-spark").as_deref(),
-            Some("gpt-5.3-codex")
-        );
-        assert!(spark_fallback_model("gpt-5.3-codex").is_none());
-    }
 }

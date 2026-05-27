@@ -66,11 +66,11 @@ const MAX_QUEUED_CONVERSATION_UPDATES: usize = 24;
 const DEBUG_JSON_MAX_CHARS: usize = 1200;
 const CLI_PROMPT_MIN_CHARS: usize = 4;
 const CLI_PROMPT_MAX_CHARS: usize = 600;
-const AUTO_DRIVE_CLI_MODEL_PRIMARY: &str = "gpt-5.3-codex";
-const AUTO_DRIVE_CLI_MODEL_SPARK: &str = "gpt-5.3-codex-spark";
+const AUTO_DRIVE_CLI_MODEL_PRIMARY: &str = "gpt-5.5";
+const AUTO_DRIVE_CLI_MODEL_FAST: &str = "gpt-5.4";
 const AUTO_DRIVE_PRIMARY_ROUTING_DESCRIPTION: &str =
     "Hard planning and complex problem solving";
-const AUTO_DRIVE_SPARK_ROUTING_DESCRIPTION: &str =
+const AUTO_DRIVE_FAST_ROUTING_DESCRIPTION: &str =
     "Fast implementation loops and failing-test iteration";
 
 static HARD_LIMIT_TRIMMED_ITEMS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -80,7 +80,7 @@ static QUEUED_UPDATE_DROPS_TOTAL: AtomicU64 = AtomicU64::new(0);
 #[error("auto coordinator cancelled")]
 struct AutoCoordinatorCancelled;
 
-pub const MODEL_SLUG: &str = "gpt-5.1";
+pub const MODEL_SLUG: &str = "gpt-5.5";
 const USER_TURN_SCHEMA_NAME: &str = "auto_coordinator_user_turn";
 const COORDINATOR_PROMPT: &str = include_str!("../../core/prompt_coordinator.md");
 const TIMEBOXED_EXEC_COORDINATOR_GUIDANCE: &str = "SYSTEM: Time-boxed autonomous exec is enabled.\n\nYou are coordinating a non-interactive coding run. Optimize for verifier success, not exploration.\n\nContract-first and evidence-led:\n- In the first 3 minutes, force a concrete failing signal by running the most authoritative acceptance check available. Prefer (in order): `/tests/verify.sh` (read it, then run it) > a task-provided verifier script > the narrowest relevant test (e.g. `pytest -q /tests/test_outputs.py`).\n- Treat that check as the contract: exact paths, ports, formats, exit codes, and stated constraints.\n\nConverge with small diffs:\n- Ship a minimal first-pass fix quickly, then iterate against the same check.\n- Avoid speculative redesigns, broad refactors, or dependency churn unless forced by the contract.\n\nDelegate by outcomes only:\n- Each turn: give one short directive phrased as an outcome (\"make X pass\", \"produce file Y at path Z\", \"ensure binary at /path is executable\"). Let the CLI pick tactics.\n\nTime discipline:\n- Prefer cheap proofs before expensive steps (long builds/downloads/services).\n- Prefer local files and official libraries over scraping web UIs/config endpoints.\n\nFinish standard:\n- finish_success only with proof (acceptance check green + required artifacts present exactly where asserted).\n- Otherwise finish_failed with the last check, its output/error, what changed, and the single next verification step.";
@@ -160,31 +160,27 @@ fn default_auto_drive_cli_routing_entries() -> Vec<AutoDriveCliRoutingEntry> {
             description: AUTO_DRIVE_PRIMARY_ROUTING_DESCRIPTION.to_string(),
         },
         AutoDriveCliRoutingEntry {
-            model: AUTO_DRIVE_CLI_MODEL_SPARK.to_string(),
+            model: AUTO_DRIVE_CLI_MODEL_FAST.to_string(),
             reasoning_levels: vec![ReasoningEffort::High],
-            description: AUTO_DRIVE_SPARK_ROUTING_DESCRIPTION.to_string(),
+            description: AUTO_DRIVE_FAST_ROUTING_DESCRIPTION.to_string(),
         },
     ]
 }
 
 fn auto_drive_cli_routing_entries_for_auth(
-    auth_mode: Option<code_app_server_protocol::AuthMode>,
-    supports_pro_only_models: bool,
+    _auth_mode: Option<code_app_server_protocol::AuthMode>,
+    _supports_pro_only_models: bool,
 ) -> Vec<AutoDriveCliRoutingEntry> {
     let mut entries = vec![AutoDriveCliRoutingEntry {
         model: AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string(),
         reasoning_levels: vec![ReasoningEffort::High, ReasoningEffort::XHigh],
         description: AUTO_DRIVE_PRIMARY_ROUTING_DESCRIPTION.to_string(),
     }];
-    if auth_mode.is_some_and(code_app_server_protocol::AuthMode::is_chatgpt)
-        && supports_pro_only_models
-    {
-        entries.push(AutoDriveCliRoutingEntry {
-            model: AUTO_DRIVE_CLI_MODEL_SPARK.to_string(),
-            reasoning_levels: vec![ReasoningEffort::High],
-            description: AUTO_DRIVE_SPARK_ROUTING_DESCRIPTION.to_string(),
-        });
-    }
+    entries.push(AutoDriveCliRoutingEntry {
+        model: AUTO_DRIVE_CLI_MODEL_FAST.to_string(),
+        reasoning_levels: vec![ReasoningEffort::High],
+        description: AUTO_DRIVE_FAST_ROUTING_DESCRIPTION.to_string(),
+    });
     entries
 }
 
@@ -268,9 +264,6 @@ fn resolve_auto_drive_cli_routing_entries(
     available_models: &[String],
 ) -> Vec<AutoDriveCliRoutingEntry> {
     let mut entries = normalize_auto_drive_cli_routing_entries(&settings.model_routing_entries);
-    if !auth_mode.is_some_and(|mode| mode.is_chatgpt()) || !supports_pro_only_models {
-        entries.retain(|entry| !entry.model.eq_ignore_ascii_case(AUTO_DRIVE_CLI_MODEL_SPARK));
-    }
     entries.retain(|entry| {
         available_models
             .iter()
@@ -289,36 +282,6 @@ fn resolve_auto_drive_cli_routing_entries(
     }
 
     entries
-}
-
-fn spark_fallback_model(model: &str) -> Option<&'static str> {
-    if model.eq_ignore_ascii_case("gpt-5.3-codex-spark") {
-        Some("gpt-5.3-codex")
-    } else if model.eq_ignore_ascii_case("code-gpt-5.3-codex-spark") {
-        Some("code-gpt-5.3-codex")
-    } else {
-        None
-    }
-}
-
-fn is_usage_limit_stream_error_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("usage limit")
-        || lower.contains("usage_limit_reached")
-        || lower.contains("usage_not_included")
-}
-
-fn error_mentions_usage_limit(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        if let Some(code_err) = cause.downcast_ref::<CodexErr>() {
-            return match code_err {
-                CodexErr::UsageLimitReached(_) | CodexErr::UsageNotIncluded => true,
-                CodexErr::Stream(message, _, _) => is_usage_limit_stream_error_message(message),
-                _ => false,
-            };
-        }
-        false
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -1183,7 +1146,7 @@ mod tests {
             "status_title": "Fixing tests",
             "status_sent_to_user": "Running clear failing-test loops.",
             "cli_milestone_instruction": "Take the failing test from red to green and report the passing evidence.",
-            "cli_model": "gpt-5.3-codex-spark",
+            "cli_model": "gpt-5.4",
             "cli_reasoning_effort": "high"
         }"#;
 
@@ -1197,18 +1160,18 @@ mod tests {
         .expect("routing-enabled decision should parse");
 
         let cli = decision.cli.expect("cli action expected");
-        assert_eq!(cli.model_override.as_deref(), Some("gpt-5.3-codex-spark"));
+        assert_eq!(cli.model_override.as_deref(), Some(AUTO_DRIVE_CLI_MODEL_FAST));
         assert_eq!(cli.reasoning_effort_override, Some(ReasoningEffort::High));
     }
 
     #[test]
-    fn parse_decision_rejects_spark_when_not_allowed() {
+    fn parse_decision_rejects_fast_model_when_not_allowed() {
         let raw = r#"{
             "finish_status": "continue",
             "status_title": "Fixing tests",
             "status_sent_to_user": "Running clear failing-test loops.",
             "cli_milestone_instruction": "Take the failing test from red to green and report the passing evidence.",
-            "cli_model": "gpt-5.3-codex-spark",
+            "cli_model": "gpt-5.4",
             "cli_reasoning_effort": "high"
         }"#;
 
@@ -1223,7 +1186,7 @@ mod tests {
                 }],
             },
         )
-        .expect_err("non-pro routing should reject spark");
+        .expect_err("restricted routing should reject fast model");
 
         assert!(err.to_string().contains("unsupported cli_model"));
         assert!(err.to_string().contains(AUTO_DRIVE_CLI_MODEL_PRIMARY));
@@ -1236,7 +1199,7 @@ mod tests {
             "status_title": "Fixing tests",
             "status_sent_to_user": "Running clear failing-test loops.",
             "cli_milestone_instruction": "Take the failing test from red to green and report the passing evidence.",
-            "cli_model": "gpt-5.3-codex",
+            "cli_model": "gpt-5.5",
             "cli_reasoning_effort": "xhigh"
         }"#;
 
@@ -1259,25 +1222,25 @@ mod tests {
     }
 
     #[test]
-    fn auto_drive_cli_models_gates_spark_by_auth() {
+    fn auto_drive_cli_models_are_auth_independent() {
         let pro_models = auto_drive_cli_models_for_auth(Some(AuthMode::Chatgpt), true);
         assert!(pro_models.contains(&AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()));
-        assert!(pro_models.contains(&AUTO_DRIVE_CLI_MODEL_SPARK.to_string()));
+        assert!(pro_models.contains(&AUTO_DRIVE_CLI_MODEL_FAST.to_string()));
 
         let non_pro_models = auto_drive_cli_models_for_auth(Some(AuthMode::Chatgpt), false);
         assert!(non_pro_models.contains(&AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()));
-        assert!(!non_pro_models.contains(&AUTO_DRIVE_CLI_MODEL_SPARK.to_string()));
+        assert!(non_pro_models.contains(&AUTO_DRIVE_CLI_MODEL_FAST.to_string()));
 
         let api_key_models = auto_drive_cli_models_for_auth(Some(AuthMode::ApiKey), false);
         assert!(api_key_models.contains(&AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string()));
-        assert!(!api_key_models.contains(&AUTO_DRIVE_CLI_MODEL_SPARK.to_string()));
+        assert!(api_key_models.contains(&AUTO_DRIVE_CLI_MODEL_FAST.to_string()));
     }
 
     #[test]
     fn resolve_cli_routing_entries_falls_back_when_enabled_entries_missing() {
         let mut settings = AutoDriveSettings::default();
         settings.model_routing_entries = vec![AutoDriveModelRoutingEntry {
-            model: "gpt-5.3-codex".to_string(),
+            model: AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string(),
             enabled: false,
             reasoning_levels: vec![ReasoningEffort::High],
             description: "disabled".to_string(),
@@ -1285,7 +1248,7 @@ mod tests {
 
         let available_models = vec![
             AUTO_DRIVE_CLI_MODEL_PRIMARY.to_string(),
-            AUTO_DRIVE_CLI_MODEL_SPARK.to_string(),
+            AUTO_DRIVE_CLI_MODEL_FAST.to_string(),
         ];
 
         let entries = resolve_auto_drive_cli_routing_entries(
@@ -1296,7 +1259,7 @@ mod tests {
         );
 
         assert!(entries.iter().any(|entry| entry.model == AUTO_DRIVE_CLI_MODEL_PRIMARY));
-        assert!(entries.iter().any(|entry| entry.model == AUTO_DRIVE_CLI_MODEL_SPARK));
+        assert!(entries.iter().any(|entry| entry.model == AUTO_DRIVE_CLI_MODEL_FAST));
     }
 
     #[test]
@@ -1310,7 +1273,7 @@ mod tests {
                     description: String::new(),
                 },
                 AutoDriveModelRoutingEntry {
-                    model: "gpt-5.3-codex-experimental".to_string(),
+                    model: "gpt-5.5-experimental".to_string(),
                     enabled: true,
                     reasoning_levels: vec![ReasoningEffort::High],
                     description: String::new(),
@@ -1582,30 +1545,6 @@ mod tests {
             }
             other => panic!("expected fatal usage limit decision, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn usage_limit_stream_errors_are_detected() {
-        let err = anyhow!(CodexErr::Stream(
-            "[transport] Transport error: You've hit your usage limit. Try again in 5 days 47 minutes."
-                .to_string(),
-            None,
-            None,
-        ));
-        assert!(error_mentions_usage_limit(&err));
-    }
-
-    #[test]
-    fn spark_models_have_non_spark_fallback() {
-        assert_eq!(
-            spark_fallback_model("gpt-5.3-codex-spark"),
-            Some("gpt-5.3-codex")
-        );
-        assert_eq!(
-            spark_fallback_model("code-gpt-5.3-codex-spark"),
-            Some("code-gpt-5.3-codex")
-        );
-        assert!(spark_fallback_model("gpt-5.3-codex").is_none());
     }
 
     #[test]
@@ -3259,32 +3198,7 @@ fn request_decision_with_model(
     let cancel = cancel_token.clone();
     let mut rate_limit_switch_state = RateLimitSwitchState::default();
     let selected_model = Arc::new(Mutex::new(model_slug.to_string()));
-    let selected_model_for_retry = Arc::clone(&selected_model);
-    let mut did_usage_limit_model_fallback = false;
     let classify = |error: &anyhow::Error| {
-        if !did_usage_limit_model_fallback && error_mentions_usage_limit(error) {
-            let active_model = selected_model_for_retry
-                .lock()
-                .ok()
-                .map(|guard| guard.clone())
-                .unwrap_or_else(|| model_slug.to_string());
-            if let Some(fallback_model) = spark_fallback_model(&active_model) {
-                did_usage_limit_model_fallback = true;
-                if let Ok(mut guard) = selected_model_for_retry.lock() {
-                    *guard = fallback_model.to_string();
-                }
-                event_tx.send(AutoCoordinatorEvent::Action {
-                    message: format!(
-                        "Usage limit reached for {active_model}; retrying with {fallback_model}…"
-                    ),
-                });
-                return RetryDecision::RateLimited {
-                    wait_until: Instant::now(),
-                    reason: "usage limit reached; switched to non-spark model".to_string(),
-                };
-            }
-        }
-
         classify_model_error_with_auto_switch(client, &mut rate_limit_switch_state, event_tx, error)
     };
     let options = RetryOptions::with_defaults(retry_max_elapsed(time_budget_deadline));
