@@ -101,15 +101,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         description: "Default frontier model for complex coding, research, and real-world work.",
         enabled_by_default: true,
         aliases: &[
-            "code-gpt-5.3-codex",
-            "code-gpt-5.3-codex-spark",
-            "code-gpt-5.3-spark",
-            "code-gpt-5.2-codex",
             "gpt-5.5",
-            "gpt-5.3-codex",
-            "gpt-5.3-codex-spark",
-            "codex-spark",
-            "gpt-5.2-codex",
             "code-gpt-5.1-codex-max",
             "code-gpt-5.1-codex",
             "code-gpt-5-codex",
@@ -134,9 +126,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         description: "Highest-capacity GPT option for tricky reasoning; use when correctness matters most.",
         enabled_by_default: true,
         aliases: &[
-            "code-gpt-5.2",
             "gpt-5.4",
-            "gpt-5.2",
             "code-gpt-5.1",
             "code-gpt-5",
             "gpt-5.1",
@@ -324,8 +314,8 @@ fn dynamic_code_agent_spec(model: ManifestModel) -> Option<AgentModelSpec> {
     let _display_name = leak_str(model.display_name);
     let aliases = leak_str_slice(vec![model_slug]);
     let model_args = leak_str_slice(vec!["--model", model_slug]);
-    let pro_only = matches!(track, CodeAgentTrack::CodexSpark);
-    let is_frontline = !matches!(track, CodeAgentTrack::Mini | CodeAgentTrack::CodexSpark);
+    let pro_only = false;
+    let is_frontline = !matches!(track, CodeAgentTrack::Mini);
 
     Some(AgentModelSpec {
         slug,
@@ -348,7 +338,6 @@ enum CodeAgentTrack {
     Base,
     Mini,
     Codex,
-    CodexSpark,
 }
 
 fn code_agent_track(model: &str) -> Option<CodeAgentTrack> {
@@ -358,7 +347,7 @@ fn code_agent_track(model: &str) -> Option<CodeAgentTrack> {
     }
 
     if canonical.contains("codex-spark") {
-        Some(CodeAgentTrack::CodexSpark)
+        None
     } else if canonical.contains("codex") {
         Some(CodeAgentTrack::Codex)
     } else if canonical.ends_with("-mini") {
@@ -679,17 +668,6 @@ mod tests {
         let codex_direct = agent_model_spec("gpt-5.1-codex-max").expect("codex present");
         assert_eq!(codex_direct.slug, "code-gpt-5.5");
 
-        let codex_upgrade = agent_model_spec("gpt-5.2-codex").expect("upgrade alias present");
-        assert_eq!(codex_upgrade.slug, "code-gpt-5.5");
-
-        let codex_slug_upgrade =
-            agent_model_spec("code-gpt-5.2-codex").expect("slug upgrade alias present");
-        assert_eq!(codex_slug_upgrade.slug, "code-gpt-5.5");
-
-        let spark =
-            agent_model_spec("gpt-5.3-codex-spark").expect("spark alias for codex present");
-        assert_eq!(spark.slug, "code-gpt-5.5");
-
         let mini = agent_model_spec("gpt-5.1-codex-mini").expect("mini alias present");
         assert_eq!(mini.slug, "code-gpt-5.4-mini");
 
@@ -699,8 +677,10 @@ mod tests {
         let mid = agent_model_spec("gpt-5.1").expect("mid alias present");
         assert_eq!(mid.slug, "code-gpt-5.4");
 
-        let mid_upgrade = agent_model_spec("code-gpt-5.2").expect("mid upgrade alias present");
-        assert_eq!(mid_upgrade.slug, "code-gpt-5.4");
+        assert!(agent_model_spec("gpt-5.2-codex").is_none());
+        assert!(agent_model_spec("code-gpt-5.2-codex").is_none());
+        assert!(agent_model_spec("gpt-5.3-codex-spark").is_none());
+        assert!(agent_model_spec("code-gpt-5.2").is_none());
     }
 
     #[test]
@@ -712,23 +692,20 @@ mod tests {
                 .all(|spec| spec.slug != "code-gpt-5.3-codex"
                     && spec.slug != "code-gpt-5.3-codex-spark")
         );
-
-        assert_eq!(agent_model_spec("code-gpt-5.3-codex").unwrap().slug, "code-gpt-5.5");
-        assert_eq!(agent_model_spec("codex-spark").unwrap().slug, "code-gpt-5.5");
     }
 
     #[test]
-    fn filter_agent_model_names_retains_retired_aliases_as_gpt_5_5() {
+    fn filter_agent_model_names_keeps_unknown_selectors_for_custom_config() {
         let filtered = filter_agent_model_names_for_auth(
             vec![
                 "code-gpt-5.5".to_string(),
-                "gpt-5.3-codex-spark".to_string(),
+                "custom-model".to_string(),
             ],
             Some(AuthMode::ApiKey),
             false,
         );
 
-        assert_eq!(filtered, vec!["code-gpt-5.5", "gpt-5.3-codex-spark"]);
+        assert_eq!(filtered, vec!["code-gpt-5.5", "custom-model"]);
     }
 
     #[test]
@@ -747,12 +724,11 @@ mod tests {
 
     #[test]
     fn dynamic_agent_specs_skip_older_manifest_models() {
-        let gpt_5_2 = agent_model_spec("gpt-5.2").expect("gpt-5.2 should resolve via upgrade alias");
-        assert_eq!(gpt_5_2.slug, "code-gpt-5.4");
         assert!(
             enabled_agent_model_specs()
                 .iter()
                 .all(|spec| spec.slug != "code-gpt-5.2")
         );
+        assert!(agent_model_spec("gpt-5.2").is_none());
     }
 }

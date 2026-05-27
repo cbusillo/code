@@ -24,7 +24,7 @@ const GPT5_1_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::High,
 ];
 
-const GPT5_2_EFFORTS: &[ReasoningEffort] = &[
+const GPT5_FRONTIER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
@@ -92,14 +92,12 @@ pub fn supported_reasoning_efforts_for_model(model: &str) -> &'static [Reasoning
         return GPT5_1_EFFORTS;
     }
 
-    if lower.starts_with("gpt-5.2")
-        || lower.starts_with("test-gpt-5.2")
-        || lower.starts_with("gpt-5.3")
-        || lower.starts_with("test-gpt-5.3")
-        || lower.starts_with("gpt-5.5")
+    if lower.starts_with("gpt-5.5")
         || lower.starts_with("test-gpt-5.5")
+        || lower.starts_with("gpt-5.4")
+        || lower.starts_with("test-gpt-5.4")
     {
-        return GPT5_2_EFFORTS;
+        return GPT5_FRONTIER_EFFORTS;
     }
 
     if lower.starts_with("gpt-5-codex-mini") {
@@ -166,14 +164,14 @@ mod tests {
     }
 
     #[test]
-    fn gpt5_2_supports_xhigh() {
-        let clamped = clamp_reasoning_effort_for_model("gpt-5.2", ReasoningEffort::XHigh);
+    fn gpt5_5_supports_xhigh() {
+        let clamped = clamp_reasoning_effort_for_model("gpt-5.5", ReasoningEffort::XHigh);
         assert_eq!(clamped, ReasoningEffort::XHigh);
     }
 
     #[test]
-    fn gpt5_3_supports_xhigh() {
-        let clamped = clamp_reasoning_effort_for_model("gpt-5.3", ReasoningEffort::XHigh);
+    fn gpt5_4_supports_xhigh() {
+        let clamped = clamp_reasoning_effort_for_model("gpt-5.4", ReasoningEffort::XHigh);
         assert_eq!(clamped, ReasoningEffort::XHigh);
     }
 }
