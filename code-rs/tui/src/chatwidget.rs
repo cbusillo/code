@@ -23470,12 +23470,10 @@ Have we met every part of this goal and is there no further work to do?"#
     }
 
     fn curated_model_presets(presets: Vec<ModelPreset>) -> Vec<ModelPreset> {
-        const MODEL_PICKER_ORDER: [&str; 5] = [
+        const MODEL_PICKER_ORDER: [&str; 3] = [
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
-            "gpt-5.3-codex",
-            "gpt-5.3-codex-spark",
         ];
 
         let mut curated: Vec<ModelPreset> = MODEL_PICKER_ORDER
@@ -32739,14 +32737,14 @@ use code_core::protocol::OrderMeta;
             .filter(|preset| {
                 matches!(
                     preset.id.as_str(),
-                    "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex"
+                    "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"
                 )
             })
             .collect();
 
         let curated = ChatWidget::curated_model_presets(presets);
         let ids: Vec<&str> = curated.iter().map(|preset| preset.id.as_str()).collect();
-        assert_eq!(ids, vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"]);
+        assert_eq!(ids, vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]);
     }
 
     #[test]
@@ -32820,15 +32818,15 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
-    fn model_command_accepts_supported_non_curated_builtin_model() {
+    fn model_command_rejects_retired_builtin_model() {
         let _runtime_guard = enter_test_runtime_guard();
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
+        let original_model = chat.config.model.clone();
 
         chat.handle_model_command("gpt-5.2".to_string());
 
-        assert_eq!(chat.config.model, "gpt-5.2");
-        assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::Medium);
+        assert_eq!(chat.config.model, original_model);
     }
 
     #[test]
@@ -32839,14 +32837,14 @@ use code_core::protocol::OrderMeta;
 
         let remote_presets: Vec<ModelPreset> = builtin_model_presets(Some(AuthMode::ChatGPT), true)
             .into_iter()
-            .filter(|preset| preset.id == "gpt-5.5" || preset.id == "gpt-5.2")
+            .filter(|preset| preset.id == "gpt-5.5" || preset.id == "gpt-5.4")
             .collect();
         assert_eq!(remote_presets.len(), 2, "expected remote test presets");
 
         chat.update_model_presets(remote_presets, None);
-        chat.handle_model_command("gpt-5.2".to_string());
+        chat.handle_model_command("gpt-5.4".to_string());
 
-        assert_eq!(chat.config.model, "gpt-5.2");
+        assert_eq!(chat.config.model, "gpt-5.4");
         assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::Medium);
     }
 
@@ -34351,7 +34349,7 @@ use code_core::protocol::OrderMeta;
                     name: format!("Agent {idx}"),
                     status: "completed".to_string(),
                     batch_id: Some(format!("batch-{}", idx / 5)),
-                    model: Some("code-gpt-5.3-codex".to_string()),
+                    model: Some("code-gpt-5.5".to_string()),
                     last_progress: Some("done".to_string()),
                     result: Some("ok".to_string()),
                     error: None,
@@ -36615,7 +36613,7 @@ use code_core::protocol::OrderMeta;
 
         chat.auto_state.set_phase(AutoRunPhase::Active);
         chat.config.auto_drive.model_routing_enabled = true;
-        chat.config.model = "gpt-5.3-codex".to_string();
+        chat.config.model = "gpt-5.5".to_string();
         chat.config.model_reasoning_effort = ReasoningEffort::Medium;
 
         chat.auto_handle_decision(
@@ -36628,7 +36626,7 @@ use code_core::protocol::OrderMeta;
                 prompt: "Run the failing test and keep iterating until it passes.".to_string(),
                 context: None,
                 suppress_ui_context: false,
-                model_override: Some("gpt-5.3-codex-spark".to_string()),
+                model_override: Some("gpt-5.4".to_string()),
                 reasoning_effort_override: Some(ReasoningEffort::High),
             }),
             None,
@@ -36638,7 +36636,7 @@ use code_core::protocol::OrderMeta;
 
         chat.auto_submit_prompt();
 
-        assert_eq!(chat.config.model, "gpt-5.3-codex-spark");
+        assert_eq!(chat.config.model, "gpt-5.4");
         assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::High);
     }
 
@@ -36650,7 +36648,7 @@ use code_core::protocol::OrderMeta;
 
         chat.auto_state.set_phase(AutoRunPhase::Active);
         chat.config.auto_drive.model_routing_enabled = false;
-        chat.config.model = "gpt-5.3-codex".to_string();
+        chat.config.model = "gpt-5.5".to_string();
         chat.config.model_reasoning_effort = ReasoningEffort::Medium;
 
         chat.auto_handle_decision(
@@ -36663,7 +36661,7 @@ use code_core::protocol::OrderMeta;
                 prompt: "Run the failing test and keep iterating until it passes.".to_string(),
                 context: None,
                 suppress_ui_context: false,
-                model_override: Some("gpt-5.3-codex-spark".to_string()),
+                model_override: Some("gpt-5.4".to_string()),
                 reasoning_effort_override: Some(ReasoningEffort::High),
             }),
             None,
@@ -36673,7 +36671,7 @@ use code_core::protocol::OrderMeta;
 
         chat.auto_submit_prompt();
 
-        assert_eq!(chat.config.model, "gpt-5.3-codex");
+        assert_eq!(chat.config.model, "gpt-5.5");
         assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::Medium);
     }
 

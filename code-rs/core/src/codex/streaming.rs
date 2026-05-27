@@ -58,7 +58,7 @@ const AUTO_CONTEXT_FORCE_COMPACT_MARGIN_TOKENS: u64 = 20_000;
 const AUTO_CONTEXT_ESTIMATED_BYTES_PER_TOKEN: u64 = 4;
 const AUTO_CONTEXT_MIN_PROJECTED_TURN_GROWTH_TOKENS: u64 = 24_000;
 const AUTO_CONTEXT_MAX_PROJECTED_TURN_GROWTH_TOKENS: u64 = 180_000;
-const AUTO_CONTEXT_JUDGE_PRIMARY_MODEL: &str = "gpt-5.3-codex-spark";
+const AUTO_CONTEXT_JUDGE_PRIMARY_MODEL: &str = "gpt-5.5";
 const AUTO_CONTEXT_JUDGE_FALLBACK_MODEL: &str = "codex-mini-latest";
 const AUTO_CONTEXT_JUDGE_DEVELOPER_MESSAGE: &str = concat!(
     "You decide whether Code should compact conversation history before the next user turn. ",
