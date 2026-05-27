@@ -333,7 +333,7 @@ if (existsSync(binaryPath)) {
   console.error(`  npm install -g @just-every/code`);
   if (isWSL()) {
     console.error("Detected WSL. Install inside WSL (Ubuntu) separately:");
-    console.error("  npx -y @just-every/code@latest  (run inside WSL)");
+    console.error("  Install and run Code from inside WSL, not from Windows.");
     console.error("If installed globally on Windows, those binaries are not usable from WSL.");
   }
   process.exit(1);
@@ -355,7 +355,7 @@ if (!validation.ok) {
   }
   if (isWSL()) {
     console.error("Detected WSL. Ensure you install/run inside WSL, not Windows:");
-    console.error("  npx -y @just-every/code@latest  (inside WSL)");
+    console.error("  Use the supported Linux install path from inside WSL.");
   }
   process.exit(1);
 }
@@ -419,7 +419,7 @@ child.on("error", (err) => {
     }
     if (isWSL()) {
       console.error("Detected WSL. Windows binaries cannot be executed from WSL.");
-      console.error("Install inside WSL and run there: npx -y @just-every/code@latest");
+      console.error("Install and run Code from inside WSL using the Linux install path.");
     }
   } else {
     console.error(err);
