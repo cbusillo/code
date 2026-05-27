@@ -38,7 +38,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ -d /mnt ] && [ -w /mnt ]; then
+            CARGO_TARGET_DIR="/mnt/code-release-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+          fi
+          echo "CI_CLI_BIN=$CARGO_TARGET_DIR/dev-fast/code" >> "$GITHUB_ENV"
           mkdir -p "$CARGO_TARGET_DIR"
+          df -h "$CARGO_TARGET_DIR"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -86,7 +92,6 @@ jobs:
         shell: bash
         env:
           SKIP_CARGO_TESTS: "1"
-          CI_CLI_BIN: ${{ env.CARGO_TARGET_DIR }}/dev-fast/code
         run: bash scripts/ci-tests.sh
 
       - name: Drop dev-fast artifacts before workspace tests
