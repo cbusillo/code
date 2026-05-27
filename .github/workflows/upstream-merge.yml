@@ -357,16 +357,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cache npm (npx) downloads
-        if: steps.check_upstream.outputs.skip != 'true'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.npm
-          key: npm-cache-${{ runner.os }}-node20-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock') }}
-          restore-keys: |
-            npm-cache-${{ runner.os }}-node20-
-
       - name: Start local OpenAI proxy (no key to agent; verbose logging)
         if: steps.check_upstream.outputs.skip != 'true'
         id: openai_proxy
