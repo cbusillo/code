@@ -32845,7 +32845,7 @@ use code_core::protocol::OrderMeta;
         chat.handle_model_command("gpt-5.4".to_string());
 
         assert_eq!(chat.config.model, "gpt-5.4");
-        assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::Medium);
+        assert_eq!(chat.config.model_reasoning_effort, ReasoningEffort::XHigh);
     }
 
     #[test]

@@ -1329,12 +1329,11 @@ mod tests {
 
         let lines = buffer_body_lines(&buf, width, height);
         let visible = lines.join("\n");
-        let has_header = visible.contains("GPT-5.3-Codex");
-        let has_desc = visible.contains("Frontier agentic coding")
-            && visible.contains("25% faster than previous models.");
+        let has_header = visible.contains("GPT-5.5");
+        let has_desc = visible.contains("Frontier model for complex coding");
 
-        assert!(has_header);
-        assert!(has_desc);
+        assert!(has_header, "expected header in rendered model picker:\n{visible}");
+        assert!(has_desc, "expected description in rendered model picker:\n{visible}");
     }
 
     #[test]
@@ -1607,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_shows_unavailable_context_hint_for_unsupported_model() {
+    fn model_selection_shows_available_context_hint_for_supported_model() {
         let presets = vec![make_preset("gpt-5.4")];
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let view = ModelSelectionView::new(
@@ -1638,13 +1637,10 @@ mod tests {
 
         let lines = buffer_body_lines(&buf, width, height);
         assert!(
-            lines.iter().any(|line| line.contains("1M Context: unavailable")),
-            "expected unsupported model to show unavailable context, got:\n{}",
+            lines.iter().any(|line| line.contains("1M Context: auto")),
+            "expected supported model to show auto context, got:\n{}",
             lines.join("\n")
         );
-        assert!(lines.iter().any(|line| {
-            line.contains("Unavailable for this model. Saved settings apply automatically on supported models.")
-        }));
     }
 
     #[test]
