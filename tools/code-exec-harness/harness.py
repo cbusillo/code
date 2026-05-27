@@ -853,7 +853,7 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
 def run_scenario(path: Path, args: argparse.Namespace) -> int:
     scenario = load_json(path)
     name = scenario_name(path, scenario)
-    paths = make_paths(Path(args.output_root), name)
+    paths = make_paths(resolve_path(str(args.output_root), Path.cwd()), name)
     scenario_dir = path.parent.resolve()
     extra_roots = [resolve_path(value, Path.cwd()) for value in args.skill_root]
 
