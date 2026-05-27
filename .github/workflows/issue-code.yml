@@ -99,15 +99,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cache npm (npx) downloads
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.npm
-          key: npm-cache-${{ runner.os }}-node20-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock') }}
-          restore-keys: |
-            npm-cache-${{ runner.os }}-node20-
-
       - name: Cache ripgrep binary
         uses: actions/cache@v4
         with:
