@@ -4,6 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 code_rs_root="$repo_root/code-rs"
 release_bin="$code_rs_root/target/release/code"
+cargo_target_dir="${CARGO_TARGET_DIR:-$code_rs_root/target}"
+if [[ "$cargo_target_dir" != /* ]]; then
+	cargo_target_dir="$(pwd)/$cargo_target_dir"
+fi
+cargo_release_bin="$cargo_target_dir/release/code"
 
 resolve_code_version() {
 	node -p "require('$repo_root/codex-cli/package.json').version"
@@ -38,6 +43,13 @@ else
 fi
 trap - EXIT
 
+if [[ "$cargo_release_bin" != "$release_bin" ]]; then
+	mkdir -p "$(dirname "$release_bin")"
+	rm -f "$release_bin"
+	ln -s "$cargo_release_bin" "$release_bin"
+	echo "Updated release-bin symlink for external target dir: $release_bin -> $cargo_release_bin"
+fi
+
 path_code="$(command -v code || true)"
 if [[ -z "$path_code" ]]; then
 	echo "error: could not find 'code' on PATH" >&2
@@ -50,13 +62,19 @@ import os, sys
 print(os.path.realpath(sys.argv[1]))
 PY
 )"
+resolved_release_bin="$(
+	python3 - "$release_bin" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
 
 echo
 echo "PATH entry:   $path_code"
 echo "Resolves to:  $resolved_path"
 echo "Release bin:  $release_bin"
 
-if [[ "$resolved_path" != "$release_bin" ]]; then
+if [[ "$resolved_path" != "$release_bin" && "$resolved_path" != "$resolved_release_bin" ]]; then
 	echo "warning: PATH does not resolve to the freshly built binary" >&2
 fi
 
