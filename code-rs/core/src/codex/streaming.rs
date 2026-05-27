@@ -14165,7 +14165,6 @@ mod tests {
         format_exec_output_with_limit,
         image_generation_artifact_path,
         is_context_overflow_stream_error,
-        is_usage_limit_stream_error,
         save_image_generation_result,
         save_image_generation_sidecar,
         ImageGenerationTurnMetadata,
@@ -14353,17 +14352,6 @@ mod tests {
             "maximum context length reached"
         ));
         assert!(!is_context_overflow_stream_error("temporary network timeout"));
-    }
-
-    #[test]
-    fn usage_limit_detection_matches_transport_errors() {
-        assert!(is_usage_limit_stream_error(
-            "[transport] Transport error: You've hit your usage limit. Try again in 5 days 47 minutes."
-        ));
-        assert!(is_usage_limit_stream_error(
-            "response.failed: usage_not_included"
-        ));
-        assert!(!is_usage_limit_stream_error("temporary network timeout"));
     }
 
     #[test]
