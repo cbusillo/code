@@ -1,5 +1,5 @@
 name: 💻 CLI Bug
-description: Report an issue in the Codex CLI
+description: Report an issue in the Every Code CLI
 labels:
   - bug
 body:
@@ -10,7 +10,7 @@ body:
 
         If you need help or support using Code, and are not reporting a bug, please post on [code/discussions](https://github.com/just-every/code/discussions), where you can ask questions or engage with others on ideas for how to improve Code.
 
-        Make sure you are running the [latest](https://npmjs.com/package/@just-every/code) version of the Code CLI. The bug you are experiencing may already have been fixed.
+        Run `code update-check` to make sure you are using the latest GitHub Release build. The bug you are experiencing may already have been fixed.
 
   - type: input
     id: version
