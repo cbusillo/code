@@ -1522,50 +1522,8 @@ async fn doctor_main() -> anyhow::Result<()> {
     show_versions("code --version by path", &code_paths).await;
     show_versions("coder --version by path", &coder_paths).await;
 
-    // Detect Bun shims
-    let bun_home = env::var("BUN_INSTALL").ok().or_else(|| {
-        env::var("HOME").ok().map(|h| format!("{}/.bun", h))
-    });
-    if let Some(bun) = bun_home {
-        let bun_bin = format!("{}/bin", bun);
-        let bun_coder = format!("{}/coder", bun_bin);
-        if coder_paths.iter().any(|p| p == &bun_coder) {
-            println!("\nBun shim detected for 'coder': {}", bun_coder);
-            println!("Suggestion: remove old Bun global with: bun remove -g @just-every/code");
-        }
-        let bun_code = format!("{}/code", bun_bin);
-        if code_paths.iter().any(|p| p == &bun_code) {
-            println!("Bun shim detected for 'code': {}", bun_code);
-            println!("Suggestion: prefer 'coder' or remove Bun shim if it conflicts.");
-        }
-    }
-
-    // Detect Homebrew overshadow of VS Code
-    #[cfg(target_os = "macos")]
-    {
-        let brew_code = code_paths.iter().find(|p| p.contains("/homebrew/bin/code") || p.contains("/Cellar/code/"));
-        let vscode_code = code_paths.iter().find(|p| p.contains("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"));
-        if brew_code.is_some() && vscode_code.is_some() {
-            println!("\nHomebrew 'code' precedes VS Code CLI in PATH.");
-            println!("Suggestion: uninstall Homebrew formula 'code' (brew uninstall code) or reorder PATH so /usr/local/bin comes before /usr/local/homebrew/bin.");
-        }
-    }
-
-    // npm global hints
-    let npm_root = run_cmd("npm", &["root", "-g"]).await;
-    let npm_prefix = run_cmd("npm", &["prefix", "-g"]).await;
-    if !npm_root.is_empty() {
-        println!("\nnpm root -g: {}", npm_root);
-    }
-    if !npm_prefix.is_empty() {
-        println!("npm prefix -g: {}", npm_prefix);
-    }
-
-    println!("\nIf versions differ, remove older installs and keep one package manager:");
-    println!("  - Bun: bun remove -g @just-every/code");
-    println!("  - npm/pnpm: npm uninstall -g @just-every/code");
-    println!("  - Homebrew: brew uninstall code");
-    println!("  - Prefer using 'coder' to avoid conflicts with VS Code's 'code'.");
+    println!("\nIf versions differ, remove older PATH entries or reorder PATH so the intended Code binary appears first.");
+    println!("Run `code update-check` from the intended binary to inspect the current GitHub Release update source.");
 
     Ok(())
 }
