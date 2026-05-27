@@ -1474,7 +1474,7 @@ impl Config {
                 || agent.name.eq_ignore_ascii_case("cloud")
             {
                 tracing::warn!(
-                    "legacy agent name '{}' detected; update config to use model slugs (e.g., code-gpt-5.3-codex)",
+                    "legacy agent name '{}' detected; update config to use model slugs (e.g., code-gpt-5.5)",
                     agent.name
                 );
             }
@@ -3049,7 +3049,7 @@ model_verbosity = "high"
         assert_eq!(config.auto_drive.model_routing_entries.len(), 2);
         assert_eq!(
             config.auto_drive.model_routing_entries[0].model,
-            "gpt-5.3-codex"
+            "gpt-5.5"
         );
         assert_eq!(
             config.auto_drive.model_routing_entries[0].reasoning_levels,
@@ -3057,7 +3057,7 @@ model_verbosity = "high"
         );
         assert_eq!(
             config.auto_drive.model_routing_entries[1].model,
-            "gpt-5.3-codex-spark"
+            "gpt-5.4"
         );
         assert_eq!(
             config.auto_drive.model_routing_entries[1].reasoning_levels,
@@ -3079,7 +3079,7 @@ model_verbosity = "high"
                 description: "invalid model should be dropped".to_string(),
             },
             AutoDriveModelRoutingEntry {
-                model: " GPT-5.3-CODEX ".to_string(),
+                model: " GPT-5.5 ".to_string(),
                 enabled: true,
                 reasoning_levels: vec![
                     ReasoningEffort::XHigh,
@@ -3104,7 +3104,7 @@ model_verbosity = "high"
 
         assert_eq!(config.auto_drive.model_routing_entries.len(), 1);
         let entry = &config.auto_drive.model_routing_entries[0];
-        assert_eq!(entry.model, "gpt-5.3-codex");
+        assert_eq!(entry.model, "gpt-5.5");
         assert_eq!(
             entry.reasoning_levels,
             vec![ReasoningEffort::High, ReasoningEffort::XHigh]
@@ -3121,13 +3121,13 @@ model_verbosity = "high"
         auto_drive.model_routing_enabled = true;
         auto_drive.model_routing_entries = vec![
             AutoDriveModelRoutingEntry {
-                model: "gpt-5.3-codex".to_string(),
+                model: "gpt-5.5".to_string(),
                 enabled: false,
                 reasoning_levels: vec![ReasoningEffort::High],
                 description: String::new(),
             },
             AutoDriveModelRoutingEntry {
-                model: "gpt-5.3-codex-spark".to_string(),
+                model: "gpt-5.4".to_string(),
                 enabled: false,
                 reasoning_levels: vec![ReasoningEffort::High],
                 description: String::new(),
@@ -3453,7 +3453,7 @@ model_verbosity = "high"
 
         let mut cfg = fixture.cfg.clone();
         cfg.agents = vec![AgentConfig {
-            name: "code-gpt-5.3-codex".to_string(),
+            name: "code-gpt-5.5".to_string(),
             command: String::new(),
             args: Vec::new(),
             read_only: false,
@@ -3483,7 +3483,7 @@ model_verbosity = "high"
             .map(|agent| agent.name.to_ascii_lowercase())
             .collect();
 
-        assert!(enabled_names.contains("code-gpt-5.3-codex"));
+        assert!(enabled_names.contains("code-gpt-5.5"));
         assert!(enabled_names.contains("code-gpt-5.4"));
         assert!(enabled_names.contains("claude-sonnet-4.6"));
         assert!(enabled_names.contains("antigravity"));
@@ -3838,7 +3838,7 @@ context_mode = "1m"
         let code_home = TempDir::new()?;
         let cfg = toml::from_str::<ConfigToml>(
             r#"
-model = "gpt-5.3-codex"
+model = "gpt-5.4"
 context_mode = "1m"
 "#,
         )?;

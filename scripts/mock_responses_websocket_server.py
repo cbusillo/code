@@ -152,7 +152,7 @@ wire_api = "responses_websocket"
 env_key = "OPENAI_API_KEY_STAGING"
 
 [profiles.localapi_ws]
-model = "gpt-5.2"
+model = "gpt-5.5"
 model_provider = "localapi_ws"
 model_reasoning_effort = "medium"
 

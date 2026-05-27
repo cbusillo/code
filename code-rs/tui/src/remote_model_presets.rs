@@ -61,8 +61,13 @@ pub(crate) fn merge_remote_models(
 }
 
 fn model_info_to_preset(info: ModelInfo) -> ModelPreset {
-    let pro_only = info.slug.eq_ignore_ascii_case("gpt-5.3-codex-spark");
+    let retired_codex_model = matches!(
+        info.slug.as_str(),
+        "gpt-5.2" | "gpt-5.2-codex" | "gpt-5.3-codex" | "gpt-5.3-codex-spark"
+    );
+    let pro_only = false;
     let show_in_picker = info.visibility == ModelVisibility::List
+        && !retired_codex_model
         && !info.slug.eq_ignore_ascii_case("gpt-5.1-codex");
 
     let supported_text_verbosity = if info.support_verbosity {

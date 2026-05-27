@@ -1012,14 +1012,6 @@ impl ModelSelectionView {
             Some("Brings together flagship reasoning, coding, and tool use in a single frontier model.")
         } else if model.eq_ignore_ascii_case("gpt-5.4-mini") {
             Some("Smaller GPT-5.4 variant tuned for faster coding loops.")
-        } else if model.eq_ignore_ascii_case("gpt-5.3-codex") {
-            Some("Frontier agentic coding, 25% faster than previous models.")
-        } else if model.eq_ignore_ascii_case("gpt-5.3-codex-spark") {
-            Some("Fast codex variant tuned for responsive coding loops and smaller edits.")
-        } else if model.eq_ignore_ascii_case("gpt-5.2-codex") {
-            Some("Frontier agentic coding model.")
-        } else if model.eq_ignore_ascii_case("gpt-5.2") {
-            Some("Latest frontier model with improvements across knowledge, reasoning, and coding.")
         } else if model.eq_ignore_ascii_case("gpt-5.1-codex-max") {
             Some("Latest Codex-optimized flagship for deep and fast reasoning.")
         } else if model.eq_ignore_ascii_case("gpt-5.1-codex") {
@@ -1300,7 +1292,7 @@ mod tests {
 
     #[test]
     fn model_selection_keeps_model_header_visible_for_first_entry() {
-        let presets = vec!["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex"]
+        let presets = vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
             .into_iter()
             .map(make_preset)
             .collect();
@@ -1308,7 +1300,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut view = ModelSelectionView::new(
             presets,
-            "gpt-5.3-codex".to_string(),
+            "gpt-5.5".to_string(),
             ReasoningEffort::Low,
             None,
             None,
@@ -1384,8 +1376,6 @@ mod tests {
         ];
 
         let presets = vec![
-            make_preset("gpt-5.3-codex"),
-            make_preset("gpt-5.3-codex-spark"),
             gpt_5_4_mini,
             gpt_5_4,
             gpt_5_5,
@@ -1424,8 +1414,6 @@ mod tests {
                 "gpt-5.5".to_string(),
                 "gpt-5.4".to_string(),
                 "gpt-5.4-mini".to_string(),
-                "gpt-5.3-codex".to_string(),
-                "gpt-5.3-codex-spark".to_string(),
             ]
         );
 
@@ -1620,11 +1608,11 @@ mod tests {
 
     #[test]
     fn model_selection_shows_unavailable_context_hint_for_unsupported_model() {
-        let presets = vec![make_preset("gpt-5.3-codex")];
+        let presets = vec![make_preset("gpt-5.4")];
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let view = ModelSelectionView::new(
             presets,
-            "gpt-5.3-codex".to_string(),
+            "gpt-5.4".to_string(),
             ReasoningEffort::Low,
             None,
             Some(ContextMode::Auto),
@@ -1705,12 +1693,12 @@ mod tests {
 
     #[test]
     fn model_selection_keeps_first_follow_chat_entry_visible_on_compact_height() {
-        let presets = vec![make_preset("gpt-5.3-codex")];
+        let presets = vec![make_preset("gpt-5.4")];
 
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let view = ModelSelectionView::new(
             presets,
-            "gpt-5.3-codex".to_string(),
+            "gpt-5.4".to_string(),
             ReasoningEffort::Low,
             None,
             None,

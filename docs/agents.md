@@ -5,7 +5,7 @@ Every Code can launch external CLI “agents” and orchestrate them in multi-ag
 ## Agent configuration (`[[agents]]` in `config.toml`)
 ```toml
 [[agents]]
-name = "code-gpt-5.3-codex"       # slug or alias shown in pickers
+name = "code-gpt-5.5"       # slug or alias shown in pickers
 command = "coder"                # executable; defaults to name
 args = ["--foo", "bar"]          # base argv
 args_read_only = ["-s", "read-only", "-a", "never", "exec", "--skip-git-repo-check"]
@@ -19,7 +19,7 @@ instructions = "Preamble added to this agent’s prompt"
 Field recap: `name` (slug/alias), `command` (absolute paths ok), `args*` (RO/RW lists override base), `env`, `read_only`, `enabled`, optional `description` and `instructions`.
 
 ### Built-in defaults
-If no `[[agents]]` are configured, Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.4`, `code-gpt-5.4-mini`, `code-gpt-5.3-codex`, `code-gpt-5.3-codex-spark`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
+If no `[[agents]]` are configured, Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
 
 Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent path. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
 

@@ -2443,7 +2443,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 },
             }),
                 description: Some(
-                    "Optional array of agent/model selectors (e.g., ['code-gpt-5.4','claude-sonnet-4.6','code-gpt-5.3-codex-spark','antigravity']; antigravity launches agy and uses Antigravity's configured model)".to_string(),
+                    "Optional array of agent/model selectors (e.g., ['code-gpt-5.5','code-gpt-5.4','claude-sonnet-4.6','antigravity']; antigravity launches agy and uses Antigravity's configured model)".to_string(),
                 ),
         },
     );
@@ -2940,7 +2940,7 @@ mod tests {
 
     fn agent_with_command(command: &str) -> AgentConfig {
         AgentConfig {
-            name: "code-gpt-5.3-codex".to_string(),
+            name: "code-gpt-5.5".to_string(),
             command: command.to_string(),
             args: Vec::new(),
             read_only: false,
@@ -3004,7 +3004,7 @@ mod tests {
 
         let output = execute_model_with_permissions(
             "agent-test",
-            "code-gpt-5.3-codex",
+            "code-gpt-5.5",
             "ok",
             true,
             None,
@@ -3039,7 +3039,7 @@ mod tests {
 
         let output = execute_model_with_permissions(
             "agent-test",
-            "code-gpt-5.3-codex",
+            "code-gpt-5.5",
             "ok",
             true,
             None,
@@ -3390,7 +3390,7 @@ exit 0
                 Agent {
                     id,
                     batch_id: Some("batch-1".to_string()),
-                    model: "code-gpt-5.3-codex".to_string(),
+                    model: "code-gpt-5.5".to_string(),
                     name: Some("Prune Test".to_string()),
                     prompt: "prompt".repeat(256),
                     context: Some("ctx".repeat(256)),
@@ -3439,7 +3439,7 @@ exit 0
             Agent {
                 id: agent_id.clone(),
                 batch_id: Some("batch-compact".to_string()),
-                model: "code-gpt-5.3-codex".to_string(),
+                model: "code-gpt-5.5".to_string(),
                 name: Some("Finalize".to_string()),
                 prompt: "prompt".repeat(1024),
                 context: Some("context".repeat(1024)),
@@ -3505,7 +3505,7 @@ exit 0
                 Agent {
                     id,
                     batch_id: Some(batch_id.clone()),
-                    model: "code-gpt-5.3-codex".to_string(),
+                    model: "code-gpt-5.5".to_string(),
                     name: Some("Archive Test".to_string()),
                     prompt: "prompt".to_string(),
                     context: None,

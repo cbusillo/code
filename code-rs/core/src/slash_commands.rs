@@ -296,7 +296,7 @@ mod tests {
 
         let defaults = get_default_models();
         assert!(defaults.iter().any(|v| v == "code-gpt-5.4"));
-        assert!(defaults.iter().any(|v| v == "code-gpt-5.3-codex"));
+        assert!(defaults.iter().any(|v| v == "code-gpt-5.5"));
         assert!(!defaults.iter().any(|v| v == "qwen3-coder-plus"));
         assert!(!defaults.iter().any(|v| v == "gemini-3-flash-preview"));
         assert!(!defaults.iter().any(|v| v == "claude-sonnet-4.6"));
@@ -376,7 +376,7 @@ mod tests {
         assert!(plan_prompt.contains("final, comprehensive plan"));
         // Default agents list should include non-Codex providers when no [[agents]] configured
         assert!(plan_prompt.contains("code-gpt-5.4"));
-        assert!(plan_prompt.contains("code-gpt-5.3-codex"));
+        assert!(plan_prompt.contains("code-gpt-5.5"));
         assert!(!plan_prompt.contains("cloud-gpt-5.1-codex-max"));
 
         // Test /solve command
