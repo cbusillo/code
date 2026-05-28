@@ -2443,7 +2443,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 },
             }),
                 description: Some(
-                    "Optional array of agent/model selectors (e.g., ['code-gpt-5.5','code-gpt-5.4','claude-sonnet-4.6','antigravity']; antigravity launches agy and uses Antigravity's configured model)".to_string(),
+                    "Optional array of agent/model selector slugs (e.g., ['code-gpt-5.5','claude-sonnet-4.6','antigravity']; external CLI selectors use that tool's configured model)".to_string(),
                 ),
         },
     );
