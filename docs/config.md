@@ -22,7 +22,7 @@ Every Code supports several mechanisms for setting config values:
 The model that Code should use.
 
 ```toml
-model = "o3"  # overrides the default of "gpt-5.1-codex"
+model = "o3"  # overrides the default of "gpt-5.5"
 ```
 
 ## model_providers
@@ -294,7 +294,7 @@ Users can specify config values at multiple levels. Order of precedence is as fo
 1. custom command-line argument, e.g., `--model o3`
 2. as part of a profile, where the `--profile` is specified via a CLI (or in the config file itself)
 3. as an entry in `config.toml`, e.g., `model = "o3"`
-4. the default value that comes with Code CLI (i.e., Code CLI defaults to `gpt-5.1-codex`)
+4. the default value that comes with Code CLI (i.e., Code CLI defaults to `gpt-5.5`)
 
 ## model_reasoning_effort
 
@@ -1038,7 +1038,7 @@ Project commands appear in the TUI via `/cmd <name>` and run through the standar
 
 | Key | Type / Values | Notes |
 | --- | --- | --- |
-| `model` | string | Model to use (e.g., `gpt-5.1-codex`). |
+| `model` | string | Model to use (e.g., `gpt-5.5`). |
 | `model_provider` | string | Provider id from `model_providers` (default: `openai`). |
 | `model_context_window` | number | Context window tokens. |
 | `model_max_output_tokens` | number | Max output tokens. |
