@@ -929,6 +929,7 @@ mod tests {
         let skills = vec![SkillMetadata {
             name: "manual-skill".to_string(),
             description: "Manual skill".to_string(),
+            short_description: None,
             path: PathBuf::from("/tmp/manual-skill/SKILL.md"),
             scope: SkillScope::User,
             content: "manual body".to_string(),

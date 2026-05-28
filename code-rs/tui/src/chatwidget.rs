@@ -15929,6 +15929,7 @@ impl ChatWidget<'_> {
                         skills.push(code_core::protocol::Skill {
                             name: meta.name,
                             description: meta.description,
+                            short_description: meta.short_description,
                             path: meta.path,
                             scope,
                             content,

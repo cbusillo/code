@@ -24,7 +24,15 @@ struct SkillFrontmatter {
     name: String,
     description: String,
     #[serde(default)]
+    metadata: Option<SkillFrontmatterMetadata>,
+    #[serde(default)]
     policy: Option<SkillFrontmatterPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterMetadata {
+    #[serde(default, rename = "short-description")]
+    short_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +48,7 @@ const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
 const ADMIN_SKILLS_ROOT: &str = "/etc/codex/skills";
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
+const MAX_SHORT_DESCRIPTION_LEN: usize = 160;
 
 #[derive(Debug)]
 enum SkillParseError {
@@ -317,15 +326,28 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
 
     let name = sanitize_single_line(&parsed.name);
     let description = sanitize_single_line(&parsed.description);
+    let short_description = parsed
+        .metadata
+        .and_then(|metadata| metadata.short_description)
+        .map(|value| sanitize_single_line(&value))
+        .filter(|value| !value.is_empty());
 
     validate_field(&name, MAX_NAME_LEN, "name")?;
     validate_field(&description, MAX_DESCRIPTION_LEN, "description")?;
+    if let Some(short_description) = short_description.as_deref() {
+        validate_field(
+            short_description,
+            MAX_SHORT_DESCRIPTION_LEN,
+            "metadata.short-description",
+        )?;
+    }
 
     let resolved_path = normalize_path(path).unwrap_or_else(|_| path.to_path_buf());
 
     Ok(SkillMetadata {
         name,
         description,
+        short_description,
         path: resolved_path,
         scope,
         content: contents,
@@ -456,6 +478,26 @@ mod tests {
         skill_path
     }
 
+    fn write_skill_with_short_description_at(
+        skills_root: &Path,
+        dir: &str,
+        name: &str,
+        description: &str,
+        short_description: &str,
+    ) -> PathBuf {
+        let skill_dir = skills_root.join(dir);
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        let skill_path = skill_dir.join(SKILLS_FILENAME);
+        fs::write(
+            &skill_path,
+            format!(
+                "---\nname: {name}\ndescription: {description}\nmetadata:\n  short-description: {short_description}\n---\n\n# {name}\n"
+            ),
+        )
+        .expect("write skill file");
+        skill_path
+    }
+
     fn write_manual_skill_at(
         skills_root: &Path,
         dir: &str,
@@ -509,6 +551,86 @@ mod tests {
             })
         );
         assert!(!skill.allow_implicit_invocation());
+    }
+
+    #[test]
+    fn loads_optional_short_description_from_metadata_frontmatter() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_skill_with_short_description_at(
+            skills_root.path(),
+            "compact",
+            "compact-skill",
+            "Long model-visible trigger description",
+            "Compact UI summary",
+        );
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert_eq!(outcome.skills.len(), 1);
+        let skill = &outcome.skills[0];
+        assert_eq!(skill.path, normalized(&skill_path));
+        assert_eq!(skill.description, "Long model-visible trigger description");
+        assert_eq!(skill.short_description.as_deref(), Some("Compact UI summary"));
+    }
+
+    #[test]
+    fn ignores_empty_short_description_metadata() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        write_skill_with_short_description_at(
+            skills_root.path(),
+            "empty-compact",
+            "empty-compact-skill",
+            "Full description",
+            "   ",
+        );
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert_eq!(outcome.skills.len(), 1);
+        assert_eq!(outcome.skills[0].short_description, None);
+    }
+
+    #[test]
+    fn rejects_too_long_short_description_metadata() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        write_skill_with_short_description_at(
+            skills_root.path(),
+            "long-compact",
+            "long-compact-skill",
+            "Full description",
+            &"x".repeat(MAX_SHORT_DESCRIPTION_LEN + 1),
+        );
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("invalid metadata.short-description"),
+            "unexpected error: {:?}",
+            outcome.errors
+        );
     }
 
     #[test]

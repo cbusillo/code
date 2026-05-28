@@ -8,6 +8,9 @@ use ts_rs::TS;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub short_description: Option<String>,
     pub path: PathBuf,
     pub scope: SkillScope,
     pub content: String,

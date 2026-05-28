@@ -461,6 +461,7 @@ mod tests {
         let skills = vec![SkillMetadata {
             name: "demo".to_string(),
             description: "Demo skill".to_string(),
+            short_description: None,
             path: skill_path,
             scope: SkillScope::User,
             content: String::new(),

@@ -168,8 +168,14 @@ impl SkillsSettingsView {
             };
             let name_span = Span::styled(format!("{arrow} {name}", name = skill.name), name_style);
             let scope_span = Span::styled(scope_text, Style::default().fg(colors::text_dim()));
+            let display_description = skill
+                .short_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(skill.description.as_str());
             let desc_span = Span::styled(
-                format!("  {desc}", desc = skill.description),
+                format!("  {display_description}"),
                 Style::default().fg(colors::text_dim()),
             );
             lines.push(Line::from(vec![name_span, scope_span, desc_span]));
@@ -421,6 +427,7 @@ impl SkillsSettingsView {
 
         let description = frontmatter_value(&body, "description")
             .unwrap_or_else(|| "No description".to_string());
+        let short_description = frontmatter_metadata_short_description(&body);
         let display_name = frontmatter_value(&body, "name").unwrap_or_else(|| name.clone());
 
         let mut updated = self.skills.clone();
@@ -428,6 +435,7 @@ impl SkillsSettingsView {
             name: display_name,
             path,
             description,
+            short_description,
             scope: SkillScope::User,
             content: body.clone(),
         };
@@ -526,4 +534,94 @@ fn frontmatter_value(body: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn frontmatter_metadata_short_description(body: &str) -> Option<String> {
+    let frontmatter = extract_frontmatter(body)?;
+    let mut in_metadata = false;
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            in_metadata = trimmed == "metadata:";
+            continue;
+        }
+        if in_metadata {
+            let child = trimmed;
+            if let Some(rest) = child.strip_prefix("short-description:") {
+                let value = rest.trim().trim_matches('"');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use code_protocol::skills::SkillScope;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    fn skill(name: &str, description: &str, short_description: Option<&str>) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: description.to_string(),
+            short_description: short_description.map(str::to_string),
+            path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            scope: SkillScope::User,
+            content: String::new(),
+        }
+    }
+
+    #[test]
+    fn list_prefers_short_description_when_present() {
+        let (tx, _rx) = mpsc::channel();
+        let view = SkillsSettingsView::new(
+            vec![skill(
+                "compact",
+                "Long model-visible trigger description",
+                Some("Compact UI summary"),
+            )],
+            AppEventSender::new(tx),
+        );
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
+
+        view.render(Rect::new(0, 0, 80, 5), &mut buf);
+        let rendered = buf_to_string(&buf);
+
+        assert!(rendered.contains("Compact UI summary"), "{rendered}");
+        assert!(
+            !rendered.contains("Long model-visible trigger description"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn reads_nested_frontmatter_short_description() {
+        let body = "---\nname: Demo\ndescription: Full trigger\nmetadata:\n  short-description: Compact summary\n---\nBody";
+
+        assert_eq!(
+            frontmatter_metadata_short_description(body).as_deref(),
+            Some("Compact summary")
+        );
+    }
+
+    fn buf_to_string(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut lines = Vec::new();
+        for y in area.y..area.y + area.height {
+            let mut line = String::new();
+            for x in area.x..area.x + area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines.join("\n")
+    }
 }
