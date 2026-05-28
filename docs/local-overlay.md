@@ -86,22 +86,35 @@ repo-owned and predictable:
 just local-remove-homebrew-code-link
 ```
 
-## Session Exit Cleanup
+## Local Cache Cleanup
 
-Before leaving a local work session, reclaim rebuildable artifacts:
+During active local work, keep rebuildable caches bounded while preserving the
+currently wired fast-build cache bucket:
+
+```sh
+just local-cleanup-space --apply --keep-current-fast-cache
+```
+
+This is the normal cleanup path when `.code/working/_target-cache` grows large.
+It removes stale per-branch `./build-fast.sh` buckets and local debug artifacts,
+but keeps the active `code-rs/target/dev-fast/code` cache warm for the next
+build.
+
+When intentionally ending a local work session and accepting a colder next
+`./build-fast.sh`, reclaim all rebuildable artifacts:
 
 ```sh
 just local-cleanup-space --apply
 ```
 
-The cleanup is intentionally aggressive: it removes `codex-rs/target`, legacy
-root targets, `code-rs` debug/dev-fast artifacts, all `./build-fast.sh` target
-cache buckets, and release dependency cache. It preserves
-`code-rs/target/release/code`, which is the PATH-resolved local binary built by
+The cold cleanup is intentionally aggressive: it removes `codex-rs/target`,
+legacy root targets, `code-rs` debug/dev-fast artifacts, all `./build-fast.sh`
+target cache buckets, and release dependency cache. It preserves
+`code-rs/target/release/code`, the PATH-resolved local binary built by
 `just local-code-rebuild`.
 
-Run without `--apply` to preview deletions. Use `--keep-current-fast-cache` or
-`--keep-release-cache` only when you intentionally want a warmer next build.
+Run without `--apply` to preview deletions. Use `--keep-release-cache` only when
+you intentionally want to preserve release dependency cache as well.
 
 Then push the product branch to `origin`, open or merge the release metadata PR,
 and monitor the `Release` workflow:
