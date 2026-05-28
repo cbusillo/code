@@ -4,7 +4,8 @@
   "license": "Apache-2.0",
   "description": "Lightweight coding agent that runs in your terminal - fork of OpenAI Codex",
   "bin": {
-    "coder": "bin/coder.js"
+    "coder": "bin/coder.js",
+    "codex": "bin/coder.js"
   },
   "type": "module",
   "engines": {
