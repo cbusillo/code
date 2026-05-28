@@ -158,6 +158,31 @@ model_provider = "ollama"
 model = "mistral"
 ```
 
+## skills
+
+Skills are discovered by default and included in the model-visible skills block
+unless a skill or config rule marks them manual-only.
+
+```toml
+[skills]
+include_instructions = true
+
+[[skills.config]]
+name = "release-notes"
+enabled = false
+
+[[skills.config]]
+path = "/Users/me/.code/skills/archive/SKILL.md"
+enabled = false
+```
+
+`enabled = false` keeps a skill installed and visible in skill listing surfaces,
+but removes it from implicit skill routing and the default skills prompt. Explicit
+turn requests such as `$release-notes` can still load the skill body.
+
+Set `include_instructions = false` to omit the default skills prompt block for
+all skills while keeping discovery available.
+
 ## approval_policy
 
 Determines when the user should be prompted to approve whether Code can execute a command:
