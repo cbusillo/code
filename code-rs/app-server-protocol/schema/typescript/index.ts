@@ -24,6 +24,8 @@ export type { AuthMode } from "./AuthMode";
 export type { AuthStatusChangeNotification } from "./AuthStatusChangeNotification";
 export type { AutoContextCheckEvent } from "./AutoContextCheckEvent";
 export type { AutoContextPhase } from "./AutoContextPhase";
+export type { AutomationOrigin } from "./AutomationOrigin";
+export type { AutomationTriggerKind } from "./AutomationTriggerKind";
 export type { BackgroundEventEvent } from "./BackgroundEventEvent";
 export type { ByteRange } from "./ByteRange";
 export type { CallToolResult } from "./CallToolResult";

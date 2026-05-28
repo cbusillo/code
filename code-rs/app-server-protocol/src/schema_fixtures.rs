@@ -55,6 +55,7 @@ pub fn write_schema_fixtures_with_options(
             ..crate::GenerateTsOptions::default()
         },
     )?;
+    normalize_typescript_tree(&typescript_out_dir)?;
     crate::generate_json_with_experimental(&json_out_dir, options.experimental_api)?;
 
     Ok(())
@@ -85,10 +86,58 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>> {
         // fixture test is platform-independent.
         let text = String::from_utf8(bytes)
             .with_context(|| format!("expected UTF-8 TypeScript in {}", path.display()))?;
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = normalize_typescript_text(&text);
         return Ok(text.into_bytes());
     }
     Ok(bytes)
+}
+
+fn normalize_typescript_tree(root: &Path) -> Result<()> {
+    for rel in collect_type_script_paths(root)? {
+        let path = root.join(rel);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let normalized = normalize_typescript_text(&text);
+        std::fs::write(&path, normalized)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn normalize_typescript_text(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut normalized = text
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
+}
+
+fn collect_type_script_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("failed to read dir {}", dir.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read dir entry in {}", dir.display()))?;
+            let path = entry.path();
+            let metadata = std::fs::metadata(&path)
+                .with_context(|| format!("failed to stat {}", path.display()))?;
+            if metadata.is_dir() {
+                stack.push(path);
+            } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "ts") {
+                paths.push(path.strip_prefix(root)?.to_path_buf());
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 fn canonicalize_json(value: &Value) -> Value {
@@ -234,4 +283,3 @@ mod tests {
         assert_eq!(canonicalize_json(&value), expected);
     }
 }
-

@@ -866,6 +866,7 @@ fn seed_session(harness: &mut ChatWidgetHarness) {
             model: "gpt-5.1-codex".into(),
             history_log_id: 0,
             history_entry_count: 0,
+            automation_origin: None,
         }),
         order: None,
     });
