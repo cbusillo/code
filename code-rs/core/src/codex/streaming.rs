@@ -1292,7 +1292,7 @@ pub(super) async fn submission_loop(
                     .map(|skill| code_protocol::protocol::SkillMetadata {
                         name: skill.name,
                         description: skill.description,
-                        short_description: None,
+                        short_description: skill.short_description,
                         interface: None,
                         dependencies: None,
                         path: skill.path,

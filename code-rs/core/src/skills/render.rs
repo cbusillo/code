@@ -57,6 +57,7 @@ mod tests {
         SkillMetadata {
             name: name.to_string(),
             description: format!("{name} description"),
+            short_description: None,
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             scope: SkillScope::User,
             content: String::new(),
@@ -83,5 +84,17 @@ mod tests {
         let rendered = render_skills_section(&[skill("manual", Some(false))]);
 
         assert!(rendered.is_none());
+    }
+
+    #[test]
+    fn render_skills_section_uses_full_description_for_model_context() {
+        let mut skill = skill("compact", None);
+        skill.description = "full trigger description".to_string();
+        skill.short_description = Some("compact UI summary".to_string());
+
+        let rendered = render_skills_section(&[skill]).expect("skill should render");
+
+        assert!(rendered.contains("- compact: full trigger description"));
+        assert!(!rendered.contains("compact UI summary"));
     }
 }
