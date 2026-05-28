@@ -38,13 +38,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo_target_dir="$CARGO_TARGET_DIR"
           if [ -d /mnt ] && [ -w /mnt ]; then
-            CARGO_TARGET_DIR="/mnt/code-release-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+            cargo_target_dir="/mnt/code-release-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
-          echo "CI_CLI_BIN=$CARGO_TARGET_DIR/dev-fast/code" >> "$GITHUB_ENV"
-          mkdir -p "$CARGO_TARGET_DIR"
-          df -h "$CARGO_TARGET_DIR"
+          echo "CARGO_TARGET_DIR=$cargo_target_dir" >> "$GITHUB_ENV"
+          echo "CI_CLI_BIN=$cargo_target_dir/dev-fast/code" >> "$GITHUB_ENV"
+          mkdir -p "$cargo_target_dir"
+          df -h "$cargo_target_dir"
 
       - name: Checkout code
         uses: actions/checkout@v4
