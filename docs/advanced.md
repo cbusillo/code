@@ -43,12 +43,12 @@ code exec resume 7f9f9a2e-1b3c-4c7a-9b0e-123456789abc "continue the task"
 
 Notes:
 
-- When using `--last`, Code picks the newest recorded session; if none exist, it behaves like starting fresh.
+- When using `--last`, Every Code picks the newest recorded session; if none exist, it behaves like starting fresh.
 - Resuming appends new events to the existing session file and maintains the same conversation id.
 
 ## Tracing / verbose logging
 
-Because Code is written in Rust, it honors the `RUST_LOG` environment variable to configure its logging behavior.
+Because Every Code is written in Rust, it honors the `RUST_LOG` environment variable to configure its logging behavior.
 
 When you run the TUI with `--debug`, log messages are written to `~/.code/debug_logs/codex-tui.log`, so you can leave the following running in a separate terminal to monitor log messages as they are written:
 
@@ -74,7 +74,7 @@ subdirectories such as:
 Tags become nested path components, so custom helpers appear alongside the
 existing timestamped filenames.
 
-Without `--debug`, Code only writes critical crash/error logs to
+Without `--debug`, Every Code only writes critical crash/error logs to
 `~/.code/debug_logs/critical.log.*`; routine log output is suppressed.
 
 By comparison, the non-interactive mode (`code exec`) defaults to `RUST_LOG=error`, but messages are printed inline, so there is no need to monitor a separate file.
@@ -83,7 +83,7 @@ See the Rust documentation on [`RUST_LOG`](https://docs.rs/env_logger/latest/env
 
 ## Model Context Protocol (MCP)
 
-The Code CLI can be configured to leverage MCP servers by defining an [`mcp_servers`](./config.md#mcp_servers) section in `~/.code/config.toml` (Code will also read a legacy `~/.codex/config.toml`). It is intended to mirror how tools such as Claude and Cursor define `mcpServers` in their respective JSON config files, though the Code format is slightly different since it uses TOML rather than JSON, e.g.:
+The Every Code CLI can be configured to leverage MCP servers by defining an [`mcp_servers`](./config.md#mcp_servers) section in `~/.code/config.toml` (Every Code will also read a legacy `~/.codex/config.toml`). It is intended to mirror how tools such as Claude and Cursor define `mcpServers` in their respective JSON config files, though the Every Code format is slightly different since it uses TOML rather than JSON, e.g.:
 
 ```toml
 # IMPORTANT: the top-level key is `mcp_servers` rather than `mcpServers`.
@@ -95,4 +95,4 @@ env = { "API_KEY" = "value" }
 
 ## Using Code as an MCP Server
 > [!TIP]
-> It is somewhat experimental, but the Code CLI can also be run as an MCP _server_ via `code mcp`. If you launch it with an MCP client such as `npx @modelcontextprotocol/inspector code mcp` and send it a `tools/list` request, you will see that there is only one tool, `code`, that accepts a grab-bag of inputs, including a catch-all `config` map for anything you might want to override. Feel free to play around with it and provide feedback via GitHub issues. 
+> It is somewhat experimental, but the Every Code CLI can also be run as an MCP _server_ via `code mcp`. If you launch it with an MCP client such as `npx @modelcontextprotocol/inspector code mcp` and send it a `tools/list` request, you will see that there is only one tool, `code`, that accepts a grab-bag of inputs, including a catch-all `config` map for anything you might want to override. Feel free to play around with it and provide feedback via GitHub issues.

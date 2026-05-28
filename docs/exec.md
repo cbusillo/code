@@ -6,13 +6,13 @@ Use Every Code in non-interactive mode to automate common workflows.
 code exec "count the total number of lines of code in this project"
 ```
 
-In non-interactive mode, Code does not ask for command or edit approvals. By default it runs in `read-only` mode, so it cannot edit files or run commands that require network access.
+In non-interactive mode, Every Code does not ask for command or edit approvals. By default it runs in `read-only` mode, so it cannot edit files or run commands that require network access.
 
 Use `code exec --full-auto` to allow file edits. Use `code exec --sandbox danger-full-access` to allow edits and networked commands.
 
 ### Default output mode
 
-By default, Code streams its activity to stderr and only writes the final message from the agent to stdout. This makes it easier to pipe `code exec` into another tool without extra filtering.
+By default, Every Code streams its activity to stderr and only writes the final message from the agent to stdout. This makes it easier to pipe `code exec` into another tool without extra filtering.
 
 To write the output of `code exec` to a file, in addition to using a shell redirect like `>`, there is also a dedicated flag to specify an output file: `-o`/`--output-last-message`.
 
@@ -83,7 +83,7 @@ Combine `--output-schema` with `-o` to only print the final JSON output. You can
 
 ### Git repository requirement
 
-Code requires a Git repository to avoid destructive changes. To disable this check, use `code exec --skip-git-repo-check`.
+Every Code requires a Git repository to avoid destructive changes. To disable this check, use `code exec --skip-git-repo-check`.
 
 ### Resuming non-interactive sessions
 
@@ -94,7 +94,7 @@ code exec "Review the change, look for use-after-free issues"
 code exec resume --last "Fix use-after-free issues"
 ```
 
-Only the conversation context is preserved; you must still provide flags to customize Code behavior.
+Only the conversation context is preserved; you must still provide flags to customize Every Code behavior.
 
 ```shell
 code exec --model gpt-5.1-codex --json "Review the change, look for use-after-free issues"

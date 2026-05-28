@@ -2,20 +2,20 @@
 
 > **Warning:** This is an experimental and non-stable feature. If you depend on it, please expect breaking changes over the coming weeks and understand that there is currently no guarantee that this works well. Use at your own risk!
 
-Code can automatically discover reusable "skills" you keep on disk. A skill is a small bundle with a name, description, and optional body of instructions you can open when needed. Code injects only implicitly invokable skill metadata into runtime context; the body stays on disk.
+Every Code can automatically discover reusable "skills" you keep on disk. A skill is a small bundle with a name, description, and optional body of instructions you can open when needed. Every Code injects only implicitly invokable skill metadata into runtime context; the body stays on disk.
 
 ## Enable skills
 
 Skills are behind the experimental `skills` feature flag and are enabled by default.
 
-- Disable in config (preferred): add the following to `$CODE_HOME/config.toml` (usually `~/.code/config.toml`) and restart Code:
+- Disable in config (preferred): add the following to `$CODE_HOME/config.toml` (usually `~/.code/config.toml`) and restart Every Code:
 
   ```toml
   [features]
   skills = false
   ```
 
-- Override for a single run when disabled in config: launch Code with `code --enable skills`.
+- Override for a single run when disabled in config: launch Every Code with `code --enable skills`.
 
 ## Where skills live
 
@@ -46,7 +46,7 @@ Skills are behind the experimental `skills` feature flag and are enabled by defa
 ## Loading and rendering
 
 - Loaded once at startup.
-- If valid implicitly invokable skills exist, Code appends a runtime-only `## Skills` section after `AGENTS.md`, one bullet per skill: `- <name>: <description> (file: /absolute/path/to/SKILL.md)`.
+- If valid implicitly invokable skills exist, Every Code appends a runtime-only `## Skills` section after `AGENTS.md`, one bullet per skill: `- <name>: <description> (file: /absolute/path/to/SKILL.md)`.
 - If no valid skills exist, the section is omitted. On-disk files are never modified.
 
 ## Using skills
@@ -78,7 +78,7 @@ Skills are behind the experimental `skills` feature flag and are enabled by defa
    ```
 
 3. Keep frontmatter fields within their limits; avoid newlines in single-line fields.
-4. Restart Code to load the new skill.
+4. Restart Every Code to load the new skill.
 
 ## Example
 
