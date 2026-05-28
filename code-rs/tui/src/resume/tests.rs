@@ -30,6 +30,7 @@ fn write_event_only_session(path: &Path, cwd: &Path) {
         originator: "resume-test".to_string(),
         cli_version: "0.0.0-test".to_string(),
         source: SessionSource::Cli,
+        automation_origin: None,
         model_provider: None,
         base_instructions: None,
         dynamic_tools: None,

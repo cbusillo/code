@@ -1678,6 +1678,7 @@ where
             originator: "test".to_string(),
             cli_version: "0.0.0-test".to_string(),
             source,
+            automation_origin: None,
             model_provider: None,
             base_instructions: None,
             dynamic_tools: None,

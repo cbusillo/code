@@ -147,6 +147,75 @@
       ],
       "type": "string"
     },
+    "AutomationOrigin": {
+      "properties": {
+        "actor": {
+          "description": "Actor reported by the source system as applying the trigger.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "description": "GitHub event delivery id, webhook id, or local request id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issue_number": {
+          "description": "GitHub issue or pull request number associated with the trigger.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/AutomationTriggerKind"
+        },
+        "label": {
+          "description": "Label that triggered automation, such as `every-code`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "description": "Repository name in `owner/repo` form, when the trigger came from GitHub.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Tool, worker, or integration that launched this automated session.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Direct URL to the triggering issue, PR, event, or worker record.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "AutomationTriggerKind": {
+      "enum": [
+        "github_label",
+        "other"
+      ],
+      "type": "string"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -892,6 +961,17 @@
                 }
               ],
               "description": "When to escalate for approval for execution"
+            },
+            "automation_origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AutomationOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured metadata for automated sessions, if the launcher provided it."
             },
             "cwd": {
               "description": "Working directory that should be treated as the *root* of the session.",
@@ -6148,6 +6228,17 @@
             }
           ],
           "description": "When to escalate for approval for execution"
+        },
+        "automation_origin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured metadata for automated sessions, if the launcher provided it."
         },
         "cwd": {
           "description": "Working directory that should be treated as the *root* of the session.",

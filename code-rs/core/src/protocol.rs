@@ -41,6 +41,7 @@ pub use code_protocol::protocol::ReviewFinding;
 pub use code_protocol::protocol::ReviewLineRange;
 pub use code_protocol::protocol::ReviewOutputEvent;
 pub use code_protocol::protocol::{ReviewContextMetadata, ReviewRequest};
+pub use code_protocol::protocol::AutomationOrigin;
 pub use code_protocol::protocol::GitInfo;
 pub use code_protocol::protocol::ImageGenerationBeginEvent;
 pub use code_protocol::protocol::ImageGenerationEndEvent;
@@ -1563,6 +1564,10 @@ pub struct SessionConfiguredEvent {
 
     /// Current number of entries in the history log.
     pub history_entry_count: usize,
+
+    /// Structured metadata for automated sessions, if the launcher provided it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_origin: Option<AutomationOrigin>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1732,12 +1737,13 @@ mod tests {
         let event = Event {
             id: "1234".to_string(),
             event_seq: 0,
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
-                session_id,
-                model: "codex-mini-latest".to_string(),
-                history_log_id: 0,
-                history_entry_count: 0,
-            }),
+                msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                    session_id,
+                    model: "codex-mini-latest".to_string(),
+                    history_log_id: 0,
+                    history_entry_count: 0,
+                    automation_origin: None,
+                }),
             order: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
@@ -1745,5 +1751,37 @@ mod tests {
             serialized,
             r#"{"id":"1234","event_seq":0,"msg":{"type":"session_configured","session_id":"67e55044-10b1-426f-9247-bb680e5fe0c8","model":"codex-mini-latest","history_log_id":0,"history_entry_count":0}}"#
         );
+    }
+
+    #[test]
+    fn serialize_session_configured_with_automation_origin() {
+        let session_id: Uuid = uuid::uuid!("67e55044-10b1-426f-9247-bb680e5fe0c8");
+        let event = Event {
+            id: "1234".to_string(),
+            event_seq: 0,
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id,
+                model: "gpt-5.5".to_string(),
+                history_log_id: 0,
+                history_entry_count: 0,
+                automation_origin: Some(AutomationOrigin {
+                    kind: code_protocol::protocol::AutomationTriggerKind::GithubLabel,
+                    source: Some("launchplane".to_string()),
+                    repository: Some("cbusillo/code".to_string()),
+                    issue_number: Some(160),
+                    label: Some("every-code".to_string()),
+                    event_id: Some("delivery-123".to_string()),
+                    actor: Some("cbusillo".to_string()),
+                    url: Some("https://github.com/cbusillo/code/issues/160".to_string()),
+                }),
+            }),
+            order: None,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["msg"]["automation_origin"]["kind"], "github_label");
+        assert_eq!(value["msg"]["automation_origin"]["source"], "launchplane");
+        assert_eq!(value["msg"]["automation_origin"]["repository"], "cbusillo/code");
+        assert_eq!(value["msg"]["automation_origin"]["issue_number"], 160);
+        assert_eq!(value["msg"]["automation_origin"]["label"], "every-code");
     }
 }

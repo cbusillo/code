@@ -48,6 +48,7 @@ use crate::config_types::ContextMode;
 use crate::config_types::ServiceTier;
 use crate::project_features::{load_project_commands, ProjectCommand, ProjectHooks};
 use code_app_server_protocol::AuthMode;
+use code_protocol::protocol::AutomationOrigin;
 use code_protocol::config_types::SandboxMode;
 use code_protocol::dynamic_tools::DynamicToolSpec;
 use std::time::Instant;
@@ -65,7 +66,30 @@ mod validation;
 use defaults::{default_responses_originator, default_review_model, default_true_local};
 
 const OPENAI_BASE_URL_ENV_VAR: &str = "OPENAI_BASE_URL";
+const AUTOMATION_ORIGIN_ENV_VAR: &str = "CODE_AUTOMATION_ORIGIN";
 const RESERVED_MODEL_PROVIDER_IDS: [&str; 2] = ["openai", "oss"];
+
+fn load_automation_origin_from_env() -> Option<AutomationOrigin> {
+    let raw = std::env::var(AUTOMATION_ORIGIN_ENV_VAR).ok()?;
+    parse_automation_origin(&raw)
+}
+
+fn parse_automation_origin(raw: &str) -> Option<AutomationOrigin> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    match serde_json::from_str::<AutomationOrigin>(trimmed) {
+        Ok(origin) => Some(origin),
+        Err(err) => {
+            tracing::warn!(
+                "ignoring invalid automation origin metadata: {err}"
+            );
+            None
+        }
+    }
+}
 
 fn validate_reserved_model_provider_ids(
     model_providers: &HashMap<String, ModelProviderInfo>,
@@ -479,6 +503,9 @@ pub struct Config {
 
     /// Optional remote inbox bridge used by local companion UIs.
     pub remote_inbox: RemoteInboxConfig,
+
+    /// Structured metadata for externally launched automation sessions.
+    pub automation_origin: Option<AutomationOrigin>,
 
     /// Shared Auto Drive defaults.
     pub auto_drive: AutoDriveSettings,
@@ -1460,6 +1487,7 @@ impl Config {
         let responses_originator_header: String = cfg
             .responses_originator_header_internal_override
             .unwrap_or_else(|| default_responses_originator());
+        let automation_origin = load_automation_origin_from_env();
 
         let agents: Vec<AgentConfig> = merge_with_default_agents(cfg.agents);
 
@@ -1756,6 +1784,7 @@ impl Config {
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             tui: cfg.tui.clone().unwrap_or_default(),
             remote_inbox: cfg.remote_inbox.unwrap_or_default(),
+            automation_origin,
             auto_drive,
             auto_drive_use_chat_model,
             code_linux_sandbox_exe,
@@ -1974,6 +2003,30 @@ mod tests {
                 },
             }
         }
+    }
+
+    #[test]
+    fn automation_origin_parses_github_label_metadata() {
+        let origin = parse_automation_origin(
+            r#"{"kind":"github_label","source":"launchplane","repository":"cbusillo/code","issue_number":160,"label":"every-code","event_id":"delivery-123","actor":"cbusillo","url":"https://github.com/cbusillo/code/issues/160"}"#,
+        )
+        .expect("automation origin metadata");
+        assert_eq!(origin.kind, code_protocol::protocol::AutomationTriggerKind::GithubLabel);
+        assert_eq!(origin.source.as_deref(), Some("launchplane"));
+        assert_eq!(origin.repository.as_deref(), Some("cbusillo/code"));
+        assert_eq!(origin.issue_number, Some(160));
+        assert_eq!(origin.label.as_deref(), Some("every-code"));
+        assert_eq!(origin.event_id.as_deref(), Some("delivery-123"));
+        assert_eq!(origin.actor.as_deref(), Some("cbusillo"));
+        assert_eq!(
+            origin.url.as_deref(),
+            Some("https://github.com/cbusillo/code/issues/160")
+        );
+    }
+
+    #[test]
+    fn automation_origin_ignores_invalid_json() {
+        assert!(parse_automation_origin("not json").is_none());
     }
 
     #[test]

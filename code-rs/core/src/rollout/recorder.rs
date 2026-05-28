@@ -162,6 +162,7 @@ impl RolloutRecorder {
                         originator: DEFAULT_ORIGINATOR.to_string(),
                         cli_version: code_version::version().to_string(),
                         source,
+                        automation_origin: config.automation_origin.clone(),
                         model_provider: None,
                         base_instructions: instructions.map(|text| BaseInstructions { text }),
                         dynamic_tools: None,
@@ -596,5 +597,65 @@ impl JsonlWriter {
         self.file.write_all(json.as_bytes()).await?;
         self.file.flush().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::config::ConfigOverrides;
+    use code_protocol::protocol::AutomationOrigin;
+    use code_protocol::protocol::AutomationTriggerKind;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn recorder_writes_automation_origin_when_present() {
+        let tmp = TempDir::new().expect("temp dir");
+        let mut config = Config::load_default_with_cli_overrides(
+            vec![],
+            ConfigOverrides {
+                cwd: Some(tmp.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("config");
+        config.code_home = tmp.path().join("code-home");
+        config.automation_origin = Some(AutomationOrigin {
+            kind: AutomationTriggerKind::GithubLabel,
+            source: Some("launchplane".to_string()),
+            repository: Some("cbusillo/code".to_string()),
+            issue_number: Some(160),
+            label: Some("every-code".to_string()),
+            event_id: Some("delivery-123".to_string()),
+            actor: Some("cbusillo".to_string()),
+            url: Some("https://github.com/cbusillo/code/issues/160".to_string()),
+        });
+
+        let recorder = RolloutRecorder::new(
+            &config,
+            RolloutRecorderParams::new(
+                ConversationId::new(),
+                None,
+                SessionSource::Exec,
+            ),
+        )
+        .await
+        .expect("recorder");
+        let rollout_path = recorder.rollout_path.clone();
+        recorder.shutdown().await.expect("shutdown");
+
+        let text = tokio::fs::read_to_string(rollout_path).await.expect("rollout");
+        let first_line = text.lines().next().expect("session meta line");
+        let line: RolloutLine = serde_json::from_str(first_line).expect("rollout line");
+        let RolloutItem::SessionMeta(meta) = line.item else {
+            panic!("expected session metadata");
+        };
+        let origin = meta.meta.automation_origin.expect("automation origin");
+        assert_eq!(origin.kind, AutomationTriggerKind::GithubLabel);
+        assert_eq!(origin.source.as_deref(), Some("launchplane"));
+        assert_eq!(origin.repository.as_deref(), Some("cbusillo/code"));
+        assert_eq!(origin.issue_number, Some(160));
+        assert_eq!(origin.label.as_deref(), Some("every-code"));
     }
 }

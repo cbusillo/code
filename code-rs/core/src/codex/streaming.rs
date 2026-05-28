@@ -886,6 +886,7 @@ pub(super) async fn submission_loop(
                         model,
                         history_log_id,
                         history_entry_count,
+                        automation_origin: config.automation_origin.clone(),
                     }),
                 ))
                 .chain(mcp_connection_errors.into_iter().map(|message| {

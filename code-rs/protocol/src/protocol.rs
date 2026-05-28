@@ -1811,6 +1811,54 @@ pub enum SubAgentSource {
     Other(String),
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AutomationTriggerKind {
+    GithubLabel,
+    Other,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct AutomationOrigin {
+    pub kind: AutomationTriggerKind,
+
+    /// Tool, worker, or integration that launched this automated session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<String>,
+
+    /// Repository name in `owner/repo` form, when the trigger came from GitHub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repository: Option<String>,
+
+    /// GitHub issue or pull request number associated with the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub issue_number: Option<u64>,
+
+    /// Label that triggered automation, such as `every-code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
+
+    /// GitHub event delivery id, webhook id, or local request id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub event_id: Option<String>,
+
+    /// Actor reported by the source system as applying the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor: Option<String>,
+
+    /// Direct URL to the triggering issue, PR, event, or worker record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+}
+
 impl fmt::Display for SessionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1857,6 +1905,9 @@ pub struct SessionMeta {
     pub cli_version: String,
     #[serde(default)]
     pub source: SessionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub automation_origin: Option<AutomationOrigin>,
     pub model_provider: Option<String>,
     /// base_instructions for the session. This *should* always be present when creating a new session,
     /// but may be missing for older sessions. If not present, fall back to rendering the base_instructions
@@ -1876,6 +1927,7 @@ impl Default for SessionMeta {
             originator: String::new(),
             cli_version: String::new(),
             source: SessionSource::default(),
+            automation_origin: None,
             model_provider: None,
             base_instructions: None,
             dynamic_tools: None,
@@ -2555,6 +2607,11 @@ pub struct SessionConfiguredEvent {
     /// Current number of entries in the history log.
     pub history_entry_count: usize,
 
+    /// Structured metadata for automated sessions, if the launcher provided it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub automation_origin: Option<AutomationOrigin>,
+
     /// Optional initial messages (as events) for resumed sessions.
     /// When present, UIs can use these to seed the history.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2995,6 +3052,7 @@ mod tests {
                 reasoning_effort: Some(ReasoningEffortConfig::default()),
                 history_log_id: 0,
                 history_entry_count: 0,
+                automation_origin: None,
                 initial_messages: None,
                 rollout_path: Some(rollout_file.path().to_path_buf()),
             }),
@@ -3019,6 +3077,53 @@ mod tests {
             }
         });
         assert_eq!(expected, serde_json::to_value(&event)?);
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_session_configured_with_automation_origin() -> Result<()> {
+        let conversation_id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
+        let event = Event {
+            id: "1234".to_string(),
+            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                session_id: conversation_id,
+                forked_from_id: None,
+                thread_name: None,
+                model: "gpt-5.5".to_string(),
+                model_provider_id: "openai".to_string(),
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::ReadOnly,
+                cwd: PathBuf::from("/home/user/project"),
+                reasoning_effort: None,
+                history_log_id: 0,
+                history_entry_count: 0,
+                automation_origin: Some(AutomationOrigin {
+                    kind: AutomationTriggerKind::GithubLabel,
+                    source: Some("launchplane".to_string()),
+                    repository: Some("cbusillo/code".to_string()),
+                    issue_number: Some(160),
+                    label: Some("every-code".to_string()),
+                    event_id: Some("delivery-123".to_string()),
+                    actor: Some("cbusillo".to_string()),
+                    url: Some("https://github.com/cbusillo/code/issues/160".to_string()),
+                }),
+                initial_messages: None,
+                rollout_path: None,
+            }),
+        };
+
+        let value = serde_json::to_value(&event)?;
+        assert_eq!(value["msg"]["automation_origin"]["kind"], "github_label");
+        assert_eq!(value["msg"]["automation_origin"]["source"], "launchplane");
+        assert_eq!(value["msg"]["automation_origin"]["repository"], "cbusillo/code");
+        assert_eq!(value["msg"]["automation_origin"]["issue_number"], 160);
+        assert_eq!(value["msg"]["automation_origin"]["label"], "every-code");
+        assert_eq!(value["msg"]["automation_origin"]["event_id"], "delivery-123");
+        assert_eq!(value["msg"]["automation_origin"]["actor"], "cbusillo");
+        assert_eq!(
+            value["msg"]["automation_origin"]["url"],
+            "https://github.com/cbusillo/code/issues/160"
+        );
         Ok(())
     }
 
