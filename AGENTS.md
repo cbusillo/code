@@ -4,9 +4,25 @@ Repo workflow metadata lives in `.github/github.json`; keep that
 file aligned with branch roles, validation gates, GitHub signal capabilities,
 workflow names, docs routing, and local cleanup policy when those facts change.
 
-Every Code is the product in this repository; `code` is the CLI shorthand.
-Upstream Codex and just-every/code are provenance and import sources, not the
-repo's product identity.
+Every Code is the product in this repository; `code` is the command users type.
+Use **Every Code** for the product name in prose, docs, UI copy, issue text,
+release text, and first mentions. Use **Every Code CLI** for the product CLI
+surface, and **the `code` command** when referring to the executable. Use **the
+Every Code agent** for the assistant identity; **Code** is only a short display
+name after Every Code context is established. Use **Every Code harness** for the
+runtime/session wrapper that we restart and dogfood, and **Every Code runtime**
+for process/session/tool-execution internals.
+
+Upstream import sources are `just-every/code` and `openai/codex`. Treat
+`just-every/code` as a fork upstream/import source. Treat `openai/codex` / Codex
+CLI as the original/direct upstream and provenance source. `codex-rs` is a
+read-only local mirror of `openai/codex:main`; edit Rust sources under
+`code-rs`, the Every Code product implementation.
+
+`CODE_HOME` / `~/.code` are the primary config and state locations.
+`CODEX_HOME` / `~/.codex` are compatibility fallbacks. Keep `CODEX_*` names when
+they are part of external, backend, or upstream compatibility; add `CODE_*`
+aliases or rename only through a scoped migration.
 
 Rust implementation lives under `code-rs`:
 

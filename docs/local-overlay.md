@@ -1,8 +1,29 @@
 # Upstream Import And Local Runtime Policy
 
 Every Code owns its product direction, defaults, releases, and UX. `main` is the
-canonical product branch and GitHub default branch for the local `code` binary on
+canonical product branch and GitHub default branch for the local `code` command on
 this machine.
+
+## Naming Ledger
+
+- **Every Code** is the product name. Use it in prose, docs, UI copy, issue text,
+  release text, and first mentions.
+- **Every Code CLI** is the product CLI surface. **The `code` command** is the
+  executable users type. Avoid “code CLI” in prose.
+- **The Every Code agent** is the assistant identity. **Code** is only a short
+  display name after Every Code context is established.
+- **Every Code harness** is the runtime/session wrapper that we restart and
+  dogfood. **Every Code runtime** is appropriate for process, session, and tool
+  execution internals.
+- **Upstream import sources** are `just-every/code` and `openai/codex`.
+  `just-every/code` is a fork upstream/import source. `openai/codex` / Codex CLI
+  is the original/direct upstream and provenance source.
+- `codex-rs/` is a read-only local mirror of `openai/codex:main`. `code-rs/` is
+  the editable Every Code Rust implementation.
+- `CODE_HOME` / `~/.code` are primary config and state locations. `CODEX_HOME` /
+  `~/.codex` are compatibility fallbacks. Keep `CODEX_*` names where external,
+  backend, or upstream compatibility requires them; add `CODE_*` aliases or
+  rename only through scoped migrations.
 
 The pre-cutover `origin/main` history was archived at
 `archive/pre-every-code-main-2026-05-24` before `main` was repointed to the Every
@@ -14,11 +35,12 @@ changes under `code-rs/`.
 
 Remote map:
 
-- `upstream`: `just-every/code`, the normal import source.
+- `upstream`: `just-every/code`, a fork upstream/import source.
 - `origin` / `fork`: `cbusillo/code`, where Every Code product branches and tags
   are pushed.
-- `openai`: reference remote for `openai/codex`; do not use it for routine
-  imports or pushes.
+- `openai`: remote for `openai/codex`, the original/direct upstream and
+  provenance source. Use it for direct upstream intake when intentional; do not
+  push Every Code changes there.
 
 ## Every Code-Owned Surfaces
 
