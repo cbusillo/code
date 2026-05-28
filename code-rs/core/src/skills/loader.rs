@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::config::SkillConfigRuleSelector;
 use crate::config::resolve_code_path_for_read;
 use crate::git_info::resolve_root_git_project_for_trust;
 use crate::skills::model::SkillError;
@@ -81,7 +82,31 @@ pub fn load_skills(config: &Config) -> SkillLoadOutcome {
     if let Err(err) = install_system_skills(&config.code_home) {
         tracing::error!("failed to install system skills: {err}");
     }
-    load_skills_from_roots(skill_roots(config))
+    let mut outcome = load_skills_from_roots(skill_roots(config));
+    apply_skill_config_rules(&mut outcome.skills, config);
+    outcome
+}
+
+fn apply_skill_config_rules(skills: &mut [SkillMetadata], config: &Config) {
+    for rule in &config.skills.config {
+        match &rule.selector {
+            SkillConfigRuleSelector::Name(name) => {
+                for skill in skills.iter_mut().filter(|skill| skill.name == *name) {
+                    set_allow_implicit_invocation(skill, rule.enabled);
+                }
+            }
+            SkillConfigRuleSelector::Path(path) => {
+                for skill in skills.iter_mut().filter(|skill| skill.path == *path) {
+                    set_allow_implicit_invocation(skill, rule.enabled);
+                }
+            }
+        }
+    }
+}
+
+fn set_allow_implicit_invocation(skill: &mut SkillMetadata, enabled: bool) {
+    let policy = skill.policy.get_or_insert_with(SkillPolicy::default);
+    policy.allow_implicit_invocation = Some(enabled);
 }
 
 pub(crate) struct SkillRoot {
@@ -551,6 +576,126 @@ mod tests {
             })
         );
         assert!(!skill.allow_implicit_invocation());
+    }
+
+    #[test]
+    fn config_name_selector_disables_implicit_invocation() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        write_skill_at(
+            skills_root.path(),
+            "manual",
+            "manual-skill",
+            "Manual skill",
+        );
+
+        let cfg = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                skills: Some(crate::config::SkillsToml {
+                    config: vec![crate::config::SkillConfigToml {
+                        name: Some("manual-skill".to_string()),
+                        enabled: false,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ConfigOverrides::default(),
+            tempfile::tempdir().expect("code home").path().to_path_buf(),
+        )
+        .expect("config");
+        let mut outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        apply_skill_config_rules(&mut outcome.skills, &cfg);
+
+        assert_eq!(outcome.skills.len(), 1);
+        assert!(!outcome.skills[0].allow_implicit_invocation());
+    }
+
+    #[test]
+    fn config_path_selector_disables_implicit_invocation() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_skill_at(
+            skills_root.path(),
+            "manual",
+            "manual-skill",
+            "Manual skill",
+        );
+        let normalized_skill_path = normalized(&skill_path);
+
+        let cfg = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                skills: Some(crate::config::SkillsToml {
+                    config: vec![crate::config::SkillConfigToml {
+                        path: Some(skill_path),
+                        enabled: false,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ConfigOverrides::default(),
+            tempfile::tempdir().expect("code home").path().to_path_buf(),
+        )
+        .expect("config");
+        let mut outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        apply_skill_config_rules(&mut outcome.skills, &cfg);
+
+        assert_eq!(outcome.skills.len(), 1);
+        assert_eq!(outcome.skills[0].path, normalized_skill_path);
+        assert!(!outcome.skills[0].allow_implicit_invocation());
+    }
+
+    #[test]
+    fn later_skill_config_rule_can_re_enable_matching_skill() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        write_skill_at(
+            skills_root.path(),
+            "enabled",
+            "enabled-skill",
+            "Enabled skill",
+        );
+
+        let cfg = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                skills: Some(crate::config::SkillsToml {
+                    config: vec![
+                        crate::config::SkillConfigToml {
+                            name: Some("enabled-skill".to_string()),
+                            enabled: false,
+                            ..Default::default()
+                        },
+                        crate::config::SkillConfigToml {
+                            name: Some("enabled-skill".to_string()),
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ConfigOverrides::default(),
+            tempfile::tempdir().expect("code home").path().to_path_buf(),
+        )
+        .expect("config");
+        let mut outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        apply_skill_config_rules(&mut outcome.skills, &cfg);
+
+        assert_eq!(outcome.skills.len(), 1);
+        assert!(outcome.skills[0].allow_implicit_invocation());
     }
 
     #[test]

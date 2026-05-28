@@ -37,7 +37,12 @@ pub(crate) async fn get_user_instructions(
     config: &Config,
     skills: Option<&[SkillMetadata]>,
 ) -> Option<String> {
-    let skills_section = skills.and_then(render_skills_section);
+    let skills_section = config
+        .skills
+        .include_instructions
+        .unwrap_or(true)
+        .then(|| skills.and_then(render_skills_section))
+        .flatten();
     let skills_section_key = skills_section.as_ref().map(|section| section.trim().to_string());
 
     let project_doc_parts = match read_project_doc_parts(config).await {
@@ -478,6 +483,30 @@ mod tests {
         assert_eq!(recomposed, rendered);
         assert_eq!(recomposed.matches(PROJECT_DOC_SEPARATOR).count(), 1);
         assert_eq!(recomposed.matches("### Available skills").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn skills_include_instructions_false_omits_default_skills_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_path = tmp.path().join("skills").join("demo").join("SKILL.md");
+        let skills = vec![SkillMetadata {
+            name: "demo".to_string(),
+            description: "Demo skill".to_string(),
+            short_description: None,
+            path: skill_path,
+            scope: SkillScope::User,
+            content: String::new(),
+            policy: None,
+        }];
+        let mut config = make_config(&tmp, 4096, Some("base"));
+        config.skills.include_instructions = Some(false);
+
+        let rendered = get_user_instructions(&config, Some(&skills))
+            .await
+            .expect("instructions expected");
+
+        assert_eq!(rendered, "base");
+        assert!(!rendered.contains("### Available skills"));
     }
 
     /// If the base instructions match the root doc but there is additional

@@ -567,6 +567,8 @@ pub struct Config {
 
     /// Experimental: enable discovery and injection of skills.
     pub skills_enabled: bool,
+    /// Per-skill configuration overrides for implicit invocation.
+    pub skills: SkillsConfig,
     /// Upstream-aligned memory feature gate.
     pub memories_enabled: bool,
     /// Upstream-aligned memories runtime settings.
@@ -937,6 +939,9 @@ pub struct ConfigToml {
     /// Experimental feature toggles.
     pub features: Option<FeaturesToml>,
 
+    /// Skill discovery and implicit invocation configuration.
+    pub skills: Option<SkillsToml>,
+
     /// Memory subsystem configuration.
     pub memories: Option<MemoriesToml>,
 
@@ -1039,6 +1044,98 @@ pub struct FeaturesToml {
     /// Enable upstream-style memories behavior.
     #[serde(default)]
     pub memories: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct SkillsToml {
+    /// Whether turns receive the automatic skills instructions block.
+    #[serde(default)]
+    pub include_instructions: Option<bool>,
+
+    /// Upstream-compatible per-skill selectors. An entry with `enabled = false`
+    /// leaves the skill discoverable but disables implicit prompt injection.
+    #[serde(default)]
+    pub config: Vec<SkillConfigToml>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct SkillConfigToml {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    #[serde(default = "default_skill_config_enabled")]
+    pub enabled: bool,
+}
+
+fn default_skill_config_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillsConfig {
+    pub include_instructions: Option<bool>,
+    pub config: Vec<SkillConfigRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillConfigRule {
+    pub selector: SkillConfigRuleSelector,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillConfigRuleSelector {
+    Name(String),
+    Path(PathBuf),
+}
+
+impl From<Option<SkillsToml>> for SkillsConfig {
+    fn from(value: Option<SkillsToml>) -> Self {
+        let Some(value) = value else {
+            return Self::default();
+        };
+        Self {
+            include_instructions: value.include_instructions,
+            config: value
+                .config
+                .into_iter()
+                .filter_map(SkillConfigRule::from_toml)
+                .collect(),
+        }
+    }
+}
+
+impl SkillConfigRule {
+    fn from_toml(value: SkillConfigToml) -> Option<Self> {
+        match (value.name, value.path) {
+            (Some(name), None) => {
+                let name = name.trim();
+                if name.is_empty() {
+                    tracing::warn!("ignoring skills.config entry with empty name selector");
+                    return None;
+                }
+                Some(Self {
+                    selector: SkillConfigRuleSelector::Name(name.to_string()),
+                    enabled: value.enabled,
+                })
+            }
+            (None, Some(path)) => Some(Self {
+                selector: SkillConfigRuleSelector::Path(
+                    dunce::canonicalize(&path).unwrap_or(path),
+                ),
+                enabled: value.enabled,
+            }),
+            (Some(_), Some(_)) => {
+                tracing::warn!("ignoring skills.config entry with both name and path selectors");
+                None
+            }
+            (None, None) => {
+                tracing::warn!("ignoring skills.config entry without a name or path selector");
+                None
+            }
+        }
+    }
 }
 
 impl ConfigToml {
@@ -1383,6 +1480,7 @@ impl Config {
             .as_ref()
             .and_then(|features| features.skills)
             .unwrap_or(true);
+        let skills: SkillsConfig = cfg.skills.clone().into();
         let memories_enabled = cfg
             .features
             .as_ref()
@@ -1823,6 +1921,7 @@ impl Config {
                 .unwrap_or(false),
             include_view_image_tool: include_view_image_tool_flag,
             skills_enabled,
+            skills,
             memories_enabled,
             memories,
             env_ctx_v2: env_ctx_v2_flag,
@@ -2027,6 +2126,42 @@ mod tests {
     #[test]
     fn automation_origin_ignores_invalid_json() {
         assert!(parse_automation_origin("not json").is_none());
+    }
+
+    #[test]
+    fn skills_config_parses_upstream_compatible_selectors() {
+        let cfg = toml::from_str::<ConfigToml>(
+            r#"
+[skills]
+include_instructions = false
+
+[[skills.config]]
+name = "manual"
+enabled = false
+
+[[skills.config]]
+path = "/tmp/auto/SKILL.md"
+"#,
+        )
+        .expect("TOML deserialization should succeed");
+        let skills = SkillsConfig::from(cfg.skills);
+
+        assert_eq!(skills.include_instructions, Some(false));
+        assert_eq!(skills.config.len(), 2);
+        assert_eq!(
+            skills.config[0],
+            SkillConfigRule {
+                selector: SkillConfigRuleSelector::Name("manual".to_string()),
+                enabled: false,
+            }
+        );
+        assert_eq!(
+            skills.config[1],
+            SkillConfigRule {
+                selector: SkillConfigRuleSelector::Path(PathBuf::from("/tmp/auto/SKILL.md")),
+                enabled: true,
+            }
+        );
     }
 
     #[test]
