@@ -1,11 +1,11 @@
 # Sample configuration
 
-Use this example configuration as a starting point. For an explanation of each field and additional context, see [Configuration](./config.md). Copy the snippet below to `~/.codex/config.toml` and adjust values as needed.
+Use this example configuration as a starting point. For an explanation of each field and additional context, see [Configuration](./config.md). Copy the snippet below to `~/.code/config.toml` and adjust values as needed.
 
 ```toml
-# Codex example configuration (config.toml)
+# Code example configuration (config.toml)
 #
-# This file lists all keys Codex reads from config.toml, their default values,
+# This file lists all keys Code reads from config.toml, their default values,
 # and concise explanations. Values here mirror the effective defaults compiled
 # into the CLI. Adjust as needed.
 #
@@ -18,11 +18,11 @@ Use this example configuration as a starting point. For an explanation of each f
 # Core Model Selection
 ################################################################################
 
-# Primary model used by Codex. Default: "gpt-5.1-codex-max" on all platforms.
-model = "gpt-5.1-codex-max"
+# Primary model used by Code. Default: "gpt-5.5" on all platforms.
+model = "gpt-5.5"
 
-# Model used by the /review feature (code reviews). Default: "gpt-5.1-codex-max".
-review_model = "gpt-5.1-codex-max"
+# Model used by the /review feature (code reviews). Default: "gpt-5.5".
+review_model = "gpt-5.5"
 
 # Provider id selected from [model_providers]. Default: "openai".
 model_provider = "openai"
@@ -31,7 +31,7 @@ model_provider = "openai"
 # Uncomment to force values.
 # model_context_window = 128000       # tokens; default: auto for model
 # model_auto_compact_token_limit = 0  # disable/override auto; default: model family specific
-# tool_output_token_limit = 10000  # tokens stored per tool output; default: 10000 for gpt-5.1-codex-max
+# tool_output_token_limit = 10000  # tokens stored per tool output
 
 ################################################################################
 # Reasoning & Verbosity (Responses API capable models)
@@ -299,7 +299,7 @@ experimental_use_freeform_apply_patch = false
 [profiles]
 
 # [profiles.default]
-# model = "gpt-5.1-codex-max"
+# model = "gpt-5.5"
 # model_provider = "openai"
 # approval_policy = "on-request"
 # sandbox_mode = "read-only"

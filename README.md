@@ -26,7 +26,7 @@
   See commit `60727b068` and related Auto Drive hardening commits in git history for details.
 
 
-- **Auto Review** – background ghost-commit watcher runs reviews in a separate worktree whenever a turn changes code; uses `codex-5.1-mini-high` and reports issues plus ready-to-apply fixes without blocking the main thread.
+- **Auto Review** – background ghost-commit watcher runs reviews in a separate worktree whenever a turn changes code; uses the configured review model and reports issues plus ready-to-apply fixes without blocking the main thread.
 - **Code Bridge** – Sentry-style local bridge that streams errors, console, screenshots, and control from running apps into Code; ships an MCP server.
 - **Plays well with Auto Drive** – reviews run in parallel with long Auto Drive tasks so quality checks land while the flow keeps moving.
 - **Quality-first focus** – the release shifts emphasis from "can the model write this file" to "did we verify it works".
