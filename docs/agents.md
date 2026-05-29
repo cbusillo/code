@@ -19,7 +19,7 @@ instructions = "Preamble added to this agent’s prompt"
 Field recap: `name` (slug/alias), `command` (absolute paths ok), `args*` (RO/RW lists override base), `env`, `read_only`, `enabled`, optional `description` and `instructions`.
 
 ### Built-in defaults
-If no `[[agents]]` are configured, Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
+If no `[[agents]]` are configured, Every Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
 
 Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent path. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
 
@@ -29,13 +29,13 @@ Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent pat
 name = "plan"                     # slash name (/plan, /solve, /code, or custom)
 read_only = true                  # default plan/solve=true, code=false
 agents = ["code-gpt-5.4", "claude-opus-4.6"]  # falls back to enabled agents or built-ins
-orchestrator_instructions = "Guidance for Code before spawning agents"
+orchestrator_instructions = "Guidance for the Every Code agent before spawning agents"
 agent_instructions = "Preamble added to each spawned agent"
 ```
 - `name`: slash command created/overridden.
 - `read_only`: forces spawned agents to RO when true.
 - `agents`: explicit list; empty → enabled `[[agents]]`; none configured → built-in roster.
-- `orchestrator_instructions`: appended to the Code-side prompt before issuing `agent.create`.
+- `orchestrator_instructions`: appended to the Every Code agent's prompt before issuing `agent.create`.
 - `agent_instructions`: appended to each spawned agent prompt.
 
 The orchestrator fans out agents, waits for results, and merges reasoning according to your `hide_agent_reasoning` / `show_raw_agent_reasoning` settings.
@@ -52,7 +52,7 @@ The orchestrator fans out agents, waits for results, and merges reasoning accord
 - `AUTO_AGENTS.md` is read alongside `AGENTS.md` for Auto Drive–specific guidance.
 
 ## AGENTS.md and project memory
-- Code loads AGENTS.md files along the path (global, repo root, cwd) up to 32 KiB total; deeper files override higher-level ones.
+- Every Code loads AGENTS.md files along the path (global, repo root, cwd) up to 32 KiB total; deeper files override higher-level ones.
 - Contents become system/developer instructions on the first turn; direct user/developer prompts still take precedence.
 
 ## Windows discovery tips

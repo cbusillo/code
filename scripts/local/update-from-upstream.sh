@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
-manifest="$repo_root/scripts/local/overlay-picks.txt"
+manifest="$repo_root/scripts/local/upstream-picks.txt"
 
 branch="$(git symbolic-ref --quiet --short HEAD || true)"
 if [[ -z "$branch" ]]; then

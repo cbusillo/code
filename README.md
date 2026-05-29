@@ -27,7 +27,7 @@
 
 
 - **Auto Review** – background ghost-commit watcher runs reviews in a separate worktree whenever a turn changes code; uses the configured review model and reports issues plus ready-to-apply fixes without blocking the main thread.
-- **Code Bridge** – Sentry-style local bridge that streams errors, console, screenshots, and control from running apps into Code; ships an MCP server.
+- **Code Bridge** – Sentry-style local bridge that streams errors, console, screenshots, and control from running apps into Every Code; ships an MCP server.
 - **Plays well with Auto Drive** – reviews run in parallel with long Auto Drive tasks so quality checks land while the flow keeps moving.
 - **Quality-first focus** – the release shifts emphasis from "can the model write this file" to "did we verify it works".
 - _From v0.5.0:_ rename to Every Code, upgraded `/auto` planning/recovery, unified `/settings`, faster streaming/history with card-based activity, and more reliable `/resume` + `/undo`.
@@ -103,7 +103,7 @@ distribution becomes intentional again.
 
 ### Install External Agents (optional)
 
-Every Code supports orchestrating other AI CLI tools. Install these and config to use alongside Code.
+Every Code supports orchestrating other AI CLI tools. Install these and config to use alongside Every Code.
 
 ```bash
 # Ensure Node.js 20+ is available locally (installs into ~/.n)
