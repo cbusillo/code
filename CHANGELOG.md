@@ -7,6 +7,11 @@
 
 - (none)
 
+## [0.6.108] - 2026-05-29
+
+- Release: require local release metadata before publishing and validate the generated notes version in CI. (cfd73d45)
+- Release: right-size local release note prompts so tiny releases can ship concise one-bullet notes. (5d6108b6, a09767e8)
+
 ## [0.6.107] - 2026-05-29
 
 - Models: update Claude Opus selector aliases to Claude Opus 4.8 and add coverage for dynamic remote GPT model discovery. (d388ac4b, 7e250da)
