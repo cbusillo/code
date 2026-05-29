@@ -87,9 +87,14 @@ Examples:
 - `main` is the Every Code product branch and the GitHub default branch.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build validates dev-fast artifacts, while the rebuild recipe owns the PATH-resolved release binary and embeds the package version.
+- During active local work, run
+  `just local-cleanup-space --apply --keep-current-fast-cache` when repo-local
+  build caches grow large; this removes stale per-branch `./build-fast.sh`
+  buckets while preserving the currently wired `code-rs/target/dev-fast/code`
+  cache for warmer rebuilds.
 - Before leaving a local work session, run `just local-cleanup-space --apply`
-  to remove rebuildable target/cache artifacts while preserving
-  `code-rs/target/release/code`.
+  only when you intentionally want a colder cleanup that removes all rebuildable
+  target/cache artifacts while preserving `code-rs/target/release/code`.
 - Use `just local-upstream-import` only from a clean `main` branch. The helper
   fetches `upstream/main`, merges it into the current Every Code branch, replays
   any commits listed in `scripts/local/upstream-picks.txt`, then rebuilds the

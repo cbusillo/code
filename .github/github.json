@@ -28,7 +28,8 @@
     },
     "scripts": {
       "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch main",
-      "cleanupSpace": "just local-cleanup-space --apply",
+      "cleanupSpace": "just local-cleanup-space --apply --keep-current-fast-cache",
+      "cleanupSpaceCold": "just local-cleanup-space --apply",
       "upstreamImport": "just local-upstream-import"
     },
     "docsRequiredWhen": [
