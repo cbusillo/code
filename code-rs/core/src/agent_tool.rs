@@ -1226,6 +1226,18 @@ impl AgentManager {
             }
             self.finalize_terminal_agent(agent_id);
             true
+        } else if self
+            .agents
+            .get(agent_id)
+            .is_some_and(|agent| matches!(agent.status, AgentStatus::Pending | AgentStatus::Running))
+        {
+            if let Some(agent) = self.agents.get_mut(agent_id) {
+                agent.status = AgentStatus::Cancelled;
+                agent.completed_at = Some(Utc::now());
+                Self::record_activity(agent);
+            }
+            self.finalize_terminal_agent(agent_id);
+            true
         } else {
             false
         }
@@ -3299,6 +3311,35 @@ mod tests {
         assert_eq!(
             manager.agents.get("agent-b").map(|agent| &agent.status),
             Some(&AgentStatus::Running),
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_agent_reaps_stale_active_record_without_handle() {
+        let mut manager = AgentManager::new();
+        let session_id = Uuid::new_v4();
+        manager.agents.insert(
+            "stale-agent".to_string(),
+            test_agent("stale-agent", session_id, "batch-stale", AgentStatus::Running),
+        );
+
+        assert!(manager.has_active_agents());
+        assert!(manager.cancel_agent_for_session("stale-agent", session_id).await);
+        assert!(!manager.has_active_agents());
+        assert_eq!(
+            manager
+                .agents
+                .get("stale-agent")
+                .map(|agent| &agent.status),
+            Some(&AgentStatus::Cancelled),
+        );
+        assert!(
+            manager
+                .agents
+                .get("stale-agent")
+                .and_then(|agent| agent.completed_at)
+                .is_some(),
+            "stale close should mark a completion time",
         );
     }
 
