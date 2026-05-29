@@ -161,6 +161,7 @@ pub(super) struct State {
     pub(super) pending_manual_compacts: VecDeque<String>,
     pub(super) wait_interrupt_epoch: u64,
     pub(super) wait_interrupt_reason: Option<WaitInterruptReason>,
+    pub(super) shutting_down: bool,
     pub(super) context_timeline: ContextTimeline,
     pub(super) environment_context_tracker: EnvironmentContextTracker,
     pub(super) environment_context_seq: u64,
@@ -1304,9 +1305,21 @@ impl Session {
     /// scheduled immediately.
     pub fn enqueue_out_of_turn_item(&self, item: ResponseInputItem) -> bool {
         let mut state = self.state.lock().unwrap();
+        if state.shutting_down {
+            return false;
+        }
         let should_start_turn = state.current_task.is_none();
         state.pending_input.push(item);
         should_start_turn
+    }
+
+    pub(super) fn mark_shutting_down(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.shutting_down = true;
+    }
+
+    pub(super) fn is_shutting_down(&self) -> bool {
+        self.state.lock().unwrap().shutting_down
     }
 
     pub(crate) fn next_internal_sub_id(&self) -> String {
