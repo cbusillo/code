@@ -23,7 +23,6 @@ const SAFE_DIFF_ARGS: &[&str] = &[
     "--no-textconv",
     "--no-ext-diff",
     "--submodule=short",
-    "--ignore-submodules=dirty",
     "--color",
 ];
 
@@ -46,6 +45,11 @@ async fn get_git_diff_in_dir(cwd: impl AsRef<Path>) -> io::Result<(bool, String)
     // Keep `/diff` informational: repository configuration must not select
     // executable diff helpers.
     let diff_config_overrides = diff_filter_config_overrides(cwd).await?;
+    let diff_config_overrides = diff_filter_config_overrides_with_submodules(
+        cwd,
+        diff_config_overrides,
+    )
+    .await?;
 
     // Run tracked diff and untracked file listing in parallel.
     let (tracked_diff_res, untracked_output_res) = tokio::join!(
@@ -164,6 +168,35 @@ async fn diff_filter_config_overrides(cwd: &Path) -> io::Result<Vec<(String, Str
             ]
         })
         .collect())
+}
+
+async fn diff_filter_config_overrides_with_submodules(
+    cwd: &Path,
+    mut overrides: Vec<(String, String)>,
+) -> io::Result<Vec<(String, String)>> {
+    let output = run_git_command(
+        cwd,
+        &[],
+        &["submodule", "foreach", "--quiet", "pwd"],
+    )
+    .await?;
+    if !(output.status.success() || output.status.code() == Some(1)) {
+        return Err(io::Error::other(format!(
+            "git submodule foreach failed with status {}",
+            output.status
+        )));
+    }
+
+    for path in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        overrides.extend(diff_filter_config_overrides(Path::new(path)).await?);
+    }
+    overrides.sort();
+    overrides.dedup();
+    Ok(overrides)
 }
 
 async fn run_git_command(
@@ -373,13 +406,17 @@ mod tests {
         );
         run_git_setup(&checkout, &["config", "filter.evil.required", "true"]);
         std::thread::sleep(std::time::Duration::from_secs(1));
-        fs::write(checkout.join("tracked.txt"), "before\n").expect("refresh child tracked file");
+        fs::write(checkout.join("tracked.txt"), "after\n").expect("modify child tracked file");
 
         let result = get_git_diff_in_dir(&repo)
             .await
-            .expect("generate diff without inspecting submodule worktrees");
+            .expect("generate diff without executing submodule helpers");
 
-        assert!(result.1.is_empty());
+        assert!(
+            result.1.contains("-dirty"),
+            "dirty submodule marker should be preserved: {}",
+            result.1
+        );
         assert!(!helper.with_extension("sh.ran").exists());
     }
 
