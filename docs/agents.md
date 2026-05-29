@@ -19,7 +19,7 @@ instructions = "Preamble added to this agent’s prompt"
 Field recap: `name` (slug/alias), `command` (absolute paths ok), `args*` (RO/RW lists override base), `env`, `read_only`, `enabled`, optional `description` and `instructions`.
 
 ### Built-in defaults
-If no `[[agents]]` are configured, Every Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
+If no `[[agents]]` are configured, Every Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
 
 Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent path. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
 
@@ -28,7 +28,7 @@ Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent pat
 [[subagents.commands]]
 name = "plan"                     # slash name (/plan, /solve, /code, or custom)
 read_only = true                  # default plan/solve=true, code=false
-agents = ["code-gpt-5.4", "claude-opus-4.6"]  # falls back to enabled agents or built-ins
+agents = ["code-gpt-5.4", "claude-opus-4.8"]  # falls back to enabled agents or built-ins
 orchestrator_instructions = "Guidance for the Every Code agent before spawning agents"
 agent_instructions = "Preamble added to each spawned agent"
 ```
@@ -84,7 +84,7 @@ enabled = true
 [[subagents.commands]]
 name = "context"
 read_only = true
-agents = ["code-gpt-5.4", "claude-opus-4.6"]
+agents = ["code-gpt-5.4", "claude-opus-4.8"]
 orchestrator_instructions = "Have each agent summarize the most relevant files and tests."
 agent_instructions = "Return paths plus 1–2 sentence rationale; do not edit files."
 ```

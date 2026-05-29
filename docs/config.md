@@ -73,7 +73,7 @@ env_key = "MISTRAL_API_KEY"
 Or a proxy that converts OpenAI-compatible requests to another vendor (e.g., Anthropic or Gemini):
 
 ```toml
-model = "claude-opus-4.6"
+model = "claude-opus-4.8"
 model_provider = "claude-proxy"
 
 [model_providers.claude-proxy]
@@ -473,7 +473,7 @@ tool_timeout_sec = 30
 
 Sub-agents are orchestrated helper workflows you can trigger with slash commands (for example `/plan`, `/solve`, `/code`). Each entry under `[[subagents.commands]]` defines the slash command name, whether spawned agents run in read-only mode, which `agents` to launch, and extra guidance for both the orchestrator (Code) and the individual agents.
 
-By default (when no `[[agents]]` are configured) Code advertises these agent/model selectors for multi-agent runs: `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.6`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, and `qwen3-coder-plus`. The cloud counterpart, `cloud-gpt-5.1-codex-max`, only appears when `CODE_ENABLE_CLOUD_AGENT_MODEL=1` is set. You can override the list by defining `[[agents]]` entries or by specifying `agents = [ … ]` on a given `[[subagents.commands]]` entry. Consumer Gemini CLI is not a built-in default; add a custom `[[agents]]` block only when you intentionally rely on enterprise/API-key Gemini CLI access.
+By default (when no `[[agents]]` are configured) Code advertises these agent/model selectors for multi-agent runs: `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, and `qwen3-coder-plus`. The cloud counterpart, `cloud-gpt-5.1-codex-max`, only appears when `CODE_ENABLE_CLOUD_AGENT_MODEL=1` is set. You can override the list by defining `[[agents]]` entries or by specifying `agents = [ … ]` on a given `[[subagents.commands]]` entry. Consumer Gemini CLI is not a built-in default; add a custom `[[agents]]` block only when you intentionally rely on enterprise/API-key Gemini CLI access.
 
 ```toml
 [[subagents.commands]]
