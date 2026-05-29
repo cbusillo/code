@@ -360,6 +360,8 @@ pub enum AgentStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
+    #[serde(default)]
+    pub owner_session_id: Option<Uuid>,
     pub batch_id: Option<String>,
     pub model: String,
     #[serde(default)]
@@ -403,7 +405,7 @@ pub struct AgentManager {
     // (including worktree/branch metadata) for the full Auto Drive run.
     archived_terminal_agents: HashMap<String, Agent>,
     handles: HashMap<String, JoinHandle<()>>,
-    event_sender: Option<mpsc::UnboundedSender<AgentStatusUpdatePayload>>,
+    event_senders: Vec<AgentStatusSender>,
     debug_log_root: Option<PathBuf>,
     watchdog_handle: Option<JoinHandle<()>>,
     inactivity_timeout: Duration,
@@ -458,13 +460,66 @@ pub struct AgentStatusUpdatePayload {
     pub task: Option<String>,
 }
 
+struct AgentStatusSender {
+    owner_session_id: Uuid,
+    sender: mpsc::UnboundedSender<AgentStatusUpdatePayload>,
+}
+
+fn agent_belongs_to_session(agent: &Agent, owner_session_id: Option<Uuid>) -> bool {
+    match owner_session_id {
+        Some(owner_session_id) => agent.owner_session_id == Some(owner_session_id),
+        None => true,
+    }
+}
+
+fn agent_info_for_status(agent: &Agent, now: DateTime<Utc>) -> AgentInfo {
+    // Just show the model name - status provides the useful info.
+    let name = agent
+        .name
+        .as_ref()
+        .map(|value| value.clone())
+        .unwrap_or_else(|| agent.model.clone());
+    let start = agent.started_at.unwrap_or(agent.created_at);
+    let end = agent.completed_at.unwrap_or(now);
+    let elapsed_ms = match end.signed_duration_since(start).num_milliseconds() {
+        value if value >= 0 => Some(value as u64),
+        _ => None,
+    };
+
+    AgentInfo {
+        id: agent.id.clone(),
+        name,
+        status: format!("{:?}", agent.status).to_lowercase(),
+        batch_id: agent.batch_id.clone(),
+        model: Some(agent.model.clone()),
+        last_progress: agent.progress.last().cloned(),
+        result: agent.result.clone(),
+        error: agent.error.clone(),
+        elapsed_ms,
+        token_count: None,
+        last_activity_at: match agent.status {
+            AgentStatus::Pending | AgentStatus::Running => Some(agent.last_activity.to_rfc3339()),
+            _ => None,
+        },
+        seconds_since_last_activity: match agent.status {
+            AgentStatus::Pending | AgentStatus::Running => Some(
+                now.signed_duration_since(agent.last_activity)
+                    .num_seconds()
+                    .max(0) as u64,
+            ),
+            _ => None,
+        },
+        source_kind: agent.source_kind.clone(),
+    }
+}
+
 impl AgentManager {
     pub fn new() -> Self {
         Self {
             agents: HashMap::new(),
             archived_terminal_agents: HashMap::new(),
             handles: HashMap::new(),
-            event_sender: None,
+            event_senders: Vec::new(),
             debug_log_root: None,
             watchdog_handle: None,
             inactivity_timeout: Duration::minutes(30),
@@ -472,12 +527,25 @@ impl AgentManager {
         }
     }
 
-    pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<AgentStatusUpdatePayload>) {
-        self.event_sender = Some(sender);
-        // New session lifecycle: keep only live agents and reset per-session
-        // diagnostics/archives so long-lived UIs start from a clean slate.
-        self.archived_terminal_agents.clear();
-        self.diagnostics = AgentManagerDiagnostics::default();
+    pub fn set_event_sender(
+        &mut self,
+        owner_session_id: Uuid,
+        sender: mpsc::UnboundedSender<AgentStatusUpdatePayload>,
+    ) {
+        self.event_senders
+            .retain(|registered| !registered.sender.is_closed());
+        let first_session = self.event_senders.is_empty();
+        self.event_senders.push(AgentStatusSender {
+            owner_session_id,
+            sender,
+        });
+        // New manager lifecycle: keep only live agents and reset diagnostics
+        // when the first UI connects, without clearing another live session's
+        // archived terminal agents when a second UI registers.
+        if first_session {
+            self.archived_terminal_agents.clear();
+            self.diagnostics = AgentManagerDiagnostics::default();
+        }
         self.start_watchdog();
     }
 
@@ -711,10 +779,11 @@ impl AgentManager {
         self.prune_terminal_agents();
     }
 
-    fn visible_agents_for_status(&self) -> Vec<&Agent> {
+    fn visible_agents_for_status(&self, owner_session_id: Option<Uuid>) -> Vec<&Agent> {
         let mut active: Vec<&Agent> = self
             .agents
             .values()
+            .filter(|agent| agent_belongs_to_session(agent, owner_session_id))
             .filter(|agent| matches!(agent.status, AgentStatus::Pending | AgentStatus::Running))
             .collect();
 
@@ -723,6 +792,7 @@ impl AgentManager {
         let mut terminal: Vec<&Agent> = self
             .agents
             .values()
+            .filter(|agent| agent_belongs_to_session(agent, owner_session_id))
             .filter(|agent| {
                 matches!(
                     agent.status,
@@ -743,10 +813,93 @@ impl AgentManager {
     }
 
     pub fn status_visible_agents(&self) -> Vec<Agent> {
-        self.visible_agents_for_status()
+        self.visible_agents_for_status(None)
             .into_iter()
             .cloned()
             .collect()
+    }
+
+    pub fn status_visible_agents_for_session(&self, owner_session_id: Uuid) -> Vec<Agent> {
+        self.visible_agents_for_status(Some(owner_session_id))
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    fn status_payload_for_session(&mut self, owner_session_id: Uuid) -> AgentStatusUpdatePayload {
+        let now = Utc::now();
+
+        let total_terminal = self
+            .agents
+            .values()
+            .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+            .filter(|agent| {
+                matches!(
+                    agent.status,
+                    AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Cancelled
+                )
+            })
+            .count();
+        let omitted_terminal = total_terminal.saturating_sub(MAX_STATUS_TERMINAL_AGENTS);
+        if omitted_terminal > 0 {
+            self.diagnostics.status_terminal_agents_omitted = self
+                .diagnostics
+                .status_terminal_agents_omitted
+                .saturating_add(omitted_terminal as u64);
+            debug!(
+                omitted_terminal,
+                total_terminal,
+                owner_session_id = %owner_session_id,
+                running_agents = self
+                    .agents
+                    .values()
+                    .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+                    .filter(|agent| {
+                        matches!(agent.status, AgentStatus::Pending | AgentStatus::Running)
+                    })
+                    .count(),
+                cumulative_omitted = self.diagnostics.status_terminal_agents_omitted,
+                "omitting terminal agents from status payload to keep UI responsive"
+            );
+        }
+
+        let agents: Vec<AgentInfo> = self
+            .visible_agents_for_status(Some(owner_session_id))
+            .into_iter()
+            .map(|agent| agent_info_for_status(agent, now))
+            .collect();
+
+        // Prefer active agents for shared context/task; terminal agents may
+        // have had heavy fields compacted already.
+        let source_agent = self
+            .agents
+            .values()
+            .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+            .find(|agent| matches!(agent.status, AgentStatus::Pending | AgentStatus::Running))
+            .or_else(|| {
+                self.agents
+                    .values()
+                    .find(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+            });
+        let (context, task) = source_agent
+            .map(|agent| {
+                let context = agent.context.as_ref().and_then(|value| {
+                    if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value.clone())
+                    }
+                });
+                let task = if agent.prompt.trim().is_empty() {
+                    None
+                } else {
+                    Some(agent.prompt.clone())
+                };
+                (context, task)
+            })
+            .unwrap_or((None, None));
+
+        AgentStatusUpdatePayload { agents, context, task }
     }
 
     fn append_agent_log(&self, log_tag: &str, line: &str) {
@@ -769,115 +922,26 @@ impl AgentManager {
     }
 
     async fn send_agent_status_update(&mut self) {
-        if let Some(ref sender) = self.event_sender {
-            let now = Utc::now();
-
-            let total_terminal = self
-                .agents
-                .values()
-                .filter(|agent| {
-                    matches!(
-                        agent.status,
-                        AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Cancelled
-                    )
-                })
-                .count();
-            let omitted_terminal = total_terminal.saturating_sub(MAX_STATUS_TERMINAL_AGENTS);
-            if omitted_terminal > 0 {
-                self.diagnostics.status_terminal_agents_omitted = self
-                    .diagnostics
-                    .status_terminal_agents_omitted
-                    .saturating_add(omitted_terminal as u64);
-                debug!(
-                    omitted_terminal,
-                    total_terminal,
-                    running_agents = self
-                        .agents
-                        .values()
-                        .filter(|agent| {
-                            matches!(agent.status, AgentStatus::Pending | AgentStatus::Running)
-                        })
-                        .count(),
-                    cumulative_omitted = self.diagnostics.status_terminal_agents_omitted,
-                    "omitting terminal agents from status payload to keep UI responsive"
-                );
-            }
-
-            let agents: Vec<AgentInfo> = self
-                .visible_agents_for_status()
+        if !self.event_senders.is_empty() {
+            let sessions: Vec<(usize, Uuid)> = self
+                .event_senders
+                .iter()
+                .enumerate()
+                .filter(|(_, registered)| !registered.sender.is_closed())
+                .map(|(idx, registered)| (idx, registered.owner_session_id))
+                .collect();
+            let sender_payloads: Vec<(usize, AgentStatusUpdatePayload)> = sessions
                 .into_iter()
-                .map(|agent| {
-                    // Just show the model name - status provides the useful info
-                    let name = agent
-                        .name
-                        .as_ref()
-                        .map(|value| value.clone())
-                        .unwrap_or_else(|| agent.model.clone());
-                    let start = agent.started_at.unwrap_or(agent.created_at);
-                    let end = agent.completed_at.unwrap_or(now);
-                    let elapsed_ms = match end.signed_duration_since(start).num_milliseconds() {
-                        value if value >= 0 => Some(value as u64),
-                        _ => None,
-                    };
-
-                    AgentInfo {
-                        id: agent.id.clone(),
-                        name,
-                        status: format!("{:?}", agent.status).to_lowercase(),
-                        batch_id: agent.batch_id.clone(),
-                        model: Some(agent.model.clone()),
-                        last_progress: agent.progress.last().cloned(),
-                        result: agent.result.clone(),
-                        error: agent.error.clone(),
-                        elapsed_ms,
-                        token_count: None,
-                        last_activity_at: match agent.status {
-                            AgentStatus::Pending | AgentStatus::Running => {
-                                Some(agent.last_activity.to_rfc3339())
-                            }
-                            _ => None,
-                        },
-                        seconds_since_last_activity: match agent.status {
-                            AgentStatus::Pending | AgentStatus::Running => Some(
-                                Utc::now()
-                                    .signed_duration_since(agent.last_activity)
-                                    .num_seconds()
-                                    .max(0) as u64,
-                            ),
-                            _ => None,
-                        },
-                        source_kind: agent.source_kind.clone(),
-                    }
-                })
+                .map(|(idx, owner_session_id)| (idx, self.status_payload_for_session(owner_session_id)))
                 .collect();
 
-            // Prefer active agents for shared context/task; terminal agents may
-            // have had heavy fields compacted already.
-            let source_agent = self
-                .agents
-                .values()
-                .find(|agent| matches!(agent.status, AgentStatus::Pending | AgentStatus::Running))
-                .or_else(|| self.agents.values().next());
-            let (context, task) = source_agent
-                .map(|agent| {
-                    let context = agent
-                        .context
-                        .as_ref()
-                        .and_then(|value| if value.trim().is_empty() {
-                            None
-                        } else {
-                            Some(value.clone())
-                        });
-                    let task = if agent.prompt.trim().is_empty() {
-                        None
-                    } else {
-                        Some(agent.prompt.clone())
-                    };
-                    (context, task)
-                })
-                .unwrap_or((None, None));
-            let payload = AgentStatusUpdatePayload { agents, context, task };
-            let _ = sender.send(payload);
+            for (idx, payload) in sender_payloads.into_iter().rev() {
+                if self.event_senders[idx].sender.send(payload).is_err() {
+                    self.event_senders.remove(idx);
+                }
+            }
+            self.event_senders
+                .retain(|registered| !registered.sender.is_closed());
         }
     }
 
@@ -891,6 +955,7 @@ impl AgentManager {
         files: Vec<String>,
         read_only: bool,
         batch_id: Option<String>,
+        owner_session_id: Uuid,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         self.create_agent_internal(
@@ -903,6 +968,7 @@ impl AgentManager {
             read_only,
             batch_id,
             None,
+            owner_session_id,
             None,
             None,
             None,
@@ -922,6 +988,7 @@ impl AgentManager {
         read_only: bool,
         batch_id: Option<String>,
         config: AgentConfig,
+        owner_session_id: Uuid,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         self.create_agent_internal(
@@ -934,6 +1001,7 @@ impl AgentManager {
             read_only,
             batch_id,
             Some(config),
+            owner_session_id,
             None,
             None,
             None,
@@ -954,6 +1022,7 @@ impl AgentManager {
         read_only: bool,
         batch_id: Option<String>,
         config: Option<AgentConfig>,
+        owner_session_id: Uuid,
         worktree_branch: Option<String>,
         worktree_base: Option<String>,
         source_kind: Option<AgentSourceKind>,
@@ -970,6 +1039,7 @@ impl AgentManager {
                 read_only,
                 batch_id,
                 config,
+                owner_session_id,
                 worktree_branch,
                 worktree_base,
                 source_kind,
@@ -989,6 +1059,7 @@ impl AgentManager {
         read_only: bool,
         batch_id: Option<String>,
         config: Option<AgentConfig>,
+        owner_session_id: Uuid,
         worktree_branch: Option<String>,
         worktree_base: Option<String>,
         source_kind: Option<AgentSourceKind>,
@@ -1005,6 +1076,7 @@ impl AgentManager {
 
         let agent = Agent {
             id: agent_id.clone(),
+            owner_session_id: Some(owner_session_id),
             batch_id,
             model,
             name: normalize_agent_name(name),
@@ -2854,6 +2926,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
+    use uuid::Uuid;
 
     #[cfg(unix)]
     static STDIN_LOCK: Mutex<()> = Mutex::new(());
@@ -2982,6 +3055,144 @@ mod tests {
 
         let custom = resolve_program_path(false, "custom-coder").expect("resolved custom");
         assert_eq!(custom, std::path::PathBuf::from("custom-coder"));
+    }
+
+    #[tokio::test]
+    async fn agent_status_updates_are_broadcast_to_all_sessions() {
+        let mut manager = AgentManager::new();
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+
+        manager.set_event_sender(session_a, tx_a);
+        manager.set_event_sender(session_b, tx_b);
+        manager.send_agent_status_update().await;
+
+        assert!(
+            rx_a.try_recv().is_ok(),
+            "first session should still receive updates"
+        );
+        assert!(rx_b.try_recv().is_ok(), "second session should receive updates");
+    }
+
+    #[tokio::test]
+    async fn agent_status_updates_include_only_owned_agents() {
+        let mut manager = AgentManager::new();
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+
+        manager.set_event_sender(session_a, tx_a);
+        manager.set_event_sender(session_b, tx_b);
+        let agent_a = manager
+            .create_agent(
+                "code-gpt-5.5".to_string(),
+                Some("session-a".to_string()),
+                "task a".to_string(),
+                None,
+                None,
+                Vec::new(),
+                true,
+                Some("batch-a".to_string()),
+                session_a,
+                ReasoningEffort::Low,
+            )
+            .await;
+        let agent_b = manager
+            .create_agent(
+                "code-gpt-5.5".to_string(),
+                Some("session-b".to_string()),
+                "task b".to_string(),
+                None,
+                None,
+                Vec::new(),
+                true,
+                Some("batch-b".to_string()),
+                session_b,
+                ReasoningEffort::Low,
+            )
+            .await;
+
+        let mut payload_a = rx_a
+            .try_recv()
+            .expect("session A should receive an update");
+        while let Ok(next) = rx_a.try_recv() {
+            payload_a = next;
+        }
+        let mut payload_b = rx_b
+            .try_recv()
+            .expect("session B should receive an update");
+        while let Ok(next) = rx_b.try_recv() {
+            payload_b = next;
+        }
+
+        assert!(payload_a.agents.iter().any(|agent| agent.id == agent_a));
+        assert!(!payload_a.agents.iter().any(|agent| agent.id == agent_b));
+        assert!(payload_b.agents.iter().any(|agent| agent.id == agent_b));
+        assert!(!payload_b.agents.iter().any(|agent| agent.id == agent_a));
+    }
+
+    #[tokio::test]
+    async fn agent_status_updates_prune_closed_session_senders() {
+        let mut manager = AgentManager::new();
+        let session_closed = Uuid::new_v4();
+        let session_open = Uuid::new_v4();
+        let (tx_closed, rx_closed) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_open, mut rx_open) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx_closed);
+
+        manager.set_event_sender(session_closed, tx_closed);
+        manager.set_event_sender(session_open, tx_open);
+        manager.send_agent_status_update().await;
+
+        assert!(rx_open.try_recv().is_ok(), "open session should receive updates");
+        assert_eq!(manager.event_senders.len(), 1);
+    }
+
+    #[test]
+    fn registering_second_session_keeps_existing_archived_agents() {
+        let mut manager = AgentManager::new();
+        let now = chrono::Utc::now();
+        let archived_id = "archived-agent".to_string();
+        manager.archived_terminal_agents.insert(
+            archived_id.clone(),
+            Agent {
+                id: archived_id.clone(),
+                owner_session_id: Some(Uuid::new_v4()),
+                batch_id: Some("batch-archived".to_string()),
+                model: "code-gpt-5.5".to_string(),
+                name: Some("Archived".to_string()),
+                prompt: String::new(),
+                context: None,
+                output_goal: None,
+                files: Vec::new(),
+                read_only: true,
+                status: AgentStatus::Completed,
+                result: Some("ok".to_string()),
+                error: None,
+                created_at: now,
+                started_at: Some(now),
+                completed_at: Some(now),
+                progress: Vec::new(),
+                worktree_path: None,
+                branch_name: None,
+                worktree_base: None,
+                source_kind: None,
+                log_tag: None,
+                config: None,
+                reasoning_effort: ReasoningEffort::Low,
+                last_activity: now,
+            },
+        );
+
+        let (tx_a, _rx_a) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(Uuid::new_v4(), tx_a);
+        let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(Uuid::new_v4(), tx_b);
+
+        assert!(manager.archived_terminal_agents.contains_key(&archived_id));
     }
 
     #[tokio::test]
@@ -3389,6 +3600,7 @@ exit 0
                 id.clone(),
                 Agent {
                     id,
+                    owner_session_id: None,
                     batch_id: Some("batch-1".to_string()),
                     model: "code-gpt-5.5".to_string(),
                     name: Some("Prune Test".to_string()),
@@ -3438,6 +3650,7 @@ exit 0
             agent_id.clone(),
             Agent {
                 id: agent_id.clone(),
+                owner_session_id: None,
                 batch_id: Some("batch-compact".to_string()),
                 model: "code-gpt-5.5".to_string(),
                 name: Some("Finalize".to_string()),
@@ -3504,6 +3717,7 @@ exit 0
                 id.clone(),
                 Agent {
                     id,
+                    owner_session_id: None,
                     batch_id: Some(batch_id.clone()),
                     model: "code-gpt-5.5".to_string(),
                     name: Some("Archive Test".to_string()),
