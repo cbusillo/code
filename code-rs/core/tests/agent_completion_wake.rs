@@ -75,11 +75,12 @@ event: response.completed\ndata: {completed}\n\n",
     config.model_provider = provider;
 
     let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("Test API Key"));
-    let codex = conversation_manager
+    let new_conversation = conversation_manager
         .new_conversation(config)
         .await
-        .expect("create conversation")
-        .conversation;
+        .expect("create conversation");
+    let session_id = new_conversation.session_configured.session_id;
+    let codex = new_conversation.conversation;
 
     codex
         .submit(Op::CancelAgents {
@@ -133,6 +134,7 @@ event: response.completed\ndata: {completed}\n\n",
                 true,
                 Some(batch_id.clone()),
                 agent_config,
+                session_id,
                 ReasoningEffort::Low,
             )
             .await
