@@ -177,7 +177,7 @@ async fn diff_filter_config_overrides_with_submodules(
     let output = run_git_command(
         cwd,
         &[],
-        &["submodule", "foreach", "--quiet", "pwd"],
+        &["submodule", "foreach", "--quiet", "--recursive", "pwd"],
     )
     .await?;
     if !(output.status.success() || output.status.code() == Some(1)) {
@@ -363,10 +363,22 @@ mod tests {
     #[tokio::test]
     async fn get_git_diff_does_not_execute_helpers_while_checking_dirty_submodules() {
         let tempdir = tempfile::tempdir().expect("create temp directory");
+        let grandchild = tempdir.path().join("grandchild");
         let child = tempdir.path().join("child");
         let repo = tempdir.path().join("repo");
+        fs::create_dir(&grandchild).expect("create grandchild repository directory");
         fs::create_dir(&child).expect("create child repository directory");
         fs::create_dir(&repo).expect("create parent repository directory");
+        run_git_setup(&grandchild, &["init", "-q"]);
+        run_git_setup(&grandchild, &["config", "user.name", "test"]);
+        run_git_setup(&grandchild, &["config", "user.email", "test@example.com"]);
+        fs::write(grandchild.join(".gitattributes"), "*.txt filter=nested\n")
+            .expect("write grandchild attributes");
+        fs::write(grandchild.join("nested.txt"), "before\n")
+            .expect("write grandchild tracked file");
+        run_git_setup(&grandchild, &["add", ".gitattributes", "nested.txt"]);
+        run_git_setup(&grandchild, &["commit", "-qm", "initial"]);
+
         run_git_setup(&child, &["init", "-q"]);
         run_git_setup(&child, &["config", "user.name", "test"]);
         run_git_setup(&child, &["config", "user.email", "test@example.com"]);
@@ -375,6 +387,19 @@ mod tests {
         fs::write(child.join("tracked.txt"), "before\n").expect("write child tracked file");
         run_git_setup(&child, &["add", ".gitattributes", "tracked.txt"]);
         run_git_setup(&child, &["commit", "-qm", "initial"]);
+        run_git_setup(
+            &child,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                grandchild.to_str().expect("grandchild repository path"),
+                "grandchild",
+            ],
+        );
+        run_git_setup(&child, &["commit", "-qm", "add nested submodule"]);
 
         run_git_setup(&repo, &["init", "-q"]);
         run_git_setup(&repo, &["config", "user.name", "test"]);
@@ -394,7 +419,9 @@ mod tests {
         run_git_setup(&repo, &["commit", "-qm", "add submodule"]);
 
         let helper = tempdir.path().join("submodule-helper.sh");
+        let nested_helper = tempdir.path().join("nested-submodule-helper.sh");
         write_marker_helper(&helper);
+        write_marker_helper(&nested_helper);
         let checkout = repo.join("child");
         run_git_setup(
             &checkout,
@@ -405,8 +432,23 @@ mod tests {
             ],
         );
         run_git_setup(&checkout, &["config", "filter.evil.required", "true"]);
+        let nested_checkout = checkout.join("grandchild");
+        run_git_setup(
+            &nested_checkout,
+            &[
+                "config",
+                "filter.nested.clean",
+                nested_helper.to_str().expect("nested submodule helper path"),
+            ],
+        );
+        run_git_setup(
+            &nested_checkout,
+            &["config", "filter.nested.required", "true"],
+        );
         std::thread::sleep(std::time::Duration::from_secs(1));
         fs::write(checkout.join("tracked.txt"), "after\n").expect("modify child tracked file");
+        fs::write(nested_checkout.join("nested.txt"), "after\n")
+            .expect("modify grandchild tracked file");
 
         let result = get_git_diff_in_dir(&repo)
             .await
@@ -418,6 +460,7 @@ mod tests {
             result.1
         );
         assert!(!helper.with_extension("sh.ran").exists());
+        assert!(!nested_helper.with_extension("sh.ran").exists());
     }
 
     fn run_git_setup(cwd: &Path, args: &[&str]) {
