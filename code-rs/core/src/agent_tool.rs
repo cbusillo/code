@@ -406,7 +406,6 @@ pub struct AgentManager {
     archived_terminal_agents: HashMap<String, Agent>,
     handles: HashMap<String, JoinHandle<()>>,
     event_senders: Vec<AgentStatusSender>,
-    event_sender_lifecycle_started: bool,
     debug_log_root: Option<PathBuf>,
     watchdog_handle: Option<JoinHandle<()>>,
     inactivity_timeout: Duration,
@@ -521,7 +520,6 @@ impl AgentManager {
             archived_terminal_agents: HashMap::new(),
             handles: HashMap::new(),
             event_senders: Vec::new(),
-            event_sender_lifecycle_started: false,
             debug_log_root: None,
             watchdog_handle: None,
             inactivity_timeout: Duration::minutes(30),
@@ -536,18 +534,20 @@ impl AgentManager {
     ) {
         self.event_senders
             .retain(|registered| !registered.sender.is_closed());
-        let first_session = !self.event_sender_lifecycle_started;
-        self.event_sender_lifecycle_started = true;
+        let fresh_sender_set = self.event_senders.is_empty();
         self.event_senders.push(AgentStatusSender {
             owner_session_id,
             sender,
         });
-        // New manager lifecycle: keep only live agents and reset diagnostics
-        // when the first UI connects, without clearing another live session's
-        // archived terminal agents when a second UI registers.
-        if first_session {
-            self.archived_terminal_agents.clear();
+        // A fresh sender set is either the first UI for this manager or a UI
+        // reconnect after all previous senders closed. Keep archived results
+        // for the reconnecting session, but drop archives from older sessions
+        // so a long-lived manager does not retain stale terminal agents forever.
+        if fresh_sender_set {
+            self.archived_terminal_agents
+                .retain(|_, agent| agent_belongs_to_session(agent, Some(owner_session_id)));
             self.diagnostics = AgentManagerDiagnostics::default();
+            self.diagnostics.archived_terminal_agents = self.archived_terminal_agents.len() as u64;
         }
         self.start_watchdog();
     }
@@ -3341,8 +3341,9 @@ mod tests {
     #[tokio::test]
     async fn reconnect_after_sender_gap_keeps_existing_archived_agents() {
         let mut manager = AgentManager::new();
+        let session_id = Uuid::new_v4();
         let (tx_a, rx_a) = tokio::sync::mpsc::unbounded_channel();
-        manager.set_event_sender(Uuid::new_v4(), tx_a);
+        manager.set_event_sender(session_id, tx_a);
         drop(rx_a);
 
         let archived_id = "archived-after-gap".to_string();
@@ -3350,16 +3351,52 @@ mod tests {
             archived_id.clone(),
             test_agent(
                 &archived_id,
-                Uuid::new_v4(),
+                session_id,
                 "batch-archived-gap",
                 AgentStatus::Completed,
             ),
         );
 
         let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel();
-        manager.set_event_sender(Uuid::new_v4(), tx_b);
+        manager.set_event_sender(session_id, tx_b);
 
         assert!(manager.archived_terminal_agents.contains_key(&archived_id));
+    }
+
+    #[tokio::test]
+    async fn fresh_sender_set_drops_archives_from_other_sessions() {
+        let mut manager = AgentManager::new();
+        let old_session = Uuid::new_v4();
+        let new_session = Uuid::new_v4();
+        let (tx_old, rx_old) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(old_session, tx_old);
+        drop(rx_old);
+
+        manager.archived_terminal_agents.insert(
+            "old-archived".to_string(),
+            test_agent(
+                "old-archived",
+                old_session,
+                "batch-old-archived",
+                AgentStatus::Completed,
+            ),
+        );
+        manager.archived_terminal_agents.insert(
+            "new-archived".to_string(),
+            test_agent(
+                "new-archived",
+                new_session,
+                "batch-new-archived",
+                AgentStatus::Completed,
+            ),
+        );
+
+        let (tx_new, _rx_new) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(new_session, tx_new);
+
+        assert!(manager.archived_terminal_agents.contains_key("new-archived"));
+        assert!(!manager.archived_terminal_agents.contains_key("old-archived"));
+        assert_eq!(manager.diagnostics.archived_terminal_agents, 1);
     }
 
     #[tokio::test]
