@@ -117,7 +117,10 @@ outside the product branch and must be replayed.
 Cut an Every Code release after every successful upstream import or local hotfix
 that should be installed by dogfood users. The active Release workflow runs from
 `main`, opens a release metadata PR when the package version or notes need to be
-updated, and publishes GitHub Release assets after that metadata lands.
+updated, and publishes GitHub Release assets after that metadata lands. Metadata
+preparation builds only the Linux x86_64 binary needed for changelog generation;
+the full preflight, macOS/Linux release matrix, and Windows asset build run on
+the publish pass after the metadata PR has merged.
 
 Release tags use the plain `v<version>` format, for example `v0.6.101`.
 
