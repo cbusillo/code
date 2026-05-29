@@ -406,6 +406,7 @@ pub struct AgentManager {
     archived_terminal_agents: HashMap<String, Agent>,
     handles: HashMap<String, JoinHandle<()>>,
     event_senders: Vec<AgentStatusSender>,
+    event_sender_lifecycle_started: bool,
     debug_log_root: Option<PathBuf>,
     watchdog_handle: Option<JoinHandle<()>>,
     inactivity_timeout: Duration,
@@ -520,6 +521,7 @@ impl AgentManager {
             archived_terminal_agents: HashMap::new(),
             handles: HashMap::new(),
             event_senders: Vec::new(),
+            event_sender_lifecycle_started: false,
             debug_log_root: None,
             watchdog_handle: None,
             inactivity_timeout: Duration::minutes(30),
@@ -534,7 +536,8 @@ impl AgentManager {
     ) {
         self.event_senders
             .retain(|registered| !registered.sender.is_closed());
-        let first_session = self.event_senders.is_empty();
+        let first_session = !self.event_sender_lifecycle_started;
+        self.event_sender_lifecycle_started = true;
         self.event_senders.push(AgentStatusSender {
             owner_session_id,
             sender,
@@ -3327,6 +3330,30 @@ mod tests {
                 reasoning_effort: ReasoningEffort::Low,
                 last_activity: now,
             },
+        );
+
+        let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(Uuid::new_v4(), tx_b);
+
+        assert!(manager.archived_terminal_agents.contains_key(&archived_id));
+    }
+
+    #[tokio::test]
+    async fn reconnect_after_sender_gap_keeps_existing_archived_agents() {
+        let mut manager = AgentManager::new();
+        let (tx_a, rx_a) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(Uuid::new_v4(), tx_a);
+        drop(rx_a);
+
+        let archived_id = "archived-after-gap".to_string();
+        manager.archived_terminal_agents.insert(
+            archived_id.clone(),
+            test_agent(
+                &archived_id,
+                Uuid::new_v4(),
+                "batch-archived-gap",
+                AgentStatus::Completed,
+            ),
         );
 
         let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel();
