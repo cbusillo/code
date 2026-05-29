@@ -117,3 +117,80 @@ fn map_reasoning_effort(effort: RemoteReasoningEffort) -> ProtocolReasoningEffor
         RemoteReasoningEffort::XHigh => ProtocolReasoningEffort::XHigh,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use code_common::model_presets::builtin_model_presets;
+    use code_protocol::openai_models::ApplyPatchToolType;
+    use code_protocol::openai_models::ConfigShellToolType;
+    use code_protocol::openai_models::TruncationPolicyConfig;
+    use code_protocol::openai_models::default_input_modalities;
+    use code_protocol::config_types::ReasoningSummary;
+
+    fn remote_model(slug: &str, priority: i32) -> ModelInfo {
+        ModelInfo {
+            slug: slug.to_string(),
+            display_name: slug.to_string(),
+            description: Some(format!("{slug} from remote models")),
+            default_reasoning_level: Some(RemoteReasoningEffort::Medium),
+            supported_reasoning_levels: vec![code_protocol::openai_models::ReasoningEffortPreset {
+                effort: RemoteReasoningEffort::Medium,
+                description: "balanced".to_string(),
+            }],
+            shell_type: ConfigShellToolType::Default,
+            visibility: ModelVisibility::List,
+            supported_in_api: true,
+            priority,
+            additional_speed_tiers: Vec::new(),
+            service_tiers: Vec::new(),
+            availability_nux: None,
+            upgrade: None,
+            base_instructions: String::new(),
+            model_messages: None,
+            supports_reasoning_summaries: false,
+            default_reasoning_summary: ReasoningSummary::Auto,
+            support_verbosity: true,
+            default_verbosity: None,
+            apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
+            web_search_tool_type: Default::default(),
+            truncation_policy: TruncationPolicyConfig::tokens(100_000),
+            supports_parallel_tool_calls: false,
+            supports_image_detail_original: false,
+            context_window: Some(100_000),
+            max_context_window: None,
+            auto_compact_token_limit: None,
+            effective_context_window_percent: 95,
+            experimental_supported_tools: Vec::new(),
+            input_modalities: default_input_modalities(),
+            supports_search_tool: false,
+            prefer_websockets: false,
+            used_fallback_model_metadata: false,
+        }
+    }
+
+    #[test]
+    fn remote_gpt_models_are_discovered_and_prioritized_without_local_presets() {
+        let merged = merge_remote_models(
+            vec![remote_model("gpt-5.4", 20), remote_model("gpt-5.6", 0)],
+            builtin_model_presets(Some(AuthMode::ChatGPT), true),
+            Some(AuthMode::ChatGPT),
+            true,
+        );
+
+        let gpt_5_6 = merged
+            .iter()
+            .find(|preset| preset.id == "gpt-5.6")
+            .expect("new remote GPT model should be visible without a local preset");
+        assert_eq!(gpt_5_6.model, "gpt-5.6");
+        assert!(gpt_5_6.is_default, "highest-priority remote model should become default");
+
+        let defaults = merged.iter().filter(|preset| preset.is_default).count();
+        assert_eq!(defaults, 1, "exactly one merged model should be default");
+        assert_eq!(
+            merged.iter().filter(|preset| preset.model == "gpt-5.4").count(),
+            1,
+            "remote metadata should replace matching local presets instead of duplicating them"
+        );
+    }
+}
