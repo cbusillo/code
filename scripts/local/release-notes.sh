@@ -70,7 +70,7 @@ CHANGELOG.md House Style
 - File header stays as-is. Do not rewrite older sections.
 - Insert the new section at the top, above older released versions and below Unreleased, with this header exactly:
   ## [${new_version}] - ${date_utc}
-- Include 2-5 bullets, each a single line, focusing on user-visible features, fixes, UX, performance, release behavior, or stability.
+- Include 1-5 bullets, each a single line, focusing on user-visible features, fixes, UX, performance, release behavior, or stability.
 - Keep bullets concise and scannable. Use present tense.
 - When helpful, start bullets with a short scope label like "TUI:", "CLI:", "Core:", "Release:", or "Docs:".
 - End each bullet with abbreviated commit SHA(s) in parentheses, using 7-8 hex chars, comma-separated when multiple.
@@ -83,7 +83,7 @@ Release Notes
   1. Title: ## @just-every/code v${new_version}
   2. One brief intro sentence.
   3. Section header: ### Changes
-     - The same 2-5 changes as the changelog, but omit SHAs.
+     - The same 1-5 changes as the changelog, but omit SHAs.
   4. Section header: ### Install
      Code block with exactly:
      gh release download v${new_version} --repo cbusillo/code
