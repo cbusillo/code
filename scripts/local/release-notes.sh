@@ -70,9 +70,11 @@ CHANGELOG.md House Style
 - File header stays as-is. Do not rewrite older sections.
 - Insert the new section at the top, above older released versions and below Unreleased, with this header exactly:
   ## [${new_version}] - ${date_utc}
-- Include 1-5 bullets, each a single line, focusing on user-visible features, fixes, UX, performance, release behavior, or stability.
-- Keep bullets concise and scannable. Use present tense.
-- When helpful, start bullets with a short scope label like "TUI:", "CLI:", "Core:", "Release:", or "Docs:".
+- Synthesize the notable user-visible features, important fixes, UX improvements, performance/stability work, and release-operator changes.
+- Ignore internal chores, merge commits, and minor refactors unless they directly affect users, installation, or release operators.
+- Use judgment on length: keep the changelog compact and scannable, do not pad thin releases, and do not omit important distinct changes from busy releases.
+- Keep each bullet concise, single-line, and present tense.
+- Start bullets with a short scope label when helpful, such as "TUI:", "CLI:", "Core:", "Release:", or "Docs:".
 - End each bullet with abbreviated commit SHA(s) in parentheses, using 7-8 hex chars, comma-separated when multiple.
 - Map changes from the git log in ${range}; ignore pure chores/merges unless they affect users or release operators.
 - Do not add links, tables, code blocks, subheadings, or PR author attributions in the changelog.
@@ -83,7 +85,12 @@ Release Notes
   1. Title: ## @just-every/code v${new_version}
   2. One brief intro sentence.
   3. Section header: ### Changes
-     - The same 1-5 changes as the changelog, but omit SHAs.
+     - Curate the most interesting release highlights for readers of a GitHub release page.
+     - Prioritize notable features, important fixes, UX improvements, performance/stability wins, and release-operator changes.
+     - Right-size the list to the release: one or two bullets is fine for tiny releases, a normal release should usually fit in a handful, and a larger release can use more when each item is distinct and useful.
+     - Do not pad with chores or exhaustively restate the commit log.
+     - Rewrite for readability and impact; bullets do not need to match the changelog verbatim.
+     - Omit SHAs, links, tables, PR numbers, and author attributions.
   4. Section header: ### Install
      Code block with exactly:
      gh release download v${new_version} --repo cbusillo/code
