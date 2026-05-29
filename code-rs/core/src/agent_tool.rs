@@ -3151,9 +3151,12 @@ mod tests {
         assert_eq!(manager.event_senders.len(), 1);
     }
 
-    #[test]
-    fn registering_second_session_keeps_existing_archived_agents() {
+    #[tokio::test]
+    async fn registering_second_session_keeps_existing_archived_agents() {
         let mut manager = AgentManager::new();
+        let (tx_a, _rx_a) = tokio::sync::mpsc::unbounded_channel();
+        manager.set_event_sender(Uuid::new_v4(), tx_a);
+
         let now = chrono::Utc::now();
         let archived_id = "archived-agent".to_string();
         manager.archived_terminal_agents.insert(
@@ -3187,8 +3190,6 @@ mod tests {
             },
         );
 
-        let (tx_a, _rx_a) = tokio::sync::mpsc::unbounded_channel();
-        manager.set_event_sender(Uuid::new_v4(), tx_a);
         let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel();
         manager.set_event_sender(Uuid::new_v4(), tx_b);
 
