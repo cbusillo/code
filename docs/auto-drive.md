@@ -46,6 +46,10 @@ What Auto Drive is, how to start it, and how it behaves in Every Code.
 - Optionally set `CODEX_TUI_SESSION_LOG_PATH=/absolute/path/session.jsonl` to choose the output file; otherwise Every Code writes under its normal log directory (typically `~/.code/debug_logs/`, and `code-dev` defaults to `~/.code/debug_logs/code-dev/`).
 - When the TUI panics, Every Code now records the panic payload and captured backtrace in both the session JSONL log and the regular error log.
 
+These debug variables keep their `CODEX_TUI_*` names for now. They are
+dev-only rename candidates; add `CODE_TUI_*` aliases and focused tests before
+changing the documented spelling.
+
 ## Models
 - Defaults: model `gpt-5.1`, reasoning effort `high`.
 - Toggle “use chat model” in settings to reuse your current chat model/effort instead of the dedicated Auto Drive model.

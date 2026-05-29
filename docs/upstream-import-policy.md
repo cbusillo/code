@@ -29,6 +29,36 @@ long-running feature branch overlay.
   backend, or upstream compatibility requires them; add `CODE_*` aliases or
   rename only through scoped migrations.
 
+## CODE And CODEX Compatibility Policy
+
+Use `CODE_*` names for new Every Code-owned environment variables, config paths,
+automation metadata, and locally-authored integration contracts. Use
+`EVERY_CODE_*` only when the variable needs to be unmistakably product-branded
+outside this repo, such as cross-repo remote inbox metadata.
+
+Keep `CODE_HOME` / `~/.code` as the primary config and state location. Keep
+`CODEX_HOME` / `~/.codex` as a compatibility fallback. The lookup order is
+`CODE_HOME`, then `CODEX_HOME`, then default `~/.code`, with legacy `~/.codex`
+read only where the specific subsystem supports migration or compatibility.
+Every Code-owned writes should go to `~/.code` / `CODE_HOME` unless a scoped
+compatibility feature explicitly says otherwise.
+
+Preserve `CODEX_*` names when they are part of an external contract, upstream
+merge surface, backend/API behavior, or documented compatibility behavior. This
+includes names such as `CODEX_HOME`, `CODEX_API_KEY`, cloud/backend variables,
+Bazel/upstream CI variables, and protocol/security names until a dedicated
+migration adds `CODE_*` aliases with tests.
+
+Dev-only or test-only `CODEX_TUI_*` variables are rename candidates, not silent
+cleanup. A change should add a `CODE_TUI_*` alias first, keep the old
+`CODEX_TUI_*` spelling for a compatibility window, document the precedence, and
+include focused tests for both names before any removal.
+
+Do not mass-rename deep Rust identifiers, telemetry prefixes, generated schema
+types, model names, or `codex-rs` mirror paths just to remove `codex`. Those
+names often preserve upstream compatibility, historical provenance, or external
+dashboard continuity.
+
 The pre-cutover `origin/main` history was archived at
 `archive/pre-every-code-main-2026-05-24` before `main` was repointed to the Every
 Code product branch. Treat `local/cbusillo-overlay` as a retired branch name;

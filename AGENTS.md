@@ -22,7 +22,9 @@ read-only local mirror of `openai/codex:main`; edit Rust sources under
 `CODE_HOME` / `~/.code` are the primary config and state locations.
 `CODEX_HOME` / `~/.codex` are compatibility fallbacks. Keep `CODEX_*` names when
 they are part of external, backend, or upstream compatibility; add `CODE_*`
-aliases or rename only through a scoped migration.
+aliases or rename only through a scoped migration. See
+`docs/upstream-import-policy.md#code-and-codex-compatibility-policy` before
+changing environment variable behavior.
 
 Rust implementation lives under `code-rs`:
 
