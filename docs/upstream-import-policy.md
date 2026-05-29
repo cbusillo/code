@@ -1,8 +1,12 @@
-# Upstream Import And Local Runtime Policy
+# Upstream Import And Runtime Policy
 
 Every Code owns its product direction, defaults, releases, and UX. `main` is the
 canonical product branch and GitHub default branch for the local `code` command on
 this machine.
+
+This document replaces the old local overlay framing. Every Code now owns
+`main`; upstream imports are synchronization work into the product branch, not a
+long-running feature branch overlay.
 
 ## Naming Ledger
 
@@ -30,8 +34,8 @@ The pre-cutover `origin/main` history was archived at
 Code product branch. Treat `local/cbusillo-overlay` as a retired branch name;
 do not revive it for new work.
 
-Treat `codex-rs/` as a read-only mirror of `openai/codex`; put editable Rust
-changes under `code-rs/`.
+Treat `codex-rs/` as a read-only local mirror of `openai/codex:main`; put
+editable Rust changes under `code-rs/`.
 
 Remote map:
 
@@ -41,6 +45,11 @@ Remote map:
 - `openai`: remote for `openai/codex`, the original/direct upstream and
   provenance source. Use it for direct upstream intake when intentional; do not
   push Every Code changes there.
+
+Do not describe either import source as the permanent primary upstream. The
+current import path may vary by task; the durable distinction is that
+`just-every/code` is a fork upstream/import source and `openai/codex` is the
+original/direct upstream and provenance source.
 
 ## Every Code-Owned Surfaces
 
@@ -67,10 +76,10 @@ Use the import helper from a clean `main` branch:
 just local-upstream-import
 ```
 
-After conflicts are resolved, preserve upstream fixes unless they contradict an
-Every Code-owned behavior above. During conflict resolution, prefer upstream
-unless the conflict touches one of those owned areas. Keep
-`scripts/local/overlay-picks.txt` empty unless a patch intentionally lives
+After conflicts are resolved, preserve imported fixes unless they contradict an
+Every Code-owned behavior above. During conflict resolution, prefer the import
+source unless the conflict touches one of those owned areas. Keep
+`scripts/local/upstream-picks.txt` empty unless a patch intentionally lives
 outside the product branch and must be replayed.
 
 ## Release Cadence
