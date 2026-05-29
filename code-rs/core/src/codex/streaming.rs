@@ -639,6 +639,7 @@ pub(super) async fn submission_loop(
                 // abort any current running session and clone its state
                 let old_session = sess.take();
                 let state = if let Some(sess_arc) = old_session.as_ref() {
+                    sess_arc.mark_shutting_down();
                     sess_arc.notify_wait_interrupted(WaitInterruptReason::SessionAborted);
                     sess_arc.abort();
                     sess_arc.state.lock().unwrap().partial_clone()
@@ -1400,6 +1401,7 @@ pub(super) async fn submission_loop(
 
                 // Ensure any running agent is aborted so streaming stops promptly.
                 if let Some(sess_arc) = sess.as_ref() {
+                    sess_arc.mark_shutting_down();
                     let s2 = sess_arc.clone();
                     tokio::spawn(async move {
                         s2.notify_wait_interrupted(WaitInterruptReason::SessionAborted);
@@ -10684,7 +10686,7 @@ async fn handle_container_exec_with_params(
         );
     }
 
-    let sess_for_hooks = sess.self_handle.upgrade();
+    let sess_for_hooks = sess.self_handle.clone();
     let params_for_after_hooks = params_for_hooks.clone();
     let exec_ctx_for_hooks = exec_command_context.clone();
     let exec_ctx_for_task = exec_command_context.clone();
@@ -10725,7 +10727,7 @@ async fn handle_container_exec_with_params(
     let suppress_event_flag_task = suppress_event_flag.clone();
     let display_label_task = display_label.clone();
     let tool_output_max_bytes = sess.tool_output_max_bytes;
-    let sess_for_background_completion = sess.self_handle.upgrade();
+    let sess_for_background_completion = sess.self_handle.clone();
     let task_handle = tokio::spawn(async move {
         // Build stdout stream with tail capture. We cannot stamp via `Session` here,
         // but deltas will be delivered with neutral ordering which the UI tolerates.
@@ -10782,8 +10784,12 @@ async fn handle_container_exec_with_params(
             exit_code,
             duration: out.duration,
         });
-        let ev = Event { id: sub_id_for_events.clone(), event_seq: 0, msg: end_msg, order: Some(order_meta_for_end) };
-        let _ = tx_event.send(ev).await;
+        if let Some(sess_arc) = sess_for_background_completion.upgrade()
+            && !sess_arc.is_shutting_down()
+        {
+            let ev = Event { id: sub_id_for_events.clone(), event_seq: 0, msg: end_msg, order: Some(order_meta_for_end) };
+            let _ = tx_event.send(ev).await;
+        }
 
         // Store result for waiters
         {
@@ -10792,7 +10798,7 @@ async fn handle_container_exec_with_params(
         }
 
         if backgrounded_task.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Some(sess_arc) = sess_for_hooks.clone() {
+            if let Some(sess_arc) = sess_for_hooks.upgrade() {
                 let mut hook_tracker = TurnDiffTracker::new();
                 sess_arc
                     .run_hooks_for_exec_event(
@@ -10816,7 +10822,12 @@ async fn handle_container_exec_with_params(
                     format!("{label} completed in background")
                 };
                 let bg_event = EventMsg::BackgroundEvent(BackgroundEventEvent { message });
-                if let Some(sess_arc) = sess_for_background_completion.as_ref() {
+                if let Some(sess_arc) = sess_for_background_completion.upgrade() {
+                    if sess_arc.is_shutting_down() {
+                        if let Some(n) = ANY_BG_NOTIFY.get() { n.notify_waiters(); }
+                        notify_task.notify_waiters();
+                        return;
+                    }
                     let ev = sess_arc.make_event(&sub_id_for_events, bg_event);
                     sess_arc.send_event(ev).await;
 
@@ -10847,7 +10858,7 @@ async fn handle_container_exec_with_params(
                             text: PENDING_ONLY_SENTINEL.to_string(),
                         }];
                         let agent = AgentTask::spawn(
-                            Arc::clone(sess_arc),
+                            Arc::clone(&sess_arc),
                             turn_context,
                             sub_id,
                             sentinel_input,
@@ -10856,9 +10867,6 @@ async fn handle_container_exec_with_params(
                         );
                         sess_arc.set_task(agent);
                     }
-                } else {
-                    let ev = Event { id: sub_id_for_events.clone(), event_seq: 0, msg: bg_event, order: None };
-                    let _ = tx_event.send(ev).await;
                 }
             }
             if let Some(n) = ANY_BG_NOTIFY.get() { n.notify_waiters(); }

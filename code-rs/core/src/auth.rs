@@ -205,20 +205,30 @@ impl CodexAuth {
                         .as_ref()
                         .map(|tokens| tokens.access_token.as_str()),
                 ) {
-                    tokio::time::timeout(Duration::from_secs(60), self.refresh_token())
-                        .await
-                        .map_err(|_| {
-                            std::io::Error::other(
-                                "timed out while refreshing OpenAI API key",
-                            )
-                        })?
-                        .map_err(std::io::Error::other)?;
+                    let refresh_result = tokio::time::timeout(
+                        Duration::from_secs(60),
+                        self.refresh_token(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::other("timed out while refreshing OpenAI API key")
+                    })
+                    .and_then(|result| result.map_err(std::io::Error::other));
 
-                    tokens = self
-                        .get_current_token_data()
-                        .ok_or(std::io::Error::other(
-                            "Token data is not available after refresh.",
-                        ))?;
+                    match refresh_result {
+                        Ok(_) => {
+                            tokens = self
+                                .get_current_token_data()
+                                .ok_or(std::io::Error::other(
+                                    "Token data is not available after refresh.",
+                                ))?;
+                        }
+                        Err(err) => {
+                            if !access_token_is_still_valid(&tokens.access_token, Utc::now()) {
+                                return Err(err);
+                            }
+                        }
+                    }
                 }
 
                 Ok(tokens)
@@ -366,6 +376,13 @@ fn should_proactively_refresh_auth(
     })
 }
 
+fn access_token_is_still_valid(access_token: &str, now: DateTime<Utc>) -> bool {
+    parse_jwt_expiration(access_token)
+        .ok()
+        .flatten()
+        .is_some_and(|expires_at| expires_at > now)
+}
+
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
 pub const CODEX_API_KEY_ENV_VAR: &str = "CODEX_API_KEY";
 
@@ -511,7 +528,22 @@ pub async fn auth_for_stored_account(
                 .await
                 .map_err(|_| {
                     std::io::Error::other("timed out while refreshing OpenAI API key")
-                })?;
+                });
+
+                let refresh_response = match refresh_response {
+                    Ok(response) => response,
+                    Err(err) => {
+                        if access_token_is_still_valid(&tokens.access_token, Utc::now()) {
+                            return Ok(CodexAuth::from_tokens_with_originator_and_mode(
+                                tokens,
+                                last_refresh,
+                                originator,
+                                account.mode,
+                            ));
+                        }
+                        return Err(err);
+                    }
+                };
 
                 let refresh_response = match refresh_response {
                     Ok(response) => response,
@@ -529,6 +561,14 @@ pub async fn auth_for_stored_account(
                                     ));
                                 }
                             }
+                        }
+                        if access_token_is_still_valid(&tokens.access_token, Utc::now()) {
+                            return Ok(CodexAuth::from_tokens_with_originator_and_mode(
+                                tokens,
+                                last_refresh,
+                                originator,
+                                account.mode,
+                            ));
                         }
                         return Err(std::io::Error::other(err));
                     }
@@ -1017,9 +1057,14 @@ mod tests {
     use base64::Engine;
     use reqwest::StatusCode;
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
     use serde::Serialize;
     use serde_json::json;
     use tempfile::tempdir;
+    use wiremock::matchers::method;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
 
     const LAST_REFRESH: &str = "2025-08-06T20:41:36.232376Z";
 
@@ -1389,6 +1434,82 @@ mod tests {
         assert!(should_proactively_refresh_auth(Some(fresh), Some(&expired_access)));
     }
 
+    #[test]
+    fn access_token_validity_uses_jwt_expiration() {
+        let future_access = build_jwt(serde_json::json!({ "exp": Utc::now().timestamp() + 3600 }));
+        let expired_access = build_jwt(serde_json::json!({ "exp": Utc::now().timestamp() - 60 }));
+
+        assert!(access_token_is_still_valid(&future_access, Utc::now()));
+        assert!(!access_token_is_still_valid(&expired_access, Utc::now()));
+        assert!(!access_token_is_still_valid("not-a-jwt", Utc::now()));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_for_stored_account_uses_valid_cached_token_if_proactive_refresh_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let _guard = EnvVarGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, server.uri());
+        let code_home = tempdir().unwrap();
+        let access_token = build_jwt(serde_json::json!({ "exp": Utc::now().timestamp() + 240 }));
+        let account = stored_chatgpt_account(access_token.clone());
+
+        let auth = auth_for_stored_account(code_home.path(), &account, "test")
+            .await
+            .expect("valid cached token should survive proactive refresh failure");
+
+        assert_eq!(auth.get_token().await.unwrap(), access_token);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn token_data_uses_valid_cached_token_if_proactive_refresh_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let _guard = EnvVarGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, server.uri());
+        let access_token = build_jwt(serde_json::json!({ "exp": Utc::now().timestamp() + 240 }));
+        let tokens = token_data_for_access(access_token.clone());
+        let auth = CodexAuth::from_tokens_with_originator_and_mode(
+            tokens,
+            Some(Utc::now()),
+            "test",
+            AuthMode::ChatGPT,
+        );
+
+        let token_data = auth
+            .get_token_data()
+            .await
+            .expect("valid cached token should survive proactive refresh failure");
+
+        assert_eq!(token_data.access_token, access_token);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_for_stored_account_errors_if_expired_token_refresh_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let _guard = EnvVarGuard::set(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, server.uri());
+        let code_home = tempdir().unwrap();
+        let access_token = build_jwt(serde_json::json!({ "exp": Utc::now().timestamp() - 60 }));
+        let account = stored_chatgpt_account(access_token);
+
+        let err = auth_for_stored_account(code_home.path(), &account, "test")
+            .await
+            .expect_err("expired token should still require successful refresh");
+
+        assert!(err.to_string().contains("temporarily unavailable"));
+    }
+
     #[tokio::test]
     async fn auth_manager_skips_refresh_for_api_key_auth() {
         let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-test"));
@@ -1432,6 +1553,50 @@ mod tests {
         let payload_b64 = b64(&serde_json::to_vec(&payload).unwrap());
         let signature_b64 = b64(b"sig");
         format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
+
+    fn stored_chatgpt_account(access_token: String) -> crate::auth_accounts::StoredAccount {
+        crate::auth_accounts::StoredAccount {
+            id: "account-id".to_string(),
+            mode: AuthMode::ChatGPT,
+            label: None,
+            openai_api_key: None,
+            tokens: Some(token_data_for_access(access_token)),
+            last_refresh: Some(Utc::now()),
+            created_at: None,
+            last_used_at: None,
+        }
+    }
+
+    fn token_data_for_access(access_token: String) -> TokenData {
+        TokenData {
+            id_token: IdTokenInfo::default(),
+            access_token,
+            refresh_token: "refresh-token".to_string(),
+            account_id: Some("account-id".to_string()),
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 
     fn write_auth_file(params: AuthFileParams, code_home: &Path) -> std::io::Result<String> {
