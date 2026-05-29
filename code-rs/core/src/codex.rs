@@ -1171,10 +1171,6 @@ pub struct Codex {
     rx_event: Receiver<Event>,
 }
 
-// Allow internal components (like background exec completions) to trigger a new
-// turn without fabricating a visible user message. We enqueue an empty
-// UserInput; the model will only see queued developer/system items.
-static TX_SUB_GLOBAL: OnceLock<Sender<Submission>> = OnceLock::new();
 static ANY_BG_NOTIFY: OnceLock<std::sync::Arc<Notify>> = OnceLock::new();
 
 /// Wrapper returned by [`Codex::spawn`] containing the spawned [`Codex`],
@@ -1247,8 +1243,6 @@ impl Codex {
             tx_sub,
             rx_event,
         };
-        // Make a clone of tx_sub available for internal auto-turn triggers.
-        let _ = TX_SUB_GLOBAL.set(codex.tx_sub.clone());
         let _ = ANY_BG_NOTIFY.set(std::sync::Arc::new(Notify::new()));
         let init_id = codex.submit(configure_session).await?;
 

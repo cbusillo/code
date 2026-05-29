@@ -277,7 +277,9 @@ pub(super) async fn submission_loop(
                     if !seen_batches.insert(trimmed.to_string()) {
                         continue;
                     }
-                    cancelled += manager.cancel_batch(trimmed).await;
+                    cancelled += manager
+                        .cancel_batch_for_session(trimmed, sess_arc.session_uuid())
+                        .await;
                 }
 
                 for agent_id in agent_ids {
@@ -288,7 +290,10 @@ pub(super) async fn submission_loop(
                     if !seen_agents.insert(trimmed.to_string()) {
                         continue;
                     }
-                    if manager.cancel_agent(trimmed).await {
+                    if manager
+                        .cancel_agent_for_session(trimmed, sess_arc.session_uuid())
+                        .await
+                    {
                         cancelled += 1;
                     }
                 }
@@ -8911,7 +8916,7 @@ async fn handle_check_agent_status(
         Ok(params) => {
             let manager = AGENT_MANAGER.read().await;
 
-            if let Some(agent) = manager.get_agent(&params.agent_id) {
+            if let Some(agent) = manager.get_agent_for_session(&params.agent_id, sess.session_uuid()) {
                 match agent.batch_id.as_deref() {
                     Some(batch) if batch == params.batch_id => {}
                     _ => {
@@ -8958,7 +8963,7 @@ async fn handle_check_agent_status(
                     };
                     // Re-acquire manager to get fresh progress after potential delay
                     let manager = AGENT_MANAGER.read().await;
-                    if let Some(agent) = manager.get_agent(&params.agent_id) {
+                    if let Some(agent) = manager.get_agent_for_session(&params.agent_id, sess.session_uuid()) {
                         let joined = agent.progress.join("\n");
                         match write_agent_file(&dir, "progress.log", &joined) {
                             Ok(p) => progress_file = Some(p.display().to_string()),
@@ -9037,7 +9042,7 @@ async fn handle_get_agent_result(
         Ok(params) => {
             let manager = AGENT_MANAGER.read().await;
 
-            if let Some(agent) = manager.get_agent(&params.agent_id) {
+            if let Some(agent) = manager.get_agent_for_session(&params.agent_id, sess.session_uuid()) {
                 match agent.batch_id.as_deref() {
                     Some(batch) if batch == params.batch_id => {}
                     _ => {
@@ -9171,7 +9176,7 @@ async fn handle_cancel_agent(
                         };
                     }
                 };
-                if let Some(agent) = manager.get_agent(&agent_id) {
+                if let Some(agent) = manager.get_agent_for_session(&agent_id, sess.session_uuid()) {
                     if agent.batch_id.as_deref() != Some(batch_id.as_str()) {
                         return ResponseInputItem::FunctionCallOutput {
                             call_id: call_id_clone,
@@ -9184,7 +9189,7 @@ async fn handle_cancel_agent(
                         };
                     }
                 }
-                if manager.cancel_agent(&agent_id).await {
+                if manager.cancel_agent_for_session(&agent_id, sess.session_uuid()).await {
                     ResponseInputItem::FunctionCallOutput {
                         call_id: call_id_clone,
                         output: FunctionCallOutputPayload {
@@ -9200,7 +9205,7 @@ async fn handle_cancel_agent(
                     }
                 }
             } else if let Some(batch_id) = params.batch_id {
-                let count = manager.cancel_batch(&batch_id).await;
+                let count = manager.cancel_batch_for_session(&batch_id, sess.session_uuid()).await;
                 ResponseInputItem::FunctionCallOutput {
                     call_id: call_id_clone,
                     output: FunctionCallOutputPayload {
@@ -9273,7 +9278,7 @@ async fn handle_wait_for_agent(
                         let manager = AGENT_MANAGER.read().await;
 
                         if let Some(agent_id) = &params.agent_id {
-                            if let Some(agent) = manager.get_agent(agent_id) {
+                            if let Some(agent) = manager.get_agent_for_session(agent_id, sess.session_uuid()) {
                                 match agent.batch_id.as_deref() {
                                     Some(batch) if batch == batch_id => {}
                                     _ => {
@@ -9362,7 +9367,7 @@ async fn handle_wait_for_agent(
                         }
                     }
                 } else {
-                    let agents = manager.list_agents(None, Some(batch_id.clone()), false);
+                    let agents = manager.list_agents_for_session(None, Some(batch_id.clone()), false, sess.session_uuid());
 
                     // Separate terminal vs non-terminal agents
                     let completed_agents: Vec<_> = agents
@@ -9678,10 +9683,11 @@ async fn handle_list_agents(
                         _ => None,
                     });
 
-            let agents = manager.list_agents(
+            let agents = manager.list_agents_for_session(
                 status_filter,
                 Some(batch_id.clone()),
                 params.recent_only.unwrap_or(false),
+                sess.session_uuid(),
             );
 
             // Count running agents for status update
@@ -10719,6 +10725,7 @@ async fn handle_container_exec_with_params(
     let suppress_event_flag_task = suppress_event_flag.clone();
     let display_label_task = display_label.clone();
     let tool_output_max_bytes = sess.tool_output_max_bytes;
+    let sess_for_background_completion = sess.self_handle.upgrade();
     let task_handle = tokio::spawn(async move {
         // Build stdout stream with tail capture. We cannot stamp via `Session` here,
         // but deltas will be delivered with neutral ordering which the UI tolerates.
@@ -10809,10 +10816,10 @@ async fn handle_container_exec_with_params(
                     format!("{label} completed in background")
                 };
                 let bg_event = EventMsg::BackgroundEvent(BackgroundEventEvent { message });
-                let ev = Event { id: sub_id_for_events.clone(), event_seq: 0, msg: bg_event, order: None };
-                let _ = tx_event.send(ev).await;
+                if let Some(sess_arc) = sess_for_background_completion.as_ref() {
+                    let ev = sess_arc.make_event(&sub_id_for_events, bg_event);
+                    sess_arc.send_event(ev).await;
 
-                if let Some(tx) = TX_SUB_GLOBAL.get() {
                     let header_label = if label.is_empty() {
                         format!("call_id={}", call_id_for_events)
                     } else {
@@ -10828,9 +10835,30 @@ async fn handle_container_exec_with_params(
                         tool_output_max_bytes,
                     );
                     let dev_text = format!("{}\n\n{}", header, body);
-                    let _ = tx
-                        .send(Submission { id: uuid::Uuid::new_v4().to_string(), op: Op::AddPendingInputDeveloper { text: dev_text } })
-                        .await;
+                    let dev_msg = ResponseInputItem::Message {
+                        role: "developer".to_string(),
+                        content: vec![ContentItem::InputText { text: dev_text }],
+                    };
+                    if sess_arc.enqueue_out_of_turn_item(dev_msg) {
+                        sess_arc.cleanup_old_status_items().await;
+                        let turn_context = sess_arc.make_turn_context();
+                        let sub_id = sess_arc.next_internal_sub_id();
+                        let sentinel_input = vec![InputItem::Text {
+                            text: PENDING_ONLY_SENTINEL.to_string(),
+                        }];
+                        let agent = AgentTask::spawn(
+                            Arc::clone(sess_arc),
+                            turn_context,
+                            sub_id,
+                            sentinel_input,
+                            TaskOriginKind::OutOfTurnDeveloper,
+                            false,
+                        );
+                        sess_arc.set_task(agent);
+                    }
+                } else {
+                    let ev = Event { id: sub_id_for_events.clone(), event_seq: 0, msg: bg_event, order: None };
+                    let _ = tx_event.send(ev).await;
                 }
             }
             if let Some(n) = ANY_BG_NOTIFY.get() { n.notify_waiters(); }

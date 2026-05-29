@@ -1126,6 +1126,12 @@ impl AgentManager {
             .or_else(|| self.archived_terminal_agents.get(agent_id).cloned())
     }
 
+    pub fn get_agent_for_session(&self, agent_id: &str, owner_session_id: Uuid) -> Option<Agent> {
+        self
+            .get_agent(agent_id)
+            .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+    }
+
     pub fn get_all_agents(&self) -> impl Iterator<Item = &Agent> {
         self.agents.values()
     }
@@ -1176,6 +1182,20 @@ impl AgentManager {
         out
     }
 
+    pub fn list_agents_for_session(
+        &self,
+        status_filter: Option<AgentStatus>,
+        batch_id: Option<String>,
+        recent_only: bool,
+        owner_session_id: Uuid,
+    ) -> Vec<Agent> {
+        self
+            .list_agents(status_filter, batch_id, recent_only)
+            .into_iter()
+            .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+            .collect()
+    }
+
     pub fn has_active_agents(&self) -> bool {
         self.agents
             .values()
@@ -1196,11 +1216,48 @@ impl AgentManager {
         }
     }
 
+    pub async fn cancel_agent_for_session(
+        &mut self,
+        agent_id: &str,
+        owner_session_id: Uuid,
+    ) -> bool {
+        if self
+            .get_agent(agent_id)
+            .is_some_and(|agent| agent_belongs_to_session(&agent, Some(owner_session_id)))
+        {
+            self.cancel_agent(agent_id).await
+        } else {
+            false
+        }
+    }
+
     pub async fn cancel_batch(&mut self, batch_id: &str) -> usize {
         let agent_ids: Vec<String> = self
             .agents
             .values()
             .filter(|agent| agent.batch_id.as_ref() == Some(&batch_id.to_string()))
+            .map(|agent| agent.id.clone())
+            .collect();
+
+        let mut count = 0;
+        for agent_id in agent_ids {
+            if self.cancel_agent(&agent_id).await {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub async fn cancel_batch_for_session(
+        &mut self,
+        batch_id: &str,
+        owner_session_id: Uuid,
+    ) -> usize {
+        let agent_ids: Vec<String> = self
+            .agents
+            .values()
+            .filter(|agent| agent.batch_id.as_ref() == Some(&batch_id.to_string()))
+            .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
             .map(|agent| agent.id.clone())
             .collect();
 
@@ -3026,6 +3083,42 @@ mod tests {
         }
     }
 
+    fn test_agent(
+        id: &str,
+        owner_session_id: Uuid,
+        batch_id: &str,
+        status: AgentStatus,
+    ) -> Agent {
+        let now = chrono::Utc::now();
+        Agent {
+            id: id.to_string(),
+            owner_session_id: Some(owner_session_id),
+            batch_id: Some(batch_id.to_string()),
+            model: "code-gpt-5.5".to_string(),
+            name: Some(id.to_string()),
+            prompt: "prompt".to_string(),
+            context: None,
+            output_goal: None,
+            files: Vec::new(),
+            read_only: true,
+            status,
+            result: None,
+            error: None,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: None,
+            progress: Vec::new(),
+            worktree_path: None,
+            branch_name: None,
+            worktree_base: None,
+            source_kind: None,
+            log_tag: None,
+            config: None,
+            reasoning_effort: ReasoningEffort::Low,
+            last_activity: now,
+        }
+    }
+
     #[test]
     fn code_family_falls_back_when_command_missing() {
         let cfg = agent_with_command("definitely-not-present-429");
@@ -3132,6 +3225,52 @@ mod tests {
         assert!(!payload_a.agents.iter().any(|agent| agent.id == agent_b));
         assert!(payload_b.agents.iter().any(|agent| agent.id == agent_b));
         assert!(!payload_b.agents.iter().any(|agent| agent.id == agent_a));
+    }
+
+    #[tokio::test]
+    async fn model_facing_agent_queries_are_session_scoped() {
+        let mut manager = AgentManager::new();
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+        let shared_batch = "shared-batch";
+
+        manager.agents.insert(
+            "agent-a".to_string(),
+            test_agent("agent-a", session_a, shared_batch, AgentStatus::Running),
+        );
+        manager.agents.insert(
+            "agent-b".to_string(),
+            test_agent("agent-b", session_b, shared_batch, AgentStatus::Running),
+        );
+        manager.handles.insert("agent-a".to_string(), tokio::spawn(async {}));
+        manager.handles.insert("agent-b".to_string(), tokio::spawn(async {}));
+        manager.archived_terminal_agents.insert(
+            "archived-b".to_string(),
+            test_agent("archived-b", session_b, shared_batch, AgentStatus::Completed),
+        );
+
+        let visible_to_a = manager.list_agents_for_session(
+            None,
+            Some(shared_batch.to_string()),
+            false,
+            session_a,
+        );
+        assert_eq!(visible_to_a.len(), 1);
+        assert_eq!(visible_to_a[0].id, "agent-a");
+        assert!(manager.get_agent_for_session("agent-b", session_a).is_none());
+        assert!(manager.get_agent_for_session("archived-b", session_a).is_none());
+        assert!(!manager.cancel_agent_for_session("agent-b", session_a).await);
+
+        assert!(manager.agents.contains_key("agent-b"));
+        assert!(manager.cancel_batch_for_session(shared_batch, session_a).await == 1);
+        assert_eq!(
+            manager.agents.get("agent-a").map(|agent| &agent.status),
+            Some(&AgentStatus::Cancelled),
+        );
+        assert_eq!(
+            manager.agents.get("agent-b").map(|agent| &agent.status),
+            Some(&AgentStatus::Running),
+        );
     }
 
     #[tokio::test]
