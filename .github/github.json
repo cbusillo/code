@@ -28,8 +28,6 @@
     },
     "scripts": {
       "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch main",
-      "cleanupSpace": "just local-cleanup-space --apply --keep-current-fast-cache",
-      "cleanupSpaceCold": "just local-cleanup-space --apply",
       "upstreamImport": "just local-upstream-import"
     },
     "docsRequiredWhen": [
@@ -87,7 +85,21 @@
   },
   "cleanup": {
     "deleteMergedLocalBranches": true,
-    "removeMergedCleanWorktrees": true
+    "removeMergedCleanWorktrees": true,
+    "commands": [
+      {
+        "name": "routine warm-cache cleanup",
+        "command": "just local-cleanup-space --apply --keep-current-fast-cache",
+        "when": "routine",
+        "description": "Remove stale repo-local build caches while preserving the current fast-build cache."
+      },
+      {
+        "name": "cold cleanup",
+        "command": "just local-cleanup-space --apply",
+        "when": "cold",
+        "description": "Aggressively remove rebuildable target and cache artifacts; run only when explicitly requested."
+      }
+    ]
   },
   "metadataFreshness": {
     "updateWhen": [
