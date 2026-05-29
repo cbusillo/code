@@ -31429,6 +31429,7 @@ Have we met every part of this goal and is there no further work to do?"#
 async fn run_background_review(
     config: Config,
     app_event_tx: AppEventSender,
+    owner_session_id: Uuid,
     base_snapshot: Option<GhostCommit>,
     turn_context: Option<String>,
     prefer_fallback: bool,
@@ -31647,6 +31648,7 @@ async fn run_background_review(
                 false,
                 Some(branch.clone()),
                 Some(agent_config.clone()),
+                Some(owner_session_id),
                 Some(branch.clone()),
                 Some(snapshot_id.clone()),
                 Some(code_core::protocol::AgentSourceKind::AutoReview),
@@ -39201,6 +39203,7 @@ impl ChatWidget<'_> {
 
         let config = self.config.clone();
         let app_event_tx = self.app_event_tx.clone();
+        let owner_session_id = self.session_id.unwrap_or_else(Uuid::new_v4);
         let base_snapshot_for_task = base_snapshot.clone();
         let turn_context = self.turn_context_block();
         let prefer_fallback = had_notice || had_fixed_indicator;
@@ -39208,6 +39211,7 @@ impl ChatWidget<'_> {
             run_background_review(
                 config,
                 app_event_tx,
+                owner_session_id,
                 base_snapshot_for_task,
                 turn_context,
                 prefer_fallback,

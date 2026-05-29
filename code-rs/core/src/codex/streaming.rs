@@ -951,10 +951,10 @@ pub(super) async fn submission_loop(
                     let mut manager = AGENT_MANAGER.write().await;
                     let (agent_tx, mut agent_rx) =
                         tokio::sync::mpsc::unbounded_channel::<AgentStatusUpdatePayload>();
-                    manager.set_event_sender(agent_tx);
+                    let sess_for_agents = sess.as_ref().expect("session active").clone();
+                    manager.set_event_sender(sess_for_agents.session_uuid(), agent_tx);
                     drop(manager);
 
-                    let sess_for_agents = sess.as_ref().expect("session active").clone();
                     // Forward agent events to the main event channel
                     let tx_event_clone = tx_event.clone();
                     tokio::spawn(async move {
@@ -6970,6 +6970,8 @@ async fn handle_gh_run_wait(
         #[serde(default)]
         branch: Option<String>,
         #[serde(default)]
+        head_sha: Option<String>,
+        #[serde(default)]
         interval_seconds: Option<u64>,
     }
 
@@ -7261,6 +7263,7 @@ async fn handle_gh_run_wait(
     fn run_summary_text(
         run_id: &str,
         branch: &str,
+        head_sha: Option<&str>,
         status: &str,
         conclusion: &str,
         workflow: Option<String>,
@@ -7288,6 +7291,12 @@ async fn handle_gh_run_wait(
         }
         lines.push(format!("Run: {run_id}"));
         lines.push(format!("Branch: {branch}"));
+        if let Some(head_sha) = head_sha {
+            if !head_sha.is_empty() {
+                let short_sha: String = head_sha.chars().take(12).collect();
+                lines.push(format!("Commit: {short_sha}"));
+            }
+        }
         if let Some(url) = url {
             if !url.is_empty() {
                 lines.push(format!("URL: {url}"));
@@ -7383,6 +7392,13 @@ async fn handle_gh_run_wait(
         Some(value) => value.to_string(),
         None => detect_branch(&cwd).await,
     };
+    let requested_head_sha = parsed
+        .head_sha
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let run_list_limit = if requested_head_sha.is_some() { "20" } else { "1" };
 
     let mut resolved_run_id = match parsed.run_id {
         Some(Value::String(value)) if !value.trim().is_empty() => Some(value),
@@ -7407,9 +7423,9 @@ async fn handle_gh_run_wait(
                     "--branch",
                     &branch,
                     "--limit",
-                    "1",
+                    run_list_limit,
                     "--json",
-                    "databaseId,displayTitle,workflowName,headBranch,status,conclusion",
+                    "databaseId,displayTitle,workflowName,headBranch,headSha,status,conclusion",
                 ],
                 repo.as_deref(),
             )
@@ -7429,9 +7445,9 @@ async fn handle_gh_run_wait(
                     "--branch",
                     &branch,
                     "--limit",
-                    "1",
+                    run_list_limit,
                     "--json",
-                    "databaseId,displayTitle,workflowName,headBranch,status,conclusion",
+                    "databaseId,displayTitle,workflowName,headBranch,headSha,status,conclusion",
                 ],
                 repo.as_deref(),
             )
@@ -7447,7 +7463,7 @@ async fn handle_gh_run_wait(
 
         if resolution_error.is_none() {
             let runs: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-            let run = runs.into_iter().next();
+            let run = select_github_run_for_wait(runs, requested_head_sha.as_deref());
             resolved_run_id = run
                 .as_ref()
                 .and_then(|item| item.get("databaseId").cloned())
@@ -7473,7 +7489,11 @@ async fn handle_gh_run_wait(
             } else {
                 format!("branch {branch}")
             };
-            resolution_error = Some(format!("No runs found for {detail}"));
+            let sha_detail = requested_head_sha
+                .as_deref()
+                .map(|sha| format!(" at commit {sha}"))
+                .unwrap_or_default();
+            resolution_error = Some(format!("No runs found for {detail}{sha_detail}"));
         }
     }
 
@@ -7521,6 +7541,9 @@ async fn handle_gh_run_wait(
         }
         prepared_branch = Some(branch.clone());
         resolved_params.insert("branch".to_string(), Value::String(branch.clone()));
+        if let Some(head_sha) = requested_head_sha.clone() {
+            resolved_params.insert("head_sha".to_string(), Value::String(head_sha));
+        }
         if let Some(workflow) = resolved_workflow.clone() {
             prepared_workflow = Some(workflow.clone());
             resolved_params.insert("workflow".to_string(), Value::String(workflow));
@@ -7629,6 +7652,7 @@ async fn handle_gh_run_wait(
                     let summary = run_summary_text(
                         &run_id,
                         prepared_branch.as_deref().unwrap_or(""),
+                        requested_head_sha.as_deref(),
                         &status,
                         &conclusion,
                         workflow_name,
@@ -8634,6 +8658,7 @@ pub(crate) async fn handle_run_agent(
                             read_only,
                             Some(batch_id.clone()),
                             config.clone(),
+                            sess.session_uuid(),
                             sess.model_reasoning_effort.into(),
                         )
                         .await;
@@ -8658,6 +8683,7 @@ pub(crate) async fn handle_run_agent(
                             params.files.clone().unwrap_or_default(),
                             read_only,
                             Some(batch_id.clone()),
+                            sess.session_uuid(),
                             sess.model_reasoning_effort.into(),
                         )
                         .await;
@@ -8726,6 +8752,7 @@ pub(crate) async fn handle_run_agent(
                         params.files.clone().unwrap_or_default(),
                         read_only,
                         Some(batch_id.clone()),
+                        sess.session_uuid(),
                         sess.model_reasoning_effort.into(),
                     )
                     .await;
@@ -11420,6 +11447,23 @@ fn track_seen_completed_agent_for_batch(state: &mut State, batch_id: &str, agent
     ensure_wait_batch_tracking_capacity(state, batch_id);
 }
 
+fn select_github_run_for_wait(
+    runs: Vec<serde_json::Value>,
+    head_sha: Option<&str>,
+) -> Option<serde_json::Value> {
+    let expected_sha = head_sha.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(expected_sha) = expected_sha {
+        runs.into_iter().find(|item| {
+            item
+                .get("headSha")
+                .and_then(|value| value.as_str())
+                .is_some_and(|head_sha| head_sha.eq_ignore_ascii_case(expected_sha))
+        })
+    } else {
+        runs.into_iter().next()
+    }
+}
+
 fn agent_completion_wake_messages(
     payload: &AgentStatusUpdatePayload,
     state: &mut State,
@@ -11510,6 +11554,7 @@ async fn enqueue_agent_completion_wake(
 #[cfg(test)]
 mod agent_completion_wake_tests {
     use super::agent_completion_wake_messages;
+    use super::select_github_run_for_wait;
     use super::track_seen_completed_agent_for_batch;
     use super::State;
     use super::AgentSourceKind;
@@ -11520,6 +11565,7 @@ mod agent_completion_wake_tests {
     };
     use crate::agent_tool::AgentStatusUpdatePayload;
     use crate::protocol::AgentInfo;
+    use serde_json::json;
 
     fn agent_info(
         id: &str,
@@ -11638,6 +11684,41 @@ mod agent_completion_wake_tests {
             .get(hot_batch)
             .expect("hot batch should be tracked");
         assert!(seen.len() <= MAX_WAIT_TRACKED_AGENT_IDS_PER_BATCH);
+    }
+
+    #[test]
+    fn github_run_wait_selects_matching_head_sha() {
+        let runs = vec![
+            json!({
+                "databaseId": 2002,
+                "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }),
+            json!({
+                "databaseId": 1001,
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }),
+        ];
+
+        let selected = select_github_run_for_wait(
+            runs,
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        )
+        .expect("matching run should be selected");
+
+        assert_eq!(selected["databaseId"], 1001);
+    }
+
+    #[test]
+    fn github_run_wait_without_head_sha_uses_latest_run() {
+        let runs = vec![
+            json!({ "databaseId": 2002, "headSha": "bbbb" }),
+            json!({ "databaseId": 1001, "headSha": "aaaa" }),
+        ];
+
+        let selected = select_github_run_for_wait(runs, None)
+            .expect("latest run should be selected without a SHA constraint");
+
+        assert_eq!(selected["databaseId"], 2002);
     }
 }
 

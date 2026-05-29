@@ -1427,6 +1427,16 @@ pub fn create_gh_run_wait_tool() -> OpenAiTool {
         },
     );
     properties.insert(
+        "head_sha".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Commit SHA to match when selecting a run by workflow/branch. Prefer passing this after a merge or push so another session's newer run on the same branch is not selected."
+                    .to_string(),
+            ),
+            allowed_values: None,
+        },
+    );
+    properties.insert(
         "interval_seconds".to_string(),
         JsonSchema::Number {
             description: Some("Polling interval in seconds (default 8).".to_string()),
@@ -1434,7 +1444,7 @@ pub fn create_gh_run_wait_tool() -> OpenAiTool {
     );
     OpenAiTool::Function(ResponsesApiTool {
         name: "gh_run_wait".to_string(),
-        description: "Wait for a GitHub Actions run to finish, using gh run view polling. If run_id is omitted, selects the latest run for the workflow/branch; if both are omitted, selects the latest run on the current branch."
+        description: "Wait for a GitHub Actions run to finish, using gh run view polling. If run_id is omitted, selects the latest run for the workflow/branch, optionally constrained by head_sha; if both are omitted, selects the latest run on the current branch."
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
