@@ -98,7 +98,7 @@ Examples:
   `scripts/local/overlay-picks.txt`, manually re-port the fix against current
   upstream, commit the new port on the product branch, then replace the old SHA
   in the manifest if you still want automatic replay.
-- For Every Code-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/local-overlay.md`.
+- For Every Code-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/upstream-import-policy.md`.
 
 ## How to Git Push
 

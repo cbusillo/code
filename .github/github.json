@@ -6,7 +6,7 @@
   "docs": {
     "overview": "README.md",
     "agentGuide": "AGENTS.md",
-    "upstreamImportPolicy": "docs/local-overlay.md",
+    "upstreamImportPolicy": "docs/upstream-import-policy.md",
     "execution": "docs/exec.md",
     "sandboxing": "docs/platform-sandboxing.md",
     "tuiComposer": "docs/tui-chat-composer.md",
