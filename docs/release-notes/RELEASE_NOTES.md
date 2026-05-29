@@ -1,17 +1,16 @@
-## @just-every/code v0.6.107
+## @just-every/code v0.6.108
 
-This release focuses on model freshness, session reliability, and a smoother release path.
+This release tightens the local release metadata workflow for smaller, cleaner release PRs.
 
 ### Changes
 
-- Updated the built-in Claude Opus selector to Claude Opus 4.8 and added coverage for dynamic remote GPT model discovery.
-- Fixed ChatGPT token refresh, auth fallback, and shutdown completions to reduce stale-auth interruptions.
-- Kept archived agent activity, visibility, and status isolated across reconnects and same-repo sessions.
-- Split release metadata preparation from final publishing so release PRs stay lightweight while publish runs the full gate.
-- Cleaned up Every Code/CODEX compatibility docs, package shim behavior, release preflight paths, and agent/skill configuration docs.
+- Require locally prepared release metadata before publishing, with CI validation that the generated release notes match the target version.
+- Make local release note generation scale down for tiny releases, including concise one-bullet GitHub notes when that is the clearest output.
 
 ### Install
 
 ```bash
-gh release download v0.6.107 --repo cbusillo/code
+gh release download v0.6.108 --repo cbusillo/code
 ```
+
+Compare: https://github.com/cbusillo/code/compare/v0.6.107...v0.6.108
