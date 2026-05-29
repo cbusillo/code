@@ -90,15 +90,15 @@ Examples:
   `code-rs/target/release/code`.
 - Use `just local-upstream-import` only from a clean `main` branch. The helper
   fetches `upstream/main`, merges it into the current Every Code branch, replays
-  any commits listed in `scripts/local/overlay-picks.txt`, then rebuilds the
+  any commits listed in `scripts/local/upstream-picks.txt`, then rebuilds the
   release binary.
 - Commits already on the product branch persist automatically across future
   upstream imports. They do not need to be duplicated in
-  `scripts/local/overlay-picks.txt`.
+  `scripts/local/upstream-picks.txt`.
 - If you make a new Every Code fix that should remain part of the product,
   commit it through the normal task-branch/PR flow into the product branch
   first. Do not leave important local changes only as an unmerged side branch.
-- Add a commit SHA to `scripts/local/overlay-picks.txt` only for a patch that
+- Add a commit SHA to `scripts/local/upstream-picks.txt` only for a patch that
   intentionally lives outside the product branch and still needs to be
   cherry-picked in during `just local-upstream-import`. Keep the list ordered
   and comment each entry with the source branch or purpose.
@@ -106,10 +106,10 @@ Examples:
   do not need to merge cleanly as branches; only the specific carried commits
   must cherry-pick cleanly onto the current product branch.
 - If a legacy pick no longer cherry-picks cleanly, leave it commented out in
-  `scripts/local/overlay-picks.txt`, manually re-port the fix against current
+  `scripts/local/upstream-picks.txt`, manually re-port the fix against current
   upstream, commit the new port on the product branch, then replace the old SHA
   in the manifest if you still want automatic replay.
-- For Every Code-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/local-overlay.md`.
+- For Every Code-owned surfaces, release steps, remote names, and conflict hot spots, see `docs/upstream-import-policy.md`.
 
 ## How to Git Push
 

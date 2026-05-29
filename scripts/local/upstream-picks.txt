@@ -7,7 +7,7 @@
 # - Commits already present on the product branch survive future upstream
 #   imports automatically; do not list them again here.
 # - Commit new product fixes onto the product branch first.
-# - Add a SHA here only if the fix intentionally lives outside the overlay
+# - Add a SHA here only if the fix intentionally lives outside the product
 #   branch and should be auto-replayed during future `just local-upstream-import`
 #   runs.
 # - If an old carried fix stops cherry-picking cleanly, keep it commented out,

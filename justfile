@@ -73,11 +73,7 @@ local-remove-homebrew-code-link:
 
 [no-cd]
 local-upstream-import:
-    ./scripts/local/update-overlay-from-upstream.sh
-
-[no-cd]
-local-overlay-update:
-    ./scripts/local/update-overlay-from-upstream.sh
+    ./scripts/local/update-from-upstream.sh
 
 [no-cd]
 local-product-health:

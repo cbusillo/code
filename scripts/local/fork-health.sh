@@ -31,7 +31,7 @@ echo
 
 if git rev-parse --verify --quiet "$upstream_ref" >/dev/null; then
 	echo "fork delta vs $upstream_ref:"
-	git diff --shortstat "$upstream_ref"..HEAD -- code-rs scripts/local .github/workflows/release.yml docs/local-overlay.md || true
+	git diff --shortstat "$upstream_ref"..HEAD -- code-rs scripts/local .github/workflows/release.yml docs/upstream-import-policy.md || true
 	echo
 	echo "hotspot files:"
 	git diff --name-only "$upstream_ref"..HEAD -- \
@@ -42,7 +42,7 @@ if git rev-parse --verify --quiet "$upstream_ref" >/dev/null; then
 		code-rs/common/src/model_presets.rs \
 		.github/workflows/release.yml \
 		scripts/local \
-		docs/local-overlay.md || true
+		docs/upstream-import-policy.md || true
 else
 	echo "warning: upstream ref '$upstream_ref' is not available" >&2
 fi
