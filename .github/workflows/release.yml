@@ -166,140 +166,6 @@ jobs:
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "metadata_required=${METADATA_REQUIRED}" >> "$GITHUB_OUTPUT"
 
-  build-release-notes-binary:
-    name: Build release-notes Code binary
-    needs: [determine-version]
-    if: needs.determine-version.outputs.metadata_required == 'true'
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_HOME: ${{ github.workspace }}/.cargo-home
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
-      TARGET: x86_64-unknown-linux-musl
-      ARTIFACT: code-x86_64-unknown-linux-musl
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Read Rust toolchain channel
-        id: rust_toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          TOOLCHAIN=$(python3 -c "import sys, pathlib; p=pathlib.Path('code-rs/rust-toolchain.toml').read_text();
-          try:
-              import tomllib as tl
-          except ModuleNotFoundError:
-              import tomli as tl
-          print(tl.loads(p)['toolchain']['channel'])")
-          echo "channel=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
-          echo "RUST_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          targets: ${{ env.TARGET }}
-
-      - name: Setup Rust Cache (target + registries)
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v5-rust
-          shared-key: code-release-notes-${{ env.TARGET }}-toolchain-${{ steps.rust_toolchain.outputs.channel }}
-          workspaces: |
-            code-rs -> target
-          cache-targets: true
-          cache-workspace-crates: true
-          cache-on-failure: true
-
-      - name: Setup sccache (GHA backend)
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: v0.10.0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Enable sccache
-        shell: bash
-        run: |
-          {
-            echo "SCCACHE_GHA_ENABLED=true"
-            echo "RUSTC_WRAPPER=sccache"
-            echo "SCCACHE_IDLE_TIMEOUT=1800"
-            echo "SCCACHE_CACHE_SIZE=10G"
-          } >> "$GITHUB_ENV"
-
-      - name: Linux (musl) tuning
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v apt-get >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
-            if command -v sudo >/dev/null 2>&1; then
-              SUDO=(sudo)
-            elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-              SUDO=()
-            else
-              echo "musl-gcc is required but this runner cannot install packages without sudo/root." >&2
-              exit 1
-            fi
-            "${SUDO[@]}" apt-get update
-            "${SUDO[@]}" apt-get install -y musl-tools pkg-config zstd
-          elif ! command -v zstd >/dev/null 2>&1; then
-            if command -v sudo >/dev/null 2>&1; then
-              sudo apt-get update
-              sudo apt-get install -y zstd
-            elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-              apt-get update
-              apt-get install -y zstd
-            else
-              echo "zstd is required but this runner cannot install packages without sudo/root." >&2
-              exit 1
-            fi
-          fi
-          {
-            echo 'CC=musl-gcc'
-            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc'
-            echo 'PKG_CONFIG_ALLOW_CROSS=1'
-            echo 'OPENSSL_STATIC=1'
-            echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort'
-          } >> "$GITHUB_ENV"
-
-      - name: Prefetch dependencies (git + registry)
-        working-directory: code-rs
-        env:
-          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-        run: cargo fetch --locked
-
-      - name: Export CODE_VERSION for Rust build
-        shell: bash
-        run: echo "CODE_VERSION=${{ needs.determine-version.outputs.version }}" >> "$GITHUB_ENV"
-
-      - name: Build release-notes binary
-        shell: bash
-        env:
-          CARGO_INCREMENTAL: "0"
-          RUST_BACKTRACE: "1"
-        run: |
-          cd code-rs
-          cargo build --release --frozen --locked --target "$TARGET" --bin code
-
-      - name: Package release-notes binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          cp "code-rs/target/${TARGET}/release/code" "artifacts/${ARTIFACT}"
-          zstd -T0 -19 --force -o "artifacts/${ARTIFACT}.zst" "artifacts/${ARTIFACT}"
-          tar -C artifacts -czf "artifacts/${ARTIFACT}.tar.gz" "$ARTIFACT"
-          rm -f "artifacts/${ARTIFACT}"
-
-      - name: Upload release-notes binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-notes-binary-${{ env.TARGET }}
-          path: artifacts/
-          compression-level: 0
-
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: [determine-version]
@@ -615,12 +481,10 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [determine-version, build-release-notes-binary, build-binaries, preflight-tests]
+    needs: [determine-version, build-binaries, preflight-tests]
     runs-on: [self-hosted, Linux, X64, chris-testing]
     if: "always() && !cancelled() && !failure() && !contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 30
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - name: Checkout code
@@ -634,33 +498,18 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Start local OpenAI proxy for release (hardened)
-        if: env.OPENAI_API_KEY != ''
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          set -euo pipefail
-          mkdir -p .github/auto
-          PORT=5058 LOG_DEST=stdout EXIT_ON_5XX=1 RESPONSES_BETA="responses=v1" node scripts/openai-proxy.js > .github/auto/openai-proxy.log 2>&1 &
-          for _ in {1..30}; do if nc -z 127.0.0.1 5058; then break; else sleep 0.2; fi; done || true
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-
-      - name: Prepare release assets
+      - name: Require local release metadata
+        if: needs.determine-version.outputs.metadata_required == 'true'
         shell: bash
+        env:
+          NEW_VERSION: ${{ needs.determine-version.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p release-assets
-          shopt -s nullglob
-          # Gather all built "code-*" files (zst/tar.gz/zip or raw) recursively under artifacts/
-          while IFS= read -r -d '' f; do
-            cp "$f" release-assets/
-          done < <(find artifacts -type f -name 'code-*' -print0)
-          # Show what we collected
-          ls -la release-assets/ || true
+          echo "::error::Release metadata for v${NEW_VERSION} must be prepared locally."
+          echo "Run 'just local-release-notes', review the generated package version,"
+          echo "CHANGELOG.md, and docs/release-notes/RELEASE_NOTES.md changes, then"
+          echo "merge that release metadata PR before publishing."
+          exit 1
 
       - name: Update package.json version
         id: version
@@ -684,272 +533,32 @@ jobs:
           fi
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
-      # Generate CHANGELOG and release notes by running our own `code` CLI in headless mode.
-      # It will:
-      #  - Review changes between the previous tag and the new version
-      #  - Update CHANGELOG.md with a new section for vNEW_VERSION
-      #  - Write rich release notes to docs/release-notes/RELEASE_NOTES.md
-      - name: Normalize release assets for changelog generation
-        if: runner.os == 'Linux' && env.OPENAI_API_KEY != ''
+      - name: Download all artifacts
+        if: steps.version.outputs.skip_push == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          if command -v zstd >/dev/null 2>&1; then
-            exit 0
-          fi
-
+          mkdir -p release-assets
           shopt -s nullglob
-          for zst in release-assets/*.zst; do
-            fallback="${zst%.zst}.tar.gz"
-            if [ -f "$fallback" ]; then
-              echo "zstd is unavailable; using fallback $(basename "$fallback") for changelog generation"
-              rm -f "$zst"
-            else
-              echo "zstd is unavailable and no fallback exists for $(basename "$zst")" >&2
-              exit 1
-            fi
-          done
+          # Gather all built "code-*" files (zst/tar.gz/zip or raw) recursively under artifacts/
+          while IFS= read -r -d '' f; do
+            cp "$f" release-assets/
+          done < <(find artifacts -type f -name 'code-*' -print0)
+          # Show what we collected
+          ls -la release-assets/ || true
 
-      - name: Generate CHANGELOG + release notes (Code)
-        if: env.OPENAI_API_KEY != ''
+      - name: Verify local release notes metadata
+        if: steps.version.outputs.skip_push == 'true'
         shell: bash
-        # shellcheck disable=SC2012,SC2086
-        env:
-          NEW_VERSION: ${{ needs.determine-version.outputs.version }}
         run: |
           set -euo pipefail
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-
-          # Determine previous tag (the most recent tag before the new one).
-          # If none exists, use the initial commit as the base.
-          PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | sed -n '2p' || true)
-          if [ -z "$PREV_TAG" ]; then
-            BASE=$(git rev-list --max-parents=0 HEAD | tail -n1)
-            RANGE="$BASE..HEAD"
-          else
-            RANGE="$PREV_TAG..HEAD"
-          fi
-          echo "Previous tag: ${PREV_TAG:-<none>}"
-          echo "Range: $RANGE"
-
-          if [ -f CHANGELOG.md ] && [ -f docs/release-notes/RELEASE_NOTES.md ] \
-             && grep -qF "## [${NEW_VERSION}]" CHANGELOG.md 2>/dev/null \
-             && grep -qF "## @just-every/code v${NEW_VERSION}" docs/release-notes/RELEASE_NOTES.md 2>/dev/null; then
-            echo "CHANGELOG.md and docs/release-notes/RELEASE_NOTES.md already contain v${NEW_VERSION}; skipping regeneration."
-            exit 0
-          fi
-
-          # Extract a Linux x86_64 Code binary from artifacts and make it runnable.
-          mkdir -p .code-bin docs/release-notes
-          : > docs/release-notes/RELEASE_NOTES.md
-          # shellcheck disable=SC2012
-          LNX_ZST=$(ls -1 release-assets/code-x86_64-unknown-linux-musl.* 2>/dev/null | head -n1 || true)
-          if [ -z "$LNX_ZST" ]; then
-            echo "Could not find linux x86_64 Code artifact in release-assets/" >&2
-            exit 1
-          fi
-          case "$LNX_ZST" in
-            *.zst)
-              zstd -d -q --force "$LNX_ZST" -o .code-bin/code ;;
-            *.tar.gz)
-              tar -xzf "$LNX_ZST" -C .code-bin && mv .code-bin/code-x86_64-unknown-linux-musl .code-bin/code ;;
-            *.zip)
-              unzip -q -o "$LNX_ZST" -d .code-bin && mv .code-bin/code-x86_64-unknown-linux-musl .code-bin/code ;;
-            *)
-              cp "$LNX_ZST" .code-bin/code ;;
-          esac
-          chmod +x .code-bin/code
-
-          # Prepare context for the model.
-          DATE=$(date -u +%Y-%m-%d)
-          echo "# Commit log ($RANGE)" > docs/release-notes/context.md
-          # shellcheck disable=SC2086
-          git log --no-color --format='* %h %s (%an)' --abbrev=8 --no-merges $RANGE >> docs/release-notes/context.md || true
-
-          # Build the task prompt (with variables expanded by bash).
-          cat > docs/release-notes/prompt.expanded.txt <<PROMPT
-          You are Code running headless in CI to prepare a new release.
-
-          Inputs
-          - Version: v${NEW_VERSION}
-          - Date (UTC): ${DATE}
-          - Previous tag: ${PREV_TAG:-none}
-          - Commit range: ${RANGE}
-          - Working directory: repo root (CHANGELOG.md lives at top-level)
-
-          Primary Tasks
-          1) Update CHANGELOG.md with a new entry for this version using the EXACT house style below.
-          2) Generate GitHub release notes at docs/release-notes/RELEASE_NOTES.md (concise, user‑facing), derived from the same changes.
-
-          CHANGELOG.md House Style (strict)
-          - File header stays as-is ("Changelog"). Do not rewrite older sections.
-          - Insert the new section at the top (above previous versions), with this header format exactly:
-            ## [${NEW_VERSION}] - ${DATE}
-          - Include 2–5 bullets (no more, no fewer), each a single line, focusing on user-visible features, fixes, UX, performance, or stability.
-          - Keep bullets concise and scannable; avoid long prose. Use present tense.
-          - When helpful, start bullets with a short scope label like "TUI:", "CLI:", or "Core:".
-          - At the end of each bullet, include abbreviated commit SHA(s) in parentheses, using 7–8 hex chars, comma‑separated when multiple, like: (abc1234, def5678).
-          - Map changes from the git commit log in ${RANGE}; ignore pure chores/merges unless user‑visible.
-          - Do NOT add links, tables, code blocks, or subheadings. Do NOT include PR author attributions in the changelog.
-          - Do NOT add any extra headers inside the changelog entry; only bullets under the version header.
-          - Idempotent: if a section for ${NEW_VERSION} already exists, replace only that section’s body with the newly generated bullets and keep the header intact.
-
-          Release Notes (docs/release-notes/RELEASE_NOTES.md)
-          - Write exactly these sections in order; include the optional Thanks section only when applicable:
-            1) Title: ## @just-every/code v${NEW_VERSION}
-            2) One brief intro sentence (1–2 lines max).
-            3) Section header: ### Changes
-               - The same 2–5 bullets as in the changelog (you may omit SHAs).
-            4) Section header: ### Install
-               Code block with exactly:
-               gh release download v${NEW_VERSION} --repo ${GITHUB_REPOSITORY}
-            5) Optional section header: ### Thanks
-               - Include ONE line like: "Thanks to @alice and @bob for contributions!"
-               - Only include if at least one merged PR in ${RANGE} is authored by an external contributor.
-               - External contributors are any GitHub users other than: @zemaj, @andrej-griniuk, and NOT upstream contributors.
-               - Treat a username as upstream if it matches the regex /-oai$/i, or clearly belongs to the upstream org (e.g., OpenAI maintainers). Exclude such users from Thanks.
-               - Derive usernames from merge commits, Co-authored-by trailers, or PR references in commit messages. Deduplicate and prefer "@username" form.
-          - Keep notes concise; no walls of text. Do not add any other sections beyond the optional Thanks.
-          - Optional final line (only if a previous tag exists):
-            Compare: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...v${NEW_VERSION}
-
-          Rules
-          - Use the provided git log as source of truth; summarize responsibly.
-          - Explore codebase directly if commit messages are unclear or need additional context.
-          - Keep formatting minimal (headers + list bullets). No emojis ever! Basic markdown only.
-          - Never reorder older versions. Only touch the section for v${NEW_VERSION}.
-          - After writing files, stage and commit with message: docs(changelog): update for v${NEW_VERSION}
-
-          Context (git log excerpt follows):
-          PROMPT
-          cat docs/release-notes/context.md >> docs/release-notes/prompt.expanded.txt
-
-          # Run Code in fully automated exec mode against the repo root.
-          # Note: the working-directory flag is `--cd` on the `exec` subcommand.
-          OPENAI_BASE_URL="http://127.0.0.1:5058/v1" \
-          ./.code-bin/code exec --cd "$GITHUB_WORKSPACE" --full-auto --skip-git-repo-check < docs/release-notes/prompt.expanded.txt | tee .github/auto/RELEASE_AGENT_OUT.txt || {
-            echo "Code exec returned non-zero; continuing to check for outputs..." >&2
-          }
-
-          # Assert no fatal streaming/server errors if proxy in use
-          if [ -s .github/auto/RELEASE_AGENT_OUT.txt ]; then
-            if rg -n "^\\[.*\\] ERROR: (stream error|server error|exceeded retry limit)" .github/auto/RELEASE_AGENT_OUT.txt >/dev/null 2>&1; then
-              echo "Agent reported a fatal error (stream/server). Failing job." >&2
-              rg -n "^\\[.*\\] ERROR: (stream error|server error|exceeded retry limit)" .github/auto/RELEASE_AGENT_OUT.txt || true
-              exit 1
-            fi
-          fi
-
-          # Post-process: scrub upstream contributors from the Thanks section (e.g., usernames ending with -oai)
-          if [ -s docs/release-notes/RELEASE_NOTES.md ]; then
-            node - <<'JS'
-            const fs = require('fs');
-            const p = 'docs/release-notes/RELEASE_NOTES.md';
-            if (!fs.existsSync(p)) process.exit(0);
-            const src = fs.readFileSync(p,'utf8');
-            const lines = src.split(/\r?\n/);
-            const start = lines.findIndex(l => /^###\s+Thanks\s*$/i.test(l));
-            if (start === -1) process.exit(0);
-            let end = lines.length;
-            for (let i = start + 1; i < lines.length; i++) { if (/^###\s+/.test(lines[i])) { end = i; break; } }
-            const body = lines.slice(start + 1, end).join(' ');
-            const seen = new Set();
-            const keep = [];
-            for (const m of body.matchAll(/@([A-Za-z0-9](?:[A-Za-z0-9_-]{0,38}))/g)) {
-              const u = m[1];
-              const uname = '@' + u;
-              if (seen.has(uname)) continue;
-              seen.add(uname);
-              const lower = u.toLowerCase();
-              // Local maintainers we never thank in Thanks
-              if (lower === 'zemaj' || lower === 'andrej-griniuk') continue;
-              // Exclude upstream-style usernames: suffix -oai (case-insensitive)
-              if (/-oai$/i.test(u)) continue;
-              keep.push(uname);
-            }
-            const out = lines.slice();
-            if (keep.length === 0) {
-              // Remove entire Thanks section
-              out.splice(start, end - start);
-            } else {
-              const msg = `Thanks to ${keep.join(' and ')} for contributions!`;
-              out.splice(start + 1, end - (start + 1), msg);
-            }
-            fs.writeFileSync(p, out.join('\n'));
-          JS
-          fi
-
-          # If the agent forgot to write release notes, synthesize a minimal one from CHANGELOG.
-          if [ ! -s docs/release-notes/RELEASE_NOTES.md ]; then
-            awk -v v="${NEW_VERSION}" '/^## /{p=($2==("v"v)||$2==v)} p{print}' CHANGELOG.md > docs/release-notes/RELEASE_NOTES.md || true
-          fi
-          if [ ! -s docs/release-notes/RELEASE_NOTES.md ]; then
-            printf "## @just-every/code v%s\n\nSee CHANGELOG.md for details." "${NEW_VERSION}" > docs/release-notes/RELEASE_NOTES.md
-          fi
-
-          # Commit CHANGELOG changes if any.
-          if ! git diff --quiet -- CHANGELOG.md; then
-            git add CHANGELOG.md docs/release-notes/RELEASE_NOTES.md || true
-            git commit -m "docs(changelog): update for v${NEW_VERSION}" || true
-          fi
-
-      - name: Fallback release notes from CHANGELOG (no OPENAI_API_KEY)
-        if: env.OPENAI_API_KEY == ''
-        shell: bash
-        env:
-          NEW_VERSION: ${{ needs.determine-version.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p docs/release-notes
-          if [ -f CHANGELOG.md ]; then
-            awk -v v="${NEW_VERSION}" '/^## /{p=($2==("v"v)||$2==v)} p{print}' CHANGELOG.md > docs/release-notes/RELEASE_NOTES.md || true
-          fi
-          if [ ! -s docs/release-notes/RELEASE_NOTES.md ]; then
-            printf "## @just-every/code v%s\n\nSee CHANGELOG.md for details." "${NEW_VERSION}" > docs/release-notes/RELEASE_NOTES.md
-          fi
-
-      - name: Assert release notes exist
-        shell: bash
-        run: |
-          test -s docs/release-notes/RELEASE_NOTES.md || { echo "docs/release-notes/RELEASE_NOTES.md missing" >&2; exit 1; }
-
-      - name: Open release metadata pull request
-        if: steps.version.outputs.skip_push != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          NEW_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          release_branch="release/v${NEW_VERSION}-${GITHUB_RUN_ID}"
-
-          git add codex-cli/package.json CHANGELOG.md docs/release-notes/RELEASE_NOTES.md 2>/dev/null || true
-          if ! git diff --staged --quiet; then
-            git commit -m "chore(release): prepare v${NEW_VERSION}"
-          fi
-
-          # Keep the release handoff branch clean; downloaded artifacts and
-          # model context files are recreated by each release run.
-          rm -rf .code-bin .github/auto artifacts release-assets docs/release-notes/context.md docs/release-notes/prompt.expanded.txt || true
-
-          git switch -c "$release_branch"
-          git push -u origin "$release_branch"
-          if gh pr create \
-            --base main \
-            --head "$release_branch" \
-            --title "chore(release): prepare v${NEW_VERSION}" \
-            --body "This automated release PR contains the version and release-notes changes for v${NEW_VERSION}. Merge this PR to let the protected main-branch Release workflow create the tag and GitHub Release assets from main."; then
-            :
-          else
-            echo "::warning::GitHub Actions could not create the release PR; create it from branch ${release_branch}."
-            gh pr view "$release_branch" --json url --jq .url || true
-          fi
-
-          echo "Release metadata changes require PR review because main is protected."
-          echo "Merge the generated PR, then the next main Release run will publish the GitHub Release."
-
-      # Defer tag and GitHub Release publication until release metadata has landed on main.
+          scripts/check-release-notes-version.sh --version "${{ steps.version.outputs.version }}"
 
       - name: Push tag
         if: steps.version.outputs.skip_push == 'true'

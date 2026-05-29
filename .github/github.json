@@ -24,11 +24,13 @@
       "workspaceNextest": "cd code-rs && cargo nextest run --no-fail-fast --locked",
       "tuiFocused": "cd code-rs && cargo test -p code-tui --features test-helpers",
       "cloudTasksFocused": "cd code-rs && cargo test -p code-cloud-tasks --tests",
-      "mcpTypesFocused": "cd code-rs && cargo test -p mcp-types --tests"
+      "mcpTypesFocused": "cd code-rs && cargo test -p mcp-types --tests",
+      "releaseNotesCheck": "scripts/check-release-notes-version.sh"
     },
     "scripts": {
       "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch main",
-      "upstreamImport": "just local-upstream-import"
+      "upstreamImport": "just local-upstream-import",
+      "localReleaseNotes": "just local-release-notes"
     },
     "docsRequiredWhen": [
       "CLI behavior changes",
