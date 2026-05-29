@@ -110,3 +110,8 @@ CODEX_API_KEY=your-api-key-here code exec "Fix merge conflict"
 ```
 
 NOTE: `CODEX_API_KEY` is only supported in `code exec`.
+
+`CODEX_API_KEY` is intentionally preserved as a compatibility name. New Every
+Code-owned environment variables should use `CODE_*`, but compatibility and
+upstream-facing names are kept unless a scoped migration documents aliases and
+tests both spellings.
