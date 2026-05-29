@@ -76,6 +76,10 @@ local-upstream-import:
     ./scripts/local/update-from-upstream.sh
 
 [no-cd]
+local-release-notes:
+    ./scripts/local/release-notes.sh
+
+[no-cd]
 local-product-health:
     ./scripts/local/fork-health.sh
 

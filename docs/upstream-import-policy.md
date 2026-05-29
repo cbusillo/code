@@ -116,10 +116,12 @@ outside the product branch and must be replayed.
 
 Cut an Every Code release after every successful upstream import or local hotfix
 that should be installed by dogfood users. The active Release workflow runs from
-`main`, opens a release metadata PR when the package version or notes need to be
-updated, and publishes GitHub Release assets after that metadata lands. Metadata
-preparation builds only the Linux x86_64 binary needed for changelog generation;
-the full preflight, macOS/Linux release matrix, and Windows asset build run on
+`main` and publishes GitHub Release assets only after release metadata has
+landed. Prepare that metadata locally with the Every Code harness before the
+publish run: the local command bumps `codex-cli/package.json`, updates
+`CHANGELOG.md`, and writes `docs/release-notes/RELEASE_NOTES.md`. The workflow
+validates those files and stops instead of generating fallback notes in CI.
+The full preflight, macOS/Linux release matrix, and Windows asset build run on
 the publish pass after the metadata PR has merged.
 
 Release tags use the plain `v<version>` format, for example `v0.6.101`.
@@ -142,6 +144,16 @@ code exec -m gpt-5.5 --sandbox read-only --max-seconds 30 "Reply with exactly OK
 Run `just local-code-rebuild` after any release-readiness `./build-fast.sh` run:
 the fast build creates dev-fast artifacts for validation, while the rebuild
 recipe owns the PATH-resolved release binary and embeds the package version.
+
+Generate and review release metadata before pushing the release PR:
+
+```sh
+just local-release-notes
+scripts/check-release-notes-version.sh
+```
+
+Commit the resulting `codex-cli/package.json`, `CHANGELOG.md`, and
+`docs/release-notes/RELEASE_NOTES.md` changes on a release metadata branch.
 
 If an old manual Homebrew link exists, remove it so PATH resolution stays
 repo-owned and predictable:
@@ -180,8 +192,8 @@ target cache buckets, and release dependency cache. It preserves
 Run without `--apply` to preview deletions. Use `--keep-release-cache` only when
 you intentionally want to preserve release dependency cache as well.
 
-Then push the product branch to `origin`, open or merge the release metadata PR,
-and monitor the `Release` workflow:
+Then push the product branch to `origin`, merge the release metadata PR, and
+monitor the `Release` workflow:
 
 ```sh
 git push origin HEAD

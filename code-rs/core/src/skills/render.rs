@@ -29,9 +29,10 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
   1) After deciding to use a skill, open its `SKILL.md`. Read only enough to follow the workflow.
-  2) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
-  3) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
-  4) If `assets/` or templates exist, reuse them instead of recreating from scratch.
+  2) When `SKILL.md` references bundled skill resources or scripts with relative paths such as `scripts/foo.py`, resolve them relative to the directory containing that `SKILL.md` first, and only consider other paths if needed.
+  3) If `SKILL.md` points to extra folders such as `references/`, load only the specific files needed for the request; don't bulk-load everything.
+  4) If `scripts/` exist, prefer running or patching them instead of retyping large code blocks.
+  5) If `assets/` or templates exist, reuse them instead of recreating from scratch.
 - Coordination and sequencing:
   - If multiple skills apply, choose the minimal set that covers the request and state the order you'll use them.
   - Announce which skill(s) you're using and why (one short line). If you skip an obvious skill, say why.
@@ -96,5 +97,15 @@ mod tests {
 
         assert!(rendered.contains("- compact: full trigger description"));
         assert!(!rendered.contains("compact UI summary"));
+    }
+
+    #[test]
+    fn render_skills_section_resolves_relative_paths_from_skill_dir() {
+        let rendered = render_skills_section(&[skill("helper", None)])
+            .expect("implicit skill should render");
+
+        assert!(rendered.contains(
+            "When `SKILL.md` references bundled skill resources or scripts with relative paths such as `scripts/foo.py`, resolve them relative to the directory containing that `SKILL.md` first, and only consider other paths if needed."
+        ));
     }
 }

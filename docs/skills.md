@@ -53,6 +53,9 @@ Skills are behind the experimental `skills` feature flag and are enabled by defa
 
 - Mention a skill by name in a message using `$<skill-name>`.
 - In the TUI, you can also use `/skills` to browse and insert skills.
+- Relative paths to bundled skill resources or scripts, such as
+  `references/foo.md` or `scripts/foo.py`, resolve relative to the directory
+  containing that skill's `SKILL.md`.
 
 ## Validation and errors
 

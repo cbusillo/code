@@ -7,6 +7,19 @@
 
 - (none)
 
+## [0.6.108] - 2026-05-29
+
+- Release: require local release metadata before publishing and validate the generated notes version in CI. (cfd73d45)
+- Release: right-size local release note prompts so tiny releases can ship concise one-bullet notes. (5d6108b6, a09767e8)
+
+## [0.6.107] - 2026-05-29
+
+- Models: update Claude Opus selector aliases to Claude Opus 4.8 and add coverage for dynamic remote GPT model discovery. (d388ac4b, 7e250da)
+- Auth: refresh ChatGPT tokens before expiry and fix cache fallback plus shutdown completions to reduce stale-auth interruptions. (792bf10c, 4b4c4c9)
+- Core/TUI: keep archived agent activity, visibility, and status isolated across reconnects and same-repo sessions. (d5571d4, ed0ca21, 9c38860)
+- Release: split metadata preparation from final publishing so release PRs stay lightweight while publish runs the full gate. (d599d2f)
+- Docs/CLI: clarify Every Code naming and compatibility policy while cleaning stale package shim and release preflight behavior. (08910f6, 11ed140, f9f522d)
+
 ## [0.6.98] - 2026-05-08
 
 - TUI: add upstream-compatible slash commands, a redesigned session picker, raw scrollback mode, and broader key/input polish. (4b469854, 3b2ebb36, 5e0a4adb, 48402be6)
