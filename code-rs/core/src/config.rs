@@ -3479,7 +3479,7 @@ model_verbosity = "high"
         let mut cfg = ConfigToml::default();
         cfg.agents = vec![
             AgentConfig {
-                name: "claude-sonnet-4.5".to_string(),
+                name: "claude-opus-4.6".to_string(),
                 command: "claude".to_string(),
                 args: Vec::new(),
                 read_only: false,
@@ -3518,7 +3518,7 @@ model_verbosity = "high"
 
         upgrade_legacy_model_slugs(&mut cfg);
 
-        assert_eq!(cfg.agents[0].name, "claude-sonnet-4.6");
+        assert_eq!(cfg.agents[0].name, "claude-opus-4.8");
         assert_eq!(cfg.agents[1].name, "antigravity");
         assert_eq!(cfg.agents[1].command, "agy");
         assert_eq!(cfg.agents[2].name, "qwen3-coder-plus");
@@ -3533,7 +3533,7 @@ model_verbosity = "high"
                 name: "code".to_string(),
                 read_only: false,
                 agents: vec![
-                    "claude-sonnet-4.5".to_string(),
+                    "claude-opus-4.6".to_string(),
                     "gemini-3-flash".to_string(),
                     "qwen-3-coder".to_string(),
                 ],
@@ -3552,7 +3552,7 @@ model_verbosity = "high"
         assert_eq!(
             command.agents,
             vec![
-                "claude-sonnet-4.6".to_string(),
+                "claude-opus-4.8".to_string(),
                 "antigravity".to_string(),
                 "qwen3-coder-plus".to_string(),
             ]
@@ -3673,6 +3673,7 @@ model_verbosity = "high"
 
         assert!(enabled_names.contains("code-gpt-5.5"));
         assert!(enabled_names.contains("code-gpt-5.4"));
+        assert!(enabled_names.contains("claude-opus-4.8"));
         assert!(enabled_names.contains("claude-sonnet-4.6"));
         assert!(enabled_names.contains("antigravity"));
         assert!(enabled_names.contains("qwen3-coder-plus"));

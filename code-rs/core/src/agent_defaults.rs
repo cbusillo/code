@@ -40,7 +40,7 @@ pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     // Frontline for moderate/challenging tasks
     "code-gpt-5.5",
     "code-gpt-5.4",
-    "claude-opus-4.6",
+    "claude-opus-4.8",
     "antigravity",
     // Straightforward / cost-aware
     "code-gpt-5.4-mini",
@@ -160,15 +160,20 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         pro_only: false,
     },
     AgentModelSpec {
-        slug: "claude-opus-4.6",
+        slug: "claude-opus-4.8",
         family: "claude",
         cli: "claude",
         read_only_args: CLAUDE_OPUS_READ_ONLY,
         write_args: CLAUDE_OPUS_WRITE,
-        model_args: &["--model", "claude-opus-4-6"],
+        model_args: &["--model", "claude-opus-4-8"],
         description: "Higher-capacity Claude model for complex reasoning; use when you want the strongest Claude.",
         enabled_by_default: true,
-        aliases: &["claude-opus", "claude-opus-4.1", "claude-opus-4.5"],
+        aliases: &[
+            "claude-opus",
+            "claude-opus-4.1",
+            "claude-opus-4.5",
+            "claude-opus-4.6",
+        ],
         gating_env: None,
         is_frontline: true,
         pro_only: false,
@@ -681,6 +686,16 @@ mod tests {
         assert!(agent_model_spec("code-gpt-5.2-codex").is_none());
         assert!(agent_model_spec("gpt-5.3-codex-spark").is_none());
         assert!(agent_model_spec("code-gpt-5.2").is_none());
+    }
+
+    #[test]
+    fn claude_opus_aliases_resolve_to_current_opus() {
+        let opus = agent_model_spec("claude-opus").expect("opus alias present");
+        assert_eq!(opus.slug, "claude-opus-4.8");
+        assert_eq!(opus.model_args, &["--model", "claude-opus-4-8"]);
+
+        let legacy = agent_model_spec("claude-opus-4.6").expect("legacy opus alias present");
+        assert_eq!(legacy.slug, "claude-opus-4.8");
     }
 
     #[test]
