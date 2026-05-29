@@ -28,17 +28,18 @@ permissions:
 jobs:
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
+    needs: [determine-version]
+    if: needs.determine-version.outputs.metadata_required != 'true'
     runs-on: ubuntu-24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
-      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
     steps:
       - name: Prepare cargo target dir on data disk
         shell: bash
         run: |
           set -euo pipefail
-          cargo_target_dir="$CARGO_TARGET_DIR"
+          cargo_target_dir="${{ github.workspace }}/.cargo-target"
           if [ -d /mnt ] && [ -w /mnt ]; then
             cargo_target_dir="/mnt/code-release-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
@@ -127,6 +128,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       version: ${{ steps.version.outputs.version }}
+      metadata_required: ${{ steps.version.outputs.metadata_required }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -149,18 +151,159 @@ jobs:
           CANDIDATE=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$latest_tag" | sort -V | tail -n1)
           if git rev-parse "v${CANDIDATE}" >/dev/null 2>&1; then
             IFS='.' read -ra V <<< "$CANDIDATE"
-            CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
+            CANDIDATE="${V[0]}.${V[1]}.$((V[2] + 1))"
           fi
           while git rev-parse "v${CANDIDATE}" >/dev/null 2>&1; do
             IFS='.' read -ra V <<< "$CANDIDATE"
-            CANDIDATE="${V[0]}.${V[1]}.$((${V[2]} + 1))"
+            CANDIDATE="${V[0]}.${V[1]}.$((V[2] + 1))"
           done
           NEW_VERSION="$CANDIDATE"
+          if [[ "$CURRENT_VERSION" == "$NEW_VERSION" ]]; then
+            METADATA_REQUIRED=false
+          else
+            METADATA_REQUIRED=true
+          fi
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "metadata_required=${METADATA_REQUIRED}" >> "$GITHUB_OUTPUT"
+
+  build-release-notes-binary:
+    name: Build release-notes Code binary
+    needs: [determine-version]
+    if: needs.determine-version.outputs.metadata_required == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
+      TARGET: x86_64-unknown-linux-musl
+      ARTIFACT: code-x86_64-unknown-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read Rust toolchain channel
+        id: rust_toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOLCHAIN=$(python3 -c "import sys, pathlib; p=pathlib.Path('code-rs/rust-toolchain.toml').read_text();
+          try:
+              import tomllib as tl
+          except ModuleNotFoundError:
+              import tomli as tl
+          print(tl.loads(p)['toolchain']['channel'])")
+          echo "channel=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
+          echo "RUST_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          targets: ${{ env.TARGET }}
+
+      - name: Setup Rust Cache (target + registries)
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v5-rust
+          shared-key: code-release-notes-${{ env.TARGET }}-toolchain-${{ steps.rust_toolchain.outputs.channel }}
+          workspaces: |
+            code-rs -> target
+          cache-targets: true
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Setup sccache (GHA backend)
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.10.0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable sccache
+        shell: bash
+        run: |
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=1800"
+            echo "SCCACHE_CACHE_SIZE=10G"
+          } >> "$GITHUB_ENV"
+
+      - name: Linux (musl) tuning
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v apt-get >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1; then
+              SUDO=(sudo)
+            elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+              SUDO=()
+            else
+              echo "musl-gcc is required but this runner cannot install packages without sudo/root." >&2
+              exit 1
+            fi
+            "${SUDO[@]}" apt-get update
+            "${SUDO[@]}" apt-get install -y musl-tools pkg-config zstd
+          elif ! command -v zstd >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y zstd
+            elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+              apt-get update
+              apt-get install -y zstd
+            else
+              echo "zstd is required but this runner cannot install packages without sudo/root." >&2
+              exit 1
+            fi
+          fi
+          {
+            echo 'CC=musl-gcc'
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc'
+            echo 'PKG_CONFIG_ALLOW_CROSS=1'
+            echo 'OPENSSL_STATIC=1'
+            echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort'
+          } >> "$GITHUB_ENV"
+
+      - name: Prefetch dependencies (git + registry)
+        working-directory: code-rs
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: cargo fetch --locked
+
+      - name: Export CODE_VERSION for Rust build
+        shell: bash
+        run: echo "CODE_VERSION=${{ needs.determine-version.outputs.version }}" >> "$GITHUB_ENV"
+
+      - name: Build release-notes binary
+        shell: bash
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUST_BACKTRACE: "1"
+        run: |
+          cd code-rs
+          cargo build --release --frozen --locked --target "$TARGET" --bin code
+
+      - name: Package release-notes binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp "code-rs/target/${TARGET}/release/code" "artifacts/${ARTIFACT}"
+          zstd -T0 -19 --force -o "artifacts/${ARTIFACT}.zst" "artifacts/${ARTIFACT}"
+          tar -C artifacts -czf "artifacts/${ARTIFACT}.tar.gz" "$ARTIFACT"
+          rm -f "artifacts/${ARTIFACT}"
+
+      - name: Upload release-notes binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes-binary-${{ env.TARGET }}
+          path: artifacts/
+          compression-level: 0
 
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: [determine-version]
+    if: needs.determine-version.outputs.metadata_required != 'true'
     runs-on: ${{ fromJson(matrix.runs_on) }}
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -241,10 +384,12 @@ jobs:
       - name: Enable sccache
         shell: bash
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_IDLE_TIMEOUT=1800" >> "$GITHUB_ENV"
-          echo "SCCACHE_CACHE_SIZE=10G" >> "$GITHUB_ENV"
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_IDLE_TIMEOUT=1800"
+            echo "SCCACHE_CACHE_SIZE=10G"
+          } >> "$GITHUB_ENV"
 
       # -------- Platform tuning (minimal, proven) --------
 
@@ -296,23 +441,27 @@ jobs:
             "${SUDO[@]}" apt-get update
             "${SUDO[@]}" apt-get install -y musl-tools pkg-config
           fi
-          echo 'CC=musl-gcc' >> "$GITHUB_ENV"
-          case "${{ matrix.target }}" in
-            x86_64-unknown-linux-musl) echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV" ;;
-            aarch64-unknown-linux-musl) echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV" ;;
-          esac
-          echo 'PKG_CONFIG_ALLOW_CROSS=1' >> "$GITHUB_ENV"
-          echo 'OPENSSL_STATIC=1'         >> "$GITHUB_ENV"
-          echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort' >> "$GITHUB_ENV"
+          {
+            echo 'CC=musl-gcc'
+            case "${{ matrix.target }}" in
+              x86_64-unknown-linux-musl) echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' ;;
+              aarch64-unknown-linux-musl) echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' ;;
+            esac
+            echo 'PKG_CONFIG_ALLOW_CROSS=1'
+            echo 'OPENSSL_STATIC=1'
+            echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort'
+          } >> "$GITHUB_ENV"
 
       # macOS: stick with Apple toolchain to avoid brew overhead; still cache C via sccache
       - name: macOS tuning
         if: startsWith(matrix.os, 'macos-')
         shell: bash
         run: |
-          echo 'CC=sccache clang'    >> "$GITHUB_ENV"
-          echo 'CXX=sccache clang++' >> "$GITHUB_ENV"
-          echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort' >> "$GITHUB_ENV"
+          {
+            echo 'CC=sccache clang'
+            echo 'CXX=sccache clang++'
+            echo 'RUSTFLAGS=-Awarnings -C debuginfo=0 -C strip=symbols -C panic=abort'
+          } >> "$GITHUB_ENV"
 
       # Windows: vcpkg not needed (rustls + pure Rust deps)
 
@@ -466,9 +615,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [determine-version, build-binaries, preflight-tests]
+    needs: [determine-version, build-release-notes-binary, build-binaries, preflight-tests]
     runs-on: [self-hosted, Linux, X64, chris-testing]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    if: "always() && !cancelled() && !failure() && !contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 30
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -493,7 +642,7 @@ jobs:
           set -euo pipefail
           mkdir -p .github/auto
           PORT=5058 LOG_DEST=stdout EXIT_ON_5XX=1 RESPONSES_BETA="responses=v1" node scripts/openai-proxy.js > .github/auto/openai-proxy.log 2>&1 &
-          for i in {1..30}; do if nc -z 127.0.0.1 5058; then break; else sleep 0.2; fi; done || true
+          for _ in {1..30}; do if nc -z 127.0.0.1 5058; then break; else sleep 0.2; fi; done || true
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -564,6 +713,7 @@ jobs:
       - name: Generate CHANGELOG + release notes (Code)
         if: env.OPENAI_API_KEY != ''
         shell: bash
+        # shellcheck disable=SC2012,SC2086
         env:
           NEW_VERSION: ${{ needs.determine-version.outputs.version }}
         run: |
@@ -593,6 +743,7 @@ jobs:
           # Extract a Linux x86_64 Code binary from artifacts and make it runnable.
           mkdir -p .code-bin docs/release-notes
           : > docs/release-notes/RELEASE_NOTES.md
+          # shellcheck disable=SC2012
           LNX_ZST=$(ls -1 release-assets/code-x86_64-unknown-linux-musl.* 2>/dev/null | head -n1 || true)
           if [ -z "$LNX_ZST" ]; then
             echo "Could not find linux x86_64 Code artifact in release-assets/" >&2
@@ -613,6 +764,7 @@ jobs:
           # Prepare context for the model.
           DATE=$(date -u +%Y-%m-%d)
           echo "# Commit log ($RANGE)" > docs/release-notes/context.md
+          # shellcheck disable=SC2086
           git log --no-color --format='* %h %s (%an)' --abbrev=8 --no-merges $RANGE >> docs/release-notes/context.md || true
 
           # Build the task prompt (with variables expanded by bash).
