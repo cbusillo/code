@@ -593,8 +593,9 @@ fn agent_belongs_to_session(agent: &Agent, owner_session_id: Option<Uuid>) -> bo
     }
 }
 
-fn agent_is_owned_by_session(agent: &Agent, owner_session_id: Uuid) -> bool {
-    agent.owner_session_id == Some(owner_session_id)
+fn agent_can_be_cancelled_by_session(agent: &Agent, owner_session_id: Uuid) -> bool {
+    agent.owner_session_id
+        .is_none_or(|agent_owner_session_id| agent_owner_session_id == owner_session_id)
 }
 
 fn agent_info_for_status(agent: &Agent, now: DateTime<Utc>) -> AgentInfo {
@@ -1380,7 +1381,7 @@ impl AgentManager {
     ) -> bool {
         if self
             .get_agent(agent_id)
-            .is_some_and(|agent| agent_is_owned_by_session(&agent, owner_session_id))
+            .is_some_and(|agent| agent_can_be_cancelled_by_session(&agent, owner_session_id))
         {
             self.cancel_agent(agent_id).await
         } else {
@@ -1414,7 +1415,7 @@ impl AgentManager {
             .agents
             .values()
             .filter(|agent| agent.batch_id.as_ref() == Some(&batch_id.to_string()))
-            .filter(|agent| agent_is_owned_by_session(agent, owner_session_id))
+            .filter(|agent| agent_can_be_cancelled_by_session(agent, owner_session_id))
             .map(|agent| agent.id.clone())
             .collect();
 
@@ -1976,6 +1977,18 @@ fn prefer_json_result(path: Option<&PathBuf>, fallback: Result<String, String>) 
     fallback
 }
 
+fn remove_review_output_json(path: Option<&PathBuf>) {
+    let Some(path) = path else { return };
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::debug!(
+            "failed to remove stale review output file {}: {err}",
+            path.display()
+        ),
+    }
+}
+
 async fn execute_model_with_permissions(
     agent_id: &str,
     model: &str,
@@ -1988,6 +2001,8 @@ async fn execute_model_with_permissions(
     source_kind: Option<AgentSourceKind>,
     log_tag: Option<&str>,
 ) -> Result<String, String> {
+    remove_review_output_json(review_output_json_path);
+
     let spec_opt = agent_model_spec(model)
         .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.name)))
         .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.command)));
@@ -3265,6 +3280,7 @@ mod tests {
     use super::resolve_program_path;
     use super::should_use_current_exe_for_agent;
     use super::prefer_json_result;
+    use super::remove_review_output_json;
     use super::current_code_binary_path;
     use super::agent_retry_delay;
     use super::AGENT_MANAGER;
@@ -3362,6 +3378,18 @@ mod tests {
         let missing = PathBuf::from("/nonexistent/path.json");
         let res = prefer_json_result(Some(&missing), Ok("orig".to_string()));
         assert_eq!(res.unwrap(), "orig");
+    }
+
+    #[test]
+    fn remove_review_output_json_clears_stale_output() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        std::fs::write(&path, "stale").unwrap();
+
+        remove_review_output_json(Some(&path));
+
+        assert!(!path.exists(), "stale review output should be removed");
+        remove_review_output_json(Some(&path));
     }
 
     fn agent_with_command(command: &str) -> AgentConfig {
@@ -3577,9 +3605,16 @@ mod tests {
         assert!(!manager.cancel_agent_for_session("agent-b", session_a).await);
 
         assert!(manager.agents.contains_key("agent-b"));
-        assert!(manager.cancel_batch_for_session(shared_batch, session_a).await == 1);
+        assert_eq!(manager.cancel_batch_for_session(shared_batch, session_a).await, 2);
         assert_eq!(
             manager.agents.get("agent-a").map(|agent| &agent.status),
+            Some(&AgentStatus::Cancelled),
+        );
+        assert_eq!(
+            manager
+                .agents
+                .get("legacy-agent")
+                .map(|agent| &agent.status),
             Some(&AgentStatus::Cancelled),
         );
         assert_eq!(
