@@ -935,6 +935,7 @@ mod tests {
             content: "manual body".to_string(),
             policy: Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
+                command_policies: Vec::new(),
             }),
         }];
         let input = vec![InputItem::Text {
@@ -1193,6 +1194,14 @@ impl Codex {
         config: Config,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> CodexResult<CodexSpawnOk> {
+        Self::spawn_with_auth_manager_and_source(config, auth_manager, SessionSource::Cli).await
+    }
+
+    pub async fn spawn_with_auth_manager_and_source(
+        config: Config,
+        auth_manager: Option<Arc<AuthManager>>,
+        session_source: SessionSource,
+    ) -> CodexResult<CodexSpawnOk> {
         // experimental resume path (undocumented)
         let resume_path = config.experimental_resume.clone();
         info!("resume_path: {resume_path:?}");
@@ -1235,6 +1244,7 @@ impl Codex {
             session_id,
             config,
             auth_manager,
+            session_source,
             rx_sub,
             tx_event,
         ));

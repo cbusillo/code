@@ -374,6 +374,8 @@ pub struct Agent {
     pub status: AgentStatus,
     pub result: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub retry: AgentRetryMetadata,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -392,6 +394,30 @@ pub struct Agent {
     pub reasoning_effort: code_protocol::config_types::ReasoningEffort,
     #[serde(skip)]
     pub last_activity: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRetryMetadata {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub original_model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub final_model: String,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_retryable_error: Option<String>,
+}
+
+impl Default for AgentRetryMetadata {
+    fn default() -> Self {
+        Self {
+            original_model: String::new(),
+            final_model: String::new(),
+            retry_count: 0,
+            max_retries: DEFAULT_AGENT_PROVIDER_MAX_RETRIES as u32,
+            last_retryable_error: None,
+        }
+    }
 }
 
 // Global agent manager
@@ -443,7 +469,100 @@ const MAX_AGENT_PROGRESS_LINE_BYTES: usize = 2048;
 const MAX_AGENT_RESULT_BYTES: usize = 64 * 1024;
 const MAX_TRACKED_TERMINAL_AGENTS: usize = 512;
 const MAX_STATUS_TERMINAL_AGENTS: usize = 128;
+const DEFAULT_AGENT_PROVIDER_MAX_RETRIES: usize = 2;
+const AGENT_PROVIDER_RETRY_BASE_DELAY: StdDuration = StdDuration::from_secs(2);
+const AGENT_PROVIDER_RETRY_MAX_DELAY: StdDuration = StdDuration::from_secs(10);
 pub(crate) const CODE_AGENT_SPAWN_DEPTH_ENV: &str = "CODE_AGENT_SPAWN_DEPTH";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentProviderFailureClass {
+    Retryable,
+    NonRetryable,
+}
+
+fn classify_agent_provider_failure(error: &str) -> AgentProviderFailureClass {
+    let lower = error.to_ascii_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+
+    if contains_any(&[
+        "unauthorized",
+        "authentication",
+        "auth failed",
+        "invalid api key",
+        "invalid token",
+        "permission denied",
+        "forbidden",
+        "not found",
+        "could not be found",
+        "not installed",
+        "no such file",
+        "invalid config",
+        "misconfigured",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "policy",
+    ]) {
+        return AgentProviderFailureClass::NonRetryable;
+    }
+
+    if contains_any(&[
+        "overloaded",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "temporarily unavailable",
+        "temporary failure",
+        "transient",
+        "timeout",
+        "timed out",
+        "deadline exceeded",
+        "service unavailable",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "connection aborted",
+        "broken pipe",
+        "transport error",
+        "stream disconnected",
+        "network error",
+        "http 408",
+        "http 409",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "status 408",
+        "status 409",
+        "status 429",
+        "status 500",
+        "status 502",
+        "status 503",
+        "status 504",
+        "api error: 408",
+        "api error: 409",
+        "api error: 429",
+        "api error: 500",
+        "api error: 502",
+        "api error: 503",
+        "api error: 504",
+    ]) {
+        return AgentProviderFailureClass::Retryable;
+    }
+
+    AgentProviderFailureClass::NonRetryable
+}
+
+fn agent_retry_delay(attempt_index: usize) -> StdDuration {
+    let multiplier = 1_u32 << attempt_index.min(8);
+    AGENT_PROVIDER_RETRY_BASE_DELAY
+        .saturating_mul(multiplier)
+        .min(AGENT_PROVIDER_RETRY_MAX_DELAY)
+}
 
 pub(crate) fn current_agent_spawn_depth() -> i32 {
     std::env::var(CODE_AGENT_SPAWN_DEPTH_ENV)
@@ -472,6 +591,11 @@ fn agent_belongs_to_session(agent: &Agent, owner_session_id: Option<Uuid>) -> bo
             .is_none_or(|agent_owner_session_id| agent_owner_session_id == owner_session_id),
         None => true,
     }
+}
+
+fn agent_can_be_cancelled_by_session(agent: &Agent, owner_session_id: Uuid) -> bool {
+    agent.owner_session_id
+        .is_none_or(|agent_owner_session_id| agent_owner_session_id == owner_session_id)
 }
 
 fn agent_info_for_status(agent: &Agent, now: DateTime<Utc>) -> AgentInfo {
@@ -1089,6 +1213,12 @@ impl AgentManager {
             _ => None,
         };
 
+        let retry = AgentRetryMetadata {
+            original_model: model.clone(),
+            final_model: model.clone(),
+            ..AgentRetryMetadata::default()
+        };
+
         let agent = Agent {
             id: agent_id.clone(),
             owner_session_id: Some(owner_session_id),
@@ -1103,6 +1233,7 @@ impl AgentManager {
             status: AgentStatus::Pending,
             result: None,
             error: None,
+            retry,
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
@@ -1250,7 +1381,7 @@ impl AgentManager {
     ) -> bool {
         if self
             .get_agent(agent_id)
-            .is_some_and(|agent| agent_belongs_to_session(&agent, Some(owner_session_id)))
+            .is_some_and(|agent| agent_can_be_cancelled_by_session(&agent, owner_session_id))
         {
             self.cancel_agent(agent_id).await
         } else {
@@ -1284,7 +1415,7 @@ impl AgentManager {
             .agents
             .values()
             .filter(|agent| agent.batch_id.as_ref() == Some(&batch_id.to_string()))
-            .filter(|agent| agent_belongs_to_session(agent, Some(owner_session_id)))
+            .filter(|agent| agent_can_be_cancelled_by_session(agent, owner_session_id))
             .map(|agent| agent.id.clone())
             .collect();
 
@@ -1371,6 +1502,20 @@ impl AgentManager {
                 self.finalize_terminal_agent(agent_id);
             }
             // Send status update event
+            self.send_agent_status_update().await;
+        }
+    }
+
+    pub async fn update_agent_retry_metadata(
+        &mut self,
+        agent_id: &str,
+        retry_count: u32,
+        last_retryable_error: Option<String>,
+    ) {
+        if let Some(agent) = self.agents.get_mut(agent_id) {
+            agent.retry.retry_count = retry_count;
+            agent.retry.last_retryable_error = last_retryable_error;
+            Self::record_activity(agent);
             self.send_agent_status_update().await;
         }
     }
@@ -1620,38 +1765,44 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
                                 if !spec.is_enabled() {
                                     Err(gating_error_message(spec))
                                 } else {
-                                    execute_cloud_built_in_streaming(
-                                        &agent_id,
-                                        &full_prompt,
-                                        Some(worktree_path),
-                                        config.clone(),
-                                        spec.slug,
-                                    )
+                                    execute_agent_provider_with_retries(&agent_id, &model, || {
+                                        execute_cloud_built_in_streaming(
+                                            &agent_id,
+                                            &full_prompt,
+                                            Some(worktree_path.clone()),
+                                            config.clone(),
+                                            spec.slug,
+                                        )
+                                    })
                                     .await
                                 }
                             } else {
-                                execute_cloud_built_in_streaming(
-                                    &agent_id,
-                                    &full_prompt,
-                                    Some(worktree_path),
-                                    config.clone(),
-                                    model.as_str(),
-                                )
+                                execute_agent_provider_with_retries(&agent_id, &model, || {
+                                    execute_cloud_built_in_streaming(
+                                        &agent_id,
+                                        &full_prompt,
+                                        Some(worktree_path.clone()),
+                                        config.clone(),
+                                        model.as_str(),
+                                    )
+                                })
                                 .await
                             }
                         } else {
-                            execute_model_with_permissions(
-                                &agent_id,
-                                &model,
-                                &full_prompt,
-                                false,
-                                Some(worktree_path),
-                                config.clone(),
-                                reasoning_effort,
-                                review_output_json_path.as_ref(),
-                                source_kind.clone(),
-                                log_tag.as_deref(),
-                            )
+                            execute_agent_provider_with_retries(&agent_id, &model, || {
+                                execute_model_with_permissions(
+                                    &agent_id,
+                                    &model,
+                                    &full_prompt,
+                                    false,
+                                    Some(worktree_path.clone()),
+                                    config.clone(),
+                                    reasoning_effort,
+                                    review_output_json_path.as_ref(),
+                                    source_kind.clone(),
+                                    log_tag.as_deref(),
+                                )
+                            })
                             .await
                         }
                     }
@@ -1676,24 +1827,44 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
                 if !spec.is_enabled() {
                     Err(gating_error_message(spec))
                 } else {
-                    execute_cloud_built_in_streaming(&agent_id, &full_prompt, None, config, spec.slug).await
+                    execute_agent_provider_with_retries(&agent_id, &model, || {
+                        execute_cloud_built_in_streaming(
+                            &agent_id,
+                            &full_prompt,
+                            None,
+                            config.clone(),
+                            spec.slug,
+                        )
+                    })
+                    .await
                 }
             } else {
-                execute_cloud_built_in_streaming(&agent_id, &full_prompt, None, config, model.as_str()).await
+                execute_agent_provider_with_retries(&agent_id, &model, || {
+                    execute_cloud_built_in_streaming(
+                        &agent_id,
+                        &full_prompt,
+                        None,
+                        config.clone(),
+                        model.as_str(),
+                    )
+                })
+                .await
             }
         } else {
-            execute_model_with_permissions(
-                &agent_id,
-                &model,
-                &full_prompt,
-                true,
-                None,
-                config,
-                reasoning_effort,
-                None,
-                source_kind,
-                log_tag.as_deref(),
-            )
+            execute_agent_provider_with_retries(&agent_id, &model, || {
+                execute_model_with_permissions(
+                    &agent_id,
+                    &model,
+                    &full_prompt,
+                    true,
+                    None,
+                    config.clone(),
+                    reasoning_effort,
+                    None,
+                    source_kind.clone(),
+                    log_tag.as_deref(),
+                )
+            })
             .await
         }
     };
@@ -1702,6 +1873,95 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
     let final_result = prefer_json_result(review_output_json_path_capture.as_ref(), result);
     let mut manager = AGENT_MANAGER.write().await;
     manager.update_agent_result(&agent_id, final_result).await;
+}
+
+async fn execute_agent_provider_with_retries<F, Fut>(
+    agent_id: &str,
+    model: &str,
+    mut run: F,
+) -> Result<String, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut retry_count = 0usize;
+    let mut last_retryable_error: Option<String> = None;
+
+    loop {
+        let result = run().await;
+        match result {
+            Ok(output) => {
+                if retry_count > 0 {
+                    let mut manager = AGENT_MANAGER.write().await;
+                    manager
+                        .update_agent_retry_metadata(
+                            agent_id,
+                            retry_count as u32,
+                            last_retryable_error.clone(),
+                        )
+                        .await;
+                }
+                return Ok(output);
+            }
+            Err(error)
+                if retry_count < DEFAULT_AGENT_PROVIDER_MAX_RETRIES
+                    && classify_agent_provider_failure(&error)
+                        == AgentProviderFailureClass::Retryable =>
+            {
+                retry_count += 1;
+                last_retryable_error = Some(error.clone());
+                let delay = agent_retry_delay(retry_count - 1);
+                let error_preview = error.trim().replace('\n', " ");
+
+                {
+                    let mut manager = AGENT_MANAGER.write().await;
+                    manager
+                        .update_agent_retry_metadata(
+                            agent_id,
+                            retry_count as u32,
+                            last_retryable_error.clone(),
+                        )
+                        .await;
+                    manager
+                        .add_progress(
+                            agent_id,
+                            format!(
+                                "Retrying {model} after transient provider failure ({retry_count}/{DEFAULT_AGENT_PROVIDER_MAX_RETRIES}) in {:.1}s: {}",
+                                delay.as_secs_f32(),
+                                AgentManager::trim_to_tail_utf8(&error_preview, 500)
+                            ),
+                        )
+                        .await;
+                }
+
+                tokio::time::sleep(TokioDuration::from_secs_f32(delay.as_secs_f32())).await;
+            }
+            Err(error) => {
+                if retry_count > 0 {
+                    let mut manager = AGENT_MANAGER.write().await;
+                    manager
+                        .update_agent_retry_metadata(
+                            agent_id,
+                            retry_count as u32,
+                            last_retryable_error.clone(),
+                        )
+                        .await;
+                    if classify_agent_provider_failure(&error) == AgentProviderFailureClass::Retryable
+                    {
+                        manager
+                            .add_progress(
+                                agent_id,
+                                format!(
+                                    "Exhausted {retry_count} automatic provider retries for {model}."
+                                ),
+                            )
+                            .await;
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
 }
 
 fn prefer_json_result(path: Option<&PathBuf>, fallback: Result<String, String>) -> Result<String, String> {
@@ -1717,6 +1977,18 @@ fn prefer_json_result(path: Option<&PathBuf>, fallback: Result<String, String>) 
     fallback
 }
 
+fn remove_review_output_json(path: Option<&PathBuf>) {
+    let Some(path) = path else { return };
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::debug!(
+            "failed to remove stale review output file {}: {err}",
+            path.display()
+        ),
+    }
+}
+
 async fn execute_model_with_permissions(
     agent_id: &str,
     model: &str,
@@ -1729,6 +2001,8 @@ async fn execute_model_with_permissions(
     source_kind: Option<AgentSourceKind>,
     log_tag: Option<&str>,
 ) -> Result<String, String> {
+    remove_review_output_json(review_output_json_path);
+
     let spec_opt = agent_model_spec(model)
         .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.name)))
         .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.command)));
@@ -2991,25 +3265,36 @@ where
 mod tests {
     use super::Agent;
     use super::AgentManager;
+    use super::AgentProviderFailureClass;
+    use super::AgentRetryMetadata;
     use super::AgentStatus;
+    use super::AGENT_PROVIDER_RETRY_MAX_DELAY;
     use super::MAX_AGENT_PROGRESS_ENTRIES;
     use super::MAX_AGENT_RESULT_BYTES;
     use super::MAX_TRACKED_TERMINAL_AGENTS;
+    use super::classify_agent_provider_failure;
     use super::normalize_agent_name;
     use super::maybe_set_gemini_config_dir;
     use super::execute_model_with_permissions;
+    use super::execute_agent_provider_with_retries;
     use super::resolve_program_path;
     use super::should_use_current_exe_for_agent;
     use super::prefer_json_result;
+    use super::remove_review_output_json;
     use super::current_code_binary_path;
+    use super::agent_retry_delay;
+    use super::AGENT_MANAGER;
     use crate::config_types::AgentConfig;
     use code_protocol::config_types::ReasoningEffort;
+    use serial_test::serial;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use tempfile::tempdir;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
     #[cfg(unix)]
@@ -3095,6 +3380,18 @@ mod tests {
         assert_eq!(res.unwrap(), "orig");
     }
 
+    #[test]
+    fn remove_review_output_json_clears_stale_output() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        std::fs::write(&path, "stale").unwrap();
+
+        remove_review_output_json(Some(&path));
+
+        assert!(!path.exists(), "stale review output should be removed");
+        remove_review_output_json(Some(&path));
+    }
+
     fn agent_with_command(command: &str) -> AgentConfig {
         AgentConfig {
             name: "code-gpt-5.5".to_string(),
@@ -3131,6 +3428,11 @@ mod tests {
             status,
             result: None,
             error: None,
+            retry: AgentRetryMetadata {
+                original_model: "code-gpt-5.5".to_string(),
+                final_model: "code-gpt-5.5".to_string(),
+                ..AgentRetryMetadata::default()
+            },
             created_at: now,
             started_at: Some(now),
             completed_at: None,
@@ -3303,9 +3605,16 @@ mod tests {
         assert!(!manager.cancel_agent_for_session("agent-b", session_a).await);
 
         assert!(manager.agents.contains_key("agent-b"));
-        assert!(manager.cancel_batch_for_session(shared_batch, session_a).await == 1);
+        assert_eq!(manager.cancel_batch_for_session(shared_batch, session_a).await, 2);
         assert_eq!(
             manager.agents.get("agent-a").map(|agent| &agent.status),
+            Some(&AgentStatus::Cancelled),
+        );
+        assert_eq!(
+            manager
+                .agents
+                .get("legacy-agent")
+                .map(|agent| &agent.status),
             Some(&AgentStatus::Cancelled),
         );
         assert_eq!(
@@ -3385,6 +3694,11 @@ mod tests {
                 status: AgentStatus::Completed,
                 result: Some("ok".to_string()),
                 error: None,
+                retry: AgentRetryMetadata {
+                    original_model: "code-gpt-5.5".to_string(),
+                    final_model: "code-gpt-5.5".to_string(),
+                    ..AgentRetryMetadata::default()
+                },
                 created_at: now,
                 started_at: Some(now),
                 completed_at: Some(now),
@@ -3937,6 +4251,11 @@ exit 0
                     status: AgentStatus::Completed,
                     result: Some("result".repeat(1024)),
                     error: None,
+                    retry: AgentRetryMetadata {
+                        original_model: "code-gpt-5.5".to_string(),
+                        final_model: "code-gpt-5.5".to_string(),
+                        ..AgentRetryMetadata::default()
+                    },
                     created_at: now,
                     started_at: Some(now),
                     completed_at: Some(now + chrono::Duration::seconds(idx as i64)),
@@ -3987,6 +4306,11 @@ exit 0
                 status: AgentStatus::Completed,
                 result: Some("result".repeat(32 * 1024)),
                 error: None,
+                retry: AgentRetryMetadata {
+                    original_model: "code-gpt-5.5".to_string(),
+                    final_model: "code-gpt-5.5".to_string(),
+                    ..AgentRetryMetadata::default()
+                },
                 created_at: now,
                 started_at: Some(now),
                 completed_at: Some(now),
@@ -4054,6 +4378,11 @@ exit 0
                     status: AgentStatus::Completed,
                     result: Some("ok".to_string()),
                     error: None,
+                    retry: AgentRetryMetadata {
+                        original_model: "code-gpt-5.5".to_string(),
+                        final_model: "code-gpt-5.5".to_string(),
+                        ..AgentRetryMetadata::default()
+                    },
                     created_at: now,
                     started_at: Some(now),
                     completed_at: Some(now + chrono::Duration::seconds(idx as i64)),
@@ -4086,6 +4415,130 @@ exit 0
                 && agent.worktree_path.as_deref() == Some("/tmp/worktree-0")
                 && agent.branch_name.as_deref() == Some("code-branch-0")
         }));
+    }
+
+    #[test]
+    fn classifies_retryable_agent_provider_failures() {
+        for error in [
+            "API Error: Overloaded",
+            "HTTP 429: too many requests",
+            "request timed out while waiting for provider",
+            "upstream service unavailable",
+            "stream disconnected: connection reset",
+            "broken pipe while reading response",
+        ] {
+            assert_eq!(
+                classify_agent_provider_failure(error),
+                AgentProviderFailureClass::Retryable,
+                "expected retryable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_non_retryable_agent_provider_failures() {
+        for error in [
+            "unauthorized: invalid token",
+            "permission denied by provider",
+            "Agent 'claude' could not be found.",
+            "invalid config: missing command",
+            "run cancelled by user",
+            "policy violation",
+        ] {
+            assert_eq!(
+                classify_agent_provider_failure(error),
+                AgentProviderFailureClass::NonRetryable,
+                "expected non-retryable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_delay_is_bounded_exponential_backoff() {
+        assert_eq!(agent_retry_delay(0), StdDuration::from_secs(2));
+        assert_eq!(agent_retry_delay(1), StdDuration::from_secs(4));
+        assert_eq!(agent_retry_delay(2), StdDuration::from_secs(8));
+        assert_eq!(agent_retry_delay(8), AGENT_PROVIDER_RETRY_MAX_DELAY);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn agent_provider_retry_wrapper_recovers_from_transient_failure() {
+        let agent_id = "retry-success".to_string();
+        let owner_session_id = Uuid::new_v4();
+        let mut manager = AgentManager::new();
+        manager.agents.insert(
+            agent_id.clone(),
+            test_agent(
+                &agent_id,
+                owner_session_id,
+                "batch-retry",
+                AgentStatus::Running,
+            ),
+        );
+
+        let old_manager = {
+            let mut global = AGENT_MANAGER.write().await;
+            std::mem::replace(&mut *global, manager)
+        };
+
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_run = attempts.clone();
+        let result = execute_agent_provider_with_retries(&agent_id, "code-gpt-5.5", || {
+            let attempts_for_run = attempts_for_run.clone();
+            async move {
+                let attempt = attempts_for_run.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err("API Error: Overloaded".to_string())
+                } else {
+                    Ok("ok".to_string())
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.as_deref(), Ok("ok"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        let manager = {
+            let mut global = AGENT_MANAGER.write().await;
+            std::mem::replace(&mut *global, old_manager)
+        };
+        let agent = manager
+            .agents
+            .get(&agent_id)
+            .expect("agent should remain tracked");
+        assert_eq!(agent.retry.retry_count, 1);
+        assert_eq!(
+            agent.retry.last_retryable_error.as_deref(),
+            Some("API Error: Overloaded")
+        );
+        assert!(
+            agent
+                .progress
+                .iter()
+                .any(|line| line.contains("Retrying code-gpt-5.5"))
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_provider_retry_wrapper_does_not_retry_non_retryable_failure() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_run = attempts.clone();
+        let result = execute_agent_provider_with_retries("missing-agent", "claude", || {
+            let attempts_for_run = attempts_for_run.clone();
+            async move {
+                attempts_for_run.fetch_add(1, Ordering::SeqCst);
+                Err("Agent 'claude' could not be found.".to_string())
+            }
+        })
+        .await;
+
+        assert_eq!(
+            result.as_ref().map(String::as_str).map_err(String::as_str),
+            Err("Agent 'claude' could not be found.")
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::skills::model::SkillMetadata;
+use crate::skills::command_policy::render_command_policy_summary;
 
 pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     let implicit_skills: Vec<&SkillMetadata> = skills
@@ -26,6 +27,7 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
             let name = skill.name.as_str();
             let description = skill.description.as_str();
             lines.push(format!("- {name}: {description} (file: {path_str})"));
+            lines.extend(render_command_policy_summary(skill));
         }
     }
 
@@ -66,6 +68,11 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::model::SkillCommandMatcher;
+    use crate::skills::model::SkillCommandPolicy;
+    use crate::skills::model::SkillCommandPolicyAction;
+    use crate::skills::model::SkillCommandPolicyPreferred;
+    use crate::skills::model::SkillCommandPolicyPreferredKind;
     use crate::skills::model::SkillPolicy;
     use crate::skills::model::SkillScope;
     use std::path::PathBuf;
@@ -80,6 +87,7 @@ mod tests {
             content: String::new(),
             policy: allow_implicit_invocation.map(|allow_implicit_invocation| SkillPolicy {
                 allow_implicit_invocation: Some(allow_implicit_invocation),
+                command_policies: Vec::new(),
             }),
         }
     }
@@ -133,6 +141,39 @@ mod tests {
 
         assert!(rendered.contains("- compact: full trigger description"));
         assert!(!rendered.contains("compact UI summary"));
+    }
+
+    #[test]
+    fn render_skills_section_includes_command_policy_guidance() {
+        let mut skill = skill("github", None);
+        skill.policy = Some(SkillPolicy {
+            allow_implicit_invocation: None,
+            command_policies: vec![SkillCommandPolicy {
+                id: "prefer-pr-merge".to_string(),
+                matcher: SkillCommandMatcher {
+                    argv_prefix: Some(vec![
+                        "gh".to_string(),
+                        "pr".to_string(),
+                        "merge".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                action: SkillCommandPolicyAction::RequirePreferred,
+                message: Some("use helper".to_string()),
+                preferred: vec![SkillCommandPolicyPreferred {
+                    kind: SkillCommandPolicyPreferredKind::Script,
+                    path: Some(PathBuf::from("/tmp/github/scripts/gh-pr.py")),
+                    name: None,
+                    example_argv: vec!["scripts/gh-pr.py".to_string(), "merge".to_string()],
+                    purpose: Some("merge through helper".to_string()),
+                }],
+            }],
+        });
+
+        let rendered = render_skills_section(&[skill]).expect("skill should render");
+
+        assert!(rendered.contains("`gh pr merge ...`: use - script"));
+        assert!(rendered.contains("scripts/gh-pr.py"));
     }
 
     #[test]

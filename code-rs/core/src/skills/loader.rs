@@ -3,6 +3,11 @@ use crate::config::SkillConfigRuleSelector;
 use crate::config::resolve_code_path_for_read;
 use crate::git_info::resolve_root_git_project_for_trust;
 use crate::skills::model::SkillError;
+use crate::skills::model::SkillCommandMatcher;
+use crate::skills::model::SkillCommandPolicy;
+use crate::skills::model::SkillCommandPolicyAction;
+use crate::skills::model::SkillCommandPolicyPreferred;
+use crate::skills::model::SkillCommandPolicyPreferredKind;
 use crate::skills::model::SkillLoadOutcome;
 use crate::skills::model::SkillMetadata;
 use crate::skills::model::SkillPolicy;
@@ -40,6 +45,59 @@ struct SkillFrontmatterMetadata {
 struct SkillFrontmatterPolicy {
     #[serde(default)]
     allow_implicit_invocation: Option<bool>,
+    #[serde(default)]
+    command_policies: Vec<SkillFrontmatterCommandPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterCommandPolicy {
+    id: String,
+    #[serde(rename = "match")]
+    matcher: SkillFrontmatterCommandMatcher,
+    action: SkillFrontmatterCommandPolicyAction,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    preferred: Vec<SkillFrontmatterCommandPolicyPreferred>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterCommandMatcher {
+    #[serde(default)]
+    argv_exact: Option<Vec<String>>,
+    #[serde(default)]
+    argv_prefix: Option<Vec<String>>,
+    #[serde(default)]
+    shell_regex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SkillFrontmatterCommandPolicyAction {
+    RequirePreferred,
+    RequireConfirm,
+    Reject,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterCommandPolicyPreferred {
+    kind: SkillFrontmatterCommandPolicyPreferredKind,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    example_argv: Vec<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SkillFrontmatterCommandPolicyPreferredKind {
+    Script,
+    Skill,
+    Command,
 }
 
 const SKILLS_FILENAME: &str = "SKILL.md";
@@ -50,6 +108,14 @@ const ADMIN_SKILLS_ROOT: &str = "/etc/codex/skills";
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const MAX_SHORT_DESCRIPTION_LEN: usize = 160;
+const MAX_COMMAND_POLICY_ID_LEN: usize = 96;
+const MAX_COMMAND_POLICY_MESSAGE_LEN: usize = 512;
+const MAX_COMMAND_POLICY_TOKEN_LEN: usize = 160;
+const MAX_COMMAND_POLICY_REGEX_LEN: usize = 512;
+const MAX_COMMAND_POLICY_PURPOSE_LEN: usize = 256;
+const MAX_COMMAND_POLICIES_PER_SKILL: usize = 64;
+const MAX_COMMAND_POLICY_PREFERRED: usize = 8;
+const MAX_COMMAND_POLICY_ARGV_TOKENS: usize = 32;
 
 #[derive(Debug)]
 enum SkillParseError {
@@ -368,6 +434,11 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
     }
 
     let resolved_path = normalize_path(path).unwrap_or_else(|_| path.to_path_buf());
+    let skill_dir = resolved_path.parent().unwrap_or_else(|| Path::new("."));
+    let policy = parsed
+        .policy
+        .map(|policy| parse_skill_policy(policy, skill_dir))
+        .transpose()?;
 
     Ok(SkillMetadata {
         name,
@@ -376,10 +447,242 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         path: resolved_path,
         scope,
         content: contents,
-        policy: parsed.policy.map(|policy| SkillPolicy {
-            allow_implicit_invocation: policy.allow_implicit_invocation,
-        }),
+        policy,
     })
+}
+
+fn parse_skill_policy(
+    policy: SkillFrontmatterPolicy,
+    skill_dir: &Path,
+) -> Result<SkillPolicy, SkillParseError> {
+    if policy.command_policies.len() > MAX_COMMAND_POLICIES_PER_SKILL {
+        return Err(SkillParseError::InvalidField {
+            field: "policy.command_policies",
+            reason: format!(
+                "must contain at most {MAX_COMMAND_POLICIES_PER_SKILL} entries"
+            ),
+        });
+    }
+
+    let mut command_policies = Vec::with_capacity(policy.command_policies.len());
+    for (index, command_policy) in policy.command_policies.into_iter().enumerate() {
+        command_policies.push(parse_command_policy(command_policy, skill_dir, index)?);
+    }
+
+    Ok(SkillPolicy {
+        allow_implicit_invocation: policy.allow_implicit_invocation,
+        command_policies,
+    })
+}
+
+fn parse_command_policy(
+    policy: SkillFrontmatterCommandPolicy,
+    skill_dir: &Path,
+    index: usize,
+) -> Result<SkillCommandPolicy, SkillParseError> {
+    let id = sanitize_single_line(&policy.id);
+    validate_field(&id, MAX_COMMAND_POLICY_ID_LEN, "policy.command_policies.id")?;
+    let matcher = parse_command_matcher(policy.matcher, index)?;
+    let message = policy
+        .message
+        .map(|message| sanitize_single_line(&message))
+        .filter(|message| !message.is_empty())
+        .map(|message| {
+            validate_field(
+                &message,
+                MAX_COMMAND_POLICY_MESSAGE_LEN,
+                "policy.command_policies.message",
+            )?;
+            Ok::<String, SkillParseError>(message)
+        })
+        .transpose()?;
+
+    if policy.preferred.len() > MAX_COMMAND_POLICY_PREFERRED {
+        return Err(SkillParseError::InvalidField {
+            field: "policy.command_policies.preferred",
+            reason: format!("must contain at most {MAX_COMMAND_POLICY_PREFERRED} entries"),
+        });
+    }
+
+    let mut preferred = Vec::with_capacity(policy.preferred.len());
+    for preferred_entry in policy.preferred {
+        preferred.push(parse_command_policy_preferred(preferred_entry, skill_dir)?);
+    }
+
+    Ok(SkillCommandPolicy {
+        id,
+        matcher,
+        action: match policy.action {
+            SkillFrontmatterCommandPolicyAction::RequirePreferred => {
+                SkillCommandPolicyAction::RequirePreferred
+            }
+            SkillFrontmatterCommandPolicyAction::RequireConfirm => {
+                SkillCommandPolicyAction::RequireConfirm
+            }
+            SkillFrontmatterCommandPolicyAction::Reject => SkillCommandPolicyAction::Reject,
+        },
+        message,
+        preferred,
+    })
+}
+
+fn parse_command_matcher(
+    matcher: SkillFrontmatterCommandMatcher,
+    index: usize,
+) -> Result<SkillCommandMatcher, SkillParseError> {
+    let argv_exact = parse_match_argv(
+        matcher.argv_exact,
+        "policy.command_policies.match.argv_exact",
+    )?;
+    let argv_prefix = parse_match_argv(
+        matcher.argv_prefix,
+        "policy.command_policies.match.argv_prefix",
+    )?;
+    let shell_regex = matcher
+        .shell_regex
+        .map(|regex| sanitize_single_line(&regex))
+        .filter(|regex| !regex.is_empty())
+        .map(|regex| {
+            validate_field(
+                &regex,
+                MAX_COMMAND_POLICY_REGEX_LEN,
+                "policy.command_policies.match.shell_regex",
+            )?;
+            regex_lite::Regex::new(&regex).map_err(|err| SkillParseError::InvalidField {
+                field: "policy.command_policies.match.shell_regex",
+                reason: format!("invalid regex in entry {index}: {err}"),
+            })?;
+            Ok::<String, SkillParseError>(regex)
+        })
+        .transpose()?;
+
+    let matcher_count = usize::from(argv_exact.is_some())
+        + usize::from(argv_prefix.is_some())
+        + usize::from(shell_regex.is_some());
+    if matcher_count == 0 {
+        return Err(SkillParseError::InvalidField {
+            field: "policy.command_policies.match",
+            reason: format!(
+                "entry {index} must set one of argv_exact, argv_prefix, or shell_regex"
+            ),
+        });
+    }
+    if matcher_count > 1 {
+        return Err(SkillParseError::InvalidField {
+            field: "policy.command_policies.match",
+            reason: format!(
+                "entry {index} must set only one of argv_exact, argv_prefix, or shell_regex"
+            ),
+        });
+    }
+
+    Ok(SkillCommandMatcher {
+        argv_exact,
+        argv_prefix,
+        shell_regex,
+    })
+}
+
+fn parse_match_argv(
+    argv: Option<Vec<String>>,
+    field: &'static str,
+) -> Result<Option<Vec<String>>, SkillParseError> {
+    let Some(argv) = argv else {
+        return Ok(None);
+    };
+    validate_argv_tokens(argv, field).map(Some)
+}
+
+fn validate_argv_tokens(
+    argv: Vec<String>,
+    field: &'static str,
+) -> Result<Vec<String>, SkillParseError> {
+    if argv.is_empty() || argv.len() > MAX_COMMAND_POLICY_ARGV_TOKENS {
+        return Err(SkillParseError::InvalidField {
+            field,
+            reason: format!(
+                "must contain between 1 and {MAX_COMMAND_POLICY_ARGV_TOKENS} tokens"
+            ),
+        });
+    }
+
+    let mut tokens = Vec::with_capacity(argv.len());
+    for token in argv {
+        let token = sanitize_single_line(&token);
+        validate_field(&token, MAX_COMMAND_POLICY_TOKEN_LEN, field)?;
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
+
+fn parse_command_policy_preferred(
+    preferred: SkillFrontmatterCommandPolicyPreferred,
+    skill_dir: &Path,
+) -> Result<SkillCommandPolicyPreferred, SkillParseError> {
+    let purpose = preferred
+        .purpose
+        .map(|purpose| sanitize_single_line(&purpose))
+        .filter(|purpose| !purpose.is_empty())
+        .map(|purpose| {
+            validate_field(
+                &purpose,
+                MAX_COMMAND_POLICY_PURPOSE_LEN,
+                "policy.command_policies.preferred.purpose",
+            )?;
+            Ok::<String, SkillParseError>(purpose)
+        })
+        .transpose()?;
+    let name = preferred
+        .name
+        .map(|name| sanitize_single_line(&name))
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            validate_field(
+                &name,
+                MAX_NAME_LEN,
+                "policy.command_policies.preferred.name",
+            )?;
+            Ok::<String, SkillParseError>(name)
+        })
+        .transpose()?;
+    let path = preferred
+        .path
+        .map(|path| resolve_skill_relative_path(skill_dir, path));
+    let example_argv = if preferred.example_argv.is_empty() {
+        Vec::new()
+    } else {
+        validate_argv_tokens(
+            preferred.example_argv,
+            "policy.command_policies.preferred.example_argv",
+        )?
+    };
+
+    Ok(SkillCommandPolicyPreferred {
+        kind: match preferred.kind {
+            SkillFrontmatterCommandPolicyPreferredKind::Script => {
+                SkillCommandPolicyPreferredKind::Script
+            }
+            SkillFrontmatterCommandPolicyPreferredKind::Skill => {
+                SkillCommandPolicyPreferredKind::Skill
+            }
+            SkillFrontmatterCommandPolicyPreferredKind::Command => {
+                SkillCommandPolicyPreferredKind::Command
+            }
+        },
+        path,
+        name,
+        example_argv,
+        purpose,
+    })
+}
+
+fn resolve_skill_relative_path(skill_dir: &Path, path: PathBuf) -> PathBuf {
+    let path = if path.is_absolute() {
+        path
+    } else {
+        skill_dir.join(path)
+    };
+    normalize_path(&path).unwrap_or(path)
 }
 
 fn sanitize_single_line(raw: &str) -> String {
@@ -542,6 +845,20 @@ mod tests {
         skill_path
     }
 
+    fn write_command_policy_skill_at(skills_root: &Path) -> PathBuf {
+        let skill_dir = skills_root.join("github");
+        fs::create_dir_all(skill_dir.join("scripts")).expect("create skill dir");
+        let script_path = skill_dir.join("scripts").join("gh-pr.py");
+        fs::write(&script_path, "#!/usr/bin/env python3\n").expect("write script");
+        let skill_path = skill_dir.join(SKILLS_FILENAME);
+        fs::write(
+            &skill_path,
+            "---\nname: github\ndescription: GitHub workflows\npolicy:\n  command_policies:\n    - id: prefer-pr-merge\n      match:\n        argv_prefix: [\"gh\", \"pr\", \"merge\"]\n      action: require_preferred\n      message: Raw gh pr merge bypasses helper flow.\n      preferred:\n        - kind: script\n          path: scripts/gh-pr.py\n          example_argv: [\"scripts/gh-pr.py\", \"merge\", \"<pr>\"]\n          purpose: Use helper script.\n        - kind: skill\n          name: github\n---\n\n# github\n",
+        )
+        .expect("write skill file");
+        skill_path
+    }
+
     fn normalized(path: &Path) -> PathBuf {
         normalize_path(path).unwrap_or_else(|_| path.to_path_buf())
     }
@@ -573,9 +890,96 @@ mod tests {
             skill.policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
+                command_policies: Vec::new(),
             })
         );
         assert!(!skill.allow_implicit_invocation());
+    }
+
+    #[test]
+    fn loads_command_policy_from_frontmatter() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_command_policy_skill_at(skills_root.path());
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        let skill = outcome.skills.first().expect("skill");
+        let policy = skill.policy.as_ref().expect("policy");
+        assert!(skill.allow_implicit_invocation());
+        assert_eq!(policy.command_policies.len(), 1);
+        let command_policy = &policy.command_policies[0];
+        assert_eq!(command_policy.id, "prefer-pr-merge");
+        assert_eq!(
+            command_policy.matcher.argv_prefix.as_deref(),
+            Some(&["gh".to_string(), "pr".to_string(), "merge".to_string()][..])
+        );
+        assert_eq!(
+            command_policy.action,
+            SkillCommandPolicyAction::RequirePreferred
+        );
+        assert_eq!(command_policy.preferred.len(), 2);
+        assert_eq!(
+            command_policy.preferred[0].path.as_deref(),
+            Some(normalized(&skill_path).parent().unwrap().join("scripts/gh-pr.py").as_path())
+        );
+    }
+
+    #[test]
+    fn invalid_command_policy_reports_skill_error() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            "---\nname: bad\ndescription: Bad policy\npolicy:\n  command_policies:\n    - id: bad-regex\n      match:\n        shell_regex: \"[\"\n      action: require_preferred\n---\n\n# bad\n",
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0].message.contains("invalid regex"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[test]
+    fn command_policy_rejects_multiple_matchers() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            "---\nname: bad\ndescription: Bad policy\npolicy:\n  command_policies:\n    - id: too-many\n      match:\n        argv_exact: [\"gh\", \"pr\", \"merge\"]\n        argv_prefix: [\"gh\", \"pr\"]\n      action: require_preferred\n---\n\n# bad\n",
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0].message.contains("must set only one"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
     }
 
     #[test]

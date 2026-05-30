@@ -65,6 +65,13 @@ The orchestrator fans out agents, waits for results, and merges reasoning accord
 - `show_raw_agent_reasoning = true` surfaces raw chains-of-thought when provided by the model.
 - Notification filtering is controlled via `/notifications` or `config.toml` `notify` / `tui.notifications`.
 
+## Automatic retries
+- Agent provider failures that look transient, such as overloads, rate limits,
+  timeouts, temporary upstream errors, and transport resets, are retried
+  automatically with bounded backoff.
+- Auth, configuration, missing-command, policy, and cancellation failures fail
+  fast. Retry attempts appear in agent progress and result metadata.
+
 ## Headless `code exec`
 - `code exec --json` streams JSONL events (agent turns included).
 - `--output-schema <schema.json>` enforces structured JSON output; combine with `--output-last-message` to capture only the final payload.

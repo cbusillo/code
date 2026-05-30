@@ -221,6 +221,7 @@ pub(super) async fn submission_loop(
     mut session_id: Uuid,
     config: Arc<Config>,
     auth_manager: Option<Arc<AuthManager>>,
+    session_source: SessionSource,
     rx_sub: Receiver<Submission>,
     tx_event: Sender<Event>,
 ) {
@@ -535,7 +536,7 @@ pub(super) async fn submission_loop(
                             crate::rollout::recorder::RolloutRecorderParams::new(
                                 code_protocol::mcp_protocol::ConversationId::from(session_id),
                                 effective_user_instructions.clone(),
-                                SessionSource::Cli,
+                                session_source.clone(),
                             ),
                         )
                             .await
@@ -708,6 +709,27 @@ pub(super) async fn submission_loop(
                     }
                 }
                 let default_shell = shell::default_user_shell().await;
+                let active_session_registration =
+                    match crate::active_sessions::register_if_write_capable(
+                        &config.code_home,
+                        &config.cwd,
+                        &config.sandbox_policy,
+                        session_id,
+                        session_source.clone(),
+                    ) {
+                        Ok(registration) => registration,
+                        Err(err) => {
+                            warn!("failed to register active session presence: {err}");
+                            None
+                        }
+                    };
+                let active_session_warning = active_session_registration
+                    .as_ref()
+                    .and_then(|registration| {
+                        crate::active_sessions::active_session_warning(&registration.conflicts)
+                    });
+                let active_session_guard =
+                    active_session_registration.map(|registration| registration.guard);
                 let mut tools_config = ToolsConfig::new(
                     &config.model_family,
                     approval_policy,
@@ -780,16 +802,22 @@ pub(super) async fn submission_loop(
                         remote.refresh_remote_models().await;
                     });
                 }
+                let session_skills = skills_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.skills.clone())
+                    .unwrap_or_default();
+                let skill_command_policies =
+                    crate::skills::command_policy::SkillCommandPolicyRuntime::from_skills(
+                        &session_skills,
+                    );
                 let mut new_session = Arc::new(Session {
                     id: session_id,
                     client,
                     remote_models_manager,
                     tools_config,
                     dynamic_tools,
-                    skills: skills_outcome
-                        .as_ref()
-                        .map(|outcome| outcome.skills.clone())
-                        .unwrap_or_default(),
+                    skills: session_skills,
+                    skill_command_policies,
                     tx_event: tx_event.clone(),
                     user_instructions: effective_user_instructions.clone(),
                     base_instructions,
@@ -836,6 +864,7 @@ pub(super) async fn submission_loop(
                     env_ctx_v2: config.env_ctx_v2,
                     retention_config: config.retention.clone(),
                     model_descriptions,
+                    _active_session_guard: active_session_guard,
                 });
                 let weak_handle = Arc::downgrade(&new_session);
                 if let Some(inner) = Arc::get_mut(&mut new_session) {
@@ -913,6 +942,16 @@ pub(super) async fn submission_loop(
                     );
                     if let Err(e) = tx_event.send(warning_event).await {
                         warn!("failed to send deprecated approval policy warning: {e}");
+                    }
+                }
+
+                if let Some(message) = active_session_warning {
+                    let warning_event = sess_arc.make_event(
+                        &sub.id,
+                        EventMsg::Warning(crate::protocol::WarningEvent { message }),
+                    );
+                    if let Err(e) = tx_event.send(warning_event).await {
+                        warn!("failed to send active session warning: {e}");
                     }
                 }
 
@@ -8992,6 +9031,7 @@ async fn handle_check_agent_status(
                     "name": agent.name,
                     "status": agent.status,
                     "model": agent.model,
+                    "retry": agent.retry,
                     "batch_id": agent.batch_id,
                     "created_at": agent.created_at,
                     "started_at": agent.started_at,
@@ -9088,6 +9128,7 @@ async fn handle_get_agent_result(
                             "agent_id": params.agent_id,
                             "batch_id": params.batch_id.clone(),
                             "status": agent.status,
+                            "retry": agent.retry,
                             "output_preview": preview,
                             "output_total_lines": total_lines,
                             "output_file": file_path,
@@ -9110,6 +9151,7 @@ async fn handle_get_agent_result(
                             "agent_id": params.agent_id,
                             "batch_id": params.batch_id.clone(),
                             "status": agent.status,
+                            "retry": agent.retry,
                             "error_preview": preview,
                             "error_total_lines": total_lines,
                             "error_file": file_path,
@@ -9355,6 +9397,7 @@ async fn handle_wait_for_agent(
                                 "agent_id": agent.id,
                                 "batch_id": batch_id,
                                 "status": agent.status,
+                                "retry": agent.retry,
                                 "wait_time_seconds": start.elapsed().as_secs(),
                                 "total_lines": total_lines,
                                 "agent_result_hint": hint,
@@ -9448,6 +9491,7 @@ async fn handle_wait_for_agent(
                                 let mut obj = serde_json::json!({
                                     "agent_id": a.id,
                                     "status": a.status,
+                                    "retry": a.retry,
                                     "total_lines": total_lines,
                                     "agent_result_hint": hint,
                                 "agent_result_params": { "action": "result", "result": { "agent_id": a.id, "batch_id": batch_id } },
@@ -9549,6 +9593,7 @@ async fn handle_wait_for_agent(
                             let mut response = serde_json::json!({
                                 "agent_id": unseen.id,
                                 "status": unseen.status,
+                                "retry": unseen.retry,
                                 "wait_time_seconds": start.elapsed().as_secs(),
                                 "total_lines": total_lines,
                                 "agent_result_hint": hint,
@@ -9752,6 +9797,7 @@ async fn handle_list_agents(
                         "name": t.name.clone(),
                         "model": t.model,
                         "status": t.status,
+                        "retry": t.retry,
                         "created_at": t.created_at,
                         "batch_id": t.batch_id,
                         "worktree_path": t.worktree_path,
@@ -9776,6 +9822,29 @@ async fn handle_list_agents(
     }
         },
     ).await
+}
+
+async fn command_guard_output(
+    sess: &Session,
+    sub_id: &str,
+    call_id: String,
+    attempt_req: u64,
+    output_index: Option<u32>,
+    guidance: String,
+) -> ResponseInputItem {
+    let order = sess.next_background_order(sub_id, attempt_req, output_index);
+    sess
+        .notify_background_event_with_order(
+            sub_id,
+            order,
+            format!("Command guard: {}", guidance.clone()),
+        )
+        .await;
+
+    ResponseInputItem::FunctionCallOutput {
+        call_id,
+        output: FunctionCallOutputPayload::from_text(guidance),
+    }
 }
 
 async fn handle_container_exec_with_params(
@@ -10052,6 +10121,22 @@ async fn handle_container_exec_with_params(
             .iter()
             .any(|p| trimmed.starts_with(p));
 
+        if let Some(policy_match) = sess
+            .skill_command_policies
+            .check(&params.command, has_confirm_prefix)
+        {
+            let guidance = policy_match.guidance("original_script", &script);
+            return command_guard_output(
+                sess,
+                &sub_id,
+                call_id,
+                attempt_req,
+                output_index,
+                guidance,
+            )
+            .await;
+        }
+
         // If no confirm prefix and it looks like a sensitive git command, reject with guidance.
         if !has_confirm_prefix {
             if let Some(pattern) = if sess.confirm_guard.is_empty() {
@@ -10216,6 +10301,21 @@ async fn handle_container_exec_with_params(
     // If no shell script is present, perform a lightweight argv inspection for sensitive git commands.
     if extract_shell_script(&params.command).is_none() {
         let joined = params.command.join(" ");
+        if let Some(policy_match) = sess.skill_command_policies.check(&params.command, false) {
+            let guidance = policy_match.guidance(
+                "original_argv",
+                &format!("{:?}", params.command),
+            );
+            return command_guard_output(
+                sess,
+                &sub_id,
+                call_id,
+                attempt_req,
+                output_index,
+                guidance,
+            )
+            .await;
+        }
         if !sess.confirm_guard.is_empty() {
             if let Some(pattern) = sess.confirm_guard.matched_pattern(&joined) {
                 let suggested = serde_json::to_string(&vec![
