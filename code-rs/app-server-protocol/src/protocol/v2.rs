@@ -2157,7 +2157,7 @@ impl From<CoreSkillMetadata> for SkillMetadata {
             dependencies: value.dependencies.map(SkillDependencies::from),
             path: value.path,
             scope: value.scope.into(),
-            enabled: true,
+            enabled: value.allow_implicit_invocation,
         }
     }
 }
@@ -3753,6 +3753,25 @@ mod tests {
                 ],
             }),
         );
+    }
+
+    #[test]
+    fn skill_metadata_enabled_reflects_implicit_invocation_policy() {
+        let core_skill = CoreSkillMetadata {
+            name: "manual".to_string(),
+            description: "Manual skill".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            path: PathBuf::from("/tmp/manual/SKILL.md"),
+            scope: CoreSkillScope::User,
+            allow_implicit_invocation: false,
+            enabled: true,
+        };
+
+        let v2_skill = SkillMetadata::from(core_skill);
+
+        assert!(!v2_skill.enabled);
     }
 
     #[test]

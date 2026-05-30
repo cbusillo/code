@@ -15932,6 +15932,7 @@ impl ChatWidget<'_> {
                             short_description: meta.short_description,
                             path: meta.path,
                             scope,
+                            allow_implicit_invocation: meta.allow_implicit_invocation,
                             content,
                         });
                     }
