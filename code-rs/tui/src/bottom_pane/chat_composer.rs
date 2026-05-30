@@ -16,9 +16,11 @@ use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
 use super::file_search_popup::FileSearchPopup;
 use super::paste_burst::PasteBurst;
+use super::skill_popup::SkillPopup;
 use crate::slash_command::{built_in_slash_commands, SlashCommand};
 use code_protocol::custom_prompts::CustomPrompt;
 use code_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
+use code_protocol::skills::Skill;
 use code_core::model_family::EXTENDED_CONTEXT_WINDOW_1M;
 
 use crate::app_event_sender::AppEventSender;
@@ -162,6 +164,7 @@ pub(crate) struct ChatComposer {
     #[allow(dead_code)]
     use_shift_enter_hint: bool,
     dismissed_file_popup_token: Option<String>,
+    dismissed_skill_popup_token: Option<String>,
     current_file_query: Option<String>,
     // Tracks a one-off Tab-triggered file search. When set, we will only
     // create/show a popup if the results are non-empty to avoid flicker.
@@ -180,6 +183,7 @@ pub(crate) struct ChatComposer {
     animation_running: Option<Arc<AtomicBool>>,
     using_chatgpt_auth: bool,
     custom_prompts: Vec<CustomPrompt>,
+    skills: Vec<Skill>,
     // Ephemeral footer notice and its expiry
     footer_notice: Option<(String, std::time::Instant)>,
     // Persistent hint for specific modes (e.g., standard terminal mode)
@@ -215,6 +219,7 @@ enum ActivePopup {
     None,
     Command(CommandPopup),
     File(FileSearchPopup),
+    Skill(SkillPopup),
 }
 
 enum FilePopupOrigin {
@@ -240,6 +245,7 @@ impl ChatComposer {
             ctrl_c_quit_hint: false,
             use_shift_enter_hint,
             dismissed_file_popup_token: None,
+            dismissed_skill_popup_token: None,
             current_file_query: None,
             pending_tab_file_query: None,
             file_popup_origin: None,
@@ -254,6 +260,7 @@ impl ChatComposer {
             animation_running: None,
             using_chatgpt_auth,
             custom_prompts: Vec::new(),
+            skills: Vec::new(),
             footer_notice: None,
             standard_terminal_hint: None,
             auto_review_status: None,
@@ -285,6 +292,15 @@ impl ChatComposer {
 
     pub(crate) fn set_agent_hint_label(&mut self, label: AgentHintLabel) {
         self.agent_hint_label = label;
+    }
+
+    pub(crate) fn set_skills(&mut self, mut skills: Vec<Skill>) {
+        skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+        self.skills = skills.clone();
+        if let ActivePopup::Skill(popup) = &mut self.active_popup {
+            popup.set_skills(skills);
+            self.sync_skill_popup();
+        }
     }
 
     #[cfg(test)]
@@ -595,6 +611,7 @@ impl ChatComposer {
         let hint_height = match (&self.active_popup, self.embedded_mode) {
             (ActivePopup::Command(c), _) => c.calculate_required_height(),
             (ActivePopup::File(c), _) => c.calculate_required_height(),
+            (ActivePopup::Skill(c), _) => c.calculate_required_height(),
             (ActivePopup::None, true) => 0,
             (ActivePopup::None, false) => 1,
         };
@@ -616,6 +633,7 @@ impl ChatComposer {
         let hint_height = match (&self.active_popup, self.embedded_mode) {
             (ActivePopup::Command(popup), _) => popup.calculate_required_height(),
             (ActivePopup::File(popup), _) => popup.calculate_required_height(),
+            (ActivePopup::Skill(popup), _) => popup.calculate_required_height(),
             (ActivePopup::None, true) => 0,
             (ActivePopup::None, false) => 1,
         };
@@ -972,15 +990,13 @@ impl ChatComposer {
         if !text.is_empty() {
             self.typed_anything = true;
         }
-        self.sync_command_popup();
-        self.sync_file_search_popup();
+        self.resync_popups();
     }
 
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.textarea.insert_str(text);
         self.typed_anything = true; // Mark that user has interacted via programmatic insertion
-        self.sync_command_popup();
-        self.sync_file_search_popup();
+        self.resync_popups();
     }
 
     pub(crate) fn text(&self) -> &str {
@@ -1089,6 +1105,7 @@ impl ChatComposer {
         let result = match &mut self.active_popup {
             ActivePopup::Command(_) => self.handle_key_event_with_slash_popup(key_event),
             ActivePopup::File(_) => self.handle_key_event_with_file_popup(key_event),
+            ActivePopup::Skill(_) => self.handle_key_event_with_skill_popup(key_event),
             ActivePopup::None => self.handle_key_event_without_popup(key_event),
         };
 
@@ -1337,6 +1354,61 @@ impl ChatComposer {
         }
     }
 
+    fn handle_key_event_with_skill_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
+        let ActivePopup::Skill(popup) = &mut self.active_popup else {
+            unreachable!();
+        };
+
+        match key_event {
+            KeyEvent { code: KeyCode::Up, modifiers, .. } => {
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    return self.handle_key_event_without_popup(key_event);
+                }
+                if popup.match_count() <= 1 {
+                    return self.handle_key_event_without_popup(key_event);
+                }
+                popup.move_up();
+                (InputResult::None, true)
+            }
+            KeyEvent { code: KeyCode::Down, modifiers, .. } => {
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    return self.handle_key_event_without_popup(key_event);
+                }
+                if popup.match_count() <= 1 {
+                    return self.handle_key_event_without_popup(key_event);
+                }
+                popup.move_down();
+                (InputResult::None, true)
+            }
+            KeyEvent { code: KeyCode::Esc, .. } => {
+                if let Some(token) = Self::current_skill_token(&self.textarea) {
+                    self.dismissed_skill_popup_token = Some(token);
+                }
+                self.active_popup = ActivePopup::None;
+                (InputResult::None, true)
+            }
+            KeyEvent {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::NONE,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                if let Some(name) = popup.selected_skill_name() {
+                    self.insert_selected_skill(&name);
+                    self.active_popup = ActivePopup::None;
+                    return (InputResult::None, true);
+                }
+                self.active_popup = ActivePopup::None;
+                self.handle_key_event_without_popup(key_event)
+            }
+            input => self.handle_input_basic(input),
+        }
+    }
+
     /// Extract the `@token` that the cursor is currently positioned on, if any.
     ///
     /// The returned string **does not** include the leading `@`.
@@ -1437,6 +1509,74 @@ impl ChatComposer {
             return right_at.or(left_at);
         }
         left_at.or(right_at)
+    }
+
+    fn current_skill_token(textarea: &TextArea) -> Option<String> {
+        let cursor_offset = textarea.cursor();
+        let text = textarea.text();
+        let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
+        let before_cursor = &text[..safe_cursor];
+        let after_cursor = &text[safe_cursor..];
+
+        let start_idx = before_cursor
+            .char_indices()
+            .rfind(|(_, c)| c.is_whitespace())
+            .map(|(idx, c)| idx + c.len_utf8())
+            .unwrap_or(0);
+        let end_rel_idx = after_cursor
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(idx, _)| idx)
+            .unwrap_or(after_cursor.len());
+        let end_idx = safe_cursor + end_rel_idx;
+
+        if start_idx >= end_idx {
+            return None;
+        }
+
+        let token = &text[start_idx..end_idx];
+        let name = token.strip_prefix('$')?;
+        if name.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        if name.chars().all(is_valid_skill_name_char)
+        {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn insert_selected_skill(&mut self, name: &str) {
+        let cursor_offset = self.textarea.cursor();
+        let text = self.textarea.text();
+        let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
+        let before_cursor = &text[..safe_cursor];
+        let after_cursor = &text[safe_cursor..];
+
+        let start_idx = before_cursor
+            .char_indices()
+            .rfind(|(_, c)| c.is_whitespace())
+            .map(|(idx, c)| idx + c.len_utf8())
+            .unwrap_or(0);
+        let end_rel_idx = after_cursor
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(idx, _)| idx)
+            .unwrap_or(after_cursor.len());
+        let end_idx = safe_cursor + end_rel_idx;
+
+        let inserted = format!("${name}");
+        let mut new_text =
+            String::with_capacity(text.len() - (end_idx - start_idx) + inserted.len() + 1);
+        new_text.push_str(&text[..start_idx]);
+        new_text.push_str(&inserted);
+        new_text.push(' ');
+        new_text.push_str(&text[end_idx..]);
+
+        self.textarea.set_text(&new_text);
+        self.textarea
+            .set_cursor(start_idx.saturating_add(inserted.len()).saturating_add(1));
     }
 
     /// Extract the completion token under the cursor for auto file search.
@@ -1635,6 +1775,16 @@ impl ChatComposer {
                 // If an @ token is present or token starts with ./, rely on auto-popup.
                 if Self::current_completion_token(&self.textarea).is_some() {
                     return (InputResult::None, false);
+                }
+
+                if matches!(Self::current_skill_token(&self.textarea).as_deref(), Some("")) {
+                    if !self.skills.is_empty() {
+                        let mut popup = SkillPopup::new(self.skills.clone());
+                        popup.on_composer_text_change(String::new());
+                        self.active_popup = ActivePopup::Skill(popup);
+                        self.app_event_tx.send(crate::app_event::AppEvent::ComposerExpanded);
+                        return (InputResult::None, true);
+                    }
                 }
 
                 // Use the generic token under cursor for a one-off search.
@@ -1971,6 +2121,42 @@ impl ChatComposer {
         }
     }
 
+    fn sync_skill_popup(&mut self) {
+        let Some(query) = Self::current_skill_token(&self.textarea) else {
+            if matches!(self.active_popup, ActivePopup::Skill(_)) {
+                self.active_popup = ActivePopup::None;
+            }
+            return;
+        };
+
+        if self.skills.is_empty() {
+            if matches!(self.active_popup, ActivePopup::Skill(_)) {
+                self.active_popup = ActivePopup::None;
+            }
+            return;
+        }
+
+        if self.dismissed_skill_popup_token.as_ref() == Some(&query) {
+            return;
+        }
+
+        let should_show = !query.is_empty() || matches!(self.active_popup, ActivePopup::Skill(_));
+        if !should_show {
+            return;
+        }
+
+        match &mut self.active_popup {
+            ActivePopup::Skill(popup) => popup.on_composer_text_change(query),
+            ActivePopup::None => {
+                let mut popup = SkillPopup::new(self.skills.clone());
+                popup.on_composer_text_change(query);
+                self.active_popup = ActivePopup::Skill(popup);
+                self.app_event_tx.send(crate::app_event::AppEvent::ComposerExpanded);
+            }
+            _ => {}
+        }
+    }
+
     /// Synchronize `self.file_search_popup` with the current text in the textarea.
     /// Note this is only called when self.active_popup is NOT Command.
     fn sync_file_search_popup(&mut self) {
@@ -2055,7 +2241,11 @@ impl ChatComposer {
         if matches!(self.active_popup, ActivePopup::Command(_)) {
             self.dismissed_file_popup_token = None;
         } else {
-            self.sync_file_search_popup();
+            self.sync_skill_popup();
+            if !matches!(self.active_popup, ActivePopup::Skill(_)) {
+                self.dismissed_skill_popup_token = None;
+                self.sync_file_search_popup();
+            }
         }
     }
 
@@ -2313,6 +2503,7 @@ impl ChatComposer {
         match (&self.active_popup, self.embedded_mode) {
             (ActivePopup::Command(popup), _) => popup.calculate_required_height(),
             (ActivePopup::File(popup), _) => popup.calculate_required_height(),
+            (ActivePopup::Skill(popup), _) => popup.calculate_required_height(),
             (ActivePopup::None, true) => 0,
             (ActivePopup::None, false) => 1,
         }
@@ -2328,6 +2519,9 @@ impl ChatComposer {
                 popup.render_ref(area, buf);
             }
             ActivePopup::File(popup) => {
+                popup.render_ref(area, buf);
+            }
+            ActivePopup::Skill(popup) => {
                 popup.render_ref(area, buf);
             }
             ActivePopup::None => {
@@ -2836,6 +3030,10 @@ impl ChatComposer {
     }
 }
 
+fn is_valid_skill_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')
+}
+
 impl Drop for ChatComposer {
     fn drop(&mut self) {
         if let Some(animation_flag) = self.animation_running.take() {
@@ -3082,9 +3280,11 @@ fn lerp_gradient_color(gradient: BorderGradient, ratio: f32) -> Color {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use code_protocol::skills::SkillScope;
     use crate::thread_spawner;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -3116,6 +3316,51 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn test_skill(name: &str, description: &str) -> Skill {
+        Skill {
+            name: name.to_string(),
+            path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            description: description.to_string(),
+            short_description: None,
+            scope: SkillScope::User,
+            allow_implicit_invocation: true,
+            content: String::new(),
+        }
+    }
+
+    #[test]
+    fn skill_token_accepts_same_name_characters_as_skill_editor() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_tx = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, app_tx, true, false);
+
+        composer.set_text_content("$foo.bar-baz_1".to_string());
+
+        assert_eq!(
+            ChatComposer::current_skill_token(&composer.textarea),
+            Some("foo.bar-baz_1".to_string())
+        );
+    }
+
+    #[test]
+    fn active_skill_popup_uses_refreshed_skills() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_tx = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, app_tx, true, false);
+
+        composer.set_skills(vec![test_skill("old-skill", "Old description")]);
+        composer.set_text_content("$old".to_string());
+        assert!(matches!(composer.active_popup, ActivePopup::Skill(_)));
+
+        composer.set_skills(vec![test_skill("new-skill", "New description")]);
+        composer.set_text_content("$new".to_string());
+
+        let ActivePopup::Skill(popup) = &composer.active_popup else {
+            panic!("skill popup should remain active after skills refresh");
+        };
+        assert_eq!(popup.selected_skill_name(), Some("new-skill".to_string()));
     }
 
     #[test]

@@ -1295,28 +1295,32 @@ pub(super) async fn submission_loop(
                 let skills: Vec<code_protocol::protocol::SkillMetadata> = skill_load_outcome
                     .skills
                     .into_iter()
-                    .map(|skill| code_protocol::protocol::SkillMetadata {
-                        name: skill.name,
-                        description: skill.description,
-                        short_description: skill.short_description,
-                        interface: None,
-                        dependencies: None,
-                        path: skill.path,
-                        scope: match skill.scope {
-                            crate::skills::model::SkillScope::Repo => {
-                                code_protocol::protocol::SkillScope::Repo
-                            }
-                            crate::skills::model::SkillScope::User => {
-                                code_protocol::protocol::SkillScope::User
-                            }
-                            crate::skills::model::SkillScope::System => {
-                                code_protocol::protocol::SkillScope::System
-                            }
-                            crate::skills::model::SkillScope::Admin => {
-                                code_protocol::protocol::SkillScope::Admin
-                            }
-                        },
-                        enabled: true,
+                    .map(|skill| {
+                        let allow_implicit_invocation = skill.allow_implicit_invocation();
+                        code_protocol::protocol::SkillMetadata {
+                            name: skill.name,
+                            description: skill.description,
+                            short_description: skill.short_description,
+                            interface: None,
+                            dependencies: None,
+                            path: skill.path,
+                            scope: match skill.scope {
+                                crate::skills::model::SkillScope::Repo => {
+                                    code_protocol::protocol::SkillScope::Repo
+                                }
+                                crate::skills::model::SkillScope::User => {
+                                    code_protocol::protocol::SkillScope::User
+                                }
+                                crate::skills::model::SkillScope::System => {
+                                    code_protocol::protocol::SkillScope::System
+                                }
+                                crate::skills::model::SkillScope::Admin => {
+                                    code_protocol::protocol::SkillScope::Admin
+                                }
+                            },
+                            allow_implicit_invocation,
+                            enabled: true,
+                        }
                     })
                     .collect();
 

@@ -35,6 +35,7 @@ mod custom_prompt_view;
 pub(crate) mod prompt_args;
 mod command_popup;
 mod file_search_popup;
+mod skill_popup;
 mod paste_burst;
 mod popup_consts;
 pub(crate) mod agent_editor_view;
@@ -573,7 +574,8 @@ impl BottomPane<'_> {
     }
 
     pub(crate) fn set_skills(&mut self, skills: Vec<Skill>) {
-        self.skills = skills;
+        self.skills = skills.clone();
+        self.composer.set_skills(skills);
     }
 
     pub(crate) fn skills(&self) -> &[Skill] {

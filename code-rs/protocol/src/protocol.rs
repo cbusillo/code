@@ -2514,6 +2514,8 @@ pub struct SkillMetadata {
     pub dependencies: Option<SkillDependencies>,
     pub path: PathBuf,
     pub scope: SkillScope,
+    #[serde(default = "default_true_bool")]
+    pub allow_implicit_invocation: bool,
     pub enabled: bool,
 }
 
@@ -3187,4 +3189,7 @@ mod tests {
         assert_eq!(value["msg"]["cancelled"][0], "c");
         Ok(())
     }
+}
+const fn default_true_bool() -> bool {
+    true
 }

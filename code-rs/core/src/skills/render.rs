@@ -1,32 +1,48 @@
 use crate::skills::model::SkillMetadata;
 
 pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
-    let skills: Vec<&SkillMetadata> = skills
+    let implicit_skills: Vec<&SkillMetadata> = skills
         .iter()
         .filter(|skill| skill.allow_implicit_invocation())
         .collect();
+    let manual_skills: Vec<&SkillMetadata> = skills
+        .iter()
+        .filter(|skill| !skill.allow_implicit_invocation())
+        .collect();
 
-    if skills.is_empty() {
+    if implicit_skills.is_empty() && manual_skills.is_empty() {
         return None;
     }
 
     let mut lines: Vec<String> = Vec::new();
     lines.push("## Skills".to_string());
-    lines.push("A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.".to_string());
-    lines.push("### Available skills".to_string());
+    lines.push("A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below are the implicitly invokable skills whose descriptions can trigger use. Skill bodies live on disk and should be opened only when the trigger rules say to use the skill.".to_string());
 
-    for skill in skills {
-        let path_str = skill.path.to_string_lossy().replace('\\', "/");
-        let name = skill.name.as_str();
-        let description = skill.description.as_str();
-        lines.push(format!("- {name}: {description} (file: {path_str})"));
+    if !implicit_skills.is_empty() {
+        lines.push("### Available skills".to_string());
+
+        for skill in implicit_skills {
+            let path_str = skill.path.to_string_lossy().replace('\\', "/");
+            let name = skill.name.as_str();
+            let description = skill.description.as_str();
+            lines.push(format!("- {name}: {description} (file: {path_str})"));
+        }
+    }
+
+    if !manual_skills.is_empty() {
+        lines.push("### Manual-only skills".to_string());
+        lines.push("These skills are discoverable but not implicitly invokable. Use them only when the user explicitly names them with `$<skill-name>` or when the skill body has already been injected into the conversation.".to_string());
+        for skill in manual_skills {
+            let name = skill.name.as_str();
+            lines.push(format!("- {name}"));
+        }
     }
 
     lines.push("### How to use skills".to_string());
     lines.push(
-        r###"- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
-- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
+        r###"- Discovery: The "Available skills" list is for implicit routing; descriptions there can trigger skill use. The "Manual-only skills" list is name-only so the user can explicitly invoke those skills without adding their instructions to every turn.
+- Trigger rules: If the user names an available skill in plain text, or the task clearly matches an available skill's description, you must use that skill for that turn. If the user explicitly names any skill with `$<skill-name>`, use it for that turn when the skill body is available or can be opened. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Missing/blocked: If an explicitly named skill body is already injected in the conversation, follow it even if the skill is not in the available-skills list. If a named skill cannot be opened or its body is unavailable, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
   1) After deciding to use a skill, open its `SKILL.md`. Read only enough to follow the workflow.
   2) When `SKILL.md` references bundled skill resources or scripts with relative paths such as `scripts/foo.py`, resolve them relative to the directory containing that `SKILL.md` first, and only consider other paths if needed.
@@ -78,13 +94,33 @@ mod tests {
 
         assert!(rendered.contains("- implicit: implicit description"));
         assert!(!rendered.contains("- manual: manual description"));
+        assert!(rendered.contains("### Manual-only skills"));
+        assert!(rendered.contains("- manual"));
+        assert!(!rendered.contains("manual description"));
     }
 
     #[test]
-    fn render_skills_section_returns_none_for_only_manual_skills() {
+    fn render_skills_section_lists_only_manual_skill_names() {
         let rendered = render_skills_section(&[skill("manual", Some(false))]);
 
-        assert!(rendered.is_none());
+        let rendered = rendered.expect("manual skill names should render");
+        assert!(!rendered.contains("### Available skills"));
+        assert!(rendered.contains("### Manual-only skills"));
+        assert!(rendered.contains("- manual"));
+        assert!(!rendered.contains("manual description"));
+    }
+
+    #[test]
+    fn render_skills_section_avoids_exhaustive_missing_skill_language() {
+        let rendered = render_skills_section(&[
+            skill("implicit", None),
+            skill("manual", Some(false)),
+        ])
+        .expect("skills should render");
+
+        assert!(!rendered.contains("the skills available in this session"));
+        assert!(!rendered.contains("isn't in the list"));
+        assert!(rendered.contains("If an explicitly named skill body is already injected"));
     }
 
     #[test]

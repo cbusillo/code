@@ -166,8 +166,14 @@ impl SkillsSettingsView {
                 SkillScope::User => " [user]",
                 SkillScope::System => " [system]",
             };
+            let manual_text = if skill.allow_implicit_invocation {
+                ""
+            } else {
+                " [manual]"
+            };
             let name_span = Span::styled(format!("{arrow} {name}", name = skill.name), name_style);
             let scope_span = Span::styled(scope_text, Style::default().fg(colors::text_dim()));
+            let manual_span = Span::styled(manual_text, Style::default().fg(colors::warning()));
             let display_description = skill
                 .short_description
                 .as_deref()
@@ -178,7 +184,7 @@ impl SkillsSettingsView {
                 format!("  {display_description}"),
                 Style::default().fg(colors::text_dim()),
             );
-            lines.push(Line::from(vec![name_span, scope_span, desc_span]));
+            lines.push(Line::from(vec![name_span, scope_span, manual_span, desc_span]));
         }
         if lines.is_empty() {
             lines.push(Line::from("No skills yet. Press Ctrl+N to create."));
@@ -361,13 +367,13 @@ impl SkillsSettingsView {
     }
 
     fn validate_frontmatter(&self, body: &str) -> Result<(), String> {
-        let Some(frontmatter) = extract_frontmatter(body) else {
+        if extract_frontmatter(body).is_none() {
             return Err("SKILL.md must start with YAML frontmatter".to_string());
         };
-        if frontmatter_value(&frontmatter, "name").is_none() {
+        if frontmatter_value(body, "name").is_none() {
             return Err("Frontmatter must include name".to_string());
         }
-        if frontmatter_value(&frontmatter, "description").is_none() {
+        if frontmatter_value(body, "description").is_none() {
             return Err("Frontmatter must include description".to_string());
         }
         Ok(())
@@ -431,12 +437,20 @@ impl SkillsSettingsView {
         let display_name = frontmatter_value(&body, "name").unwrap_or_else(|| name.clone());
 
         let mut updated = self.skills.clone();
+        let allow_implicit_invocation = frontmatter_policy_allow_implicit_invocation(&body)
+            .unwrap_or_else(|| {
+                self.skills
+                    .get(self.selected)
+                    .map(|skill| skill.allow_implicit_invocation)
+                    .unwrap_or(true)
+            });
         let new_entry = Skill {
             name: display_name,
             path,
             description,
             short_description,
             scope: SkillScope::User,
+            allow_implicit_invocation,
             content: body.clone(),
         };
         if self.selected < updated.len() {
@@ -561,12 +575,69 @@ fn frontmatter_metadata_short_description(body: &str) -> Option<String> {
     None
 }
 
+fn frontmatter_policy_allow_implicit_invocation(body: &str) -> Option<bool> {
+    let frontmatter = extract_frontmatter(body)?;
+    let mut in_policy = false;
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if !indented {
+            in_policy = trimmed == "policy:";
+            if let Some(rest) = trimmed.strip_prefix("policy.allow_implicit_invocation:") {
+                return parse_frontmatter_bool(rest.trim());
+            }
+            continue;
+        }
+        if in_policy
+            && let Some(rest) = trimmed.strip_prefix("allow_implicit_invocation:")
+        {
+            return parse_frontmatter_bool(rest.trim());
+        }
+    }
+    None
+}
+
+fn parse_frontmatter_bool(value: &str) -> Option<bool> {
+    match value.trim_matches('"').trim_matches('\'').to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use code_protocol::skills::SkillScope;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::mpsc;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn skill(name: &str, description: &str, short_description: Option<&str>) -> Skill {
         Skill {
@@ -575,7 +646,15 @@ mod tests {
             short_description: short_description.map(str::to_string),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             scope: SkillScope::User,
+            allow_implicit_invocation: true,
             content: String::new(),
+        }
+    }
+
+    fn manual_skill(name: &str, description: &str) -> Skill {
+        Skill {
+            allow_implicit_invocation: false,
+            ..skill(name, description, None)
         }
     }
 
@@ -603,6 +682,92 @@ mod tests {
     }
 
     #[test]
+    fn list_marks_manual_only_skills() {
+        let (tx, _rx) = mpsc::channel();
+        let view = SkillsSettingsView::new(
+            vec![
+                skill("implicit", "Implicit description", None),
+                manual_skill("manual", "Manual description"),
+            ],
+            AppEventSender::new(tx),
+        );
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
+
+        view.render(Rect::new(0, 0, 80, 8), &mut buf);
+        let rendered = buf_to_string(&buf);
+
+        assert!(rendered.contains("manual [user] [manual]"), "{rendered}");
+        assert!(rendered.contains("implicit [user]  Implicit description"), "{rendered}");
+        assert!(!rendered.contains("implicit [user] [manual]"), "{rendered}");
+    }
+
+    #[test]
+    fn save_preserves_manual_only_policy() {
+        let (tx, _rx) = mpsc::channel();
+        let temp_home = tempfile::tempdir().expect("temp code home");
+        let _code_home_guard = EnvVarGuard::new("CODE_HOME");
+        unsafe { std::env::set_var("CODE_HOME", temp_home.path()) };
+        let mut view = SkillsSettingsView::new(
+            vec![manual_skill("manual", "Manual description")],
+            AppEventSender::new(tx),
+        );
+
+        view.name_field.set_text("manual");
+        view.body_field.set_text(
+            "---\nname: manual\ndescription: Updated description\npolicy:\n  allow_implicit_invocation: false\n---\nUpdated body",
+        );
+
+        view.save_current();
+
+        assert!(!view.skills[0].allow_implicit_invocation);
+        assert_eq!(view.skills[0].description, "Updated description");
+    }
+
+    #[test]
+    fn save_preserves_manual_only_policy_when_frontmatter_omits_policy() {
+        let (tx, _rx) = mpsc::channel();
+        let temp_home = tempfile::tempdir().expect("temp code home");
+        let _code_home_guard = EnvVarGuard::new("CODE_HOME");
+        unsafe { std::env::set_var("CODE_HOME", temp_home.path()) };
+        let mut view = SkillsSettingsView::new(
+            vec![manual_skill("manual", "Manual description")],
+            AppEventSender::new(tx),
+        );
+
+        view.name_field.set_text("manual");
+        view.body_field.set_text(
+            "---\nname: manual\ndescription: Updated description\n---\nUpdated body",
+        );
+
+        view.save_current();
+
+        assert!(!view.skills[0].allow_implicit_invocation);
+        assert_eq!(view.skills[0].description, "Updated description");
+    }
+
+    #[test]
+    fn save_re_reads_manual_only_policy_from_frontmatter() {
+        let (tx, _rx) = mpsc::channel();
+        let temp_home = tempfile::tempdir().expect("temp code home");
+        let _code_home_guard = EnvVarGuard::new("CODE_HOME");
+        unsafe { std::env::set_var("CODE_HOME", temp_home.path()) };
+        let mut view = SkillsSettingsView::new(
+            vec![skill("implicit", "Implicit description", None)],
+            AppEventSender::new(tx),
+        );
+
+        view.name_field.set_text("implicit");
+        view.body_field.set_text(
+            "---\nname: implicit\ndescription: Updated description\npolicy:\n  allow_implicit_invocation: false\n---\nUpdated body",
+        );
+
+        view.save_current();
+
+        assert!(!view.skills[0].allow_implicit_invocation);
+        assert_eq!(view.skills[0].description, "Updated description");
+    }
+
+    #[test]
     fn reads_nested_frontmatter_short_description() {
         let body = "---\nname: Demo\ndescription: Full trigger\nmetadata:\n  short-description: Compact summary\n---\nBody";
 
@@ -610,6 +775,13 @@ mod tests {
             frontmatter_metadata_short_description(body).as_deref(),
             Some("Compact summary")
         );
+    }
+
+    #[test]
+    fn reads_nested_frontmatter_policy() {
+        let body = "---\nname: Demo\ndescription: Full trigger\npolicy:\n  allow_implicit_invocation: false\n---\nBody";
+
+        assert_eq!(frontmatter_policy_allow_implicit_invocation(body), Some(false));
     }
 
     fn buf_to_string(buf: &Buffer) -> String {

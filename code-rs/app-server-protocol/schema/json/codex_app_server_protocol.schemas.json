@@ -9587,6 +9587,10 @@
     },
     "SkillMetadata": {
       "properties": {
+        "allow_implicit_invocation": {
+          "default": true,
+          "type": "boolean"
+        },
         "dependencies": {
           "anyOf": [
             {
