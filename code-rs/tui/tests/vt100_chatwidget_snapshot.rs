@@ -66,7 +66,41 @@ fn normalize_output(text: String) -> String {
 }
 
 fn normalize_lab_build_name(text: String) -> String {
-    text.replace(code_version::LAB_BUILD_NAME, code_version::PRODUCT_NAME)
+    let mut border_width = None;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        let content = trimmed.trim_start();
+        if content.starts_with('+')
+            && content.ends_with('+')
+            && content
+                .chars()
+                .skip(1)
+                .take(content.len().saturating_sub(2))
+                .all(|ch| ch == '-')
+        {
+            border_width = Some(content.len());
+        }
+
+        if content.contains(code_version::LAB_BUILD_NAME) {
+            let indent = line.len().saturating_sub(line.trim_start().len());
+            let width = border_width.unwrap_or_else(|| content.len());
+            let inner_width = width.saturating_sub(2);
+            let label_width = code_version::PRODUCT_NAME.len();
+            let left = inner_width.saturating_sub(label_width) / 2;
+            let right = inner_width.saturating_sub(label_width + left);
+            out.push(format!(
+                "{}|{}{}{}|",
+                " ".repeat(indent),
+                " ".repeat(left),
+                code_version::PRODUCT_NAME,
+                " ".repeat(right)
+            ));
+        } else {
+            out.push(line.replace(code_version::LAB_BUILD_NAME, code_version::PRODUCT_NAME));
+        }
+    }
+    out.join("\n")
 }
 
 fn init_tracing_once() {
