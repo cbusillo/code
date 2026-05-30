@@ -109,17 +109,7 @@ fn compare_policy_matches(
 impl SkillCommandPolicyMatch<'_> {
     pub(crate) fn guidance(&self, original_label: &str, original_value: &str) -> String {
         let policy = self.policy;
-        let message = policy.message.as_deref().unwrap_or(match policy.action {
-            SkillCommandPolicyAction::RequirePreferred => {
-                "A loaded skill owns this workflow; use one of the preferred actions instead."
-            }
-            SkillCommandPolicyAction::RequireConfirm => {
-                "A loaded skill requires explicit confirmation before this raw command runs."
-            }
-            SkillCommandPolicyAction::Reject => {
-                "A loaded skill rejects this raw command shape."
-            }
-        });
+        let message = policy_message(policy);
         let mut lines = vec![
             format!(
                 "Command policy matched skill `{}` ({}) at {}.",
@@ -177,15 +167,39 @@ impl SkillCommandPolicyMatch<'_> {
             .iter()
             .skip(1)
             .map(|policy_match| {
+                let action = describe_action(policy_match.policy.action);
+                let message = policy_message(policy_match.policy);
                 format!(
-                    "- skill `{}` ({}) at {}; matched_command: {}",
+                    "- skill `{}` ({}) at {}; action: {}; warning: {}; matched_command: {}",
                     policy_match.policy.skill_name,
                     policy_match.policy.id,
                     policy_match.policy.skill_path.display(),
+                    action,
+                    message,
                     policy_match.matched_command
                 )
             })
             .collect()
+    }
+}
+
+fn policy_message(policy: &CompiledSkillCommandPolicy) -> &str {
+    policy.message.as_deref().unwrap_or(match policy.action {
+        SkillCommandPolicyAction::RequirePreferred => {
+            "A loaded skill owns this workflow; use one of the preferred actions instead."
+        }
+        SkillCommandPolicyAction::RequireConfirm => {
+            "A loaded skill requires explicit confirmation before this raw command runs."
+        }
+        SkillCommandPolicyAction::Reject => "A loaded skill rejects this raw command shape.",
+    })
+}
+
+fn describe_action(action: SkillCommandPolicyAction) -> &'static str {
+    match action {
+        SkillCommandPolicyAction::RequirePreferred => "require_preferred",
+        SkillCommandPolicyAction::RequireConfirm => "require_confirm",
+        SkillCommandPolicyAction::Reject => "reject",
     }
 }
 
@@ -637,6 +651,76 @@ mod tests {
 
         assert!(guidance.contains("Command policy matched skill `first` (first-policy)"));
         assert!(guidance.contains("skill `second` (second-policy)"));
+    }
+
+    #[test]
+    fn longer_prefix_beats_shorter_prefix() {
+        let broad_policy = policy_with_id(
+            "broad-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string()]),
+                ..Default::default()
+            },
+        );
+        let narrow_policy = policy_with_id(
+            "narrow-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        let runtime = runtime_from_skills(vec![skill(
+            "github",
+            vec![broad_policy, narrow_policy],
+            true,
+        )]);
+
+        let matched = runtime
+            .check(
+                &[
+                    "gh".to_string(),
+                    "pr".to_string(),
+                    "merge".to_string(),
+                    "246".to_string(),
+                ],
+                false,
+            )
+            .expect("match");
+
+        assert_eq!(matched.policy.id, "narrow-policy");
+    }
+
+    #[test]
+    fn related_policy_lines_include_action_and_warning() {
+        let preferred_policy = policy_with_id(
+            "preferred-policy",
+            SkillCommandMatcher {
+                argv_exact: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        let mut reject_policy = policy_with_id(
+            "reject-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string()]),
+                ..Default::default()
+            },
+        );
+        reject_policy.action = SkillCommandPolicyAction::Reject;
+        reject_policy.message = Some("This raw PR command family is blocked.".to_string());
+        let runtime = runtime_from_skills(vec![
+            skill("github", vec![preferred_policy], true),
+            skill("policy", vec![reject_policy], true),
+        ]);
+
+        let guidance = runtime
+            .check(&["gh".to_string(), "pr".to_string(), "merge".to_string()], false)
+            .expect("match")
+            .guidance("original_argv", "[\"gh\", \"pr\", \"merge\"]");
+
+        assert!(guidance.contains("Command policy matched skill `github` (preferred-policy)"));
+        assert!(guidance.contains("action: reject"));
+        assert!(guidance.contains("warning: This raw PR command family is blocked."));
     }
 
     #[test]
