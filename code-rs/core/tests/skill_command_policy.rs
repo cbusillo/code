@@ -113,6 +113,16 @@ policy:
           path: scripts/gh-pr.py
           example_argv: ["scripts/gh-pr.py", "merge", "<pr>"]
           purpose: Merge through the helper.
+    - id: prefer-pr-helper-for-pr-writes
+      match:
+        shell_regex: "^gh\\s+pr\\s+(merge|create|edit|comment)\\b"
+      action: require_preferred
+      message: Raw gh pr writes should use the helper family.
+      preferred:
+        - kind: script
+          path: scripts/gh-pr.py
+          example_argv: ["scripts/gh-pr.py", "merge", "<pr>"]
+          purpose: Merge through the helper.
 ---
 Use the GitHub helper.
 "#,
@@ -184,7 +194,10 @@ Use the GitHub helper.
         .expect("follow-up request should contain policy tool output");
     assert!(output.contains("Command policy matched skill `github`"));
     assert!(output.contains("Raw gh pr merge bypasses the helper flow."));
+    assert!(output.contains("Also matched policies:"));
+    assert!(output.contains("prefer-pr-helper-for-pr-writes"));
     assert!(output.contains("scripts/gh-pr.py"));
+    assert_eq!(output.matches("- script;").count(), 1);
 }
 
 fn find_function_call_output_text(value: &Value) -> Option<&str> {
