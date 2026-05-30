@@ -1457,6 +1457,8 @@ async fn doctor_main() -> anyhow::Result<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
     println!("code version: {}", code_version::version());
+    println!("product: {}", code_version::LAB_BUILD_NAME);
+    println!("repository: {}", code_version::LAB_REPOSITORY);
     println!("current_exe: {}", exe);
 
     // PATH
@@ -1523,7 +1525,7 @@ async fn doctor_main() -> anyhow::Result<()> {
     show_versions("coder --version by path", &coder_paths).await;
 
     println!("\nIf versions differ, remove older PATH entries or reorder PATH so the intended Code binary appears first.");
-    println!("Run `code update-check` from the intended binary to inspect the current GitHub Release update source.");
+    println!("Run `code update-check` or `<your-command> update-check` from the intended binary to inspect the current GitHub Release update source.");
 
     Ok(())
 }

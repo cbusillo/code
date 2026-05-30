@@ -10,13 +10,17 @@ body:
 
         If you need help or support using Code, and are not reporting a bug, please post on [code/discussions](https://github.com/just-every/code/discussions), where you can ask questions or engage with others on ideas for how to improve Code.
 
-        Run `code update-check` to make sure you are using the latest GitHub Release build. The bug you are experiencing may already have been fixed.
+        Run `code doctor` (or `<your-command> doctor` if your binary is
+        renamed) and include the output below. It shows the version, Every Code
+        Lab build tag, repository, executable path, and update source.
 
   - type: input
     id: version
     attributes:
-      label: What version of Code is running?
-      description: Copy the output of `code --version` (or `coder --version`)
+      label: What version and build of Code is running?
+      description: >-
+        Copy the version/build lines from `code doctor` (or `<your-command>
+        doctor`)
   - type: input
     id: model
     attributes:

@@ -396,10 +396,17 @@ const { spawn } = await import("child_process");
 
 // Make the resolved native binary path visible to spawned agents/subprocesses.
 process.env.CODE_BINARY_PATH = binaryPath;
+process.env.CODE_COMMAND_NAME = path.basename(process.argv[1] || "code");
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
-  env: { ...process.env, CODER_MANAGED_BY_NPM: "1", CODEX_MANAGED_BY_NPM: "1", CODE_BINARY_PATH: binaryPath },
+  env: {
+    ...process.env,
+    CODER_MANAGED_BY_NPM: "1",
+    CODEX_MANAGED_BY_NPM: "1",
+    CODE_BINARY_PATH: binaryPath,
+    CODE_COMMAND_NAME: process.env.CODE_COMMAND_NAME,
+  },
 });
 
 child.on("error", (err) => {
