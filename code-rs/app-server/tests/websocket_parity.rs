@@ -101,6 +101,59 @@ async fn assert_no_message(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_rejects_origin_header_handshakes() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr: SocketAddr = listener.local_addr().expect("resolve bound address");
+    drop(listener);
+
+    let server_handle = tokio::spawn(async move {
+        run_main_with_transport(
+            None,
+            CliConfigOverrides::default(),
+            AppServerTransport::WebSocket { bind_address: addr },
+        )
+        .await
+    });
+
+    let url = format!("http://{addr}/");
+    let mut attempts = 0;
+    let response = loop {
+        match reqwest::Client::new()
+            .get(&url)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("Origin", "http://example.test")
+            .send()
+            .await
+        {
+            Ok(response) => break response,
+            Err(err) => {
+                attempts += 1;
+                assert!(attempts < 40, "failed to reach {url}: {err}");
+                sleep(Duration::from_millis(25)).await;
+            }
+        }
+    };
+
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    server_handle.abort();
+}
+
+#[test]
+fn websocket_listen_url_requires_loopback_bind() {
+    let err = AppServerTransport::from_listen_url("ws://0.0.0.0:4242")
+        .expect_err("non-loopback websocket bind should be rejected");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("loopback"),
+        "unexpected non-loopback error: {message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_user_agent_is_connection_scoped() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr: SocketAddr = listener.local_addr().expect("resolve bound address");
