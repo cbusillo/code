@@ -247,6 +247,23 @@ pub fn find_account(code_home: &Path, account_id: &str) -> io::Result<Option<Sto
         .find(|acc| acc.id == account_id))
 }
 
+pub fn update_account_last_refresh(
+    code_home: &Path,
+    account_id: &str,
+    last_refresh: DateTime<Utc>,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path(code_home);
+    let mut data = read_accounts_file(&path)?;
+
+    let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == account_id) else {
+        return Ok(None);
+    };
+    account.last_refresh = Some(last_refresh);
+    let updated = account.clone();
+    write_accounts_file(&path, &data)?;
+    Ok(Some(updated))
+}
+
 pub fn set_active_account_id(
     code_home: &Path,
     account_id: Option<String>,

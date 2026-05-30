@@ -189,7 +189,6 @@ async fn diff_filter_config_overrides_with_submodules(
 
     for path in String::from_utf8_lossy(&output.stdout)
         .lines()
-        .map(str::trim)
         .filter(|line| !line.is_empty())
     {
         overrides.extend(diff_filter_config_overrides(Path::new(path)).await?);
@@ -461,6 +460,68 @@ mod tests {
         );
         assert!(!helper.with_extension("sh.ran").exists());
         assert!(!nested_helper.with_extension("sh.ran").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn get_git_diff_preserves_submodule_paths_with_trailing_whitespace() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let child = tempdir.path().join("child ");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir(&child).expect("create child repository directory");
+        fs::create_dir(&repo).expect("create parent repository directory");
+
+        run_git_setup(&child, &["init", "-q"]);
+        run_git_setup(&child, &["config", "user.name", "test"]);
+        run_git_setup(&child, &["config", "user.email", "test@example.com"]);
+        fs::write(child.join(".gitattributes"), "*.txt filter=evil\n")
+            .expect("write child attributes");
+        fs::write(child.join("tracked.txt"), "before\n").expect("write child tracked file");
+        run_git_setup(&child, &["add", ".gitattributes", "tracked.txt"]);
+        run_git_setup(&child, &["commit", "-qm", "initial"]);
+
+        run_git_setup(&repo, &["init", "-q"]);
+        run_git_setup(&repo, &["config", "user.name", "test"]);
+        run_git_setup(&repo, &["config", "user.email", "test@example.com"]);
+        run_git_setup(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                child.to_str().expect("child repository path"),
+                "child ",
+            ],
+        );
+        run_git_setup(&repo, &["commit", "-qm", "add submodule"]);
+
+        let helper = tempdir.path().join("submodule-helper.sh");
+        write_marker_helper(&helper);
+        let checkout = repo.join("child ");
+        run_git_setup(
+            &checkout,
+            &[
+                "config",
+                "filter.evil.clean",
+                helper.to_str().expect("submodule helper path"),
+            ],
+        );
+        run_git_setup(&checkout, &["config", "filter.evil.required", "true"]);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        fs::write(checkout.join("tracked.txt"), "after\n").expect("modify child tracked file");
+
+        let result = get_git_diff_in_dir(&repo)
+            .await
+            .expect("generate diff without trimming submodule path");
+
+        assert!(
+            result.1.contains("-dirty"),
+            "dirty submodule marker should be preserved: {}",
+            result.1
+        );
+        assert!(!helper.with_extension("sh.ran").exists());
     }
 
     fn run_git_setup(cwd: &Path, args: &[&str]) {

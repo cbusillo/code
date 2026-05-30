@@ -911,6 +911,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "futures",
  "owo-colors",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",
