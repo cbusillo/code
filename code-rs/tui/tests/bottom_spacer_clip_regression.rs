@@ -206,8 +206,40 @@ fn normalize_output(text: String) -> String {
         .map(normalize_glyph)
         .collect::<String>()
         .pipe(normalize_timers)
+        .pipe(normalize_lab_build_name)
         .pipe(normalize_spacer_rows)
         .pipe(scrub_intro_art)
+}
+
+fn normalize_lab_build_name(text: String) -> String {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let content = line.trim_start();
+        if content.contains(code_version::LAB_BUILD_NAME)
+            && content.starts_with('|')
+            && content.ends_with('|')
+        {
+            let indent = line.len().saturating_sub(content.len());
+            let inner_width = content.len().saturating_sub(2);
+            let label_width = code_version::PRODUCT_NAME.len();
+            let left = inner_width.saturating_sub(label_width) / 2;
+            let right = inner_width.saturating_sub(label_width + left);
+            out.push(format!(
+                "{}|{}{}{}|",
+                " ".repeat(indent),
+                " ".repeat(left),
+                code_version::PRODUCT_NAME,
+                " ".repeat(right)
+            ));
+        } else {
+            out.push(line.replace(code_version::LAB_BUILD_NAME, code_version::PRODUCT_NAME));
+        }
+    }
+    let mut normalized = out.join("\n");
+    if text.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
 }
 
 fn normalize_glyph(ch: char) -> char {
