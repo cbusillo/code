@@ -76,7 +76,12 @@ impl ConversationManager {
             codex,
             init_id: _,
             session_id,
-        } = Codex::spawn_with_auth_manager(config, Some(auth_manager.clone())).await?;
+        } = Codex::spawn_with_auth_manager_and_source(
+            config,
+            Some(auth_manager.clone()),
+            self.session_source.clone(),
+        )
+        .await?;
         let conversation_id: code_protocol::ConversationId = session_id.into();
         self.finalize_spawn(codex, conversation_id).await
     }
@@ -137,7 +142,12 @@ impl ConversationManager {
             codex,
             init_id: _,
             session_id,
-        } = Codex::spawn_with_auth_manager(config, Some(auth_manager.clone())).await?;
+        } = Codex::spawn_with_auth_manager_and_source(
+            config,
+            Some(auth_manager.clone()),
+            self.session_source.clone(),
+        )
+        .await?;
         let conversation_id: code_protocol::ConversationId = session_id.into();
         self.finalize_spawn(codex, conversation_id).await
     }
@@ -203,7 +213,12 @@ impl ConversationManager {
             codex,
             init_id: _,
             session_id,
-        } = Codex::spawn_with_auth_manager(config, Some(self.auth_manager.clone())).await?;
+        } = Codex::spawn_with_auth_manager_and_source(
+            config,
+            Some(self.auth_manager.clone()),
+            self.session_source.clone(),
+        )
+        .await?;
         let conversation_id: code_protocol::ConversationId = session_id.into();
         self.finalize_spawn(codex, conversation_id).await
     }
