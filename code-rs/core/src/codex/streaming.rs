@@ -221,6 +221,7 @@ pub(super) async fn submission_loop(
     mut session_id: Uuid,
     config: Arc<Config>,
     auth_manager: Option<Arc<AuthManager>>,
+    session_source: SessionSource,
     rx_sub: Receiver<Submission>,
     tx_event: Sender<Event>,
 ) {
@@ -535,7 +536,7 @@ pub(super) async fn submission_loop(
                             crate::rollout::recorder::RolloutRecorderParams::new(
                                 code_protocol::mcp_protocol::ConversationId::from(session_id),
                                 effective_user_instructions.clone(),
-                                SessionSource::Cli,
+                                session_source.clone(),
                             ),
                         )
                             .await
@@ -708,6 +709,27 @@ pub(super) async fn submission_loop(
                     }
                 }
                 let default_shell = shell::default_user_shell().await;
+                let active_session_registration =
+                    match crate::active_sessions::register_if_write_capable(
+                        &config.code_home,
+                        &config.cwd,
+                        &config.sandbox_policy,
+                        session_id,
+                        session_source.clone(),
+                    ) {
+                        Ok(registration) => registration,
+                        Err(err) => {
+                            warn!("failed to register active session presence: {err}");
+                            None
+                        }
+                    };
+                let active_session_warning = active_session_registration
+                    .as_ref()
+                    .and_then(|registration| {
+                        crate::active_sessions::active_session_warning(&registration.conflicts)
+                    });
+                let active_session_guard =
+                    active_session_registration.map(|registration| registration.guard);
                 let mut tools_config = ToolsConfig::new(
                     &config.model_family,
                     approval_policy,
@@ -836,6 +858,7 @@ pub(super) async fn submission_loop(
                     env_ctx_v2: config.env_ctx_v2,
                     retention_config: config.retention.clone(),
                     model_descriptions,
+                    _active_session_guard: active_session_guard,
                 });
                 let weak_handle = Arc::downgrade(&new_session);
                 if let Some(inner) = Arc::get_mut(&mut new_session) {
@@ -913,6 +936,16 @@ pub(super) async fn submission_loop(
                     );
                     if let Err(e) = tx_event.send(warning_event).await {
                         warn!("failed to send deprecated approval policy warning: {e}");
+                    }
+                }
+
+                if let Some(message) = active_session_warning {
+                    let warning_event = sess_arc.make_event(
+                        &sub.id,
+                        EventMsg::Warning(crate::protocol::WarningEvent { message }),
+                    );
+                    if let Err(e) = tx_event.send(warning_event).await {
+                        warn!("failed to send active session warning: {e}");
                     }
                 }
 

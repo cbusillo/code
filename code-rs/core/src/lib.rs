@@ -7,6 +7,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod apply_patch;
+mod active_sessions;
 mod fs_sanitize;
 pub mod auth;
 pub mod auth_accounts;
@@ -65,6 +66,7 @@ mod mcp_tool_call;
 mod message_history;
 mod memories;
 mod model_provider_info;
+mod process_liveness;
 pub mod remote_models;
 // Remote model discovery caches its own on-disk state within the module.
 mod cgroup;

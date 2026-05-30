@@ -1,4 +1,5 @@
 use super::*;
+use crate::active_sessions::ActiveSessionGuard;
 use crate::protocol::TaskOriginKind;
 use serde_json::Value;
 use crate::util::extract_shell_script;
@@ -516,6 +517,7 @@ pub(crate) struct Session {
     pub(super) env_ctx_v2: bool,
     pub(super) retention_config: crate::config_types::RetentionConfig,
     pub(super) model_descriptions: Option<String>,
+    pub(super) _active_session_guard: Option<ActiveSessionGuard>,
 }
 pub(super) struct HookGuard<'a> {
     flag: &'a AtomicBool,
