@@ -935,6 +935,7 @@ mod tests {
             content: "manual body".to_string(),
             policy: Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
+                command_policies: Vec::new(),
             }),
         }];
         let input = vec![InputItem::Text {

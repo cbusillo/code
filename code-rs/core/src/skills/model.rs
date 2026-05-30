@@ -31,6 +31,46 @@ impl SkillMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SkillPolicy {
     pub allow_implicit_invocation: Option<bool>,
+    pub command_policies: Vec<SkillCommandPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillCommandPolicy {
+    pub id: String,
+    pub matcher: SkillCommandMatcher,
+    pub action: SkillCommandPolicyAction,
+    pub message: Option<String>,
+    pub preferred: Vec<SkillCommandPolicyPreferred>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillCommandMatcher {
+    pub argv_exact: Option<Vec<String>>,
+    pub argv_prefix: Option<Vec<String>>,
+    pub shell_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillCommandPolicyAction {
+    RequirePreferred,
+    RequireConfirm,
+    Reject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillCommandPolicyPreferred {
+    pub kind: SkillCommandPolicyPreferredKind,
+    pub path: Option<PathBuf>,
+    pub name: Option<String>,
+    pub example_argv: Vec<String>,
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillCommandPolicyPreferredKind {
+    Script,
+    Skill,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -802,16 +802,22 @@ pub(super) async fn submission_loop(
                         remote.refresh_remote_models().await;
                     });
                 }
+                let session_skills = skills_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.skills.clone())
+                    .unwrap_or_default();
+                let skill_command_policies =
+                    crate::skills::command_policy::SkillCommandPolicyRuntime::from_skills(
+                        &session_skills,
+                    );
                 let mut new_session = Arc::new(Session {
                     id: session_id,
                     client,
                     remote_models_manager,
                     tools_config,
                     dynamic_tools,
-                    skills: skills_outcome
-                        .as_ref()
-                        .map(|outcome| outcome.skills.clone())
-                        .unwrap_or_default(),
+                    skills: session_skills,
+                    skill_command_policies,
                     tx_event: tx_event.clone(),
                     user_instructions: effective_user_instructions.clone(),
                     base_instructions,
@@ -9818,6 +9824,29 @@ async fn handle_list_agents(
     ).await
 }
 
+async fn command_guard_output(
+    sess: &Session,
+    sub_id: &str,
+    call_id: String,
+    attempt_req: u64,
+    output_index: Option<u32>,
+    guidance: String,
+) -> ResponseInputItem {
+    let order = sess.next_background_order(sub_id, attempt_req, output_index);
+    sess
+        .notify_background_event_with_order(
+            sub_id,
+            order,
+            format!("Command guard: {}", guidance.clone()),
+        )
+        .await;
+
+    ResponseInputItem::FunctionCallOutput {
+        call_id,
+        output: FunctionCallOutputPayload::from_text(guidance),
+    }
+}
+
 async fn handle_container_exec_with_params(
     params: ExecParams,
     sess: &Session,
@@ -10092,6 +10121,22 @@ async fn handle_container_exec_with_params(
             .iter()
             .any(|p| trimmed.starts_with(p));
 
+        if let Some(policy_match) = sess
+            .skill_command_policies
+            .check(&params.command, has_confirm_prefix)
+        {
+            let guidance = policy_match.guidance("original_script", &script);
+            return command_guard_output(
+                sess,
+                &sub_id,
+                call_id,
+                attempt_req,
+                output_index,
+                guidance,
+            )
+            .await;
+        }
+
         // If no confirm prefix and it looks like a sensitive git command, reject with guidance.
         if !has_confirm_prefix {
             if let Some(pattern) = if sess.confirm_guard.is_empty() {
@@ -10256,6 +10301,21 @@ async fn handle_container_exec_with_params(
     // If no shell script is present, perform a lightweight argv inspection for sensitive git commands.
     if extract_shell_script(&params.command).is_none() {
         let joined = params.command.join(" ");
+        if let Some(policy_match) = sess.skill_command_policies.check(&params.command, false) {
+            let guidance = policy_match.guidance(
+                "original_argv",
+                &format!("{:?}", params.command),
+            );
+            return command_guard_output(
+                sess,
+                &sub_id,
+                call_id,
+                attempt_req,
+                output_index,
+                guidance,
+            )
+            .await;
+        }
         if !sess.confirm_guard.is_empty() {
             if let Some(pattern) = sess.confirm_guard.matched_pattern(&joined) {
                 let suggested = serde_json::to_string(&vec![

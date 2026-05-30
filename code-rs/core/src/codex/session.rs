@@ -469,6 +469,7 @@ pub(crate) struct Session {
     pub(super) tools_config: ToolsConfig,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
     pub(super) skills: Vec<crate::skills::SkillMetadata>,
+    pub(super) skill_command_policies: crate::skills::command_policy::SkillCommandPolicyRuntime,
 
     /// Manager for external MCP servers/tools.
     pub(super) mcp_connection_manager: McpConnectionManager,

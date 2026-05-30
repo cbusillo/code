@@ -1,3 +1,4 @@
+pub mod command_policy;
 pub mod loader;
 pub mod model;
 pub mod render;
