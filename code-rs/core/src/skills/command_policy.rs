@@ -5,6 +5,7 @@ use crate::skills::model::SkillCommandPolicyPreferred;
 use crate::skills::model::SkillCommandPolicyPreferredKind;
 use crate::skills::model::SkillMetadata;
 use regex_lite::Regex;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -14,6 +15,7 @@ pub(crate) struct SkillCommandPolicyRuntime {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledSkillCommandPolicy {
+    order: usize,
     pub(crate) skill_name: String,
     pub(crate) skill_path: PathBuf,
     pub(crate) id: String,
@@ -35,7 +37,15 @@ enum MatchSpecificity {
 pub(crate) struct SkillCommandPolicyMatch<'a> {
     pub(crate) policy: &'a CompiledSkillCommandPolicy,
     matched_command: String,
+    related: Vec<SingleSkillCommandPolicyMatch<'a>>,
+}
+
+#[derive(Debug, Clone)]
+struct SingleSkillCommandPolicyMatch<'a> {
+    policy: &'a CompiledSkillCommandPolicy,
+    matched_command: String,
     specificity: MatchSpecificity,
+    matcher_width: usize,
 }
 
 impl SkillCommandPolicyRuntime {
@@ -46,7 +56,7 @@ impl SkillCommandPolicyRuntime {
                 continue;
             };
             for command_policy in &policy.command_policies {
-                if let Some(compiled) = compile_policy(skill, command_policy) {
+                if let Some(compiled) = compile_policy(skill, command_policy, policies.len()) {
                     policies.push(compiled);
                 }
             }
@@ -63,7 +73,7 @@ impl SkillCommandPolicyRuntime {
             return None;
         }
         let normalized = NormalizedCommand::from_command(command);
-        let mut best: Option<SkillCommandPolicyMatch<'a>> = None;
+        let mut matches = Vec::new();
         for policy in &self.policies {
             if has_confirm_prefix && policy.action == SkillCommandPolicyAction::RequireConfirm {
                 continue;
@@ -71,35 +81,35 @@ impl SkillCommandPolicyRuntime {
             let Some(candidate) = policy_matches(policy, &normalized) else {
                 continue;
             };
-            if best
-                .as_ref()
-                .is_none_or(|current| candidate.is_more_specific_than(current))
-            {
-                best = Some(candidate);
-            }
+            matches.push(candidate);
         }
-        best
+        matches.sort_by(compare_policy_matches);
+        let primary = matches.first()?.clone();
+        Some(SkillCommandPolicyMatch {
+            policy: primary.policy,
+            matched_command: primary.matched_command,
+            related: matches,
+        })
     }
 }
 
-impl<'a> SkillCommandPolicyMatch<'a> {
-    fn is_more_specific_than(&self, other: &Self) -> bool {
-        specificity_rank(self.specificity) < specificity_rank(other.specificity)
-    }
+fn compare_policy_matches(
+    left: &SingleSkillCommandPolicyMatch<'_>,
+    right: &SingleSkillCommandPolicyMatch<'_>,
+) -> std::cmp::Ordering {
+    specificity_rank(left.specificity)
+        .cmp(&specificity_rank(right.specificity))
+        .then_with(|| right.matcher_width.cmp(&left.matcher_width))
+        .then_with(|| left.policy.order.cmp(&right.policy.order))
+        .then_with(|| left.policy.skill_name.cmp(&right.policy.skill_name))
+        .then_with(|| left.policy.skill_path.cmp(&right.policy.skill_path))
+        .then_with(|| left.policy.id.cmp(&right.policy.id))
+}
 
+impl SkillCommandPolicyMatch<'_> {
     pub(crate) fn guidance(&self, original_label: &str, original_value: &str) -> String {
         let policy = self.policy;
-        let message = policy.message.as_deref().unwrap_or(match policy.action {
-            SkillCommandPolicyAction::RequirePreferred => {
-                "A loaded skill owns this workflow; use one of the preferred actions instead."
-            }
-            SkillCommandPolicyAction::RequireConfirm => {
-                "A loaded skill requires explicit confirmation before this raw command runs."
-            }
-            SkillCommandPolicyAction::Reject => {
-                "A loaded skill rejects this raw command shape."
-            }
-        });
+        let message = policy_message(policy);
         let mut lines = vec![
             format!(
                 "Command policy matched skill `{}` ({}) at {}.",
@@ -107,16 +117,25 @@ impl<'a> SkillCommandPolicyMatch<'a> {
                 policy.id,
                 policy.skill_path.display()
             ),
+            "Selected by matcher specificity, matcher width, then stable skill load order.".to_string(),
             String::new(),
             message.to_string(),
             String::new(),
         ];
 
-        if !policy.preferred.is_empty() {
+        let preferred = self.unique_preferred_actions();
+        if !preferred.is_empty() {
             lines.push("Preferred actions:".to_string());
-            for preferred in &policy.preferred {
+            for preferred in preferred {
                 lines.push(format_preferred(preferred));
             }
+            lines.push(String::new());
+        }
+
+        let related = self.related_policy_lines();
+        if !related.is_empty() {
+            lines.push("Also matched policies:".to_string());
+            lines.extend(related);
             lines.push(String::new());
         }
 
@@ -129,11 +148,65 @@ impl<'a> SkillCommandPolicyMatch<'a> {
         lines.push(format!("{original_label}: {original_value}"));
         lines.join("\n")
     }
+
+    fn unique_preferred_actions(&self) -> Vec<&SkillCommandPolicyPreferred> {
+        let mut seen = BTreeSet::new();
+        let mut preferred = Vec::new();
+        for policy_match in &self.related {
+            for action in &policy_match.policy.preferred {
+                if seen.insert(preferred_key(action)) {
+                    preferred.push(action);
+                }
+            }
+        }
+        preferred
+    }
+
+    fn related_policy_lines(&self) -> Vec<String> {
+        self.related
+            .iter()
+            .skip(1)
+            .map(|policy_match| {
+                let action = describe_action(policy_match.policy.action);
+                let message = policy_message(policy_match.policy);
+                format!(
+                    "- skill `{}` ({}) at {}; action: {}; warning: {}; matched_command: {}",
+                    policy_match.policy.skill_name,
+                    policy_match.policy.id,
+                    policy_match.policy.skill_path.display(),
+                    action,
+                    message,
+                    policy_match.matched_command
+                )
+            })
+            .collect()
+    }
+}
+
+fn policy_message(policy: &CompiledSkillCommandPolicy) -> &str {
+    policy.message.as_deref().unwrap_or(match policy.action {
+        SkillCommandPolicyAction::RequirePreferred => {
+            "A loaded skill owns this workflow; use one of the preferred actions instead."
+        }
+        SkillCommandPolicyAction::RequireConfirm => {
+            "A loaded skill requires explicit confirmation before this raw command runs."
+        }
+        SkillCommandPolicyAction::Reject => "A loaded skill rejects this raw command shape.",
+    })
+}
+
+fn describe_action(action: SkillCommandPolicyAction) -> &'static str {
+    match action {
+        SkillCommandPolicyAction::RequirePreferred => "require_preferred",
+        SkillCommandPolicyAction::RequireConfirm => "require_confirm",
+        SkillCommandPolicyAction::Reject => "reject",
+    }
 }
 
 fn compile_policy(
     skill: &SkillMetadata,
     policy: &SkillCommandPolicy,
+    order: usize,
 ) -> Option<CompiledSkillCommandPolicy> {
     let shell_regex = policy
         .matcher
@@ -141,6 +214,7 @@ fn compile_policy(
         .as_ref()
         .and_then(|pattern| Regex::new(pattern).ok());
     Some(CompiledSkillCommandPolicy {
+        order,
         skill_name: skill.name.clone(),
         skill_path: skill.path.clone(),
         id: policy.id.clone(),
@@ -155,14 +229,15 @@ fn compile_policy(
 fn policy_matches<'a>(
     policy: &'a CompiledSkillCommandPolicy,
     normalized: &NormalizedCommand,
-) -> Option<SkillCommandPolicyMatch<'a>> {
+) -> Option<SingleSkillCommandPolicyMatch<'a>> {
     if let Some(argv_exact) = policy.matcher.argv_exact.as_ref() {
         for argv in normalized.argv_candidates() {
             if argv == argv_exact.as_slice() {
-                return Some(SkillCommandPolicyMatch {
+                return Some(SingleSkillCommandPolicyMatch {
                     policy,
                     matched_command: argv.join(" "),
                     specificity: MatchSpecificity::Exact,
+                    matcher_width: argv_exact.len(),
                 });
             }
         }
@@ -171,10 +246,11 @@ fn policy_matches<'a>(
     if let Some(argv_prefix) = policy.matcher.argv_prefix.as_ref() {
         for argv in normalized.argv_candidates() {
             if argv.starts_with(argv_prefix) {
-                return Some(SkillCommandPolicyMatch {
+                return Some(SingleSkillCommandPolicyMatch {
                     policy,
                     matched_command: argv.join(" "),
                     specificity: MatchSpecificity::Prefix,
+                    matcher_width: argv_prefix.len(),
                 });
             }
         }
@@ -183,10 +259,11 @@ fn policy_matches<'a>(
     if let Some(regex) = policy.shell_regex.as_ref() {
         for text in normalized.text_candidates() {
             if regex.is_match(&text) {
-                return Some(SkillCommandPolicyMatch {
+                return Some(SingleSkillCommandPolicyMatch {
                     policy,
                     matched_command: text.clone(),
                     specificity: MatchSpecificity::Regex,
+                    matcher_width: 0,
                 });
             }
         }
@@ -261,6 +338,22 @@ fn extract_shell_script(command: &[String]) -> Option<(usize, &str)> {
     None
 }
 
+fn preferred_key(preferred: &SkillCommandPolicyPreferred) -> String {
+    let kind = match preferred.kind {
+        SkillCommandPolicyPreferredKind::Script => "script",
+        SkillCommandPolicyPreferredKind::Skill => "skill",
+        SkillCommandPolicyPreferredKind::Command => "command",
+    };
+    let path = preferred
+        .path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = preferred.name.as_deref().unwrap_or_default();
+    let example = preferred.example_argv.join("\u{1f}");
+    format!("{kind}\u{1f}{path}\u{1f}{name}\u{1f}{example}")
+}
+
 fn format_preferred(preferred: &SkillCommandPolicyPreferred) -> String {
     let kind = match preferred.kind {
         SkillCommandPolicyPreferredKind::Script => "script",
@@ -327,18 +420,30 @@ mod tests {
     use crate::skills::model::SkillScope;
 
     fn runtime(policy: SkillCommandPolicy) -> SkillCommandPolicyRuntime {
-        SkillCommandPolicyRuntime::from_skills(&[SkillMetadata {
-            name: "github".to_string(),
-            description: "GitHub workflows".to_string(),
+        runtime_from_skills(vec![skill("github", vec![policy], false)])
+    }
+
+    fn runtime_from_skills(skills: Vec<SkillMetadata>) -> SkillCommandPolicyRuntime {
+        SkillCommandPolicyRuntime::from_skills(&skills)
+    }
+
+    fn skill(
+        name: &str,
+        command_policies: Vec<SkillCommandPolicy>,
+        allow_implicit_invocation: bool,
+    ) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_string(),
+            description: format!("{name} workflows"),
             short_description: None,
-            path: PathBuf::from("/tmp/github/SKILL.md"),
+            path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             scope: SkillScope::User,
             content: String::new(),
             policy: Some(SkillPolicy {
-                allow_implicit_invocation: Some(false),
-                command_policies: vec![policy],
+                allow_implicit_invocation: Some(allow_implicit_invocation),
+                command_policies,
             }),
-        }])
+        }
     }
 
     fn policy(matcher: SkillCommandMatcher) -> SkillCommandPolicy {
@@ -354,6 +459,22 @@ mod tests {
                 example_argv: vec!["scripts/gh-pr.py".to_string(), "merge".to_string()],
                 purpose: Some("merge safely".to_string()),
             }],
+        }
+    }
+
+    fn policy_with_id(id: &str, matcher: SkillCommandMatcher) -> SkillCommandPolicy {
+        let mut policy = policy(matcher);
+        policy.id = id.to_string();
+        policy
+    }
+
+    fn script_preferred(path: &str, purpose: &str) -> SkillCommandPolicyPreferred {
+        SkillCommandPolicyPreferred {
+            kind: SkillCommandPolicyPreferredKind::Script,
+            path: Some(PathBuf::from(path)),
+            name: None,
+            example_argv: vec![path.to_string()],
+            purpose: Some(purpose.to_string()),
         }
     }
 
@@ -433,6 +554,242 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn overlap_prefers_exact_over_prefix_and_includes_related_guidance() {
+        let prefix_policy = policy_with_id(
+            "prefix-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string()]),
+                ..Default::default()
+            },
+        );
+        let exact_policy = policy_with_id(
+            "exact-policy",
+            SkillCommandMatcher {
+                argv_exact: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        let runtime = runtime_from_skills(vec![
+            skill("github", vec![prefix_policy], true),
+            skill("merge-helper", vec![exact_policy], false),
+        ]);
+
+        let guidance = runtime
+            .check(&["gh".to_string(), "pr".to_string(), "merge".to_string()], false)
+            .expect("match")
+            .guidance("original_argv", "[\"gh\", \"pr\", \"merge\"]");
+
+        assert!(guidance.contains("Command policy matched skill `merge-helper` (exact-policy)"));
+        assert!(guidance.contains("Also matched policies:"));
+        assert!(guidance.contains("skill `github` (prefix-policy)"));
+    }
+
+    #[test]
+    fn overlap_prefers_prefix_over_regex() {
+        let regex_policy = policy_with_id(
+            "regex-policy",
+            SkillCommandMatcher {
+                shell_regex: Some("^gh\\s+pr\\s+merge\\b".to_string()),
+                ..Default::default()
+            },
+        );
+        let prefix_policy = policy_with_id(
+            "prefix-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        let runtime = runtime_from_skills(vec![skill(
+            "github",
+            vec![regex_policy, prefix_policy],
+            true,
+        )]);
+
+        let matched = runtime
+            .check(
+                &[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "gh pr merge 244".to_string(),
+                ],
+                false,
+            )
+            .expect("match");
+
+        assert_eq!(matched.policy.id, "prefix-policy");
+    }
+
+    #[test]
+    fn equal_specificity_uses_stable_loader_order() {
+        let first_policy = policy_with_id(
+            "first-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "issue".to_string()]),
+                ..Default::default()
+            },
+        );
+        let second_policy = policy_with_id(
+            "second-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "issue".to_string()]),
+                ..Default::default()
+            },
+        );
+        let runtime = runtime_from_skills(vec![
+            skill("first", vec![first_policy], true),
+            skill("second", vec![second_policy], true),
+        ]);
+
+        let guidance = runtime
+            .check(&["gh".to_string(), "issue".to_string(), "list".to_string()], false)
+            .expect("match")
+            .guidance("original_argv", "[\"gh\", \"issue\", \"list\"]");
+
+        assert!(guidance.contains("Command policy matched skill `first` (first-policy)"));
+        assert!(guidance.contains("skill `second` (second-policy)"));
+    }
+
+    #[test]
+    fn longer_prefix_beats_shorter_prefix() {
+        let broad_policy = policy_with_id(
+            "broad-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string()]),
+                ..Default::default()
+            },
+        );
+        let narrow_policy = policy_with_id(
+            "narrow-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        let runtime = runtime_from_skills(vec![skill(
+            "github",
+            vec![broad_policy, narrow_policy],
+            true,
+        )]);
+
+        let matched = runtime
+            .check(
+                &[
+                    "gh".to_string(),
+                    "pr".to_string(),
+                    "merge".to_string(),
+                    "246".to_string(),
+                ],
+                false,
+            )
+            .expect("match");
+
+        assert_eq!(matched.policy.id, "narrow-policy");
+    }
+
+    #[test]
+    fn related_policy_lines_include_action_and_warning() {
+        let preferred_policy = policy_with_id(
+            "preferred-policy",
+            SkillCommandMatcher {
+                argv_exact: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        let mut reject_policy = policy_with_id(
+            "reject-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string()]),
+                ..Default::default()
+            },
+        );
+        reject_policy.action = SkillCommandPolicyAction::Reject;
+        reject_policy.message = Some("This raw PR command family is blocked.".to_string());
+        let runtime = runtime_from_skills(vec![
+            skill("github", vec![preferred_policy], true),
+            skill("policy", vec![reject_policy], true),
+        ]);
+
+        let guidance = runtime
+            .check(&["gh".to_string(), "pr".to_string(), "merge".to_string()], false)
+            .expect("match")
+            .guidance("original_argv", "[\"gh\", \"pr\", \"merge\"]");
+
+        assert!(guidance.contains("Command policy matched skill `github` (preferred-policy)"));
+        assert!(guidance.contains("action: reject"));
+        assert!(guidance.contains("warning: This raw PR command family is blocked."));
+    }
+
+    #[test]
+    fn overlap_deduplicates_preferred_actions() {
+        let preferred = script_preferred("/tmp/github/scripts/gh-pr.py", "merge safely");
+        let mut first_policy = policy_with_id(
+            "first-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+                ..Default::default()
+            },
+        );
+        first_policy.preferred = vec![preferred.clone()];
+        let mut second_policy = policy_with_id(
+            "second-policy",
+            SkillCommandMatcher {
+                shell_regex: Some("^gh\\s+pr\\s+merge\\b".to_string()),
+                ..Default::default()
+            },
+        );
+        second_policy.preferred = vec![preferred];
+        let runtime = runtime_from_skills(vec![
+            skill("github", vec![first_policy], true),
+            skill("github-plan", vec![second_policy], true),
+        ]);
+
+        let guidance = runtime
+            .check(
+                &[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "gh pr merge 244".to_string(),
+                ],
+                false,
+            )
+            .expect("match")
+            .guidance("original_script", "gh pr merge 244");
+
+        assert_eq!(guidance.matches("- script;").count(), 1);
+        assert!(guidance.contains("/tmp/github/scripts/gh-pr.py"));
+        assert!(guidance.contains("skill `github-plan` (second-policy)"));
+    }
+
+    #[test]
+    fn manual_only_policy_participates_in_overlap_guidance() {
+        let broad_policy = policy_with_id(
+            "broad-policy",
+            SkillCommandMatcher {
+                argv_prefix: Some(vec!["gh".to_string()]),
+                ..Default::default()
+            },
+        );
+        let manual_policy = policy_with_id(
+            "manual-policy",
+            SkillCommandMatcher {
+                argv_exact: Some(vec!["gh".to_string(), "issue".to_string(), "close".to_string()]),
+                ..Default::default()
+            },
+        );
+        let runtime = runtime_from_skills(vec![
+            skill("github", vec![broad_policy], true),
+            skill("manual-github", vec![manual_policy], false),
+        ]);
+
+        let matched = runtime
+            .check(&["gh".to_string(), "issue".to_string(), "close".to_string()], false)
+            .expect("match");
+
+        assert_eq!(matched.policy.skill_name, "manual-github");
     }
 
     #[test]

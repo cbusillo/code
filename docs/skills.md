@@ -55,8 +55,35 @@ default.
     - `metadata.short-description` (non-empty when present, <=160 chars)
     - `policy.allow_implicit_invocation` (`true` by default; set `false` for
       manual-only skills)
+    - `policy.command_policies` for skill-owned command guardrails. Policies can
+      match `argv_exact`, `argv_prefix`, or `shell_regex` command shapes and can
+      require preferred actions, require explicit confirmation, or reject a raw
+      command.
   - The body can contain any Markdown; it is not injected into context until the
     skill is opened.
+
+## Command policies
+
+Use `policy.command_policies` when a skill owns a fragile or preferred command
+workflow, such as a helper script that preserves Markdown formatting, routes
+through the correct token, normalizes output, or performs cleanup.
+
+When multiple loaded skills match the same command, Every Code selects one
+primary policy deterministically by matcher specificity (`argv_exact`, then
+`argv_prefix`, then `shell_regex`), matcher width, and stable skill load order.
+The guard guidance also lists lower-priority matching policies and de-duplicates
+identical preferred actions, so overlapping skills can still provide useful
+context without repeating the same helper suggestion.
+
+Manual-only skills are not described in the implicit skill prompt, but their
+command policies still participate in runtime command guards. Treat
+manual-only as an invocation rule, not a policy-disable switch.
+
+Prefer one canonical owner for each raw command path. If two sibling skills care
+about the same command, give the policy to the skill that owns the workflow and
+have the other skill reference that owner in prose. Keep matchers as narrow as
+the workflow allows; broad prefixes are appropriate only when the skill truly
+owns the whole command family.
 
 ## Loading and rendering
 
