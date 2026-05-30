@@ -170,7 +170,7 @@ async fn initial_session_request_injects_memory_when_summary_exists() {
     assert!(text.contains("## Memory"));
     assert!(text.contains("sentinel memory guidance for request capture"));
     assert!(text.contains(&format!(
-        "{} (already provided below; do NOT open again)",
-        memories_dir.join("memory_summary.md").display()
+        "{}/memory_summary.md (already provided below; do NOT open again)",
+        memories_dir.display()
     )));
 }
