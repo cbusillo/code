@@ -285,6 +285,8 @@ struct NormalizedCommand {
     original_argv: Vec<String>,
     shell_script: Option<String>,
     shell_argv: Option<Vec<String>>,
+    shell_segment_argvs: Vec<Vec<String>>,
+    shell_segments: Vec<String>,
 }
 
 impl NormalizedCommand {
@@ -293,10 +295,21 @@ impl NormalizedCommand {
         let shell_argv = shell_script
             .as_ref()
             .and_then(|script| shlex::split(script));
+        let shell_segments = shell_script
+            .as_deref()
+            .map(shell_command_segments)
+            .unwrap_or_default();
+        let shell_segment_argvs = shell_segments
+            .iter()
+            .filter_map(|segment| shlex::split(segment))
+            .flat_map(command_argv_candidates)
+            .collect();
         Self {
             original_argv: command.to_vec(),
             shell_script,
             shell_argv,
+            shell_segment_argvs,
+            shell_segments,
         }
     }
 
@@ -305,6 +318,7 @@ impl NormalizedCommand {
         if let Some(shell_argv) = self.shell_argv.as_ref() {
             candidates.push(shell_argv.as_slice());
         }
+        candidates.extend(self.shell_segment_argvs.iter().map(Vec::as_slice));
         candidates.push(self.original_argv.as_slice());
         candidates
     }
@@ -314,9 +328,99 @@ impl NormalizedCommand {
         if let Some(shell_script) = self.shell_script.as_ref() {
             candidates.push(shell_script.clone());
         }
+        for segment in &self.shell_segments {
+            candidates.push(segment.clone());
+            if let Some(argv) = shlex::split(segment) {
+                for candidate in command_argv_candidates(argv) {
+                    candidates.push(candidate.join(" "));
+                }
+            }
+        }
         candidates.push(self.original_argv.join(" "));
         candidates
     }
+}
+
+fn shell_command_segments(script: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut segment_start = 0;
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    let mut escaped = false;
+    let mut iter = script.char_indices().peekable();
+
+    while let Some((index, ch)) = iter.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !double_quoted {
+            single_quoted = !single_quoted;
+            continue;
+        }
+        if ch == '"' && !single_quoted {
+            double_quoted = !double_quoted;
+            continue;
+        }
+        if single_quoted || double_quoted {
+            continue;
+        }
+
+        let operator_len = match ch {
+            ';' => Some(1),
+            '&' if iter.peek().is_some_and(|(_, next)| *next == '&') => Some(2),
+            '|' if iter.peek().is_some_and(|(_, next)| *next == '|') => Some(2),
+            _ => None,
+        };
+        let Some(operator_len) = operator_len else {
+            continue;
+        };
+
+        push_shell_segment(&mut segments, &script[segment_start..index]);
+        if operator_len == 2 {
+            iter.next();
+        }
+        segment_start = index + operator_len;
+    }
+
+    push_shell_segment(&mut segments, &script[segment_start..]);
+    segments
+}
+
+fn push_shell_segment(segments: &mut Vec<String>, segment: &str) {
+    let segment = segment.trim();
+    if !segment.is_empty() {
+        segments.push(segment.to_string());
+    }
+}
+
+fn command_argv_candidates(argv: Vec<String>) -> Vec<Vec<String>> {
+    let mut candidates = vec![argv.clone()];
+    let trimmed: Vec<String> = argv
+        .iter()
+        .skip_while(|arg| is_env_assignment(arg))
+        .cloned()
+        .collect();
+    if !trimmed.is_empty() && trimmed != argv {
+        candidates.push(trimmed);
+    }
+    candidates
+}
+
+fn is_env_assignment(arg: &str) -> bool {
+    let Some((name, _)) = arg.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn extract_shell_script(command: &[String]) -> Option<(usize, &str)> {
@@ -534,6 +638,81 @@ mod tests {
                     false,
                 )
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn argv_prefix_matches_wrapped_shell_segment() {
+        let runtime = runtime(policy(SkillCommandMatcher {
+            argv_prefix: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+            ..Default::default()
+        }));
+
+        let matched = runtime
+            .check(
+                &[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "cd /tmp/repo && gh pr merge 234 --delete-branch".to_string(),
+                ],
+                false,
+            )
+            .expect("match wrapped command segment");
+
+        assert_eq!(matched.matched_command, "gh pr merge 234 --delete-branch");
+    }
+
+    #[test]
+    fn shell_regex_matches_wrapped_shell_segment() {
+        let runtime = runtime(policy(SkillCommandMatcher {
+            shell_regex: Some("^gh\\s+pr\\s+merge\\b".to_string()),
+            ..Default::default()
+        }));
+
+        let matched = runtime
+            .check(
+                &[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "cd /tmp/repo && gh pr merge 234".to_string(),
+                ],
+                false,
+            )
+            .expect("match wrapped command segment");
+
+        assert_eq!(matched.matched_command, "gh pr merge 234");
+    }
+
+    #[test]
+    fn argv_prefix_matches_env_wrapped_shell_segment() {
+        let runtime = runtime(policy(SkillCommandMatcher {
+            argv_prefix: Some(vec!["gh".to_string(), "pr".to_string(), "merge".to_string()]),
+            ..Default::default()
+        }));
+
+        let matched = runtime
+            .check(
+                &[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "cd /tmp/repo && GH_TOKEN=abc gh pr merge 234".to_string(),
+                ],
+                false,
+            )
+            .expect("match env-wrapped command segment");
+
+        assert_eq!(matched.matched_command, "gh pr merge 234");
+    }
+
+    #[test]
+    fn shell_segments_ignore_quoted_control_operators() {
+        assert_eq!(
+            shell_command_segments("printf 'a && b'; gh pr merge 234"),
+            vec!["printf 'a && b'".to_string(), "gh pr merge 234".to_string()]
+        );
+        assert_eq!(
+            shell_command_segments("printf \"a || b\" && gh pr merge 234"),
+            vec!["printf \"a || b\"".to_string(), "gh pr merge 234".to_string()]
         );
     }
 
