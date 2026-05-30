@@ -12,6 +12,9 @@ long-running feature branch overlay.
 
 - **Every Code** is the product name. Use it in prose, docs, UI copy, issue text,
   release text, and first mentions.
+- **Every Code Lab** is the `cbusillo/code` runtime/build tag, similar to a beta
+  or lab channel label. Use it where users need to distinguish this build from
+  upstream `just-every/code`; do not treat it as a product rebrand.
 - **Every Code CLI** is the product CLI surface. **The `code` command** is the
   executable users type. Avoid “code CLI” in prose.
 - **The Every Code agent** is the assistant identity. **Code** is only a short

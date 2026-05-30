@@ -31095,7 +31095,7 @@ Have we met every part of this goal and is there no further work to do?"#
 
             // Title follows theme text color
             spans.push(Span::styled(
-                "Every Code",
+                code_version::LAB_BUILD_NAME,
                 Style::default()
                     .fg(crate::colors::text())
                     .add_modifier(Modifier::BOLD),
