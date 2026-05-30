@@ -31,7 +31,12 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::ErrorResponse;
+use tokio_tungstenite::tungstenite::handshake::server::Request;
+use tokio_tungstenite::tungstenite::handshake::server::Response;
+use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::http::header::ORIGIN;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tracing::debug;
 use tracing::error;
@@ -54,15 +59,7 @@ fn print_websocket_startup_banner(addr: SocketAddr) {
     let note_label = colorize("note:", Style::new().dimmed());
     eprintln!("{title}");
     eprintln!("  {listening_label} {listen_url}");
-    if addr.ip().is_loopback() {
-        eprintln!(
-            "  {note_label} binds localhost only (use SSH port-forwarding for remote access)"
-        );
-    } else {
-        eprintln!(
-            "  {note_label} this is a raw WS server; consider running behind TLS/auth for real remote use"
-        );
-    }
+    eprintln!("  {note_label} binds localhost only (use SSH port-forwarding for remote access)");
 }
 
 #[allow(clippy::print_stderr)]
@@ -81,6 +78,7 @@ pub enum AppServerTransport {
 pub enum AppServerTransportParseError {
     UnsupportedListenUrl(String),
     InvalidWebSocketListenUrl(String),
+    NonLoopbackWebSocketListenUrl(String),
 }
 
 impl std::fmt::Display for AppServerTransportParseError {
@@ -93,6 +91,10 @@ impl std::fmt::Display for AppServerTransportParseError {
             AppServerTransportParseError::InvalidWebSocketListenUrl(listen_url) => write!(
                 f,
                 "invalid websocket --listen URL `{listen_url}`; expected `ws://IP:PORT`"
+            ),
+            AppServerTransportParseError::NonLoopbackWebSocketListenUrl(listen_url) => write!(
+                f,
+                "unsupported websocket --listen URL `{listen_url}`; websocket app-server binds must use a loopback IP address"
             ),
         }
     }
@@ -112,6 +114,11 @@ impl AppServerTransport {
             let bind_address = socket_addr.parse::<SocketAddr>().map_err(|_| {
                 AppServerTransportParseError::InvalidWebSocketListenUrl(listen_url.to_string())
             })?;
+            if !bind_address.ip().is_loopback() {
+                return Err(AppServerTransportParseError::NonLoopbackWebSocketListenUrl(
+                    listen_url.to_string(),
+                ));
+            }
             return Ok(Self::WebSocket { bind_address });
         }
 
@@ -295,7 +302,7 @@ async fn run_websocket_connection(
     stream: TcpStream,
     transport_event_tx: mpsc::Sender<TransportEvent>,
 ) {
-    let websocket_stream = match accept_async(stream).await {
+    let websocket_stream = match accept_hdr_async(stream, reject_origin_websocket_requests).await {
         Ok(stream) => stream,
         Err(err) => {
             warn!("failed to complete websocket handshake: {err}");
@@ -386,6 +393,24 @@ async fn run_websocket_connection(
     let _ = transport_event_tx
         .send(TransportEvent::ConnectionClosed { connection_id })
         .await;
+}
+
+fn reject_origin_websocket_requests(
+    request: &Request,
+    response: Response,
+) -> Result<Response, ErrorResponse> {
+    if request.headers().contains_key(ORIGIN) {
+        warn!(
+            uri = %request.uri(),
+            "rejecting app-server websocket request with Origin header"
+        );
+        return Err(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Some("WebSocket Origin requests are not accepted".to_string()))
+            .expect("static websocket error response should build"));
+    }
+
+    Ok(response)
 }
 
 async fn forward_incoming_message(
