@@ -100,7 +100,11 @@ fn normalize_lab_build_name(text: String) -> String {
             out.push(line.replace(code_version::LAB_BUILD_NAME, code_version::PRODUCT_NAME));
         }
     }
-    out.join("\n")
+    let mut normalized = out.join("\n");
+    if text.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
 }
 
 fn init_tracing_once() {
