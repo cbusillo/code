@@ -13,6 +13,7 @@ use sha2::Sha256;
 
 const DEFAULT_REPOSITORY: &str = "cbusillo/code";
 const DEFAULT_CHANNEL: &str = "stable";
+const COMMAND_NAME_ENV: &str = "CODE_COMMAND_NAME";
 
 #[derive(Debug, Parser)]
 pub struct UpdateCheckCommand {
@@ -68,22 +69,26 @@ enum VersionOrdering {
 
 pub async fn run_update_check(args: UpdateCheckCommand) -> anyhow::Result<()> {
     let report = fetch_update_report(args.repo.as_deref(), args.tag.as_deref()).await?;
-    print_update_report(&report);
+    let identity = RuntimeIdentity::detect(None);
+    print_update_report(&report, &identity);
     Ok(())
 }
 
 pub async fn run_update(args: UpdateCommand) -> anyhow::Result<()> {
     let report = fetch_update_report(args.repo.as_deref(), args.tag.as_deref()).await?;
-    print_update_report(&report);
+    let exe = env::current_exe().context("failed to resolve current executable")?;
+    let identity = RuntimeIdentity::detect(Some(&exe));
+    print_update_report(&report, &identity);
 
     if report.ordering != VersionOrdering::Newer {
         println!("No update needed.");
         return Ok(());
     }
 
-    let exe = env::current_exe().context("failed to resolve current executable")?;
     let install_target = resolve_install_target(&exe);
     let install = detect_install_source_for_path(&install_target);
+    println!("command:        {}", identity.command_name);
+    println!("install target: {}", install_target.display());
     println!("install source: {}", install.description());
     if !install.can_self_update() {
         bail!(
@@ -197,7 +202,10 @@ async fn latest_release_tag(repo: &str) -> anyhow::Result<String> {
     Ok(release.tag_name)
 }
 
-fn print_update_report(report: &UpdateReport) {
+fn print_update_report(report: &UpdateReport, identity: &RuntimeIdentity) {
+    println!("product:         {}", code_version::LAB_BUILD_NAME);
+    println!("repository:      {}", code_version::LAB_REPOSITORY);
+    println!("command:         {}", identity.command_name);
     println!("current version: {}", report.current_version);
     println!("latest version:  {}", report.manifest.version);
     println!("channel:         {}", report.manifest.channel);
@@ -214,6 +222,38 @@ fn print_update_report(report: &UpdateReport) {
         VersionOrdering::Same => println!("status:          up to date"),
         VersionOrdering::Older => println!("status:          installed version is newer"),
         VersionOrdering::Unknown => println!("status:          unable to compare versions"),
+    }
+}
+
+struct RuntimeIdentity {
+    command_name: String,
+}
+
+impl RuntimeIdentity {
+    fn detect(exe: Option<&Path>) -> Self {
+        let command_name = env::var(COMMAND_NAME_ENV)
+            .ok()
+            .and_then(|name| valid_command_name(&name))
+            .or_else(|| exe.and_then(command_name_from_path))
+            .or_else(|| env::args_os().next().and_then(|arg| command_name_from_path(Path::new(&arg))))
+            .unwrap_or_else(|| "code".to_string());
+
+        Self { command_name }
+    }
+}
+
+fn command_name_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(valid_command_name)
+}
+
+fn valid_command_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.contains(std::path::MAIN_SEPARATOR) {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -368,6 +408,7 @@ fn detect_install_source_for_path(exe: &Path) -> InstallSource {
     }
     if path.contains("/.code/bin/")
         || path.contains("/.local/bin/")
+        || path.contains("/usr/local/bin/")
         || path.contains("/code-rs/target/release/")
     {
         return InstallSource::Direct;
@@ -408,6 +449,9 @@ fn parse_version_triplet(version: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn normalize_tag_adds_v_prefix_when_missing() {
@@ -523,6 +567,62 @@ mod tests {
             detect_install_source_for_path(Path::new("/Users/me/.local/bin/code")),
             InstallSource::Direct
         ));
+        assert!(matches!(
+            detect_install_source_for_path(Path::new("/usr/local/bin/chris-code")),
+            InstallSource::Direct
+        ));
+    }
+
+    #[test]
+    fn runtime_identity_prefers_command_name_env() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let _reset = EnvReset::capture(COMMAND_NAME_ENV);
+        unsafe {
+            env::set_var(COMMAND_NAME_ENV, "chris-code");
+        }
+
+        let identity = RuntimeIdentity::detect(Some(Path::new("/usr/local/bin/code")));
+
+        assert_eq!(identity.command_name, "chris-code");
+    }
+
+    #[test]
+    fn runtime_identity_falls_back_to_exe_name() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let _reset = EnvReset::capture(COMMAND_NAME_ENV);
+        unsafe {
+            env::remove_var(COMMAND_NAME_ENV);
+        }
+
+        let identity = RuntimeIdentity::detect(Some(Path::new("/usr/local/bin/chris-code")));
+
+        assert_eq!(identity.command_name, "chris-code");
+    }
+
+    struct EnvReset {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl EnvReset {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: env::var(key).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.value {
+                    env::set_var(self.key, value);
+                } else {
+                    env::remove_var(self.key);
+                }
+            }
+        }
     }
 
     #[test]
