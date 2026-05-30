@@ -7,6 +7,14 @@
 
 - (none)
 
+## [0.6.109] - 2026-05-30
+
+- Skills: add manual skill discovery and command policies, including bundled-path resolution from the skill directory. (db2c24e4, 33121bf0, b475fb11)
+- Agents: retry transient provider failures and clean up stale active slots when runs are cancelled. (7d5c90e1, f26e81a2, 58eee09f)
+- Core: warn when multiple active sessions use the same checkout and cool down auth refresh fallback retries. (0980556e, 599483f8)
+- TUI: harden `/diff` for submodules, whitespace paths, dirty markers, nested filters, and repo helper edge cases. (5a5266a5, 09292749, 94db4237, 1b58e080)
+- App Server/Update: harden websocket transport and preserve the renamed binary identity during update checks. (bc42a166, 93bee109)
+
 ## [0.6.108] - 2026-05-29
 
 - Release: require local release metadata before publishing and validate the generated notes version in CI. (cfd73d45)

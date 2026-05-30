@@ -13,6 +13,10 @@ pub const CODE_VERSION: &str = {
     }
 };
 
+pub const PRODUCT_NAME: &str = "Every Code";
+pub const LAB_BUILD_NAME: &str = "Every Code Lab";
+pub const LAB_REPOSITORY: &str = "cbusillo/code";
+
 const ANNOUNCEMENT_TIP: &str = include_str!("../../../announcement_tip.toml");
 const MODELS_MANIFEST: &str = include_str!("../../../codex-rs/models-manager/models.json");
 pub const MIN_WIRE_COMPAT_VERSION_FALLBACK: &str = "0.101.0";

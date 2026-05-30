@@ -58,10 +58,15 @@ fn normalize_output(text: String) -> String {
         .collect::<String>()
         .pipe(normalize_ellipsis)
         .pipe(normalize_timers)
+        .pipe(normalize_lab_build_name)
         .pipe(normalize_auto_drive_layout)
         .pipe(normalize_agent_history_details)
         .pipe(normalize_spacer_rows)
         .pipe(normalize_trailing_whitespace)
+}
+
+fn normalize_lab_build_name(text: String) -> String {
+    text.replace(code_version::LAB_BUILD_NAME, code_version::PRODUCT_NAME)
 }
 
 fn init_tracing_once() {

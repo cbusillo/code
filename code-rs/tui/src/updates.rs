@@ -148,6 +148,7 @@ const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/cbusillo/code/rel
 const CURRENT_RELEASE_REPO: &str = "cbusillo/code";
 const LEGACY_RELEASE_REPO: &str = "just-every/code";
 pub const CODE_RELEASE_URL: &str = "https://github.com/cbusillo/code/releases/latest";
+const COMMAND_NAME_ENV: &str = "CODE_COMMAND_NAME";
 
 const CACHE_TTL_HOURS: i64 = 20;
 const MAX_CLOCK_SKEW_MINUTES: i64 = 5;
@@ -198,18 +199,43 @@ pub fn resolve_upgrade_resolution() -> UpgradeResolution {
 fn resolve_upgrade_resolution_for_exe(exe_path: &Path) -> UpgradeResolution {
     let install_target = resolve_install_target(exe_path);
     if detect_upgrade_install_source(&install_target) == UpgradeInstallSource::Direct {
+        let command_name = upgrade_command_name(exe_path, &install_target);
         return UpgradeResolution::Command {
             command: vec![
                 install_target.display().to_string(),
                 "update".to_string(),
                 "--yes".to_string(),
             ],
-            display: "code update --yes".to_string(),
+            display: format!("{command_name} update --yes"),
         };
     }
 
     UpgradeResolution::Manual {
         instructions: manual_upgrade_instructions(),
+    }
+}
+
+fn upgrade_command_name(exe_path: &Path, install_target: &Path) -> String {
+    std::env::var(COMMAND_NAME_ENV)
+        .ok()
+        .and_then(|name| valid_command_name(&name))
+        .or_else(|| command_name_from_path(exe_path))
+        .or_else(|| command_name_from_path(install_target))
+        .unwrap_or_else(|| "code".to_string())
+}
+
+fn command_name_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(valid_command_name)
+}
+
+fn valid_command_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.contains(std::path::MAIN_SEPARATOR) {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -234,6 +260,7 @@ fn detect_upgrade_install_source(exe_path: &Path) -> UpgradeInstallSource {
     }
     if path.contains("/.code/bin/")
         || path.contains("/.local/bin/")
+        || path.contains("/usr/local/bin/")
         || path.contains("/code-rs/target/release/")
     {
         return UpgradeInstallSource::Direct;
@@ -311,49 +338,12 @@ pub async fn auto_upgrade_if_enabled(config: &Config) -> anyhow::Result<AutoUpgr
                 return Ok(outcome);
             }
 
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            {
-                if !starts_with_sudo(&command) {
-                    info!("auto-upgrade: retrying with sudo -n");
-                    let sudo_command = wrap_with_sudo(&command);
-                    match execute_upgrade_command(&sudo_command).await {
-                        Ok(fallback) if fallback.success => {
-                            info!("auto-upgrade: sudo retry succeeded; installed {latest_version}");
-                            outcome.installed_version = Some(latest_version);
-                            return Ok(outcome);
-                        }
-                        Ok(fallback) => {
-                            if sudo_requires_manual_intervention(&fallback.stderr, fallback.status)
-                            {
-                                outcome.user_notice = Some(format!(
-                                "Automatic upgrade needs your attention. Run `/update` to finish with `{}`.",
-                                    command_display
-                                ));
-                            }
-                            warn!(
-                                "auto-upgrade: sudo retry failed: status={:?} stderr={}",
-                                fallback.status,
-                                truncate_for_log(&fallback.stderr)
-                            );
-                            return Ok(outcome);
-                        }
-                        Err(err) => {
-                            warn!("auto-upgrade: sudo retry error: {err}");
-                            outcome.user_notice = Some(format!(
-                                "Automatic upgrade could not escalate permissions. Run `/update` to finish with `{}`.",
-                                command_display
-                            ));
-                            return Ok(outcome);
-                        }
-                    }
-                }
+            if upgrade_requires_manual_intervention(&primary.stderr, primary.status) {
+                outcome.user_notice = Some(format!(
+                    "Automatic upgrade needs your attention. Run `/update` to finish with `{}`.",
+                    command_display
+                ));
             }
-
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            {
-                let _ = primary; // suppress unused warning on non-Unix targets
-            }
-
             warn!(
                 "auto-upgrade: upgrade command failed: status={:?} stderr={}",
                 primary.status,
@@ -478,26 +468,7 @@ async fn execute_upgrade_command(command: &[String]) -> anyhow::Result<CommandCa
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn wrap_with_sudo(command: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(command.len() + 3);
-    out.push("sudo".to_string());
-    out.push("-n".to_string());
-    out.push("--".to_string());
-    out.extend(command.iter().cloned());
-    out
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn starts_with_sudo(command: &[String]) -> bool {
-    command
-        .first()
-        .map(|c| c.eq_ignore_ascii_case("sudo"))
-        .unwrap_or(false)
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn sudo_requires_manual_intervention(stderr: &str, status: Option<i32>) -> bool {
+fn upgrade_requires_manual_intervention(stderr: &str, status: Option<i32>) -> bool {
     let lowered = stderr.to_ascii_lowercase();
     let needs_password = lowered.contains("password is required")
         || lowered.contains("a password is required")
@@ -717,9 +688,12 @@ mod tests {
     use chrono::TimeZone;
     use std::fs;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{sleep, Duration as TokioDuration};
+
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_cache(path: &Path, info: &serde_json::Value) {
         fs::write(path, format!("{}\n", info)).expect("write version cache");
@@ -728,13 +702,43 @@ mod tests {
     #[test]
     fn upgrade_resolution_uses_cli_updater_for_direct_installs() {
         match resolve_upgrade_resolution_for_exe(Path::new(
-            "/Users/me/.local/bin/code",
+            "/Users/me/.local/bin/chris-code",
         )) {
             UpgradeResolution::Command { command, display } => {
                 assert!(command.len() >= 3);
                 assert_eq!(command[command.len() - 2], "update");
                 assert_eq!(command[command.len() - 1], "--yes");
-                assert_eq!(display, "code update --yes");
+                assert_eq!(display, "chris-code update --yes");
+            }
+            UpgradeResolution::Manual { instructions } => panic!("unexpected manual resolution: {instructions}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_resolution_allows_unmanaged_usr_local_bin() {
+        match resolve_upgrade_resolution_for_exe(Path::new(
+            "/usr/local/bin/chris-code",
+        )) {
+            UpgradeResolution::Command { display, .. } => {
+                assert_eq!(display, "chris-code update --yes");
+            }
+            UpgradeResolution::Manual { instructions } => panic!("unexpected manual resolution: {instructions}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_resolution_prefers_command_name_env() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let _reset = EnvReset::capture(COMMAND_NAME_ENV);
+        unsafe {
+            std::env::set_var(COMMAND_NAME_ENV, "chris-code");
+        }
+
+        match resolve_upgrade_resolution_for_exe(Path::new(
+            "/Users/me/.local/bin/code",
+        )) {
+            UpgradeResolution::Command { display, .. } => {
+                assert_eq!(display, "chris-code update --yes");
             }
             UpgradeResolution::Manual { instructions } => panic!("unexpected manual resolution: {instructions}"),
         }
@@ -751,6 +755,32 @@ mod tests {
             UpgradeResolution::Manual { instructions } => {
                 assert!(!instructions.contains("code update --yes"));
                 assert!(instructions.contains(CODE_RELEASE_URL));
+            }
+        }
+    }
+
+    struct EnvReset {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl EnvReset {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var(key).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.value {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }
