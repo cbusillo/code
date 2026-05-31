@@ -2004,8 +2004,7 @@ async fn execute_model_with_permissions(
     remove_review_output_json(review_output_json_path);
 
     let spec_opt = agent_model_spec(model)
-        .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.name)))
-        .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.command)));
+        .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.name)));
 
     if let Some(spec) = spec_opt {
         if !spec.is_enabled() {
@@ -4102,6 +4101,95 @@ mod tests {
                 "hello from agy",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_selector_uses_antigravity_cli() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _reset_path = EnvReset::capture("PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let agy = script_path(dir.path(), "agy");
+        write_argv_script(&agy);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        unsafe {
+            std::env::set_var("PATH", prepend_path(dir.path()));
+        }
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "gemini",
+            "hello from google lane",
+            true,
+            Some(workspace.clone()),
+            None,
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute gemini selector through antigravity");
+
+        let args: Vec<&str> = output.trim().split('|').collect();
+        assert_eq!(
+            args,
+            vec![
+                "--add-dir",
+                workspace.to_str().expect("workspace path utf-8"),
+                "-p",
+                "hello from google lane",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_gemini_command_keeps_gemini_cli_args() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _reset_path = EnvReset::capture("PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let gemini = script_path(dir.path(), "gemini");
+        write_argv_script(&gemini);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        unsafe {
+            std::env::set_var("PATH", prepend_path(dir.path()));
+        }
+
+        let cfg = AgentConfig {
+            name: "corp-gemini".to_string(),
+            command: "gemini".to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "corp-gemini",
+            "hello from gemini cli",
+            true,
+            Some(workspace),
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute explicit gemini CLI config");
+
+        let args: Vec<&str> = output.trim().split('|').collect();
+        assert_eq!(args, vec!["-p", "hello from gemini cli"]);
     }
 
     fn env_lock() -> &'static Mutex<()> {
