@@ -3,8 +3,9 @@ name: Release
 on:
   push:
     branches: [ main ]
-    # Ignore common non-release paths, but DO NOT ignore release.yml so that
-    # edits to this workflow can intentionally trigger a new release run.
+    # Ignore common non-release paths. For other main pushes, the workflow
+    # determines whether the committed package version represents release
+    # intent or a successful no-op.
     paths-ignore:
       - '.github/workflows/issue-triage.yml'
       - '.github/workflows/preview-build.yml'
@@ -28,8 +29,8 @@ permissions:
 jobs:
   preflight-tests:
     name: Preflight Tests (Linux fast E2E)
-    needs: [determine-version]
-    if: needs.determine-version.outputs.metadata_required != 'true'
+    needs: [determine-version, validate-release-metadata]
+    if: needs.determine-version.outputs.release_intent == 'true'
     runs-on: ubuntu-24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -128,7 +129,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       version: ${{ steps.version.outputs.version }}
-      metadata_required: ${{ steps.version.outputs.metadata_required }}
+      release_intent: ${{ steps.version.outputs.release_intent }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -139,37 +140,29 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Determine next GitHub Release version
+      - name: Determine GitHub Release intent
         id: version
-        working-directory: codex-cli
         shell: bash
-        run: |
-          set -euo pipefail
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -n 1 | sed 's/^v//' || true)
-          latest_tag="${latest_tag:-0.0.0}"
-          CANDIDATE=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$latest_tag" | sort -V | tail -n1)
-          if git rev-parse "v${CANDIDATE}" >/dev/null 2>&1; then
-            IFS='.' read -ra V <<< "$CANDIDATE"
-            CANDIDATE="${V[0]}.${V[1]}.$((V[2] + 1))"
-          fi
-          while git rev-parse "v${CANDIDATE}" >/dev/null 2>&1; do
-            IFS='.' read -ra V <<< "$CANDIDATE"
-            CANDIDATE="${V[0]}.${V[1]}.$((V[2] + 1))"
-          done
-          NEW_VERSION="$CANDIDATE"
-          if [[ "$CURRENT_VERSION" == "$NEW_VERSION" ]]; then
-            METADATA_REQUIRED=false
-          else
-            METADATA_REQUIRED=true
-          fi
-          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "metadata_required=${METADATA_REQUIRED}" >> "$GITHUB_OUTPUT"
+        run: scripts/release/determine-release-intent.sh
+
+  validate-release-metadata:
+    name: Validate Release Metadata
+    needs: [determine-version]
+    if: needs.determine-version.outputs.release_intent == 'true'
+    runs-on: [self-hosted, Linux, X64, chris-testing]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Validate committed release metadata
+        shell: bash
+        run: scripts/check-release-notes-version.sh --version "${{ needs.determine-version.outputs.version }}"
 
   build-binaries:
     name: Build ${{ matrix.target }}
-    needs: [determine-version]
-    if: needs.determine-version.outputs.metadata_required != 'true'
+    needs: [determine-version, validate-release-metadata]
+    if: needs.determine-version.outputs.release_intent == 'true'
     runs-on: ${{ fromJson(matrix.runs_on) }}
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -481,9 +474,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [determine-version, build-binaries, preflight-tests]
+    needs: [determine-version, validate-release-metadata, build-binaries, preflight-tests]
     runs-on: [self-hosted, Linux, X64, chris-testing]
-    if: "always() && !cancelled() && !failure() && !contains(github.event.head_commit.message, '[skip ci]')"
+    if: "always() && needs.determine-version.outputs.release_intent == 'true' && !cancelled() && !failure() && !contains(github.event.head_commit.message, '[skip ci]')"
     timeout-minutes: 30
 
     steps:
@@ -497,19 +490,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Require local release metadata
-        if: needs.determine-version.outputs.metadata_required == 'true'
-        shell: bash
-        env:
-          NEW_VERSION: ${{ needs.determine-version.outputs.version }}
-        run: |
-          set -euo pipefail
-          echo "::error::Release metadata for v${NEW_VERSION} must be prepared locally."
-          echo "Run 'just local-release-notes', review the generated package version,"
-          echo "CHANGELOG.md, and docs/release-notes/RELEASE_NOTES.md changes, then"
-          echo "merge that release metadata PR before publishing."
-          exit 1
 
       - name: Update package.json version
         id: version
