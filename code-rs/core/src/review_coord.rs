@@ -3,10 +3,11 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LOCK_FILENAME: &str = "review.lock";
 const EPOCH_FILENAME: &str = "snapshot.epoch";
+const MALFORMED_LOCK_STALE_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewLockInfo {
@@ -165,6 +166,19 @@ fn lock_file_exists(scope: Option<&Path>) -> bool {
     lock_path(scope).map(|path| path.exists()).unwrap_or(false)
 }
 
+fn malformed_lock_is_old_enough_to_clear(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    age >= MALFORMED_LOCK_STALE_AFTER
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // Safety: kill with signal 0 performs permission/aliveness check only
@@ -194,8 +208,10 @@ pub fn clear_stale_lock_if_dead(scope: Option<&Path>) -> std::io::Result<bool> {
         None => {
             if lock_file_exists(scope) {
                 if let Ok(path) = lock_path(scope) {
-                    let _ = fs::remove_file(path);
-                    return Ok(true);
+                    if malformed_lock_is_old_enough_to_clear(&path) {
+                        let _ = fs::remove_file(path);
+                        return Ok(true);
+                    }
                 }
             }
             return Ok(false);
@@ -220,7 +236,9 @@ impl Drop for ReviewGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::FileTime;
     use std::path::Path;
+    use std::time::Duration;
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -303,12 +321,31 @@ mod tests {
 
     #[test]
     #[serial]
-    fn malformed_lock_is_cleared_as_stale() {
+    fn fresh_malformed_lock_is_not_cleared() {
         let dir = TempDir::new().unwrap();
         set_code_home(dir.path());
         let cwd = dir.path();
         let path = lock_path(Some(cwd)).unwrap();
         fs::write(&path, b"not json").unwrap();
+
+        assert!(!clear_stale_lock_if_dead(Some(cwd)).unwrap());
+        assert!(path.exists());
+        let guard = try_acquire_lock("during-malformed-write", cwd).unwrap();
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn old_malformed_lock_is_cleared_as_stale() {
+        let dir = TempDir::new().unwrap();
+        set_code_home(dir.path());
+        let cwd = dir.path();
+        let path = lock_path(Some(cwd)).unwrap();
+        fs::write(&path, b"not json").unwrap();
+        let stale_time = FileTime::from_system_time(
+            SystemTime::now() - MALFORMED_LOCK_STALE_AFTER - Duration::from_secs(1),
+        );
+        filetime::set_file_mtime(&path, stale_time).unwrap();
 
         assert!(clear_stale_lock_if_dead(Some(cwd)).unwrap());
         assert!(!path.exists());
