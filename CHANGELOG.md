@@ -7,6 +7,11 @@
 
 - (none)
 
+## [0.6.113] - 2026-05-31
+
+- Skills: normalize command resource paths before validation so declared helper scripts resolve consistently across relative and absolute metadata forms. (132dec53)
+- Upstream: fetch cursor refs without tags so upstream review checks avoid release tag collisions. (132dec53)
+
 ## [0.6.112] - 2026-05-31
 
 - Skills: support repo and external skill commands while preserving compatibility for existing metadata. (61799048, a5221451)

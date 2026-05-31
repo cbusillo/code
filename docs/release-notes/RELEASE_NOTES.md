@@ -1,17 +1,16 @@
-## @just-every/code v0.6.112
+## @just-every/code v0.6.113
 
-This release tightens skill command metadata and adds upstream review cursor tooling.
+This release ships a small reliability fix for skill metadata and upstream cursor checks.
 
 ### Changes
 
-- Support repo and external skill commands without breaking existing command metadata.
-- Reject skill commands that point at non-script resources, so templates and references cannot be treated as runnable helpers.
-- Add an upstream cursor report for tracking reviewed commits across Every Code's upstream sources.
+- Normalize skill command resource paths before validation so helper scripts resolve consistently.
+- Fetch upstream cursor refs without tags to avoid release tag collisions during review checks.
 
 ### Install
 
 ```bash
-gh release download v0.6.112 --repo cbusillo/code
+gh release download v0.6.113 --repo cbusillo/code
 ```
 
-Compare: https://github.com/cbusillo/code/compare/v0.6.111...v0.6.112
+Compare: https://github.com/cbusillo/code/compare/v0.6.112...v0.6.113
