@@ -35,6 +35,12 @@ pub struct ActiveSessionRecord {
     pub head: Option<String>,
 }
 
+impl ActiveSessionRecord {
+    pub fn fingerprint_component(&self) -> String {
+        format!("{}:{}", self.pid, self.session_id)
+    }
+}
+
 #[derive(Debug)]
 pub struct ActiveSessionGuard {
     path: PathBuf,
@@ -113,24 +119,71 @@ pub fn register_if_write_capable(
 
 pub fn active_session_warning(conflicts: &[ActiveSessionRecord]) -> Option<String> {
     let first = conflicts.first()?;
-    let source = format_session_source(&first.source);
-    let detail = format!(
-        "pid {}, {}, started {}s ago",
-        first.pid,
-        source,
-        unix_now().saturating_sub(first.started_at_unix)
-    );
+    let detail = format_session_detail(first);
     let root = first.checkout_root.display();
     if conflicts.len() == 1 {
         Some(format!(
-            "Another write-capable Every Code session is active in this checkout ({detail}) at {root}. Concurrent edits can conflict; consider closing it or using a separate worktree."
+            "Another write-capable Every Code session is active in this checkout ({detail}) at {root}. Concurrent edits can conflict; Every Code will warn the model to prefer isolated work and avoid touching unrelated changes."
         ))
     } else {
         Some(format!(
-            "{} other write-capable Every Code sessions are active in this checkout, including {detail}, at {root}. Concurrent edits can conflict; consider closing them or using separate worktrees.",
+            "{} other write-capable Every Code sessions are active in this checkout, including {detail}, at {root}. Concurrent edits can conflict; Every Code will warn the model to prefer isolated work and avoid touching unrelated changes.",
             conflicts.len()
         ))
     }
+}
+
+pub fn active_session_model_notice(conflicts: &[ActiveSessionRecord]) -> Option<String> {
+    let first = conflicts.first()?;
+    let detail = format_session_detail(first);
+    let root = first.checkout_root.display();
+    let subject = if conflicts.len() == 1 {
+        "Another write-capable Every Code session is active in this checkout".to_string()
+    } else {
+        format!(
+            "{} other write-capable Every Code sessions are active in this checkout",
+            conflicts.len()
+        )
+    };
+
+    Some(format!(
+        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Prefer doing implementation work in a separate git worktree before modifying files. If you stay in this checkout, re-read target files immediately before editing and keep edits tightly scoped. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
+    ))
+}
+
+pub fn active_session_model_notice_for_current(
+    code_home: &Path,
+    cwd: &Path,
+    session_id: Uuid,
+) -> io::Result<Option<ActiveSessionModelNotice>> {
+    let Some(checkout_root) = git_path(cwd, &["rev-parse", "--show-toplevel"]) else {
+        return Ok(None);
+    };
+    let checkout_root = canonicalize_lossy(&checkout_root);
+    let dir = active_sessions_dir(code_home)?;
+    prune_stale_records(&dir);
+    let mut conflicts = live_records(&dir)
+        .into_iter()
+        .filter(|candidate| candidate.session_id != session_id)
+        .filter(|candidate| candidate.checkout_root == checkout_root)
+        .filter(|candidate| candidate.mode == ActiveSessionMode::WriteCapable)
+        .collect::<Vec<_>>();
+    conflicts.sort_by_key(|record| (record.pid, record.session_id));
+    let fingerprint = conflicts
+        .iter()
+        .map(ActiveSessionRecord::fingerprint_component)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(active_session_model_notice(&conflicts).map(|message| ActiveSessionModelNotice {
+        fingerprint,
+        message,
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSessionModelNotice {
+    pub fingerprint: String,
+    pub message: String,
 }
 
 fn is_write_capable(sandbox_policy: &SandboxPolicy) -> bool {
@@ -222,6 +275,16 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+fn format_session_detail(record: &ActiveSessionRecord) -> String {
+    let source = format_session_source(&record.source);
+    format!(
+        "pid {}, {}, started {}s ago",
+        record.pid,
+        source,
+        unix_now().saturating_sub(record.started_at_unix)
+    )
+}
+
 fn format_session_source(source: &SessionSource) -> &'static str {
     match source {
         SessionSource::Cli => "cli",
@@ -285,6 +348,49 @@ mod tests {
         assert_eq!(second.conflicts.len(), 1);
         assert_eq!(second.conflicts[0].source, SessionSource::Cli);
         assert!(active_session_warning(&second.conflicts).unwrap().contains("write-capable"));
+    }
+
+    #[test]
+    fn model_notice_gives_concurrent_editing_guidance() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        init_git_repo(repo.path());
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+
+        let first = register_if_write_capable(
+            home.path(),
+            repo.path(),
+            &SandboxPolicy::DangerFullAccess,
+            first_id,
+            SessionSource::Cli,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(first.conflicts.is_empty());
+
+        let second = register_if_write_capable(
+            home.path(),
+            repo.path(),
+            &SandboxPolicy::DangerFullAccess,
+            second_id,
+            SessionSource::Exec,
+        )
+        .unwrap()
+        .unwrap();
+
+        let notice = active_session_model_notice(&second.conflicts).unwrap();
+        assert!(notice.contains("CONCURRENT CHECKOUT SESSION DETECTED"));
+        assert!(notice.contains("separate git worktree"));
+        assert!(notice.contains("re-read target files"));
+        assert!(notice.contains("Do not revert, overwrite, stage"));
+        assert!(notice.contains(repo.path().canonicalize().unwrap().to_string_lossy().as_ref()));
+
+        let refreshed = active_session_model_notice_for_current(home.path(), repo.path(), second_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.message, notice);
+        assert!(refreshed.fingerprint.contains(&second.conflicts[0].session_id.to_string()));
     }
 
     #[test]
