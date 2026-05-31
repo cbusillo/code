@@ -933,10 +933,13 @@ mod tests {
             path: PathBuf::from("/tmp/manual-skill/SKILL.md"),
             scope: SkillScope::User,
             content: "manual body".to_string(),
+            resources: Vec::new(),
             policy: Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
                 command_policies: Vec::new(),
             }),
+            commands: Vec::new(),
+            workflow_defaults: Vec::new(),
         }];
         let input = vec![InputItem::Text {
             text: "Please use $manual-skill for this turn, then reply.".to_string(),

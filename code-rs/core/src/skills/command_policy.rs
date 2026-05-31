@@ -543,10 +543,13 @@ mod tests {
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             scope: SkillScope::User,
             content: String::new(),
+            resources: Vec::new(),
             policy: Some(SkillPolicy {
                 allow_implicit_invocation: Some(allow_implicit_invocation),
                 command_policies,
             }),
+            commands: Vec::new(),
+            workflow_defaults: Vec::new(),
         }
     }
 
