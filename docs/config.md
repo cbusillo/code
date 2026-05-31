@@ -223,7 +223,7 @@ approval_policy = "never"
 
 Use `[[agents]]` blocks to register additional CLI programs that Code can launch as peers. Each block maps a short `name` (referenced elsewhere in the config) to the command to execute, optional default flags, and environment variables.
 
-> **Note:** Built-in agent/model selectors (for example `code-gpt-5.4`, `claude-sonnet-4.6`, or `antigravity`) map to a CLI plus optional model flags. Code strips any user `--model`/`-m` flags from `args`, `args_read_only`, or `args_write` before launching a built-in to avoid conflicts. `antigravity` launches `agy` and uses Antigravity's configured model rather than injecting a Gemini model flag.
+> **Note:** Built-in agent/model selectors (for example `code-gpt-5.4`, `claude-sonnet-4.6`, or `antigravity`) map to a CLI plus optional model flags. Code strips any user `--model`/`-m` flags from `args`, `args_read_only`, or `args_write` before launching a built-in to avoid conflicts. `antigravity` launches `agy` as the Google/Gemini-family path and uses Antigravity's configured model rather than injecting a Gemini model flag.
 
 ```toml
 [[agents]]
@@ -473,7 +473,7 @@ tool_timeout_sec = 30
 
 Sub-agents are orchestrated helper workflows you can trigger with slash commands (for example `/plan`, `/solve`, `/code`). Each entry under `[[subagents.commands]]` defines the slash command name, whether spawned agents run in read-only mode, which `agents` to launch, and extra guidance for both the orchestrator (Code) and the individual agents.
 
-By default (when no `[[agents]]` are configured) Code advertises these agent/model selectors for multi-agent runs: `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, and `qwen3-coder-plus`. The cloud counterpart, `cloud-gpt-5.1-codex-max`, only appears when `CODE_ENABLE_CLOUD_AGENT_MODEL=1` is set. You can override the list by defining `[[agents]]` entries or by specifying `agents = [ … ]` on a given `[[subagents.commands]]` entry. Consumer Gemini CLI is not a built-in default; add a custom `[[agents]]` block only when you intentionally rely on enterprise/API-key Gemini CLI access.
+By default (when no `[[agents]]` are configured) Code advertises these agent/model selectors for multi-agent runs: `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, and `qwen3-coder-plus`. The cloud counterpart, `cloud-gpt-5.1-codex-max`, only appears when `CODE_ENABLE_CLOUD_AGENT_MODEL=1` is set. You can override the list by defining `[[agents]]` entries or by specifying `agents = [ … ]` on a given `[[subagents.commands]]` entry. Consumer Gemini CLI is not a built-in default; add a custom `[[agents]]` block only when you intentionally rely on enterprise/API-key Gemini CLI access. Legacy Gemini-style agent selectors are treated as Google-family intent and resolve to `antigravity`, which still uses AGY's configured model.
 
 ```toml
 [[subagents.commands]]

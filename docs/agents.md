@@ -21,7 +21,7 @@ Field recap: `name` (slug/alias), `command` (absolute paths ok), `args*` (RO/RW 
 ### Built-in defaults
 If no `[[agents]]` are configured, Every Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
 
-Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google-agent path. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
+Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google/Gemini-family agent path. Gemini/Google intent can resolve to `antigravity`, but AGY uses its configured model rather than a per-run Gemini Pro/Flash flag. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
 
 ## Subagents (`[[subagents.commands]]`)
 ```toml
@@ -39,6 +39,8 @@ agent_instructions = "Preamble added to each spawned agent"
 - `agent_instructions`: appended to each spawned agent prompt.
 
 The orchestrator fans out agents, waits for results, and merges reasoning according to your `hide_agent_reasoning` / `show_raw_agent_reasoning` settings.
+
+When you ask the Every Code agent to "ask agents" or gather dissent, it should prefer a small, diverse batch when the task benefits from multiple viewpoints and budget allows. A typical diverse batch includes GPT, Claude, and `antigravity` for the Google/Gemini-family perspective. Narrow mechanical work can use fewer agents; if an obvious family is skipped, the agent should briefly say why.
 
 ## TUI controls
 - `/agents` opens the settings overlay to the Agents section: toggle enabled/read-only, view defaults, and open editors.

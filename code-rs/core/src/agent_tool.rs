@@ -2004,8 +2004,7 @@ async fn execute_model_with_permissions(
     remove_review_output_json(review_output_json_path);
 
     let spec_opt = agent_model_spec(model)
-        .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.name)))
-        .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.command)));
+        .or_else(|| config.as_ref().and_then(|cfg| agent_model_spec(&cfg.name)));
 
     if let Some(spec) = spec_opt {
         if !spec.is_enabled() {
@@ -2873,7 +2872,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 },
             }),
                 description: Some(
-                    "Optional array of agent/model selector slugs (e.g., ['code-gpt-5.5','claude-sonnet-4.6','antigravity']; external CLI selectors use that tool's configured model)".to_string(),
+                    "Optional array of agent/model selector slugs. For explicit multi-agent/dissent requests, prefer diverse families when useful and budget allows (for example ['code-gpt-5.5','claude-sonnet-4.6','antigravity']). Use `antigravity` for Google/Gemini-family perspective; AGY uses its configured model rather than per-run Gemini Pro/Flash selection. If you skip an obvious family, briefly explain why.".to_string(),
                 ),
         },
     );
@@ -3269,6 +3268,7 @@ mod tests {
     use super::AgentRetryMetadata;
     use super::AgentStatus;
     use super::AGENT_PROVIDER_RETRY_MAX_DELAY;
+    use super::create_agent_tool;
     use super::MAX_AGENT_PROGRESS_ENTRIES;
     use super::MAX_AGENT_RESULT_BYTES;
     use super::MAX_TRACKED_TERMINAL_AGENTS;
@@ -3285,6 +3285,7 @@ mod tests {
     use super::agent_retry_delay;
     use super::AGENT_MANAGER;
     use crate::config_types::AgentConfig;
+    use crate::openai_tools::{JsonSchema, OpenAiTool};
     use code_protocol::config_types::ReasoningEffort;
     use serial_test::serial;
     use std::collections::HashMap;
@@ -4102,6 +4103,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn gemini_selector_uses_antigravity_cli() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _reset_path = EnvReset::capture("PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let agy = script_path(dir.path(), "agy");
+        write_argv_script(&agy);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        unsafe {
+            std::env::set_var("PATH", prepend_path(dir.path()));
+        }
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "gemini",
+            "hello from google lane",
+            true,
+            Some(workspace.clone()),
+            None,
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute gemini selector through antigravity");
+
+        let args: Vec<&str> = output.trim().split('|').collect();
+        assert_eq!(
+            args,
+            vec![
+                "--add-dir",
+                workspace.to_str().expect("workspace path utf-8"),
+                "-p",
+                "hello from google lane",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_gemini_command_keeps_gemini_cli_args() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _reset_path = EnvReset::capture("PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let gemini = script_path(dir.path(), "gemini");
+        write_argv_script(&gemini);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        unsafe {
+            std::env::set_var("PATH", prepend_path(dir.path()));
+        }
+
+        let cfg = AgentConfig {
+            name: "corp-gemini".to_string(),
+            command: "gemini".to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "corp-gemini",
+            "hello from gemini cli",
+            true,
+            Some(workspace),
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute explicit gemini CLI config");
+
+        let args: Vec<&str> = output.trim().split('|').collect();
+        assert_eq!(args, vec!["-p", "hello from gemini cli"]);
+    }
+
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -4459,6 +4549,41 @@ exit 0
         assert_eq!(agent_retry_delay(1), StdDuration::from_secs(4));
         assert_eq!(agent_retry_delay(2), StdDuration::from_secs(8));
         assert_eq!(agent_retry_delay(8), AGENT_PROVIDER_RETRY_MAX_DELAY);
+    }
+
+    #[test]
+    fn agent_tool_models_description_guides_google_family_delegation() {
+        let tool = create_agent_tool(&[
+            "code-gpt-5.5".to_string(),
+            "claude-sonnet-4.6".to_string(),
+            "antigravity".to_string(),
+        ]);
+
+        let function = match tool {
+            OpenAiTool::Function(function) => function,
+            _ => panic!("agent tool should be a function"),
+        };
+        let JsonSchema::Object { properties, .. } = function.parameters else {
+            panic!("agent tool should have object parameters");
+        };
+        let create_schema = properties.get("create").expect("create schema");
+        let JsonSchema::Object { properties: create_properties, .. } = create_schema else {
+            panic!("create schema should be an object");
+        };
+        let models_schema = create_properties.get("models").expect("models schema");
+        let JsonSchema::Array { items, description } = models_schema else {
+            panic!("models schema should be an array");
+        };
+        let description = description.as_deref().expect("models description");
+        assert!(description.contains("diverse families"));
+        assert!(description.contains("Use `antigravity` for Google/Gemini-family perspective"));
+        assert!(description.contains("AGY uses its configured model"));
+
+        let JsonSchema::String { allowed_values, .. } = items.as_ref() else {
+            panic!("models items should be strings");
+        };
+        let values = allowed_values.as_ref().expect("allowed models");
+        assert!(values.contains(&"antigravity".to_string()));
     }
 
     #[tokio::test]

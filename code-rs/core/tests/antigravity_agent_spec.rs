@@ -17,7 +17,18 @@ fn antigravity_replaces_builtin_gemini_agent_path() {
             .slug,
         "antigravity"
     );
-    assert!(agent_model_spec("gemini").is_none());
+    assert_eq!(
+        agent_model_spec("gemini")
+            .expect("gemini intent alias present")
+            .slug,
+        "antigravity"
+    );
+    assert_eq!(
+        agent_model_spec("google")
+            .expect("google intent alias present")
+            .slug,
+        "antigravity"
+    );
     assert!(agent_model_spec("gemini-3-flash-preview").is_none());
     assert!(agent_model_spec("gemini-3.1-pro-preview").is_none());
 }
