@@ -1,10 +1,11 @@
 ## @just-every/code v0.6.111
 
-This release tightens skill workflow validation in Every Code.
+This release improves skill helper metadata and validation in Every Code.
 
 ### Changes
 
-- Reject skills that reference missing command helpers so invalid workflow policies fail during load.
+- Add structured command, resource, and default metadata for the repo-local PR watcher and issue digest skills.
+- Reject skills that reference missing command helpers so invalid workflow metadata fails during load.
 
 ### Install
 

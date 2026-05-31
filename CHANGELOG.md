@@ -9,7 +9,7 @@
 
 ## [0.6.111] - 2026-05-31
 
-- Skills: reject skills that reference missing command helpers so invalid workflow policies fail during load. (91eae015)
+- Skills: add helper metadata for PR watching and issue digests, and reject skills whose command helpers are missing. (252e31ff, 91eae015)
 
 ## [0.6.110] - 2026-05-31
 
