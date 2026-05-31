@@ -623,9 +623,10 @@ fn parse_command_resource_path(
             };
             let resolved_resource_path = resolve_skill_relative_path(skill_dir, resource_path.clone());
 
+            let normalized_resource_path = normalize_skill_path(resolved_resource_path.clone());
             let declared_resource = declared_resources
                 .iter()
-                .find(|r| r.path == resolved_resource_path);
+                .find(|r| normalize_skill_path(r.path.clone()) == normalized_resource_path);
             let Some(declared_resource) = declared_resource else {
                 return Err(SkillParseError::InvalidField {
                     field: "commands.resource_path",
@@ -656,7 +657,7 @@ fn parse_command_resource_path(
                 });
             }
 
-            Ok(Some(resolved_resource_path))
+            Ok(Some(normalized_resource_path))
         }
         SkillCommandSource::Repo => {
             if resource_path.is_some() {
@@ -959,7 +960,11 @@ fn resolve_skill_relative_path(skill_dir: &Path, path: PathBuf) -> PathBuf {
     } else {
         skill_dir.join(path)
     };
-    normalize_path(&path).unwrap_or(path)
+    normalize_skill_path(path)
+}
+
+fn normalize_skill_path(path: PathBuf) -> PathBuf {
+    normalize_path(&path).unwrap_or_else(|_| path_clean::clean(&path))
 }
 
 fn sanitize_single_line(raw: &str) -> String {
@@ -1415,6 +1420,91 @@ resources:
 commands:
   - name: missing-helper
     resource_path: scripts/missing.py
+    example_argv: ["python", "scripts/missing.py"]
+    purpose: Run a missing helper.
+---
+
+# bad
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("does not exist as a file"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[test]
+    fn command_resource_path_matches_normalized_declared_resource_path() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("good");
+        fs::create_dir_all(skill_dir.join("scripts")).expect("create skill dir");
+        fs::write(skill_dir.join("scripts").join("helper.py"), "print('ok')")
+            .expect("write helper");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: good
+description: Good command helper
+resources:
+  - path: scripts/helper.py
+    kind: script
+commands:
+  - name: helper
+    resource_path: ./scripts/helper.py
+    example_argv: ["python", "scripts/helper.py"]
+    purpose: Run a helper.
+---
+
+# good
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert_eq!(outcome.skills.len(), 1);
+        assert_eq!(
+            outcome.skills[0].commands[0].resource_path.as_deref(),
+            Some(normalized(&skill_dir.join("scripts/helper.py")).as_path())
+        );
+    }
+
+    #[test]
+    fn missing_command_resource_path_matches_normalized_declared_resource_path() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(skill_dir.join("scripts")).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: bad
+description: Bad command helper
+resources:
+  - path: scripts/missing.py
+    kind: script
+commands:
+  - name: missing-helper
+    resource_path: ./scripts/missing.py
     example_argv: ["python", "scripts/missing.py"]
     purpose: Run a missing helper.
 ---
