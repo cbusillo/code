@@ -46,7 +46,8 @@ async fn exec_session_warns_when_checkout_already_has_write_capable_session() {
         EventMsg::Warning(warning) => {
             assert!(warning.message.contains("Another write-capable Every Code session"));
             assert!(warning.message.contains("cli"));
-            assert!(warning.message.contains("separate worktree"));
+            assert!(warning.message.contains("Every Code will warn the model"));
+            assert!(warning.message.contains("avoid touching unrelated changes"));
         }
         other => panic!("expected warning event, got {other:?}"),
     }
