@@ -497,7 +497,7 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
     let resolved_path = normalize_path(path).unwrap_or_else(|_| path.to_path_buf());
     let skill_dir = resolved_path.parent().unwrap_or_else(|| Path::new("."));
     let resources = parse_skill_resources(parsed.resources, skill_dir)?;
-    let commands = parse_skill_commands(parsed.commands, skill_dir, scope, &resources)?;
+    let commands = parse_skill_commands(parsed.commands, skill_dir, &resources)?;
     let workflow_defaults = parse_workflow_defaults(parsed.workflow_defaults)?;
     let policy = parsed
         .policy
@@ -564,7 +564,6 @@ fn parse_skill_resources(
 fn parse_skill_commands(
     commands: Vec<SkillFrontmatterCommand>,
     skill_dir: &Path,
-    scope: SkillScope,
     declared_resources: &[SkillResource],
 ) -> Result<Vec<SkillCommand>, SkillParseError> {
     if commands.len() > MAX_STRUCTURED_ITEMS_PER_SKILL {
@@ -588,7 +587,6 @@ fn parse_skill_commands(
         let resource_path = parse_command_resource_path(
             &name,
             source,
-            scope,
             command.resource_path,
             skill_dir,
             declared_resources,
@@ -614,7 +612,6 @@ fn parse_skill_commands(
 fn parse_command_resource_path(
     name: &str,
     source: SkillCommandSource,
-    scope: SkillScope,
     resource_path: Option<PathBuf>,
     skill_dir: &Path,
     declared_resources: &[SkillResource],
@@ -652,12 +649,6 @@ fn parse_command_resource_path(
             Ok(Some(resolved_resource_path))
         }
         SkillCommandSource::Repo => {
-            if scope != SkillScope::Repo {
-                return Err(SkillParseError::InvalidField {
-                    field: "commands.source",
-                    reason: format!("command '{name}' uses source repo outside a repo skill"),
-                });
-            }
             if resource_path.is_some() {
                 return Err(SkillParseError::InvalidField {
                     field: "commands.resource_path",
@@ -1254,7 +1245,7 @@ workflow_defaults:
     }
 
     #[test]
-    fn repo_commands_require_repo_scope() {
+    fn repo_commands_can_be_declared_by_user_skills() {
         let skills_root = tempfile::tempdir().expect("tempdir");
         let skill_dir = skills_root.path().join("bad");
         fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -1280,15 +1271,15 @@ commands:
             scope: SkillScope::User,
         }]);
 
-        assert!(outcome.skills.is_empty());
-        assert_eq!(outcome.errors.len(), 1);
         assert!(
-            outcome.errors[0]
-                .message
-                .contains("uses source repo outside a repo skill"),
-            "unexpected error: {}",
-            outcome.errors[0].message
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
         );
+        let skill = outcome.skills.first().expect("skill");
+        assert_eq!(skill.commands.len(), 1);
+        assert_eq!(skill.commands[0].source, SkillCommandSource::Repo);
+        assert_eq!(skill.commands[0].resource_path, None);
     }
 
     #[test]
