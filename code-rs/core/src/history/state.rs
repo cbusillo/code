@@ -698,12 +698,12 @@ fn truncated_prefix_len(chunks: &[ExecStreamChunk]) -> usize {
     chunks.first().map(|chunk| chunk.offset).unwrap_or(0)
 }
 
-fn truncate_exec_stream(chunks: &mut Vec<ExecStreamChunk>, truncate_at: usize) {
+fn truncate_exec_stream(chunks: &mut Vec<ExecStreamChunk>, truncate_at: usize) -> usize {
     while let Some(last) = chunks.last_mut() {
         let last_start = last.offset;
         let last_end = last_start.saturating_add(last.content.len());
         if truncate_at >= last_end {
-            break;
+            return truncate_at;
         }
         if truncate_at <= last_start {
             chunks.pop();
@@ -711,8 +711,9 @@ fn truncate_exec_stream(chunks: &mut Vec<ExecStreamChunk>, truncate_at: usize) {
         }
         let keep = floor_char_boundary(&last.content, truncate_at.saturating_sub(last_start));
         last.content.truncate(keep);
-        break;
+        return last_start.saturating_add(keep);
     }
+    truncate_at
 }
 
 fn floor_char_boundary(content: &str, index: usize) -> usize {
@@ -731,8 +732,8 @@ fn ceil_char_boundary(content: &str, index: usize) -> usize {
     boundary
 }
 
-fn append_exec_chunk(chunks: &mut Vec<ExecStreamChunk>, chunk: ExecStreamChunk) {
-    truncate_exec_stream(chunks, chunk.offset);
+fn append_exec_chunk(chunks: &mut Vec<ExecStreamChunk>, mut chunk: ExecStreamChunk) {
+    chunk.offset = truncate_exec_stream(chunks, chunk.offset);
     if let Some(last) = chunks.last_mut() {
         let last_end = last.offset.saturating_add(last.content.len());
         if chunk.offset == last_end {
@@ -2603,11 +2604,10 @@ mod tests {
 
         append_exec_chunk(&mut chunks, ExecStreamChunk { offset: 4, content: "z".to_string() });
 
-        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].offset, 0);
-        assert_eq!(chunks[0].content, "abc");
-        assert_eq!(chunks[1].offset, 4);
-        assert_eq!(chunks[1].content, "z");
+        assert_eq!(chunks[0].content, "abcz");
+        assert_eq!(stream_len(&chunks), chunks[0].content.len());
     }
 
     #[test]
