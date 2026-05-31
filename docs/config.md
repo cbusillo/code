@@ -15,7 +15,8 @@ Every Code supports several mechanisms for setting config values:
     - Because quotes are interpreted by one's shell, `-c key="true"` will be correctly interpreted in TOML as `key = true` (a boolean) and not `key = "true"` (a string). If for some reason you needed the string `"true"`, you would need to use `-c key='"true"'` (note the two sets of quotes).
 - The `$CODE_HOME/config.toml` configuration file. `CODE_HOME` defaults to `~/.code`; Every Code also reads from `$CODEX_HOME`/`~/.codex` for backwards compatibility but only writes to `~/.code`. (Logs and other state use the same directory.) See [CODE and CODEX compatibility policy](./upstream-import-policy.md#code-and-codex-compatibility-policy) for naming and fallback rules.
 
-- https://developers.openai.com/codex/config-reference
+- Upstream compatibility reference:
+  https://developers.openai.com/codex/config-reference
 
 ## model
 

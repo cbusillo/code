@@ -1,12 +1,12 @@
 name: 🎁 Feature Request
-description: Propose a new feature for Code
+description: Propose a new feature for Every Code
 labels:
   - enhancement
 body:
   - type: markdown
     attributes:
       value: |
-        Is Code missing a feature that you'd like to see? Feel free to propose it here.
+        Is Every Code missing a feature that you'd like to see? Feel free to propose it here.
 
         Before you submit a feature:
         1. Search existing issues for similar features. If you find one, 👍 it rather than opening a new one.
@@ -15,8 +15,8 @@ body:
   - type: input
     id: variant
     attributes:
-      label: What variant of Codex are you using?
-      description: (e.g., App, IDE Extension, CLI, Web)
+      label: What Every Code surface are you using?
+      description: (e.g., Every Code CLI, app, IDE integration, web)
     validations:
       required: true
   - type: textarea
