@@ -636,6 +636,16 @@ fn parse_command_resource_path(
                 });
             };
 
+            if declared_resource.kind != SkillResourceKind::Script {
+                return Err(SkillParseError::InvalidField {
+                    field: "commands.resource_path",
+                    reason: format!(
+                        "command '{}' references resource_path '{}' which is declared as a non-script resource",
+                        name, resource_path.display()
+                    ),
+                });
+            }
+
             if !declared_resource.path.is_file() {
                 return Err(SkillParseError::InvalidField {
                     field: "commands.resource_path",
@@ -1425,6 +1435,49 @@ commands:
             outcome.errors[0]
                 .message
                 .contains("does not exist as a file"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[test]
+    fn command_resource_path_must_be_script_resource() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(skill_dir.join("templates")).expect("create skill dir");
+        fs::write(skill_dir.join("templates").join("helper.md"), "# not runnable")
+            .expect("write template");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: bad
+description: Bad command helper kind
+resources:
+  - path: templates/helper.md
+    kind: template
+commands:
+  - name: template-helper
+    resource_path: templates/helper.md
+    example_argv: ["templates/helper.md"]
+    purpose: Run a non-script helper.
+---
+
+# bad
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("declared as a non-script resource"),
             "unexpected error: {}",
             outcome.errors[0].message
         );
