@@ -1,6 +1,29 @@
 ---
 name: codex-issue-digest
 description: Run a GitHub issue digest for openai/codex by feature-area labels, all areas, and configurable time windows. Use when asked to summarize recent Codex bug reports or enhancement requests, especially for owner-specific labels such as tui, exec, app, or similar areas.
+resources:
+  - path: scripts/collect_issue_digest.py
+    kind: script
+    description: GitHub issue activity collector for owner-focused Codex digests.
+commands:
+  - name: collect-label-digest
+    resource_path: scripts/collect_issue_digest.py
+    example_argv: ["python3", ".codex/skills/codex-issue-digest/scripts/collect_issue_digest.py", "--labels", "tui", "exec", "--window-hours", "24"]
+    purpose: Collect recent bug/enhancement issue activity for selected feature-area labels.
+  - name: collect-all-areas-digest
+    resource_path: scripts/collect_issue_digest.py
+    example_argv: ["python3", ".codex/skills/codex-issue-digest/scripts/collect_issue_digest.py", "--all-labels", "--window", "past week", "--limit-issues", "10"]
+    purpose: Collect recent bug/enhancement issue activity across all feature-area labels.
+workflow_defaults:
+  - name: repo
+    value: openai/codex
+    description: Default GitHub repository for Codex issue digests.
+  - name: window
+    value: previous 24 hours
+    description: Default lookback unless the user asks for another duration.
+  - name: output_mode
+    value: summary-only
+    description: Include details only when the user asks for a table, details, or a full digest.
 ---
 
 # Codex Issue Digest
