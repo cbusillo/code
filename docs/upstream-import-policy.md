@@ -123,9 +123,12 @@ that should be installed by dogfood users. The active Release workflow runs from
 landed. Prepare that metadata locally with the Every Code harness before the
 publish run: the local command bumps `codex-cli/package.json`, updates
 `CHANGELOG.md`, and writes `docs/release-notes/RELEASE_NOTES.md`. The workflow
-validates those files and stops instead of generating fallback notes in CI.
-The full preflight, macOS/Linux release matrix, and Windows asset build run on
-the publish pass after the metadata PR has merged.
+uses the committed `codex-cli/package.json` version as release intent. If that
+version already has a tag, the workflow exits successfully as a no-op; if the
+tag does not exist, it validates the metadata and publishes exactly that
+committed version instead of generating fallback notes in CI. The full preflight,
+macOS/Linux release matrix, and Windows asset build run only on the publish pass
+after the metadata PR has merged.
 
 Release tags use the plain `v<version>` format, for example `v0.6.101`.
 
