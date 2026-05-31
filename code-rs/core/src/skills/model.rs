@@ -49,9 +49,17 @@ pub enum SkillResourceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillCommand {
     pub name: String,
-    pub resource_path: PathBuf,
+    pub source: SkillCommandSource,
+    pub resource_path: Option<PathBuf>,
     pub example_argv: Vec<String>,
     pub purpose: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillCommandSource {
+    Skill,
+    Repo,
+    External,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

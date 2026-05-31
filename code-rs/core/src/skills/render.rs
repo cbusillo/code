@@ -1,5 +1,6 @@
 use crate::skills::model::SkillMetadata;
 use crate::skills::model::SkillResourceKind;
+use crate::skills::model::SkillCommandSource;
 use crate::skills::command_policy::render_command_policy_summary;
 
 pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
@@ -90,13 +91,30 @@ fn render_structured_skill_guidance(skill: &SkillMetadata) -> Vec<String> {
         } else {
             command.example_argv.join(" ")
         };
-        let line = format!(
-            "  - command `{}`: run `{}` (helper script: {}); purpose: {}",
-            command.name,
-            example,
-            command.resource_path.to_string_lossy().replace('\\', "/"),
-            command.purpose
-        );
+        let line = match command.source {
+            SkillCommandSource::Skill => {
+                let helper_path = command
+                    .resource_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|| "<missing helper>".to_string());
+                format!(
+                    "  - command `{}`: run `{}` (helper script: {}); purpose: {}",
+                    command.name,
+                    example,
+                    helper_path,
+                    command.purpose
+                )
+            }
+            SkillCommandSource::Repo => format!(
+                "  - command `{}`: run `{}` (repo command); purpose: {}",
+                command.name, example, command.purpose
+            ),
+            SkillCommandSource::External => format!(
+                "  - command `{}`: run `{}` (external command); purpose: {}",
+                command.name, example, command.purpose
+            ),
+        };
         lines.push(line);
     }
 
@@ -120,6 +138,7 @@ mod tests {
     use crate::skills::model::SkillCommandPolicyAction;
     use crate::skills::model::SkillCommandPolicyPreferred;
     use crate::skills::model::SkillCommandPolicyPreferredKind;
+    use crate::skills::model::SkillCommandSource;
     use crate::skills::model::SkillPolicy;
     use crate::skills::model::SkillResource;
     use crate::skills::model::SkillResourceKind;
@@ -242,9 +261,24 @@ mod tests {
         skill.commands = vec![
             SkillCommand {
                 name: "create-plan".to_string(),
-                resource_path: PathBuf::from("/tmp/plan/scripts/create_plan.py"),
+                source: SkillCommandSource::Skill,
+                resource_path: Some(PathBuf::from("/tmp/plan/scripts/create_plan.py")),
                 example_argv: vec!["python".to_string(), "scripts/create_plan.py".to_string(), "--name".to_string()],
                 purpose: "Create and save a new plan".to_string(),
+            },
+            SkillCommand {
+                name: "remote-env".to_string(),
+                source: SkillCommandSource::Repo,
+                resource_path: None,
+                example_argv: vec!["./scripts/test-remote-env.sh".to_string()],
+                purpose: "Build remote executor environment".to_string(),
+            },
+            SkillCommand {
+                name: "list-devboxes".to_string(),
+                source: SkillCommandSource::External,
+                resource_path: None,
+                example_argv: vec!["applied_devbox".to_string(), "ls".to_string()],
+                purpose: "List available devboxes".to_string(),
             },
         ];
         skill.workflow_defaults = vec![SkillWorkflowDefault {
@@ -257,6 +291,8 @@ mod tests {
 
         assert!(rendered.contains("resource: /tmp/plan/scripts/create_plan.py (script); description: Helper to create a plan"));
         assert!(rendered.contains("command `create-plan`: run `python scripts/create_plan.py --name` (helper script: /tmp/plan/scripts/create_plan.py); purpose: Create and save a new plan"));
+        assert!(rendered.contains("command `remote-env`: run `./scripts/test-remote-env.sh` (repo command); purpose: Build remote executor environment"));
+        assert!(rendered.contains("command `list-devboxes`: run `applied_devbox ls` (external command); purpose: List available devboxes"));
         assert!(rendered.contains("workflow default `save_location`: $CODEX_HOME/plans; description: Keep plans outside repos"));
     }
 
@@ -270,7 +306,8 @@ mod tests {
         }];
         skill.commands = vec![SkillCommand {
             name: "create-plan".to_string(),
-            resource_path: PathBuf::from("/tmp/plan/scripts/create_plan.py"),
+            source: SkillCommandSource::Skill,
+            resource_path: Some(PathBuf::from("/tmp/plan/scripts/create_plan.py")),
             example_argv: vec!["python".to_string(), "scripts/create_plan.py".to_string()],
             purpose: "Create and save a new plan".to_string(),
         }];

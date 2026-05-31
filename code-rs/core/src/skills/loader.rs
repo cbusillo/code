@@ -8,6 +8,7 @@ use crate::skills::model::SkillCommandPolicy;
 use crate::skills::model::SkillCommandPolicyAction;
 use crate::skills::model::SkillCommandPolicyPreferred;
 use crate::skills::model::SkillCommandPolicyPreferredKind;
+use crate::skills::model::SkillCommandSource;
 use crate::skills::model::SkillError;
 use crate::skills::model::SkillLoadOutcome;
 use crate::skills::model::SkillMetadata;
@@ -71,10 +72,22 @@ enum SkillFrontmatterResourceKind {
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatterCommand {
     name: String,
-    resource_path: PathBuf,
+    #[serde(default)]
+    source: SkillFrontmatterCommandSource,
+    #[serde(default)]
+    resource_path: Option<PathBuf>,
     #[serde(default)]
     example_argv: Vec<String>,
     purpose: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum SkillFrontmatterCommandSource {
+    #[default]
+    Skill,
+    Repo,
+    External,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,7 +497,7 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
     let resolved_path = normalize_path(path).unwrap_or_else(|_| path.to_path_buf());
     let skill_dir = resolved_path.parent().unwrap_or_else(|| Path::new("."));
     let resources = parse_skill_resources(parsed.resources, skill_dir)?;
-    let commands = parse_skill_commands(parsed.commands, skill_dir, &resources)?;
+    let commands = parse_skill_commands(parsed.commands, skill_dir, scope, &resources)?;
     let workflow_defaults = parse_workflow_defaults(parsed.workflow_defaults)?;
     let policy = parsed
         .policy
@@ -551,6 +564,7 @@ fn parse_skill_resources(
 fn parse_skill_commands(
     commands: Vec<SkillFrontmatterCommand>,
     skill_dir: &Path,
+    scope: SkillScope,
     declared_resources: &[SkillResource],
 ) -> Result<Vec<SkillCommand>, SkillParseError> {
     if commands.len() > MAX_STRUCTURED_ITEMS_PER_SKILL {
@@ -566,30 +580,19 @@ fn parse_skill_commands(
         validate_field(&name, MAX_STRUCTURED_ID_LEN, "commands.name")?;
         let purpose = sanitize_single_line(&command.purpose);
         validate_field(&purpose, MAX_STRUCTURED_PURPOSE_LEN, "commands.purpose")?;
-        let resolved_resource_path = resolve_skill_relative_path(skill_dir, command.resource_path.clone());
-
-        let declared_resource = declared_resources
-            .iter()
-            .find(|r| r.path == resolved_resource_path);
-        let Some(declared_resource) = declared_resource else {
-            return Err(SkillParseError::InvalidField {
-                field: "commands.resource_path",
-                reason: format!(
-                    "command '{}' references resource_path '{}' which is not declared in the resources section",
-                    name, command.resource_path.display()
-                ),
-            });
+        let source = match command.source {
+            SkillFrontmatterCommandSource::Skill => SkillCommandSource::Skill,
+            SkillFrontmatterCommandSource::Repo => SkillCommandSource::Repo,
+            SkillFrontmatterCommandSource::External => SkillCommandSource::External,
         };
-
-        if !declared_resource.path.is_file() {
-            return Err(SkillParseError::InvalidField {
-                field: "commands.resource_path",
-                reason: format!(
-                    "command '{}' references resource_path '{}' which does not exist as a file",
-                    name, command.resource_path.display()
-                ),
-            });
-        }
+        let resource_path = parse_command_resource_path(
+            &name,
+            source,
+            scope,
+            command.resource_path,
+            skill_dir,
+            declared_resources,
+        )?;
 
         let example_argv = if command.example_argv.is_empty() {
             Vec::new()
@@ -599,12 +602,84 @@ fn parse_skill_commands(
 
         parsed.push(SkillCommand {
             name,
-            resource_path: resolved_resource_path,
+            source,
+            resource_path,
             example_argv,
             purpose,
         });
     }
     Ok(parsed)
+}
+
+fn parse_command_resource_path(
+    name: &str,
+    source: SkillCommandSource,
+    scope: SkillScope,
+    resource_path: Option<PathBuf>,
+    skill_dir: &Path,
+    declared_resources: &[SkillResource],
+) -> Result<Option<PathBuf>, SkillParseError> {
+    match source {
+        SkillCommandSource::Skill => {
+            let Some(resource_path) = resource_path else {
+                return Err(SkillParseError::MissingField("commands.resource_path"));
+            };
+            let resolved_resource_path = resolve_skill_relative_path(skill_dir, resource_path.clone());
+
+            let declared_resource = declared_resources
+                .iter()
+                .find(|r| r.path == resolved_resource_path);
+            let Some(declared_resource) = declared_resource else {
+                return Err(SkillParseError::InvalidField {
+                    field: "commands.resource_path",
+                    reason: format!(
+                        "command '{}' references resource_path '{}' which is not declared in the resources section",
+                        name, resource_path.display()
+                    ),
+                });
+            };
+
+            if !declared_resource.path.is_file() {
+                return Err(SkillParseError::InvalidField {
+                    field: "commands.resource_path",
+                    reason: format!(
+                        "command '{}' references resource_path '{}' which does not exist as a file",
+                        name, resource_path.display()
+                    ),
+                });
+            }
+
+            Ok(Some(resolved_resource_path))
+        }
+        SkillCommandSource::Repo => {
+            if scope != SkillScope::Repo {
+                return Err(SkillParseError::InvalidField {
+                    field: "commands.source",
+                    reason: format!("command '{name}' uses source repo outside a repo skill"),
+                });
+            }
+            if resource_path.is_some() {
+                return Err(SkillParseError::InvalidField {
+                    field: "commands.resource_path",
+                    reason: format!(
+                        "command '{name}' with source repo or external must not declare resource_path"
+                    ),
+                });
+            }
+            Ok(None)
+        }
+        SkillCommandSource::External => {
+            if resource_path.is_some() {
+                return Err(SkillParseError::InvalidField {
+                    field: "commands.resource_path",
+                    reason: format!(
+                        "command '{name}' with source repo or external must not declare resource_path"
+                    ),
+                });
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn parse_optional_text(
@@ -1179,6 +1254,44 @@ workflow_defaults:
     }
 
     #[test]
+    fn repo_commands_require_repo_scope() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: bad
+description: Bad command source
+commands:
+  - name: bad-repo-command
+    source: repo
+    example_argv: ["./scripts/helper.sh"]
+    purpose: Uses repo command source outside repo scope.
+---
+
+# bad
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("uses source repo outside a repo skill"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[test]
     fn loads_structured_skill_workflow_fields_from_frontmatter() {
         let skills_root = tempfile::tempdir().expect("tempdir");
         let skill_path = write_structured_skill_at(skills_root.path());
@@ -1213,9 +1326,10 @@ workflow_defaults:
 
         assert_eq!(skill.commands.len(), 2);
         assert_eq!(skill.commands[0].name, "create-plan");
+        assert_eq!(skill.commands[0].source, SkillCommandSource::Skill);
         assert_eq!(
-            skill.commands[0].resource_path,
-            normalized(&skill_path).parent().unwrap().join("scripts/create_plan.py")
+            skill.commands[0].resource_path.as_deref(),
+            Some(normalized(&skill_path).parent().unwrap().join("scripts/create_plan.py").as_path())
         );
         assert_eq!(
             skill.commands[0].example_argv,
@@ -1224,9 +1338,10 @@ workflow_defaults:
         assert_eq!(skill.commands[0].purpose, "Create a saved plan.");
 
         assert_eq!(skill.commands[1].name, "list-plans");
+        assert_eq!(skill.commands[1].source, SkillCommandSource::Skill);
         assert_eq!(
-            skill.commands[1].resource_path,
-            normalized(&skill_path).parent().unwrap().join("scripts/list_plans.py")
+            skill.commands[1].resource_path.as_deref(),
+            Some(normalized(&skill_path).parent().unwrap().join("scripts/list_plans.py").as_path())
         );
         assert_eq!(
             skill.commands[1].example_argv,
@@ -1319,6 +1434,91 @@ commands:
             outcome.errors[0]
                 .message
                 .contains("does not exist as a file"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[test]
+    fn repo_and_external_commands_do_not_require_skill_resources() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("remote-tests");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: remote-tests
+description: Run remote tests
+commands:
+  - name: build-remote-env
+    source: repo
+    example_argv: ["./scripts/test-remote-env.sh"]
+    purpose: Build the remote test executor environment.
+  - name: list-devboxes
+    source: external
+    example_argv: ["applied_devbox", "ls"]
+    purpose: List available devboxes.
+---
+
+# remote-tests
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::Repo,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        let skill = outcome.skills.first().expect("skill");
+        assert_eq!(skill.commands.len(), 2);
+        assert_eq!(skill.commands[0].source, SkillCommandSource::Repo);
+        assert_eq!(skill.commands[0].resource_path, None);
+        assert_eq!(skill.commands[0].example_argv, ["./scripts/test-remote-env.sh"]);
+        assert_eq!(skill.commands[1].source, SkillCommandSource::External);
+        assert_eq!(skill.commands[1].resource_path, None);
+        assert_eq!(skill.commands[1].example_argv, ["applied_devbox", "ls"]);
+    }
+
+    #[test]
+    fn repo_and_external_commands_must_not_declare_resource_path() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: bad
+description: Bad command source
+commands:
+  - name: bad-repo-command
+    source: repo
+    resource_path: scripts/helper.sh
+    example_argv: ["./scripts/helper.sh"]
+    purpose: Mixes command source fields.
+---
+
+# bad
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::Repo,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("must not declare resource_path"),
             "unexpected error: {}",
             outcome.errors[0].message
         );
@@ -1938,7 +2138,8 @@ Plan skill body
 
         assert_eq!(skill.commands.len(), 1);
         assert_eq!(skill.commands[0].name, "create-plan");
-        assert_eq!(skill.commands[0].resource_path, normalized(&skill_dir.join("create_plan.py")));
+        assert_eq!(skill.commands[0].source, SkillCommandSource::Skill);
+        assert_eq!(skill.commands[0].resource_path.as_deref(), Some(normalized(&skill_dir.join("create_plan.py")).as_path()));
         assert_eq!(skill.commands[0].example_argv, vec!["python", "create_plan.py", "--name"]);
         assert_eq!(skill.commands[0].purpose, "Create a plan file");
     }

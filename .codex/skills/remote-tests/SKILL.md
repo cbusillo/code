@@ -1,6 +1,26 @@
 ---
 name: remote-tests
 description: How to run tests using remote executor.
+commands:
+  - name: build-remote-env
+    source: repo
+    example_argv: ["./scripts/test-remote-env.sh"]
+    purpose: Build and initialize the Docker container used by remote executor tests.
+  - name: list-devboxes
+    source: external
+    example_argv: ["applied_devbox", "ls"]
+    purpose: List available devboxes before selecting one with codex in the name.
+  - name: connect-devbox
+    source: external
+    example_argv: ["ssh", "<devbox_name>"]
+    purpose: Connect to the selected Linux devbox.
+workflow_defaults:
+  - name: remote_env
+    value: CODEX_TEST_REMOTE_ENV
+    description: Set when integration tests should use a remote executor.
+  - name: remote_checkout
+    value: ~/code/codex
+    description: Reuse the devbox checkout and keep SHA and modified files in sync.
 ---
 
 Some codex integration tests support a running against a remote executor.
