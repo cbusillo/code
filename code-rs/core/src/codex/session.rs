@@ -171,6 +171,42 @@ pub(super) struct State {
     pub(super) last_turn_started_at: Option<Instant>,
     pub(super) last_turn_completed_at: Option<Instant>,
     pub(super) last_turn_prompt_counts: Option<TurnPromptCounts>,
+    pub(super) active_session_notice_state: ActiveSessionNoticeState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ActiveSessionNoticeState {
+    pub(super) context_generation: u64,
+    pub(super) last_emitted: Option<ActiveSessionNoticeEmission>,
+}
+
+impl ActiveSessionNoticeState {
+    pub(super) fn should_emit(&mut self, fingerprint: &str, submission_id: &str) -> bool {
+        let should_emit = self.last_emitted.as_ref().is_none_or(|last| {
+            last.fingerprint != fingerprint
+                || last.context_generation != self.context_generation
+                || last.submission_id != submission_id
+        });
+        if should_emit {
+            self.last_emitted = Some(ActiveSessionNoticeEmission {
+                fingerprint: fingerprint.to_string(),
+                context_generation: self.context_generation,
+                submission_id: submission_id.to_string(),
+            });
+        }
+        should_emit
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.last_emitted = None;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ActiveSessionNoticeEmission {
+    pub(super) fingerprint: String,
+    pub(super) context_generation: u64,
+    pub(super) submission_id: String,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -332,6 +368,7 @@ pub(super) fn is_connectivity_error(err: &CodexErr) -> bool {
 mod tests {
     use super::is_connectivity_error;
     use super::{
+        ActiveSessionNoticeState,
         ApprovedCommandMatchKind,
         ApprovedCommandPattern,
         FollowUpTurnAction,
@@ -424,6 +461,39 @@ mod tests {
 
         assert!(pattern.matches(&["git status --short".to_string()]));
     }
+
+    #[test]
+    fn active_session_notice_state_emits_once_per_generation() {
+        let mut state = ActiveSessionNoticeState::default();
+        assert!(state.should_emit("pid-1", "turn-1"));
+        assert!(!state.should_emit("pid-1", "turn-1"));
+        assert!(state.should_emit("pid-1", "turn-2"));
+        assert!(!state.should_emit("pid-1", "turn-2"));
+
+        state.context_generation = state.context_generation.saturating_add(1);
+        assert!(state.should_emit("pid-1", "turn-2"));
+        assert!(state.should_emit("pid-2", "turn-2"));
+
+        state.clear();
+        assert!(state.should_emit("pid-2", "turn-2"));
+    }
+
+    #[test]
+    fn partial_clone_preserves_active_session_notice_state() {
+        let mut state = State::default();
+        assert!(state
+            .active_session_notice_state
+            .should_emit("pid-1", "turn-1"));
+
+        let mut cloned = state.partial_clone();
+
+        assert!(!cloned
+            .active_session_notice_state
+            .should_emit("pid-1", "turn-1"));
+        assert!(cloned
+            .active_session_notice_state
+            .should_emit("pid-1", "turn-2"));
+    }
 }
 
 #[derive(Debug)]
@@ -460,6 +530,7 @@ pub(crate) struct Session {
     pub(super) base_instructions: Option<String>,
     pub(super) user_instructions: Option<String>,
     pub(super) demo_developer_message: Option<String>,
+    pub(super) active_session_model_notice: Option<String>,
     pub(super) compact_prompt_override: Option<String>,
     pub(super) approval_policy: AskForApproval,
     pub(super) sandbox_policy: SandboxPolicy,
@@ -1105,6 +1176,29 @@ impl Session {
     pub fn replace_history(&self, items: Vec<ResponseItem>) {
         let mut state = self.state.lock().unwrap();
         state.history.replace(items);
+        state.active_session_notice_state.context_generation = state
+            .active_session_notice_state
+            .context_generation
+            .saturating_add(1);
+    }
+
+    pub(super) fn active_session_notice_should_emit(
+        &self,
+        fingerprint: &str,
+        submission_id: &str,
+    ) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state
+            .active_session_notice_state
+            .should_emit(fingerprint, submission_id)
+    }
+
+    pub(super) fn active_session_notice_clear(&self) {
+        self.state
+            .lock()
+            .unwrap()
+            .active_session_notice_state
+            .clear();
     }
 
     pub fn remove_task(&self, sub_id: &str) {
@@ -1348,6 +1442,7 @@ impl Session {
             base_instructions: self.base_instructions.clone(),
             user_instructions: self.user_instructions.clone(),
             demo_developer_message: self.demo_developer_message.clone(),
+            active_session_model_notice: self.active_session_model_notice.clone(),
             compact_prompt_override: self.compact_prompt_override.clone(),
             approval_policy: self.approval_policy,
             sandbox_policy: self.sandbox_policy.clone(),
@@ -2650,6 +2745,7 @@ impl State {
             environment_context_seq: self.environment_context_seq,
             last_environment_snapshot: self.last_environment_snapshot.clone(),
             context_stream_ids: self.context_stream_ids.clone(),
+            active_session_notice_state: self.active_session_notice_state.clone(),
             ..Default::default()
         }
     }

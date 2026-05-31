@@ -561,10 +561,9 @@ async fn run_compact_task_inner_inline(
     let initial_context = sess.build_initial_context(turn_context.as_ref());
     let new_history = build_compacted_history(initial_context, &snippets, &summary_text);
 
+    sess.replace_history(new_history.clone());
     {
         let mut state = sess.state.lock().unwrap();
-        state.history = crate::conversation_history::ConversationHistory::new();
-        state.history.record_items(new_history.iter());
         state.token_usage_info = None;
     }
 

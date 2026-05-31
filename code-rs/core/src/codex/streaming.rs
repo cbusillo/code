@@ -728,6 +728,13 @@ pub(super) async fn submission_loop(
                     .and_then(|registration| {
                         crate::active_sessions::active_session_warning(&registration.conflicts)
                     });
+                let active_session_model_notice = active_session_registration
+                    .as_ref()
+                    .and_then(|registration| {
+                        crate::active_sessions::active_session_model_notice(
+                            &registration.conflicts,
+                        )
+                    });
                 let active_session_guard =
                     active_session_registration.map(|registration| registration.guard);
                 let mut tools_config = ToolsConfig::new(
@@ -822,6 +829,7 @@ pub(super) async fn submission_loop(
                     user_instructions: effective_user_instructions.clone(),
                     base_instructions,
                     demo_developer_message: demo_developer_message.clone(),
+                    active_session_model_notice,
                     compact_prompt_override: config.compact_prompt_override.clone(),
                     approval_policy,
                     sandbox_policy,
@@ -1519,6 +1527,52 @@ fn build_timeboxed_review_message(base: Option<String>) -> Option<String> {
     message
 }
 
+fn build_prepend_developer_messages(
+    demo_developer_message: Option<&String>,
+    active_session_model_notice: Option<&String>,
+) -> Vec<String> {
+    let mut messages: Vec<String> = demo_developer_message.cloned().into_iter().collect();
+    if let Some(notice) = active_session_model_notice {
+        messages.push(notice.clone());
+    }
+    messages
+}
+
+fn active_session_model_notice_for_request(
+    sess: &Session,
+    submission_id: &str,
+    fallback: Option<&String>,
+) -> Option<String> {
+    if !matches!(
+        sess.sandbox_policy,
+        SandboxPolicy::WorkspaceWrite { .. } | SandboxPolicy::DangerFullAccess
+    ) {
+        return None;
+    }
+
+    match crate::active_sessions::active_session_model_notice_for_current(
+        sess.client.code_home(),
+        &sess.cwd,
+        sess.session_uuid(),
+    ) {
+        Ok(Some(notice)) => {
+            if sess.active_session_notice_should_emit(&notice.fingerprint, submission_id) {
+                Some(notice.message)
+            } else {
+                None
+            }
+        }
+        Ok(None) => {
+            sess.active_session_notice_clear();
+            None
+        }
+        Err(err) => {
+            warn!("failed to refresh active session model notice: {err}");
+            fallback.cloned()
+        }
+    }
+}
+
 async fn spawn_review_thread(
     sess: Arc<Session>,
     config: Arc<Config>,
@@ -1592,6 +1646,7 @@ async fn spawn_review_thread(
         base_instructions: Some(REVIEW_PROMPT.to_string()),
         user_instructions: None,
         demo_developer_message: review_demo_message,
+        active_session_model_notice: parent_turn_context.active_session_model_notice.clone(),
         compact_prompt_override: parent_turn_context.compact_prompt_override.clone(),
         approval_policy: parent_turn_context.approval_policy,
         sandbox_policy: parent_turn_context.sandbox_policy.clone(),
@@ -3032,11 +3087,15 @@ async fn run_turn(
         // Build status items (screenshots, system status) fresh for each attempt
         let status_items = build_turn_status_items(sess).await;
 
-        let mut prepend_developer_messages: Vec<String> = tc
-            .demo_developer_message
-            .clone()
-            .into_iter()
-            .collect();
+        let mut prepend_developer_messages = build_prepend_developer_messages(
+            tc.demo_developer_message.as_ref(),
+            active_session_model_notice_for_request(
+                sess,
+                &sub_id,
+                tc.active_session_model_notice.as_ref(),
+            )
+            .as_ref(),
+        );
         if should_inject_html_sanitizer_guardrails(&attempt_input) {
             prepend_developer_messages.push(HTML_SANITIZER_GUARDRAILS_MESSAGE.to_string());
         }
@@ -14381,6 +14440,7 @@ mod tests {
         AUTO_CONTEXT_JUDGE_FALLBACK_MODEL,
         AUTO_CONTEXT_JUDGE_PRIMARY_MODEL,
         auto_context_judge_models,
+        build_prepend_developer_messages,
         choose_larger_context_model_from_candidates,
         custom_tool_event_result_text,
         ContextFallbackCandidate,
@@ -14424,6 +14484,16 @@ mod tests {
                 .join("session____1")
                 .join("___ig___123.png")
         );
+    }
+
+    #[test]
+    fn active_session_notice_is_prepended_after_demo_guidance() {
+        let demo = "demo guidance".to_string();
+        let notice = "CONCURRENT CHECKOUT SESSION DETECTED".to_string();
+
+        let messages = build_prepend_developer_messages(Some(&demo), Some(&notice));
+
+        assert_eq!(messages, vec![demo, notice]);
     }
 
     #[tokio::test]
