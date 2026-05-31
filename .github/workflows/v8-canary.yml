@@ -3,7 +3,7 @@ name: v8-canary
 on:
   workflow_dispatch:
 
-# This fork relies on the Release workflow for post-push validation.
+# This fork relies on the Release Intent workflow for post-push validation.
 # Keep v8-canary available for manual runs, but suppress inherited auto-triggers.
 
 concurrency:
