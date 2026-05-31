@@ -1,6 +1,39 @@
 ---
 name: babysit-pr
 description: Babysit a GitHub pull request after creation by continuously polling review comments, CI checks/workflow runs, and mergeability state until the PR is merged/closed or user help is required. Diagnose failures, retry likely flaky failures up to 3 times, auto-fix/push branch-related issues when appropriate, and keep watching open PRs so fresh review feedback is surfaced promptly. Use when the user asks Codex to monitor a PR, watch CI, handle review comments, or keep an eye on failures and feedback on an open PR.
+resources:
+  - path: scripts/gh_pr_watch.py
+    kind: script
+    description: GitHub PR watcher that normalizes CI, review, mergeability, and retry state.
+  - path: references/heuristics.md
+    kind: reference
+    description: CI failure classification checklist for PR babysitting decisions.
+  - path: references/github-api-notes.md
+    kind: reference
+    description: GitHub API notes for PR, review, and Actions watcher behavior.
+commands:
+  - name: pr-snapshot
+    resource_path: scripts/gh_pr_watch.py
+    example_argv: ["python3", ".codex/skills/babysit-pr/scripts/gh_pr_watch.py", "--pr", "auto", "--once"]
+    purpose: Emit one JSON snapshot of PR review, CI, and mergeability state.
+  - name: pr-watch
+    resource_path: scripts/gh_pr_watch.py
+    example_argv: ["python3", ".codex/skills/babysit-pr/scripts/gh_pr_watch.py", "--pr", "auto", "--watch"]
+    purpose: Continuously emit JSONL snapshots while babysitting a PR.
+  - name: retry-failed-checks
+    resource_path: scripts/gh_pr_watch.py
+    example_argv: ["python3", ".codex/skills/babysit-pr/scripts/gh_pr_watch.py", "--pr", "auto", "--retry-failed-now"]
+    purpose: Rerun failed jobs for the current PR when watcher policy recommends it.
+workflow_defaults:
+  - name: pr_target
+    value: auto
+    description: Infer the PR from the current branch unless the user provides a number or URL.
+  - name: max_flaky_retries
+    value: "3"
+    description: Stop for user help after three unrelated/flaky rerun cycles per head SHA.
+  - name: poll_cadence
+    value: 1 minute while babysitting
+    description: Keep polling until the PR closes or a user-help blocker appears.
 ---
 
 # PR Babysitter
