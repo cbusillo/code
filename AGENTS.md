@@ -99,6 +99,16 @@ Examples:
   fetches `upstream/main`, merges it into the current Every Code branch, replays
   any commits listed in `scripts/local/upstream-picks.txt`, then rebuilds the
   release binary.
+- Use `just local-upstream-cursors` to inspect the durable upstream review
+  cursors in `.github/upstream-cursors.json`. `lastExamined` means the newest
+  upstream commit whose delta has been reviewed or intentionally skipped;
+  `lastImported` means the newest upstream commit actually merged, cherry-picked,
+  or manually ported into Every Code. Do not infer either value from
+  `git merge-base` alone.
+- Advance `.github/upstream-cursors.json` only after reviewing the new range for
+  that upstream. Keep cursor changes in the PR that performs the review/import
+  so future sessions compare from the recorded `lastExamined` SHA instead of
+  rereading older commits.
 - Commits already on the product branch persist automatically across future
   upstream imports. They do not need to be duplicated in
   `scripts/local/upstream-picks.txt`.

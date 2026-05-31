@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "productBranch": "main",
+  "updatedAt": "2026-05-31T13:00:00Z",
+  "upstreams": {
+    "justEveryCode": {
+      "remote": "upstream",
+      "branch": "main",
+      "repository": "just-every/code",
+      "role": "fork upstream/import source",
+      "lastExamined": {
+        "commit": "7065f1689ebf85e40323cad6c7b1e67de8fed015",
+        "examinedAt": "2026-05-31T13:00:00Z",
+        "basis": "reviewed for import candidates"
+      },
+      "lastImported": {
+        "commit": null,
+        "importedAt": null,
+        "method": null,
+        "productCommit": null
+      }
+    },
+    "openaiCodex": {
+      "remote": "openai",
+      "branch": "main",
+      "repository": "openai/codex",
+      "role": "original upstream/provenance source",
+      "lastExamined": {
+        "commit": "cdde711fac008cd4e1115603ead713cf23b1a580",
+        "examinedAt": "2026-05-31T13:00:00Z",
+        "basis": "reviewed direct upstream provenance delta"
+      },
+      "lastImported": {
+        "commit": null,
+        "importedAt": null,
+        "method": null,
+        "productCommit": null
+      }
+    }
+  }
+}

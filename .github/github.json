@@ -3,6 +3,11 @@
   "projectType": "every-code-product",
   "upstreamForkBaseBranch": "fork-main",
   "productBranch": "main",
+  "upstreamReviewTracking": {
+    "cursorFile": ".github/upstream-cursors.json",
+    "policyDoc": "docs/upstream-import-policy.md",
+    "statusCommand": "just local-upstream-cursors"
+  },
   "docs": {
     "overview": "README.md",
     "agentGuide": "AGENTS.md",
@@ -29,6 +34,7 @@
     },
     "scripts": {
       "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch main",
+      "upstreamCursors": "just local-upstream-cursors",
       "upstreamImport": "just local-upstream-import",
       "localReleaseNotes": "just local-release-notes"
     },
@@ -114,7 +120,8 @@
       "GitHub default branch changes",
       "Every Code default branch changes",
       "release workflow changes",
-      "upstream mirror policy changes"
+      "upstream mirror policy changes",
+      "upstream review cursor changes"
     ]
   }
 }

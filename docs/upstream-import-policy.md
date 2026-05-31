@@ -115,6 +115,40 @@ source unless the conflict touches one of those owned areas. Keep
 `scripts/local/upstream-picks.txt` empty unless a patch intentionally lives
 outside the product branch and must be replayed.
 
+### Upstream Review Cursors
+
+Every Code is a long-running overlay product with two upstream references. Track
+where review left off in `.github/upstream-cursors.json`, and inspect that state
+with:
+
+```sh
+just local-upstream-cursors
+```
+
+The cursor file records `lastExamined` and `lastImported` separately for each
+upstream source:
+
+- `lastExamined` is the newest upstream commit whose delta has been reviewed or
+  intentionally skipped. This is the cursor future sessions should compare from
+  to avoid rereading old upstream commits.
+- `lastImported` is the newest upstream commit actually merged, cherry-picked, or
+  manually ported into Every Code. It can be older than, newer than, or absent
+  relative to `lastExamined`, especially for direct `openai/codex` provenance
+  reviews.
+
+Do not infer either value from `git merge-base`. Merge bases are useful branch
+health diagnostics, but they do not say what a human or agent already examined.
+
+When reviewing upstream without importing, advance only `lastExamined` for that
+source after the review is complete. When importing or manually porting upstream
+work, update `lastImported` as well and include the product commit that contains
+the port. Keep cursor changes in the same PR as the review/import so the next
+session can start from the recorded SHA.
+
+Fetch branch refs without tags when checking cursors. Upstream and Every Code
+share `v*` tag names, and tag fetches can collide even when branch refs are
+healthy.
+
 ## Release Cadence
 
 Cut an Every Code release after every successful upstream import or local hotfix

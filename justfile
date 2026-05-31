@@ -76,6 +76,10 @@ local-upstream-import:
     ./scripts/local/update-from-upstream.sh
 
 [no-cd]
+local-upstream-cursors *args:
+    ./scripts/local/upstream-cursors.sh "$@"
+
+[no-cd]
 local-release-notes:
     ./scripts/local/release-notes.sh
 
