@@ -80,7 +80,8 @@
       "readyStateIsMergeIntent": false,
       "fixTrainSettling": "Auto-review and related fixes can arrive after CI turns green; treat green and mergeable PRs as ready for a merge decision, not automatic merge intent."
     },
-    "watchSkill": "babysit-pr"
+    "watchSkill": "babysit-pr",
+    "watchSkillSource": "shared-codex-skills"
   },
   "release": {
     "intent": {
