@@ -38,9 +38,6 @@ use std::fs::OpenOptions;
 use std::io;
 use std::backtrace::Backtrace;
 use std::path::{Path, PathBuf};
-use code_core::review_coord::{
-    bump_snapshot_epoch, clear_stale_lock_if_dead, read_lock_info, try_acquire_lock,
-};
 use std::sync::Once;
 use std::sync::OnceLock;
 use std::sync::Arc;
@@ -885,7 +882,7 @@ fn run_ratatui_app(
     restore();
 
     // After restoring the terminal, clean up any worktrees created by this process.
-    cleanup_session_worktrees_and_print();
+    cleanup_session_worktrees_and_print(&config.code_home);
     // Mark the end of the recorded session.
     session_log::log_session_end();
     if let Some(summary) = timing_summary {
@@ -929,96 +926,26 @@ fn print_timing_summary(summary: &str) {
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
-fn cleanup_session_worktrees_and_print() {
-    let pid = std::process::id();
-    let home = match std::env::var_os("HOME") { Some(h) => std::path::PathBuf::from(h), None => return };
-    let session_dir = home.join(".code").join("working").join("_session");
-    let file = session_dir.join(format!("pid-{}.txt", pid));
-    reclaim_worktrees_from_file(&file, "current session");
-}
-
-fn reclaim_worktrees_from_file(path: &std::path::Path, label: &str) {
-    use std::process::Command;
-
-    let Ok(data) = std::fs::read_to_string(path) else {
-        let _ = std::fs::remove_file(path);
-        return;
-    };
-
-    let mut entries: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    for line in data.lines() {
-        if line.trim().is_empty() { continue; }
-        if let Some((root_s, path_s)) = line.split_once('\t') {
-            entries.push((std::path::PathBuf::from(root_s), std::path::PathBuf::from(path_s)));
-        }
-    }
-
-    use std::collections::HashSet;
-    let mut seen = HashSet::new();
-    entries.retain(|(_, p)| seen.insert(p.clone()));
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-
-    eprintln!("Cleaning remaining worktrees for {} ({}).", label, entries.len());
-    let current_pid = std::process::id();
-    for (git_root, worktree) in entries {
-        let Some(wt_str) = worktree.to_str() else { continue };
-
-        // Retry a few times if the global review lock is busy.
-        let mut acquired = None;
-        let mut lock_info = None;
-        for attempt in 0..3 {
-            acquired = try_acquire_lock("tui-worktree-cleanup", &git_root)
-                .ok()
-                .flatten();
-            if acquired.is_some() {
-                break;
-            }
-
-            // If the lock holder died, clear it and retry immediately.
-            if let Ok(true) = clear_stale_lock_if_dead(Some(&git_root)) {
-                continue;
-            }
-
-            // Remember who is holding the lock for diagnostics and potential self-cleanup.
-            lock_info = read_lock_info(Some(&git_root));
-            if matches!(lock_info.as_ref(), Some(info) if info.pid == current_pid) {
-                // Our own process still holds the lock (e.g., background task still winding down).
-                // Proceed without a guard so we still reclaim our worktrees on shutdown.
-                break;
-            }
-
-            std::thread::sleep(std::time::Duration::from_millis(150 * (attempt + 1)));
-        }
-
-        let lock_is_self = matches!(lock_info.as_ref(), Some(info) if info.pid == current_pid);
-
-        if acquired.is_none() && !lock_is_self {
-            let detail = lock_info
-                .as_ref()
-                .map(|info| format!("pid {} (intent: {})", info.pid, info.intent))
-                .unwrap_or_else(|| "unknown holder".to_string());
+fn cleanup_session_worktrees_and_print(code_home: &Path) {
+    match code_core::cleanup_current_session_worktrees(code_home) {
+        Ok(outcome) if outcome.worktrees_removed > 0 => {
             eprintln!(
-                "Deferring cleanup of {} — cleanup lock busy ({detail}); will retry on next shutdown",
-                worktree.display()
+                "Cleaned {} worktree(s) from this session, reclaiming {} bytes.",
+                outcome.worktrees_removed,
+                outcome.worktree_bytes_reclaimed
             );
-            continue;
         }
-
-        if let Ok(out) = Command::new("git")
-            .current_dir(&git_root)
-            .args(["worktree", "remove", wt_str, "--force"])
-            .output()
-        {
-            if out.status.success() {
-                bump_snapshot_epoch();
-            }
+        Ok(outcome) if outcome.errors > 0 => {
+            eprintln!(
+                "Worktree cleanup completed with {} error(s); stale entries may be retried by housekeeping.",
+                outcome.errors
+            );
         }
-        let _ = std::fs::remove_dir_all(&worktree);
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("Worktree cleanup failed: {err}");
+        }
     }
-    let _ = std::fs::remove_file(path);
 }
 
 fn maybe_apply_terminal_theme_detection(config: &mut Config, theme_configured_explicitly: bool) {

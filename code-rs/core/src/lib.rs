@@ -147,6 +147,7 @@ pub use agent_tool::external_agent_command_exists;
 pub use agent_tool::smoke_test_agent_blocking;
 pub use agent_tool::split_command_and_args;
 pub use safety::get_platform_sandbox;
+pub use housekeeping::cleanup_current_session_worktrees;
 pub use housekeeping::run_housekeeping_if_due;
 pub use housekeeping::CleanupOutcome;
 // Use our internal protocol module for crate-internal types and helpers.

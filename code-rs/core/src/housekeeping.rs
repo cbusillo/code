@@ -15,6 +15,8 @@ use tracing::{debug, info, warn};
 const DEFAULT_SESSION_RETENTION_DAYS: i64 = 7;
 const DEFAULT_WORKTREE_RETENTION_DAYS: i64 = 3;
 const DEFAULT_MIN_INTERVAL_HOURS: i64 = 6;
+const DEFAULT_WORKTREE_WARN_COUNT: usize = 20;
+const DEFAULT_WORKTREE_WARN_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const LOCK_FILE_NAME: &str = "cleanup.lock";
 const STATE_FILE_NAME: &str = "cleanup-state.json";
 
@@ -27,6 +29,10 @@ pub struct CleanupOutcome {
     pub worktree_files_removed: usize,
     pub worktree_bytes_reclaimed: u64,
     pub worktrees_skipped_active: usize,
+    pub worktrees_skipped_dirty: usize,
+    pub worktrees_remaining: usize,
+    pub worktree_bytes_remaining: u64,
+    pub worktree_health_warnings: usize,
     pub errors: usize,
 }
 
@@ -35,6 +41,8 @@ struct HousekeepingConfig {
     session_retention_days: Option<i64>,
     worktree_retention_days: Option<i64>,
     min_interval_hours: i64,
+    worktree_warn_count: usize,
+    worktree_warn_bytes: u64,
     disabled: bool,
 }
 
@@ -56,14 +64,32 @@ impl HousekeepingConfig {
             "CODE_CLEANUP_MIN_INTERVAL_HOURS",
             DEFAULT_MIN_INTERVAL_HOURS,
         );
+        let worktree_warn_count = parse_positive_usize_env(
+            "CODE_CLEANUP_WORKTREE_WARN_COUNT",
+            DEFAULT_WORKTREE_WARN_COUNT,
+        );
+        let worktree_warn_bytes = parse_positive_u64_env(
+            "CODE_CLEANUP_WORKTREE_WARN_BYTES",
+            DEFAULT_WORKTREE_WARN_BYTES,
+        );
 
         Self {
             session_retention_days,
             worktree_retention_days,
             min_interval_hours,
+            worktree_warn_count,
+            worktree_warn_bytes,
             disabled,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeHealthWarning {
+    pub managed_worktrees: usize,
+    pub managed_bytes: u64,
+    pub warn_count: usize,
+    pub warn_bytes: u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -143,7 +169,51 @@ pub fn run_housekeeping_if_due(code_home: &Path) -> io::Result<Option<CleanupOut
         debug!("code home housekeeping completed; nothing to prune");
     }
 
+    if outcome.worktree_health_warnings > 0 {
+        warn!(
+            managed_worktrees = outcome.worktrees_remaining,
+            managed_worktree_bytes = outcome.worktree_bytes_remaining,
+            "code home housekeeping detected elevated managed worktree usage"
+        );
+    }
+
     Ok(Some(outcome))
+}
+
+pub fn cleanup_current_session_worktrees(code_home: &Path) -> io::Result<CleanupOutcome> {
+    let mut outcome = CleanupOutcome::default();
+
+    for session_file in current_session_registry_files(code_home) {
+        let entries = read_session_worktree_entries(&session_file)?;
+        if !entries.is_empty() {
+            let stats = reclaim_session_worktree_entries(
+                code_home,
+                &entries,
+                &HashSet::new(),
+                ReclaimReason::CurrentSession,
+            );
+            apply_worktree_stats(&mut outcome, stats);
+        }
+        let _ = fs::remove_file(&session_file);
+    }
+
+    Ok(outcome)
+}
+
+fn current_session_registry_files(code_home: &Path) -> Vec<PathBuf> {
+    let file_name = format!("pid-{}.txt", std::process::id());
+    let mut paths = vec![code_home.join("working").join("_session").join(&file_name)];
+
+    if let Some(default_home) = dirs::home_dir().map(|home| home.join(".code")) {
+        if default_home != code_home {
+            let default_path = default_home.join("working").join("_session").join(file_name);
+            if !paths.contains(&default_path) {
+                paths.push(default_path);
+            }
+        }
+    }
+
+    paths
 }
 
 fn perform_housekeeping(
@@ -168,6 +238,26 @@ fn perform_housekeeping(
             outcome.worktree_files_removed = stats.removed_files;
             outcome.worktree_bytes_reclaimed = stats.reclaimed_bytes;
             outcome.worktrees_skipped_active = stats.skipped_active;
+            outcome.worktrees_skipped_dirty = stats.skipped_dirty;
+            outcome.worktrees_remaining = stats.remaining_worktrees;
+            outcome.worktree_bytes_remaining = stats.remaining_bytes;
+            outcome.worktree_health_warnings = worktree_health_warning(
+                stats.remaining_worktrees,
+                stats.remaining_bytes,
+                config.worktree_warn_count,
+                config.worktree_warn_bytes,
+            )
+            .map(|warning| {
+                warn!(
+                    managed_worktrees = warning.managed_worktrees,
+                    managed_worktree_bytes = warning.managed_bytes,
+                    warn_count = warning.warn_count,
+                    warn_bytes = warning.warn_bytes,
+                    "managed worktree usage exceeds housekeeping health threshold"
+                );
+                1
+            })
+            .unwrap_or(0);
             outcome.errors += stats.errors;
         }
     }
@@ -280,7 +370,15 @@ fn cleanup_worktrees(
         Duration::from_secs(retention_days as u64 * 86_400)
     };
 
-    let active = collect_active_worktrees(&working_root.join("_session"));
+    let session_scan = collect_session_worktrees(&working_root.join("_session"));
+    let active = session_scan.active;
+    let dead_stats = reclaim_session_worktree_entries(
+        code_home,
+        &session_scan.dead_entries,
+        &active,
+        ReclaimReason::DeadSession,
+    );
+    stats.merge(dead_stats);
     let now_system: SystemTime = SystemTime::from(now);
 
     let repo_dirs = list_dir_sorted(&working_root);
@@ -313,6 +411,18 @@ fn cleanup_worktrees(
             let canonical = canonicalize_or_original(&branch_path);
             if active.contains(&canonical) || active.contains(&branch_path) {
                 stats.skipped_active += 1;
+                continue;
+            }
+
+            let canonical = canonicalize_or_original(&branch_path);
+            if stats.skipped_dirty_paths.contains(&canonical) || stats.skipped_dirty_paths.contains(&branch_path) {
+                continue;
+            }
+
+            if worktree_has_uncommitted_changes(&branch_path).unwrap_or(false) {
+                stats.skipped_dirty_paths.insert(canonical);
+                stats.skipped_dirty_paths.insert(branch_path.clone());
+                stats.skipped_dirty += 1;
                 continue;
             }
 
@@ -382,7 +492,203 @@ fn cleanup_worktrees(
         }
     }
 
+    let remaining = scan_managed_worktrees(&working_root);
+    stats.remaining_worktrees = remaining.worktrees;
+    stats.remaining_files = remaining.files;
+    stats.remaining_bytes = remaining.bytes;
+
     Ok(Some(stats))
+}
+
+fn apply_worktree_stats(outcome: &mut CleanupOutcome, stats: WorktreeCleanupStats) {
+    outcome.worktrees_removed += stats.removed_worktrees;
+    outcome.worktree_files_removed += stats.removed_files;
+    outcome.worktree_bytes_reclaimed += stats.reclaimed_bytes;
+    outcome.worktrees_skipped_active += stats.skipped_active;
+    outcome.worktrees_skipped_dirty += stats.skipped_dirty;
+    outcome.errors += stats.errors;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReclaimReason {
+    CurrentSession,
+    DeadSession,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionWorktreeEntry {
+    git_root: PathBuf,
+    worktree_path: PathBuf,
+}
+
+#[derive(Default)]
+struct SessionWorktreeScan {
+    active: HashSet<PathBuf>,
+    dead_entries: Vec<SessionWorktreeEntry>,
+}
+
+fn read_session_worktree_entries(path: &Path) -> io::Result<Vec<SessionWorktreeEntry>> {
+    let data = match fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    Ok(parse_session_worktree_entries(&data))
+}
+
+fn parse_session_worktree_entries(data: &str) -> Vec<SessionWorktreeEntry> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    for line in data.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((root, worktree)) = line.split_once('\t') else {
+            continue;
+        };
+        let git_root = PathBuf::from(root);
+        let worktree_path = PathBuf::from(worktree);
+        if seen.insert(worktree_path.clone()) {
+            entries.push(SessionWorktreeEntry { git_root, worktree_path });
+        }
+    }
+    entries
+}
+
+fn collect_session_worktrees(session_dir: &Path) -> SessionWorktreeScan {
+    let mut scan = SessionWorktreeScan::default();
+    let entries = match fs::read_dir(session_dir) {
+        Ok(entries) => entries,
+        Err(_) => return scan,
+    };
+
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+
+        let file_path = entry.path();
+        let is_active = pid_file_is_active(entry.file_name().as_os_str()).unwrap_or(false);
+        let records = read_session_worktree_entries(&file_path).unwrap_or_default();
+
+        if is_active {
+            for record in records {
+                let canonical = canonicalize_or_original(&record.worktree_path);
+                scan.active.insert(canonical);
+                scan.active.insert(record.worktree_path);
+            }
+        } else {
+            scan.dead_entries.extend(records);
+            let _ = fs::remove_file(&file_path);
+        }
+    }
+
+    scan
+}
+
+fn reclaim_session_worktree_entries(
+    code_home: &Path,
+    entries: &[SessionWorktreeEntry],
+    active: &HashSet<PathBuf>,
+    reason: ReclaimReason,
+) -> WorktreeCleanupStats {
+    let mut stats = WorktreeCleanupStats::default();
+    let session_dir = code_home.join("working").join("_session");
+
+    for entry in entries {
+        let canonical = canonicalize_or_original(&entry.worktree_path);
+        if active.contains(&canonical) || active.contains(&entry.worktree_path) {
+            stats.skipped_active += 1;
+            continue;
+        }
+
+        if matches!(reason, ReclaimReason::DeadSession)
+            && worktree_has_uncommitted_changes(&entry.worktree_path).unwrap_or(false)
+        {
+            stats.skipped_dirty_paths.insert(canonical);
+            stats.skipped_dirty_paths.insert(entry.worktree_path.clone());
+            stats.skipped_dirty += 1;
+            continue;
+        }
+
+        let dir_stats = directory_stats(&entry.worktree_path);
+        remove_worktree_entry(&entry.git_root, &entry.worktree_path, &mut stats);
+        if !entry.worktree_path.exists() {
+            git_worktree::remove_branch_metadata(&entry.worktree_path);
+            purge_session_registry(&session_dir, &entry.worktree_path);
+            stats.removed_worktrees += 1;
+            stats.removed_files += dir_stats.files;
+            stats.reclaimed_bytes += dir_stats.bytes;
+        }
+    }
+
+    stats
+}
+
+fn remove_worktree_entry(git_root: &Path, worktree_path: &Path, stats: &mut WorktreeCleanupStats) {
+    run_git_worktree_remove_from(git_root, worktree_path);
+    match fs::remove_dir_all(worktree_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            stats.errors += 1;
+            warn!("failed to remove session worktree {:?}: {err}", worktree_path);
+        }
+    }
+}
+
+fn worktree_has_uncommitted_changes(worktree_path: &Path) -> io::Result<bool> {
+    let output = std::process::Command::new("git")
+        .current_dir(worktree_path)
+        .args(["status", "--porcelain"])
+        .output()?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+fn scan_managed_worktrees(working_root: &Path) -> ManagedWorktreeStats {
+    let mut stats = ManagedWorktreeStats::default();
+    for repo_entry in list_dir_sorted(working_root) {
+        let name = repo_entry.file_name();
+        if name.to_string_lossy().starts_with('_') {
+            continue;
+        }
+        let branches_dir = repo_entry.path().join("branches");
+        if !branches_dir.is_dir() {
+            continue;
+        }
+        for branch_entry in list_dir_sorted(&branches_dir) {
+            if !branch_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            stats.worktrees += 1;
+            let dir_stats = directory_stats(&branch_entry.path());
+            stats.files += dir_stats.files;
+            stats.bytes += dir_stats.bytes;
+        }
+    }
+    stats
+}
+
+fn worktree_health_warning(
+    managed_worktrees: usize,
+    managed_bytes: u64,
+    warn_count: usize,
+    warn_bytes: u64,
+) -> Option<WorktreeHealthWarning> {
+    if managed_worktrees > warn_count || managed_bytes > warn_bytes {
+        Some(WorktreeHealthWarning {
+            managed_worktrees,
+            managed_bytes,
+            warn_count,
+            warn_bytes,
+        })
+    } else {
+        None
+    }
 }
 
 fn should_prune_worktree_branch(branch_name: &str) -> bool {
@@ -426,6 +732,10 @@ fn run_git_worktree_remove(worktree_path: &Path) {
         return;
     };
 
+    run_git_worktree_remove_from(&repo_root, worktree_path);
+}
+
+fn run_git_worktree_remove_from(repo_root: &Path, worktree_path: &Path) {
     if !repo_root.exists() {
         return;
     }
@@ -436,7 +746,7 @@ fn run_git_worktree_remove(worktree_path: &Path) {
     };
 
     let output = std::process::Command::new("git")
-        .current_dir(&repo_root)
+        .current_dir(repo_root)
         .args(["worktree", "remove", "--force", worktree_str])
         .output();
 
@@ -485,50 +795,6 @@ fn detect_repo_root(worktree_path: &Path) -> Option<PathBuf> {
     }
 
     None
-}
-
-fn collect_active_worktrees(session_dir: &Path) -> HashSet<PathBuf> {
-    let mut set = HashSet::new();
-    let entries = match fs::read_dir(session_dir) {
-        Ok(entries) => entries,
-        Err(_) => return set,
-    };
-
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            continue;
-        }
-
-        let file_path = entry.path();
-        let is_active = pid_file_is_active(entry.file_name().as_os_str()).unwrap_or(false);
-        if !is_active {
-            let _ = fs::remove_file(&file_path);
-            continue;
-        }
-
-        let data = match fs::read_to_string(&file_path) {
-            Ok(data) => data,
-            Err(_) => continue,
-        };
-
-        for line in data.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let worktree = match line.split_once('\t') {
-                Some((_, path)) => path,
-                None => continue,
-            };
-            let path = PathBuf::from(worktree);
-            if let Ok(canon) = path.canonicalize() {
-                set.insert(canon);
-            } else {
-                set.insert(path);
-            }
-        }
-    }
-
-    set
 }
 
 fn purge_session_registry(session_dir: &Path, worktree_path: &Path) {
@@ -594,7 +860,31 @@ struct WorktreeCleanupStats {
     removed_files: usize,
     reclaimed_bytes: u64,
     skipped_active: usize,
+    skipped_dirty: usize,
+    skipped_dirty_paths: HashSet<PathBuf>,
+    remaining_worktrees: usize,
+    remaining_files: usize,
+    remaining_bytes: u64,
     errors: usize,
+}
+
+impl WorktreeCleanupStats {
+    fn merge(&mut self, other: Self) {
+        self.removed_worktrees += other.removed_worktrees;
+        self.removed_files += other.removed_files;
+        self.reclaimed_bytes += other.reclaimed_bytes;
+        self.skipped_active += other.skipped_active;
+        self.skipped_dirty += other.skipped_dirty;
+        self.skipped_dirty_paths.extend(other.skipped_dirty_paths);
+        self.errors += other.errors;
+    }
+}
+
+#[derive(Default)]
+struct ManagedWorktreeStats {
+    worktrees: usize,
+    files: usize,
+    bytes: u64,
 }
 
 fn directory_stats(path: &Path) -> DirStats {
@@ -747,6 +1037,52 @@ fn parse_positive_i64_env(var: &str, default: i64) -> i64 {
     }
 }
 
+fn parse_positive_usize_env(var: &str, default: usize) -> usize {
+    match std::env::var(var) {
+        Ok(value) => match value.trim().parse::<usize>() {
+            Ok(num) if num > 0 => num,
+            Ok(_) => default,
+            Err(_) => {
+                warn!(
+                    "invalid value for {} ({}); falling back to default {}",
+                    var,
+                    value,
+                    default
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(err) => {
+            warn!("failed to read {}: {err}; using default {}", var, default);
+            default
+        }
+    }
+}
+
+fn parse_positive_u64_env(var: &str, default: u64) -> u64 {
+    match std::env::var(var) {
+        Ok(value) => match value.trim().parse::<u64>() {
+            Ok(num) if num > 0 => num,
+            Ok(_) => default,
+            Err(_) => {
+                warn!(
+                    "invalid value for {} ({}); falling back to default {}",
+                    var,
+                    value,
+                    default
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(err) => {
+            warn!("failed to read {}: {err}; using default {}", var, default);
+            default
+        }
+    }
+}
+
 fn matches_ignore_case(value: &str, options: &[&str]) -> bool {
     options
         .iter()
@@ -776,6 +1112,8 @@ mod tests {
             session_retention_days: Some(7),
             worktree_retention_days: None,
             min_interval_hours: 1,
+            worktree_warn_count: DEFAULT_WORKTREE_WARN_COUNT,
+            worktree_warn_bytes: DEFAULT_WORKTREE_WARN_BYTES,
             disabled: false,
         };
 
@@ -801,6 +1139,8 @@ mod tests {
             session_retention_days: None,
             worktree_retention_days: Some(0),
             min_interval_hours: 1,
+            worktree_warn_count: DEFAULT_WORKTREE_WARN_COUNT,
+            worktree_warn_bytes: DEFAULT_WORKTREE_WARN_BYTES,
             disabled: false,
         };
 
@@ -829,6 +1169,8 @@ mod tests {
             session_retention_days: None,
             worktree_retention_days: Some(0),
             min_interval_hours: 1,
+            worktree_warn_count: DEFAULT_WORKTREE_WARN_COUNT,
+            worktree_warn_bytes: DEFAULT_WORKTREE_WARN_BYTES,
             disabled: false,
         };
 
@@ -876,6 +1218,8 @@ mod tests {
             session_retention_days: None,
             worktree_retention_days: Some(0),
             min_interval_hours: 1,
+            worktree_warn_count: DEFAULT_WORKTREE_WARN_COUNT,
+            worktree_warn_bytes: DEFAULT_WORKTREE_WARN_BYTES,
             disabled: false,
         };
 
@@ -885,6 +1229,97 @@ mod tests {
         assert_eq!(outcome.worktrees_removed, 1);
         assert!(!worktree_path.exists());
         assert!(!branch_exists(&repo_dir, "code-branch-test"));
+    }
+
+    #[test]
+    fn reclaims_clean_worktrees_from_dead_session_registry() {
+        let temp = TempDir::new().unwrap();
+        let code_home = temp.path();
+        let worktree_path = code_home.join("working/demo/branches/auto-review");
+        fs::create_dir_all(&worktree_path).unwrap();
+        fs::write(worktree_path.join(".git"), "gitdir: /tmp/nonexistent/.git/worktrees/auto-review\n").unwrap();
+        fs::write(worktree_path.join("README.md"), b"placeholder").unwrap();
+        let session_dir = code_home.join("working/_session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let registry_path = session_dir.join("pid-999999.txt");
+        let line = format!("/tmp/nonexistent\t{}\n", worktree_path.display());
+        fs::write(&registry_path, line).unwrap();
+
+        let config = HousekeepingConfig {
+            session_retention_days: None,
+            worktree_retention_days: Some(3),
+            min_interval_hours: 1,
+            worktree_warn_count: DEFAULT_WORKTREE_WARN_COUNT,
+            worktree_warn_bytes: DEFAULT_WORKTREE_WARN_BYTES,
+            disabled: false,
+        };
+
+        let now = datetime!(2025-10-10 12:00:00 UTC);
+        let outcome = perform_housekeeping(code_home, now, &config).unwrap();
+
+        assert_eq!(outcome.worktrees_removed, 1);
+        assert!(!worktree_path.exists());
+        assert!(!registry_path.exists());
+    }
+
+    #[test]
+    fn keeps_dirty_worktrees_from_dead_session_registry() {
+        let temp = TempDir::new().unwrap();
+        let code_home = temp.path();
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        run_git(&repo_dir, ["init"]).unwrap();
+        fs::write(repo_dir.join("README.md"), b"hello").unwrap();
+        run_git(&repo_dir, ["add", "."]).unwrap();
+        run_git(
+            &repo_dir,
+            [
+                "-c",
+                "user.name=code",
+                "-c",
+                "user.email=code@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let worktree_path = code_home.join("working/repo/branches/auto-review");
+        fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        run_git(&repo_dir, ["worktree", "add", "--detach", worktree_path.to_str().unwrap(), "HEAD"])
+            .unwrap();
+        fs::write(worktree_path.join("dirty.txt"), b"keep me").unwrap();
+        let session_dir = code_home.join("working/_session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let registry_path = session_dir.join("pid-999999.txt");
+        let line = format!("{}\t{}\n", repo_dir.display(), worktree_path.display());
+        fs::write(&registry_path, line).unwrap();
+
+        let config = HousekeepingConfig {
+            session_retention_days: None,
+            worktree_retention_days: Some(3),
+            min_interval_hours: 1,
+            worktree_warn_count: DEFAULT_WORKTREE_WARN_COUNT,
+            worktree_warn_bytes: DEFAULT_WORKTREE_WARN_BYTES,
+            disabled: false,
+        };
+
+        let now = datetime!(2025-10-10 12:00:00 UTC);
+        let outcome = perform_housekeeping(code_home, now, &config).unwrap();
+
+        assert_eq!(outcome.worktrees_removed, 0);
+        assert_eq!(outcome.worktrees_skipped_dirty, 1);
+        assert!(worktree_path.exists());
+        assert!(!registry_path.exists());
+    }
+
+    #[test]
+    fn reports_managed_worktree_health_warning() {
+        let warning = worktree_health_warning(3, 10, 2, 100).expect("count warning");
+        assert_eq!(warning.managed_worktrees, 3);
+        assert!(worktree_health_warning(1, 101, 2, 100).is_some());
+        assert!(worktree_health_warning(1, 99, 2, 100).is_none());
     }
 
     fn run_git(repo_root: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> io::Result<()> {
@@ -916,7 +1351,7 @@ mod tests {
         let registry_path = session_dir.join("pid-999999.txt");
         fs::write(&registry_path, "/tmp/repo\t/tmp/worktree\n").unwrap();
 
-        let active = super::collect_active_worktrees(&session_dir);
+        let active = super::collect_session_worktrees(&session_dir).active;
 
         assert!(active.is_empty());
         assert!(!registry_path.exists());
