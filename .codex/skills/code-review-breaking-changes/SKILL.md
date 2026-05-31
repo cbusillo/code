@@ -1,5 +1,5 @@
 ---
-name: code-breaking-changes
+name: code-review-breaking-changes
 description: Breaking changes
 ---
 
