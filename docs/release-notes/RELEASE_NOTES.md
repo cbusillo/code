@@ -1,19 +1,17 @@
-## @just-every/code v0.6.109
+## @just-every/code v0.6.110
 
-This release improves skill handling, agent reliability, diff rendering, and update behavior across Every Code.
+This release improves concurrent-session awareness, skill command policy matching, and release workflow behavior in Every Code.
 
 ### Changes
 
-- Add manual skill discovery plus skill command policies, with bundled skill paths resolved relative to their skill directory.
-- Make agent runs more resilient by retrying transient provider failures and cleaning up stale active slots after cancellation.
-- Warn when multiple active sessions share a checkout, reduce repeated auth refresh fallback attempts, and harden app-server websocket transport.
-- Improve `/diff` handling for submodules, whitespace paths, dirty markers, nested filters, and repo helper edge cases.
-- Preserve the renamed binary identity during update checks so users see the correct command name.
+- Surface same-checkout concurrent sessions to the model so parallel local work has clearer context.
+- Clarify and enforce skill command policy precedence, including matching commands embedded in shell segments.
+- Let release workflows exit cleanly when they determine no release should be published.
 
 ### Install
 
 ```bash
-gh release download v0.6.109 --repo cbusillo/code
+gh release download v0.6.110 --repo cbusillo/code
 ```
 
-Compare: https://github.com/cbusillo/code/compare/v0.6.108...v0.6.109
+Compare: https://github.com/cbusillo/code/compare/v0.6.109...v0.6.110

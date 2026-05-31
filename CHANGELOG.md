@@ -7,6 +7,12 @@
 
 - (none)
 
+## [0.6.110] - 2026-05-31
+
+- Core: tell the model when another active session is using the same checkout so concurrent work is visible. (b8cd26d9)
+- Skills: define overlapping command-policy precedence and match policies inside shell command segments. (85be576d, 09d4e54a)
+- Release: skip publish jobs cleanly when the workflow determines no release is intended. (8dd6b9f)
+
 ## [0.6.109] - 2026-05-30
 
 - Skills: add manual skill discovery and command policies, including bundled-path resolution from the skill directory. (db2c24e4, 33121bf0, b475fb11)
