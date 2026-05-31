@@ -49,7 +49,7 @@ if [[ "$fetch_refs" == true ]]; then
 		remote="$(jq -r --arg key "$key" '.upstreams[$key].remote' "$cursor_file")"
 		branch="$(jq -r --arg key "$key" '.upstreams[$key].branch' "$cursor_file")"
 		echo "Fetching $remote/$branch"
-		git fetch "$remote" "$branch" >/dev/null
+		git fetch --no-tags "$remote" "$branch" >/dev/null
 	done
 	echo
 fi

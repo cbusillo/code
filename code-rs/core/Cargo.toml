@@ -43,6 +43,7 @@ libc = { workspace = true }
 mcp-types = { workspace = true }
 mime_guess = { workspace = true }
 os_info = { workspace = true }
+path-clean = { workspace = true }
 fs2 = "0.4"
 htmd = "0.1"
 httpdate = "1"

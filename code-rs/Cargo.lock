@@ -1228,6 +1228,7 @@ dependencies = [
  "once_cell",
  "openssl-sys",
  "os_info",
+ "path-clean",
  "portable-pty",
  "pretty_assertions",
  "rand 0.9.2",
