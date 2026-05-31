@@ -7,6 +7,12 @@
 
 - (none)
 
+## [0.6.112] - 2026-05-31
+
+- Skills: support repo and external skill commands while preserving compatibility for existing metadata. (61799048, a5221451)
+- Skills: require skill command helpers to use declared script resources so references and templates cannot masquerade as runnable helpers. (e9d33a8)
+- Upstream: add review cursor tracking and a local cursor report command for long-running fork maintenance. (11b169b0)
+
 ## [0.6.111] - 2026-05-31
 
 - Skills: add helper metadata for PR watching and issue digests, and reject skills whose command helpers are missing. (252e31ff, 91eae015)
