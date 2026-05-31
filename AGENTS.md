@@ -217,7 +217,11 @@ This architecture separates concerns between execution logic (core), UI state ma
 ### Monitor Release Workflows After Pushing
 
 - Use `scripts/wait-for-gh-run.sh` to follow GitHub Actions releases without spamming manual `gh` commands.
-- Typical release check right after a push: `scripts/wait-for-gh-run.sh --workflow Release --branch main`.
+- Typical release-intent check right after merging release metadata:
+  `scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main`.
+- A successful `Release Intent` workflow may be a publish or a no-op. If a
+  release was requested, verify the tag explicitly with
+  `gh release view v<version> --repo cbusillo/code`.
 - If you already know the run ID (e.g., from webhook output), run `scripts/wait-for-gh-run.sh --run <run-id>`.
 - Adjust the poll cadence via `--interval <seconds>` (defaults to 8). The script exits 0 on success and 1 on failure, so it can gate local automation.
 - Pass `--failure-logs` to automatically dump logs for any job that does not finish successfully.

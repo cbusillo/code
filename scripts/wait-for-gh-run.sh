@@ -3,7 +3,7 @@
 #
 # Usage examples:
 #   scripts/wait-for-gh-run.sh --run 17901972778
-#   scripts/wait-for-gh-run.sh --workflow Release --branch main
+#   scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main
 #   scripts/wait-for-gh-run.sh  # picks latest run on current branch
 #
 # Dependencies: gh (GitHub CLI), jq.

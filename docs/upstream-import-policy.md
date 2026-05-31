@@ -152,15 +152,19 @@ healthy.
 ## Release Cadence
 
 Cut an Every Code release after every successful upstream import or local hotfix
-that should be installed by dogfood users. The active Release workflow runs from
-`main` and publishes GitHub Release assets only after release metadata has
-landed. Prepare that metadata locally with the Every Code harness before the
-publish run: the local command bumps `codex-cli/package.json`, updates
-`CHANGELOG.md`, and writes `docs/release-notes/RELEASE_NOTES.md`. The workflow
-uses the committed `codex-cli/package.json` version as release intent. If that
-version already has a tag, the workflow exits successfully as a no-op; if the
-tag does not exist, it validates the metadata and publishes exactly that
-committed version instead of generating fallback notes in CI. The full preflight,
+that should be installed by dogfood users. The active release workflow file is
+`.github/workflows/release.yml`, and GitHub displays it as `Release Intent`.
+That name is intentional: the workflow runs after relevant `main` pushes, first
+decides whether the committed package version represents a new release, and only
+then publishes GitHub Release assets.
+
+Prepare release metadata locally with the Every Code harness before the publish
+run: the local command bumps `codex-cli/package.json`, updates `CHANGELOG.md`,
+and writes `docs/release-notes/RELEASE_NOTES.md`. The workflow uses the
+committed `codex-cli/package.json` version as release intent. If that version
+already has a tag, the workflow exits successfully as a no-op; if the tag does
+not exist, it validates the metadata and publishes exactly that committed
+version instead of generating fallback notes in CI. The full preflight,
 macOS/Linux release matrix, and Windows asset build run only on the publish pass
 after the metadata PR has merged.
 
@@ -232,12 +236,21 @@ target cache buckets, and release dependency cache. It preserves
 Run without `--apply` to preview deletions. Use `--keep-release-cache` only when
 you intentionally want to preserve release dependency cache as well.
 
-Then push the product branch to `origin`, merge the release metadata PR, and
-monitor the `Release` workflow:
+Then push the release metadata branch to `origin`, merge the release metadata
+PR, and monitor the `Release Intent` workflow:
 
 ```sh
 git push origin HEAD
-scripts/wait-for-gh-run.sh --workflow Release --branch main
+scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main
+```
+
+A successful workflow run is not enough evidence that a release was published:
+non-release runs also complete successfully as no-ops when the package version
+already has a tag. When cutting a release, verify the tag or GitHub Release
+directly after the workflow succeeds:
+
+```sh
+gh release view v<version> --repo cbusillo/code
 ```
 
 Do not push Every Code releases to `upstream` or `openai`.

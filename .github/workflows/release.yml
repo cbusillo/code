@@ -1,11 +1,11 @@
-name: Release
+name: Release Intent
 
 on:
   push:
     branches: [ main ]
     # Ignore common non-release paths. For other main pushes, the workflow
     # determines whether the committed package version represents release
-    # intent or a successful no-op.
+    # intent. Runs with no new package version are successful no-ops.
     paths-ignore:
       - '.github/workflows/issue-triage.yml'
       - '.github/workflows/preview-build.yml'

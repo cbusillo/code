@@ -33,7 +33,8 @@
       "releaseNotesCheck": "scripts/check-release-notes-version.sh"
     },
     "scripts": {
-      "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow Release --branch main",
+      "waitForGitHubRun": "scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main",
+      "verifyGitHubRelease": "gh release view v<version> --repo cbusillo/code",
       "upstreamCursors": "just local-upstream-cursors",
       "upstreamImport": "just local-upstream-import",
       "localReleaseNotes": "just local-release-notes"
@@ -52,7 +53,7 @@
   "importantWorkflows": [
     "blob-size-policy",
     "Preview Build",
-    "Release",
+    "Release Intent",
     "Upstream Merge",
     "CodeQL",
     "Dependabot Updates",
