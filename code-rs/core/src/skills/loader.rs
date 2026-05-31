@@ -2,16 +2,20 @@ use crate::config::Config;
 use crate::config::SkillConfigRuleSelector;
 use crate::config::resolve_code_path_for_read;
 use crate::git_info::resolve_root_git_project_for_trust;
-use crate::skills::model::SkillError;
+use crate::skills::model::SkillCommand;
 use crate::skills::model::SkillCommandMatcher;
 use crate::skills::model::SkillCommandPolicy;
 use crate::skills::model::SkillCommandPolicyAction;
 use crate::skills::model::SkillCommandPolicyPreferred;
 use crate::skills::model::SkillCommandPolicyPreferredKind;
+use crate::skills::model::SkillError;
 use crate::skills::model::SkillLoadOutcome;
 use crate::skills::model::SkillMetadata;
 use crate::skills::model::SkillPolicy;
+use crate::skills::model::SkillResource;
+use crate::skills::model::SkillResourceKind;
 use crate::skills::model::SkillScope;
+use crate::skills::model::SkillWorkflowDefault;
 use crate::skills::system::system_cache_root_dir;
 use crate::skills::system::install_system_skills;
 use dunce::canonicalize as normalize_path;
@@ -32,6 +36,12 @@ struct SkillFrontmatter {
     #[serde(default)]
     metadata: Option<SkillFrontmatterMetadata>,
     #[serde(default)]
+    resources: Vec<SkillFrontmatterResource>,
+    #[serde(default)]
+    commands: Vec<SkillFrontmatterCommand>,
+    #[serde(default)]
+    workflow_defaults: Vec<SkillFrontmatterWorkflowDefault>,
+    #[serde(default)]
     policy: Option<SkillFrontmatterPolicy>,
 }
 
@@ -39,6 +49,40 @@ struct SkillFrontmatter {
 struct SkillFrontmatterMetadata {
     #[serde(default, rename = "short-description")]
     short_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterResource {
+    path: PathBuf,
+    kind: SkillFrontmatterResourceKind,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SkillFrontmatterResourceKind {
+    Script,
+    Reference,
+    Template,
+    Asset,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterCommand {
+    name: String,
+    resource_path: PathBuf,
+    #[serde(default)]
+    example_argv: Vec<String>,
+    purpose: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatterWorkflowDefault {
+    name: String,
+    value: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +160,10 @@ const MAX_COMMAND_POLICY_PURPOSE_LEN: usize = 256;
 const MAX_COMMAND_POLICIES_PER_SKILL: usize = 64;
 const MAX_COMMAND_POLICY_PREFERRED: usize = 8;
 const MAX_COMMAND_POLICY_ARGV_TOKENS: usize = 32;
+const MAX_STRUCTURED_ITEMS_PER_SKILL: usize = 64;
+const MAX_STRUCTURED_ID_LEN: usize = 96;
+const MAX_STRUCTURED_PURPOSE_LEN: usize = 256;
+const MAX_STRUCTURED_VALUE_LEN: usize = 512;
 
 #[derive(Debug)]
 enum SkillParseError {
@@ -435,6 +483,9 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
 
     let resolved_path = normalize_path(path).unwrap_or_else(|_| path.to_path_buf());
     let skill_dir = resolved_path.parent().unwrap_or_else(|| Path::new("."));
+    let resources = parse_skill_resources(parsed.resources, skill_dir)?;
+    let commands = parse_skill_commands(parsed.commands, skill_dir, &resources)?;
+    let workflow_defaults = parse_workflow_defaults(parsed.workflow_defaults)?;
     let policy = parsed
         .policy
         .map(|policy| parse_skill_policy(policy, skill_dir))
@@ -448,7 +499,145 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         scope,
         content: contents,
         policy,
+        resources,
+        commands,
+        workflow_defaults,
     })
+}
+
+fn parse_skill_resources(
+    resources: Vec<SkillFrontmatterResource>,
+    skill_dir: &Path,
+) -> Result<Vec<SkillResource>, SkillParseError> {
+    if resources.len() > MAX_STRUCTURED_ITEMS_PER_SKILL {
+        return Err(SkillParseError::InvalidField {
+            field: "resources",
+            reason: format!("must contain at most {MAX_STRUCTURED_ITEMS_PER_SKILL} entries"),
+        });
+    }
+
+    let mut parsed = Vec::with_capacity(resources.len());
+    for resource in resources {
+        let description = parse_optional_text(
+            resource.description,
+            MAX_STRUCTURED_PURPOSE_LEN,
+            "resources.description",
+        )?;
+        let resolved_path = resolve_skill_relative_path(skill_dir, resource.path);
+
+        if !resolved_path.exists() {
+            tracing::warn!(
+                "Resource path '{}' does not exist on disk.",
+                resolved_path.display()
+            );
+        }
+
+        let kind = match resource.kind {
+            SkillFrontmatterResourceKind::Script => SkillResourceKind::Script,
+            SkillFrontmatterResourceKind::Reference => SkillResourceKind::Reference,
+            SkillFrontmatterResourceKind::Template => SkillResourceKind::Template,
+            SkillFrontmatterResourceKind::Asset => SkillResourceKind::Asset,
+        };
+
+        parsed.push(SkillResource {
+            path: resolved_path,
+            kind,
+            description,
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_skill_commands(
+    commands: Vec<SkillFrontmatterCommand>,
+    skill_dir: &Path,
+    declared_resources: &[SkillResource],
+) -> Result<Vec<SkillCommand>, SkillParseError> {
+    if commands.len() > MAX_STRUCTURED_ITEMS_PER_SKILL {
+        return Err(SkillParseError::InvalidField {
+            field: "commands",
+            reason: format!("must contain at most {MAX_STRUCTURED_ITEMS_PER_SKILL} entries"),
+        });
+    }
+
+    let mut parsed = Vec::with_capacity(commands.len());
+    for command in commands {
+        let name = sanitize_single_line(&command.name);
+        validate_field(&name, MAX_STRUCTURED_ID_LEN, "commands.name")?;
+        let purpose = sanitize_single_line(&command.purpose);
+        validate_field(&purpose, MAX_STRUCTURED_PURPOSE_LEN, "commands.purpose")?;
+        let resolved_resource_path = resolve_skill_relative_path(skill_dir, command.resource_path.clone());
+
+        let resource_exists = declared_resources.iter().any(|r| r.path == resolved_resource_path);
+        if !resource_exists {
+            return Err(SkillParseError::InvalidField {
+                field: "commands.resource_path",
+                reason: format!(
+                    "command '{}' references resource_path '{}' which is not declared in the resources section",
+                    name, command.resource_path.display()
+                ),
+            });
+        }
+
+        let example_argv = if command.example_argv.is_empty() {
+            Vec::new()
+        } else {
+            validate_argv_tokens(command.example_argv, "commands.example_argv")?
+        };
+
+        parsed.push(SkillCommand {
+            name,
+            resource_path: resolved_resource_path,
+            example_argv,
+            purpose,
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_optional_text(
+    value: Option<String>,
+    max_len: usize,
+    field: &'static str,
+) -> Result<Option<String>, SkillParseError> {
+    value
+        .map(|value| sanitize_single_line(&value))
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            validate_field(&value, max_len, field)?;
+            Ok::<String, SkillParseError>(value)
+        })
+        .transpose()
+}
+
+fn parse_workflow_defaults(
+    defaults: Vec<SkillFrontmatterWorkflowDefault>,
+) -> Result<Vec<SkillWorkflowDefault>, SkillParseError> {
+    if defaults.len() > MAX_STRUCTURED_ITEMS_PER_SKILL {
+        return Err(SkillParseError::InvalidField {
+            field: "workflow_defaults",
+            reason: format!("must contain at most {MAX_STRUCTURED_ITEMS_PER_SKILL} entries"),
+        });
+    }
+
+    let mut parsed = Vec::with_capacity(defaults.len());
+    for default in defaults {
+        let name = sanitize_single_line(&default.name);
+        validate_field(&name, MAX_STRUCTURED_ID_LEN, "workflow_defaults.name")?;
+        let value = sanitize_single_line(&default.value);
+        validate_field(&value, MAX_STRUCTURED_VALUE_LEN, "workflow_defaults.value")?;
+        let description = parse_optional_text(
+            default.description,
+            MAX_STRUCTURED_PURPOSE_LEN,
+            "workflow_defaults.description",
+        )?;
+        parsed.push(SkillWorkflowDefault {
+            name,
+            value,
+            description,
+        });
+    }
+    Ok(parsed)
 }
 
 fn parse_skill_policy(
@@ -859,6 +1048,51 @@ mod tests {
         skill_path
     }
 
+    fn write_structured_skill_at(skills_root: &Path) -> PathBuf {
+        let skill_dir = skills_root.join("plan");
+        fs::create_dir_all(skill_dir.join("scripts")).expect("create scripts dir");
+        fs::create_dir_all(skill_dir.join("references")).expect("create references dir");
+        fs::write(skill_dir.join("scripts").join("create_plan.py"), "").expect("write script");
+        fs::write(skill_dir.join("scripts").join("list_plans.py"), "").expect("write script");
+        fs::write(skill_dir.join("references").join("format.md"), "").expect("write reference");
+        let skill_path = skill_dir.join(SKILLS_FILENAME);
+        fs::write(
+            &skill_path,
+            r#"---
+name: plan
+description: Plan workflows
+resources:
+  - path: scripts/create_plan.py
+    kind: script
+    description: Script to create plan
+  - path: scripts/list_plans.py
+    kind: script
+    description: Script to list plans
+  - path: references/format.md
+    kind: reference
+    description: Plan body format.
+commands:
+  - name: create-plan
+    resource_path: scripts/create_plan.py
+    example_argv: ["python", "scripts/create_plan.py", "--name", "<name>"]
+    purpose: Create a saved plan.
+  - name: list-plans
+    resource_path: scripts/list_plans.py
+    example_argv: ["python", "scripts/list_plans.py"]
+    purpose: List saved plans.
+workflow_defaults:
+  - name: save_location
+    value: $CODEX_HOME/plans or ~/.codex/plans
+    description: Keep plan files outside repositories.
+---
+
+# plan
+"#,
+        )
+        .expect("write skill file");
+        skill_path
+    }
+
     fn normalized(path: &Path) -> PathBuf {
         normalize_path(path).unwrap_or_else(|_| path.to_path_buf())
     }
@@ -929,6 +1163,111 @@ mod tests {
         assert_eq!(
             command_policy.preferred[0].path.as_deref(),
             Some(normalized(&skill_path).parent().unwrap().join("scripts/gh-pr.py").as_path())
+        );
+    }
+
+    #[test]
+    fn loads_structured_skill_workflow_fields_from_frontmatter() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_path = write_structured_skill_at(skills_root.path());
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        let skill = outcome.skills.first().expect("skill");
+        assert_eq!(skill.resources.len(), 3);
+        assert_eq!(skill.resources[0].kind, SkillResourceKind::Script);
+        assert_eq!(
+            skill.resources[0].path,
+            normalized(&skill_path).parent().unwrap().join("scripts/create_plan.py")
+        );
+        assert_eq!(skill.resources[1].kind, SkillResourceKind::Script);
+        assert_eq!(
+            skill.resources[1].path,
+            normalized(&skill_path).parent().unwrap().join("scripts/list_plans.py")
+        );
+        assert_eq!(skill.resources[2].kind, SkillResourceKind::Reference);
+        assert_eq!(
+            skill.resources[2].path,
+            normalized(&skill_path).parent().unwrap().join("references/format.md")
+        );
+
+        assert_eq!(skill.commands.len(), 2);
+        assert_eq!(skill.commands[0].name, "create-plan");
+        assert_eq!(
+            skill.commands[0].resource_path,
+            normalized(&skill_path).parent().unwrap().join("scripts/create_plan.py")
+        );
+        assert_eq!(
+            skill.commands[0].example_argv,
+            ["python", "scripts/create_plan.py", "--name", "<name>"]
+        );
+        assert_eq!(skill.commands[0].purpose, "Create a saved plan.");
+
+        assert_eq!(skill.commands[1].name, "list-plans");
+        assert_eq!(
+            skill.commands[1].resource_path,
+            normalized(&skill_path).parent().unwrap().join("scripts/list_plans.py")
+        );
+        assert_eq!(
+            skill.commands[1].example_argv,
+            ["python", "scripts/list_plans.py"]
+        );
+        assert_eq!(skill.commands[1].purpose, "List saved plans.");
+        assert_eq!(skill.workflow_defaults.len(), 1);
+        assert_eq!(skill.workflow_defaults[0].name, "save_location");
+        assert_eq!(
+            skill.workflow_defaults[0].value,
+            "$CODEX_HOME/plans or ~/.codex/plans"
+        );
+        assert_eq!(
+            skill.workflow_defaults[0].description.as_deref(),
+            Some("Keep plan files outside repositories.")
+        );
+    }
+
+    #[test]
+    fn command_resource_path_must_be_declared_resource() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: bad
+description: Bad command resource
+commands:
+  - name: missing-resource
+    resource_path: scripts/missing.py
+    example_argv: ["python", "scripts/missing.py"]
+    purpose: Run a missing helper.
+---
+
+# bad
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("is not declared in the resources section"),
+            "unexpected error: {}",
+            outcome.errors[0].message
         );
     }
 
@@ -1497,5 +1836,87 @@ mod tests {
         let root = admin_skills_root();
         assert_eq!(root.path, PathBuf::from(ADMIN_SKILLS_ROOT));
         assert_eq!(root.scope, SkillScope::Admin);
+    }
+
+    #[test]
+    fn loader_parses_resources_and_commands() {
+        let code_home = tempfile::tempdir().expect("tempdir");
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let skill_dir = code_home.path().join("skills").join("plan");
+        fs::create_dir_all(&skill_dir).unwrap();
+
+        fs::write(skill_dir.join("create_plan.py"), "print('hello')").unwrap();
+        fs::write(skill_dir.join("template.md"), "# Plan Template").unwrap();
+
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: plan
+description: Generate a plan
+resources:
+  - path: create_plan.py
+    kind: script
+    description: Helper to create a plan
+  - path: template.md
+    kind: template
+    description: Markdown template
+commands:
+  - name: create-plan
+    resource_path: create_plan.py
+    example_argv: ["python", "create_plan.py", "--name"]
+    purpose: Create a plan file
+---
+Plan skill body
+"#,
+        ).unwrap();
+
+        let cfg = make_config_for_cwd(code_home.path(), cwd.path());
+        let outcome = load_skills(&cfg);
+
+        assert!(outcome.errors.is_empty(), "unexpected errors: {:?}", outcome.errors);
+        assert_eq!(outcome.skills.len(), 1);
+        let skill = &outcome.skills[0];
+
+        assert_eq!(skill.resources.len(), 2);
+        assert_eq!(skill.resources[0].path, normalized(&skill_dir.join("create_plan.py")));
+        assert_eq!(skill.resources[0].kind, SkillResourceKind::Script);
+        assert_eq!(skill.resources[0].description.as_deref(), Some("Helper to create a plan"));
+
+        assert_eq!(skill.commands.len(), 1);
+        assert_eq!(skill.commands[0].name, "create-plan");
+        assert_eq!(skill.commands[0].resource_path, normalized(&skill_dir.join("create_plan.py")));
+        assert_eq!(skill.commands[0].example_argv, vec!["python", "create_plan.py", "--name"]);
+        assert_eq!(skill.commands[0].purpose, "Create a plan file");
+    }
+
+    #[test]
+    fn loader_fails_when_command_references_undeclared_resource() {
+        let code_home = tempfile::tempdir().expect("tempdir");
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let skill_dir = code_home.path().join("skills").join("plan");
+        fs::create_dir_all(&skill_dir).unwrap();
+
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: plan
+description: Generate a plan
+resources:
+  - path: template.md
+    kind: template
+commands:
+  - name: create-plan
+    resource_path: create_plan.py
+    purpose: Create a plan file
+---
+Plan skill body
+"#,
+        ).unwrap();
+
+        let cfg = make_config_for_cwd(code_home.path(), cwd.path());
+        let outcome = load_skills(&cfg);
+
+        assert!(!outcome.errors.is_empty(), "expected validation failure");
+        assert!(outcome.errors[0].message.contains("references resource_path"));
     }
 }

@@ -470,7 +470,10 @@ mod tests {
             path: skill_path,
             scope: SkillScope::User,
             content: String::new(),
+            resources: Vec::new(),
             policy: None,
+            commands: Vec::new(),
+            workflow_defaults: Vec::new(),
         }];
 
         let rendered = get_user_instructions(&make_config(&tmp, 4096, Some("base")), Some(&skills))
@@ -496,7 +499,10 @@ mod tests {
             path: skill_path,
             scope: SkillScope::User,
             content: String::new(),
+            resources: Vec::new(),
             policy: None,
+            commands: Vec::new(),
+            workflow_defaults: Vec::new(),
         }];
         let mut config = make_config(&tmp, 4096, Some("base"));
         config.skills.include_instructions = Some(false);
