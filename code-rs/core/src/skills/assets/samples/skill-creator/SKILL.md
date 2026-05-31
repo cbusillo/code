@@ -3,6 +3,33 @@ name: skill-creator
 description: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations.
 metadata:
   short-description: Create or update a skill
+resources:
+  - path: scripts/init_skill.py
+    kind: script
+    description: Initialize a new skill directory with SKILL.md and optional resource folders.
+  - path: scripts/quick_validate.py
+    kind: script
+    description: Validate SKILL.md frontmatter, required fields, and naming rules.
+  - path: scripts/package_skill.py
+    kind: script
+    description: Package a skill directory into a distributable skill archive.
+commands:
+  - name: init-skill
+    resource_path: scripts/init_skill.py
+    example_argv: ["python", "scripts/init_skill.py", "<skill-name>", "--path", "<output-directory>"]
+    purpose: Create the initial skill directory and starter files.
+  - name: validate-skill
+    resource_path: scripts/quick_validate.py
+    example_argv: ["python", "scripts/quick_validate.py", "<path-to-skill-dir>"]
+    purpose: Check that a skill has valid frontmatter and naming.
+  - name: package-skill
+    resource_path: scripts/package_skill.py
+    example_argv: ["python", "scripts/package_skill.py", "<path-to-skill-dir>", "<output-directory>"]
+    purpose: Package a finished skill for distribution.
+workflow_defaults:
+  - name: resource_dirs
+    value: scripts/, references/, assets/
+    description: Optional resource subdirectories; create only what the skill needs.
 ---
 
 # Skill Creator
@@ -123,11 +150,8 @@ Decide:
 
 ### Step 3: Initialize the skill
 
-Use the helper script to create the initial structure.
-
-```bash
-scripts/init_skill.py <skill-name> --path <output-directory>
-```
+Use the structured `init-skill` command from this skill's frontmatter to create
+the initial structure.
 
 The script:
 
@@ -146,17 +170,11 @@ After initialization, customize or remove the generated SKILL.md and example fil
 
 ### Step 5: Validate and package
 
-Use `scripts/quick_validate.py` to check that SKILL.md is valid.
-
-```bash
-python scripts/quick_validate.py <path-to-skill-dir>
-```
+Use the structured `validate-skill` command from this skill's frontmatter to
+check that SKILL.md is valid.
 
 Package a skill into a `.skill` file (optional):
-
-```bash
-python scripts/package_skill.py <path-to-skill-dir> [output-directory]
-```
+use the structured `package-skill` command from this skill's frontmatter.
 
 ## Skill naming guidelines
 
@@ -216,11 +234,7 @@ If the user is not sure how the skill will be used, prompt them with a few examp
 
 ### Step 3: Initialize the skill
 
-Run:
-
-```bash
-scripts/init_skill.py my-skill --path skills/public
-```
+Run the structured `init-skill` command from this skill's frontmatter.
 
 ### Step 4: Write SKILL.md
 
@@ -230,11 +244,8 @@ scripts/init_skill.py my-skill --path skills/public
 
 ### Step 5: Package or distribute (optional)
 
-Use the packager if needed:
-
-```bash
-python scripts/package_skill.py skills/public/my-skill
-```
+Use the structured `package-skill` command from this skill's frontmatter if a
+distributable archive is needed.
 
 ## Additional guidance
 
