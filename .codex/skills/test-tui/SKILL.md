@@ -1,6 +1,6 @@
 ---
 name: test-tui
-description: Guide for testing Codex TUI interactively
+description: Guide for testing Every Code TUI interactively
 commands:
   - name: start-tui
     source: repo
@@ -15,7 +15,7 @@ workflow_defaults:
     description: Send text first, then Enter as a separate write when driving the TUI programmatically.
 ---
 
-You can start and use Codex TUI to verify changes. 
+You can start and use Every Code TUI to verify changes.
 
 Important notes:
 
