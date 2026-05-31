@@ -117,7 +117,7 @@ outside the product branch and must be replayed.
 
 ### Upstream Review Cursors
 
-Every Code is a long-running overlay product with two upstream references. Track
+Every Code is a product branch with two upstream references. Track
 where review left off in `.github/upstream-cursors.json`, and inspect that state
 with:
 
@@ -206,6 +206,25 @@ repo-owned and predictable:
 just local-remove-homebrew-code-link
 ```
 
+Then push the release metadata branch to `origin`, merge the release metadata
+PR, and monitor the `Release Intent` workflow:
+
+```sh
+git push origin HEAD
+scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main
+```
+
+A successful workflow run is not enough evidence that a release was published:
+non-release runs also complete successfully as no-ops when the package version
+already has a tag. When cutting a release, verify the tag or GitHub Release
+directly after the workflow succeeds:
+
+```sh
+gh release view v<version> --repo cbusillo/code
+```
+
+Do not push Every Code releases to `upstream` or `openai`.
+
 ## Local Cache Cleanup
 
 During active local work, keep rebuildable caches bounded while preserving the
@@ -235,25 +254,6 @@ target cache buckets, and release dependency cache. It preserves
 
 Run without `--apply` to preview deletions. Use `--keep-release-cache` only when
 you intentionally want to preserve release dependency cache as well.
-
-Then push the release metadata branch to `origin`, merge the release metadata
-PR, and monitor the `Release Intent` workflow:
-
-```sh
-git push origin HEAD
-scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main
-```
-
-A successful workflow run is not enough evidence that a release was published:
-non-release runs also complete successfully as no-ops when the package version
-already has a tag. When cutting a release, verify the tag or GitHub Release
-directly after the workflow succeeds:
-
-```sh
-gh release view v<version> --repo cbusillo/code
-```
-
-Do not push Every Code releases to `upstream` or `openai`.
 
 ## Fork Health
 

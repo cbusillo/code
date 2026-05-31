@@ -1,10 +1,11 @@
 # Workflow Strategy
 
-Rust-specific `rust-ci*.yml` workflows are intentionally removed in this fork.
+Rust-specific `rust-ci*.yml` workflows are intentionally removed for Every Code.
 
 ## Verification Paths
 
-- `bazel.yml` is the primary Rust verification path for pull requests and for `main`.
+- `./build-fast.sh` is the required local Rust verification gate.
+- `preview-build.yml` builds preview binaries for pull requests.
 - `release.yml` is displayed in GitHub Actions as `Release Intent`. It runs
   after relevant `main` pushes, determines whether the committed
   `codex-cli/package.json` version has an existing `v<version>` tag, and either

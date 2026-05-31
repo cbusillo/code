@@ -342,9 +342,8 @@ The `pre-push` hook runs `./pre-release.sh` automatically when pushing to `main`
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/amazing-feature`
 3. Make your changes
-4. Run tests: `cargo test`
-5. Build successfully: `./build-fast.sh`
-6. Submit a pull request
+4. Build successfully: `./build-fast.sh`
+5. Submit a pull request
 
 
 &ensp;
