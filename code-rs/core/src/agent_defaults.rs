@@ -213,9 +213,16 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         read_only_args: ANTIGRAVITY_READ_ONLY,
         write_args: ANTIGRAVITY_WRITE,
         model_args: &[],
-        description: "Google Antigravity CLI agent; use as the Google-agent path after consumer Gemini CLI retirement.",
+        description: "Google/Gemini-family agent via Antigravity CLI; use for Google perspective after consumer Gemini CLI retirement. AGY uses its configured model, not per-run Gemini Pro/Flash flags.",
         enabled_by_default: true,
-        aliases: &["agy", "google-antigravity"],
+        aliases: &[
+            "agy",
+            "google",
+            "gemini",
+            "gemini-agent",
+            "gemini-perspective",
+            "google-antigravity",
+        ],
         gating_env: None,
         is_frontline: true,
         pro_only: false,
@@ -497,7 +504,9 @@ fn model_guide_intro(active_agents: &[String]) -> String {
     }
     let frontline_str = present_frontline.join(", ");
 
-    format!("Preferred agent models: use {frontline_str} for challenging coding/agentic work.")
+    format!(
+        "Preferred agent models: use {frontline_str} for challenging coding/agentic work. For explicit multi-agent or dissent requests, prefer diverse model families when useful and budget allows; include `antigravity` for Google/Gemini-family perspective."
+    )
 }
 
 fn model_guide_line(spec: &AgentModelSpec) -> String {
@@ -696,6 +705,28 @@ mod tests {
 
         let legacy = agent_model_spec("claude-opus-4.6").expect("legacy opus alias present");
         assert_eq!(legacy.slug, "claude-opus-4.8");
+    }
+
+    #[test]
+    fn google_intent_aliases_resolve_to_antigravity() {
+        for alias in ["google", "gemini", "gemini-agent", "gemini-perspective"] {
+            let spec = agent_model_spec(alias).expect("google-family alias should resolve");
+            assert_eq!(spec.slug, "antigravity");
+            assert!(spec.model_args.is_empty());
+        }
+    }
+
+    #[test]
+    fn model_guide_describes_antigravity_as_google_family_lane() {
+        let guide = build_model_guide_description(&[
+            "code-gpt-5.5".to_string(),
+            "claude-sonnet-4.6".to_string(),
+            "antigravity".to_string(),
+        ]);
+
+        assert!(guide.contains("include `antigravity` for Google/Gemini-family perspective"));
+        assert!(guide.contains("AGY uses its configured model"));
+        assert!(guide.contains("not per-run Gemini Pro/Flash flags"));
     }
 
     #[test]
