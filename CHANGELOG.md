@@ -7,6 +7,10 @@
 
 - (none)
 
+## [0.6.111] - 2026-05-31
+
+- Skills: add helper metadata for PR watching and issue digests, and reject skills whose command helpers are missing. (252e31ff, 91eae015)
+
 ## [0.6.110] - 2026-05-31
 
 - Core: tell the model when another active session is using the same checkout so concurrent work is visible. (b8cd26d9)
