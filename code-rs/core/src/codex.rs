@@ -261,6 +261,7 @@ pub(crate) struct TurnContext {
     pub(crate) base_instructions: Option<String>,
     pub(crate) user_instructions: Option<String>,
     pub(crate) demo_developer_message: Option<String>,
+    pub(crate) active_session_model_notice: Option<String>,
     pub(crate) compact_prompt_override: Option<String>,
     pub(crate) approval_policy: AskForApproval,
     pub(crate) sandbox_policy: SandboxPolicy,
