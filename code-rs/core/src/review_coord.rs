@@ -161,6 +161,10 @@ pub fn read_lock_info(scope: Option<&Path>) -> Option<ReviewLockInfo> {
     serde_json::from_str(&buf).ok()
 }
 
+fn lock_file_exists(scope: Option<&Path>) -> bool {
+    lock_path(scope).map(|path| path.exists()).unwrap_or(false)
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // Safety: kill with signal 0 performs permission/aliveness check only
@@ -187,7 +191,15 @@ fn pid_alive(_pid: u32) -> bool {
 pub fn clear_stale_lock_if_dead(scope: Option<&Path>) -> std::io::Result<bool> {
     let info = match read_lock_info(scope) {
         Some(i) => i,
-        None => return Ok(false),
+        None => {
+            if lock_file_exists(scope) {
+                if let Ok(path) = lock_path(scope) {
+                    let _ = fs::remove_file(path);
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
     };
     if pid_alive(info.pid) {
         return Ok(false);
@@ -287,6 +299,21 @@ mod tests {
         assert_eq!(still_recorded.snapshot_epoch, initial.snapshot_epoch);
         assert!(now > initial.snapshot_epoch);
         drop(guard);
+    }
+
+    #[test]
+    #[serial]
+    fn malformed_lock_is_cleared_as_stale() {
+        let dir = TempDir::new().unwrap();
+        set_code_home(dir.path());
+        let cwd = dir.path();
+        let path = lock_path(Some(cwd)).unwrap();
+        fs::write(&path, b"not json").unwrap();
+
+        assert!(clear_stale_lock_if_dead(Some(cwd)).unwrap());
+        assert!(!path.exists());
+        let guard = try_acquire_lock("after-malformed", cwd).unwrap();
+        assert!(guard.is_some());
     }
 
     #[test]
