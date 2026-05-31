@@ -709,10 +709,26 @@ fn truncate_exec_stream(chunks: &mut Vec<ExecStreamChunk>, truncate_at: usize) {
             chunks.pop();
             continue;
         }
-        let keep = truncate_at.saturating_sub(last_start);
+        let keep = floor_char_boundary(&last.content, truncate_at.saturating_sub(last_start));
         last.content.truncate(keep);
         break;
     }
+}
+
+fn floor_char_boundary(content: &str, index: usize) -> usize {
+    let mut boundary = index.min(content.len());
+    while boundary > 0 && !content.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn ceil_char_boundary(content: &str, index: usize) -> usize {
+    let mut boundary = index.min(content.len());
+    while boundary < content.len() && !content.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    boundary
 }
 
 fn append_exec_chunk(chunks: &mut Vec<ExecStreamChunk>, chunk: ExecStreamChunk) {
@@ -758,7 +774,7 @@ fn prune_exec_stream(chunks: &mut Vec<ExecStreamChunk>, max_bytes: usize) {
 
     if bytes_to_drop > 0 {
         if let Some(first) = chunks.first_mut() {
-            let drain = bytes_to_drop.min(first.content.len());
+            let drain = ceil_char_boundary(&first.content, bytes_to_drop);
             first.offset = first.offset.saturating_add(drain);
             first.content.drain(..drain);
         }
@@ -2568,6 +2584,30 @@ mod tests {
         assert_eq!(flattened.len(), MAX_EXEC_STREAM_RETAINED_BYTES);
         let expected_tail = oversized[oversized.len() - MAX_EXEC_STREAM_RETAINED_BYTES..].to_string();
         assert_eq!(flattened, expected_tail);
+    }
+
+    #[test]
+    fn exec_stream_prunes_on_utf8_boundary() {
+        let mut chunks = vec![ExecStreamChunk { offset: 0, content: format!("{}é", "x".repeat(8)) }];
+
+        prune_exec_stream(&mut chunks, 1);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].offset, 10);
+        assert_eq!(chunks[0].content, "");
+    }
+
+    #[test]
+    fn exec_stream_overlap_truncates_on_utf8_boundary() {
+        let mut chunks = vec![ExecStreamChunk { offset: 0, content: "abcé".to_string() }];
+
+        append_exec_chunk(&mut chunks, ExecStreamChunk { offset: 4, content: "z".to_string() });
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].content, "abc");
+        assert_eq!(chunks[1].offset, 4);
+        assert_eq!(chunks[1].content, "z");
     }
 
     #[test]
