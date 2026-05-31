@@ -568,12 +568,24 @@ fn parse_skill_commands(
         validate_field(&purpose, MAX_STRUCTURED_PURPOSE_LEN, "commands.purpose")?;
         let resolved_resource_path = resolve_skill_relative_path(skill_dir, command.resource_path.clone());
 
-        let resource_exists = declared_resources.iter().any(|r| r.path == resolved_resource_path);
-        if !resource_exists {
+        let declared_resource = declared_resources
+            .iter()
+            .find(|r| r.path == resolved_resource_path);
+        let Some(declared_resource) = declared_resource else {
             return Err(SkillParseError::InvalidField {
                 field: "commands.resource_path",
                 reason: format!(
                     "command '{}' references resource_path '{}' which is not declared in the resources section",
+                    name, command.resource_path.display()
+                ),
+            });
+        };
+
+        if !declared_resource.path.is_file() {
+            return Err(SkillParseError::InvalidField {
+                field: "commands.resource_path",
+                reason: format!(
+                    "command '{}' references resource_path '{}' which does not exist as a file",
                     name, command.resource_path.display()
                 ),
             });
@@ -1266,6 +1278,47 @@ commands:
             outcome.errors[0]
                 .message
                 .contains("is not declared in the resources section"),
+            "unexpected error: {}",
+            outcome.errors[0].message
+        );
+    }
+
+    #[test]
+    fn command_resource_path_must_exist_as_file() {
+        let skills_root = tempfile::tempdir().expect("tempdir");
+        let skill_dir = skills_root.path().join("bad");
+        fs::create_dir_all(skill_dir.join("scripts")).expect("create skill dir");
+        fs::write(
+            skill_dir.join(SKILLS_FILENAME),
+            r#"---
+name: bad
+description: Bad command helper
+resources:
+  - path: scripts/missing.py
+    kind: script
+commands:
+  - name: missing-helper
+    resource_path: scripts/missing.py
+    example_argv: ["python", "scripts/missing.py"]
+    purpose: Run a missing helper.
+---
+
+# bad
+"#,
+        )
+        .expect("write skill file");
+
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: skills_root.path().to_path_buf(),
+            scope: SkillScope::User,
+        }]);
+
+        assert!(outcome.skills.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0]
+                .message
+                .contains("does not exist as a file"),
             "unexpected error: {}",
             outcome.errors[0].message
         );
