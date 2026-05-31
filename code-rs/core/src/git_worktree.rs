@@ -337,38 +337,17 @@ pub async fn prepare_reusable_worktree(
     let worktree_path = code_dir.join(worktree_name);
 
     if worktree_path.exists() {
-        // Reset to requested snapshot and clean tracked files; keep gitignored
-        // outputs (e.g., target/) when desired.
-        let reset = Command::new("git")
-            .current_dir(&worktree_path)
-            .args(["reset", "--hard", base_ref])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to reset reusable worktree: {}", e))?;
-        if !reset.status.success() {
-            let stderr = String::from_utf8_lossy(&reset.stderr);
-            return Err(format!("Failed to reset reusable worktree: {stderr}"));
+        if is_registered_worktree(git_root, &worktree_path).await?
+            && reset_reusable_worktree(&worktree_path, base_ref, keep_gitignored)
+                .await
+                .is_ok()
+        {
+            bump_snapshot_epoch_for(&worktree_path);
+            record_worktree_in_session(git_root, &worktree_path).await;
+            return Ok(worktree_path);
         }
 
-        let clean_args = if keep_gitignored {
-            vec!["clean", "-fd"]
-        } else {
-            vec!["clean", "-fdx"]
-        };
-        let clean = Command::new("git")
-            .current_dir(&worktree_path)
-            .args(&clean_args)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to clean reusable worktree: {}", e))?;
-        if !clean.status.success() {
-            let stderr = String::from_utf8_lossy(&clean.stderr);
-            return Err(format!("Failed to clean reusable worktree: {stderr}"));
-        }
-
-        bump_snapshot_epoch_for(&worktree_path);
-        record_worktree_in_session(git_root, &worktree_path).await;
-        return Ok(worktree_path);
+        remove_broken_reusable_worktree(git_root, &worktree_path).await?;
     }
 
     // Create detached worktree at the snapshot commit.
@@ -426,6 +405,103 @@ pub async fn prepare_reusable_worktree(
     bump_snapshot_epoch_for(&worktree_path);
     record_worktree_in_session(git_root, &worktree_path).await;
     Ok(worktree_path)
+}
+
+async fn reset_reusable_worktree(
+    worktree_path: &Path,
+    base_ref: &str,
+    keep_gitignored: bool,
+) -> Result<(), String> {
+    let reset = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["reset", "--hard", base_ref])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to reset reusable worktree: {}", e))?;
+    if !reset.status.success() {
+        let stderr = String::from_utf8_lossy(&reset.stderr);
+        return Err(format!("Failed to reset reusable worktree: {stderr}"));
+    }
+
+    let clean_args = if keep_gitignored {
+        vec!["clean", "-fd"]
+    } else {
+        vec!["clean", "-fdx"]
+    };
+    let clean = Command::new("git")
+        .current_dir(worktree_path)
+        .args(&clean_args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to clean reusable worktree: {}", e))?;
+    if !clean.status.success() {
+        let stderr = String::from_utf8_lossy(&clean.stderr);
+        return Err(format!("Failed to clean reusable worktree: {stderr}"));
+    }
+
+    Ok(())
+}
+
+async fn is_registered_worktree(git_root: &Path, worktree_path: &Path) -> Result<bool, String> {
+    let output = Command::new("git")
+        .current_dir(git_root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to list git worktrees: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to list git worktrees: {stderr}"));
+    }
+
+    let canonical_target =
+        stdfs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
+    let raw_target = worktree_path.to_path_buf();
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let registered = PathBuf::from(path);
+        if registered == raw_target {
+            return Ok(true);
+        }
+        let canonical_registered = stdfs::canonicalize(&registered).unwrap_or(registered);
+        if canonical_registered == canonical_target {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn remove_broken_reusable_worktree(git_root: &Path, worktree_path: &Path) -> Result<(), String> {
+    let Some(worktree_str) = worktree_path.to_str() else {
+        return Err("Invalid worktree path".to_string());
+    };
+
+    let _ = Command::new("git")
+        .current_dir(git_root)
+        .args(["worktree", "remove", "--force", "--force", worktree_str])
+        .output()
+        .await;
+
+    let _ = prune_stale_worktrees(git_root).await;
+    if !worktree_path.exists() {
+        bump_snapshot_epoch_for(worktree_path);
+        return Ok(());
+    }
+
+    tokio::fs::remove_dir_all(worktree_path).await.map_err(|e| {
+        format!(
+            "Failed to remove invalid reusable worktree {}: {e}",
+            worktree_path.display()
+        )
+    })?;
+    let _ = prune_stale_worktrees(git_root).await;
+    bump_snapshot_epoch_for(worktree_path);
+    Ok(())
 }
 
 async fn prune_stale_worktrees(git_root: &Path) -> Result<(), String> {
@@ -874,6 +950,70 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(second.exists());
+
+        restore_home(prev_home);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn prepare_reusable_worktree_recovers_unregistered_existing_path() {
+        let temp_home = TempDir::new().expect("temp home");
+        let repo_dir = temp_home.path().join("repo");
+        init_repo(&repo_dir).await;
+
+        let prev_home = std::env::var("HOME").ok();
+        set_home(temp_home.path());
+
+        let first = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
+            .await
+            .expect("first worktree");
+        assert!(first.exists());
+
+        git(&repo_dir, &["worktree", "remove", "--force", first.to_str().unwrap()]).await;
+        tokio::fs::create_dir_all(&first).await.expect("recreate stale dir");
+        tokio::fs::write(first.join(".git"), b"gitdir: /tmp/missing/worktrees/auto-review\n")
+            .await
+            .expect("write broken git file");
+
+        let second = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
+            .await
+            .expect("recreated worktree");
+
+        assert_eq!(first, second);
+        assert!(second.join("README.md").exists());
+        assert!(is_registered_worktree(&repo_dir, &second).await.unwrap());
+
+        restore_home(prev_home);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn prepare_reusable_worktree_recovers_broken_registered_path() {
+        let temp_home = TempDir::new().expect("temp home");
+        let repo_dir = temp_home.path().join("repo");
+        init_repo(&repo_dir).await;
+
+        let prev_home = std::env::var("HOME").ok();
+        set_home(temp_home.path());
+
+        let first = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
+            .await
+            .expect("first worktree");
+        assert!(first.exists());
+        tokio::fs::write(
+            first.join(".git"),
+            b"gitdir: /tmp/missing/worktrees/auto-review\n",
+        )
+        .await
+        .expect("break git file");
+
+        let second = prepare_reusable_worktree(&repo_dir, "auto-review", "HEAD", false)
+            .await
+            .expect("recreated worktree");
+
+        assert_eq!(first, second);
+        assert!(second.join("README.md").exists());
+        assert!(is_registered_worktree(&repo_dir, &second).await.unwrap());
 
         restore_home(prev_home);
     }
