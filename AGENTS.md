@@ -2,7 +2,8 @@
 
 Repo workflow metadata lives in `.github/github.json`; keep that
 file aligned with branch roles, validation gates, GitHub signal capabilities,
-workflow names, docs routing, and local cleanup policy when those facts change.
+workflow names, PR/release policy, docs routing, and local cleanup policy when
+those facts change.
 
 Every Code is the product in this repository; `code` is the command users type.
 Use **Every Code** for the product name in prose, docs, UI copy, issue text,
@@ -85,6 +86,9 @@ Examples:
 ## Upstream Import Workflow
 
 - `main` is the Every Code product branch and the GitHub default branch.
+- PR readiness is not merge intent. Use the shared `babysit-pr`/GitHub skills
+  and `.github/github.json` PR workflow metadata when watching fix trains,
+  auto-review lag, CI, review comments, and merge readiness.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build validates dev-fast artifacts, while the rebuild recipe owns the PATH-resolved release binary and embeds the package version.
 - During active local work, run

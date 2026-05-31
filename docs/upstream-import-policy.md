@@ -151,20 +151,23 @@ healthy.
 
 ## Release Cadence
 
-Cut an Every Code release after every successful upstream import or local hotfix
-that should be installed by dogfood users. The active release workflow file is
-`.github/workflows/release.yml`, and GitHub displays it as `Release Intent`.
-That name is intentional: the workflow runs after relevant `main` pushes, first
-decides whether the committed package version represents a new release, and only
-then publishes GitHub Release assets.
+Every Code releases are intentional dogfood distribution events, not an
+automatic follow-up to every upstream import, local fix, or merged PR. Use the
+release policy in `.github/github.json` to decide whether to cut immediately or
+defer until nearby release-worthy fixes settle into one batch.
 
-Prepare release metadata locally with the Every Code harness before the publish
-run: the local command bumps `codex-cli/package.json`, updates `CHANGELOG.md`,
-and writes `docs/release-notes/RELEASE_NOTES.md`. The workflow uses the
-committed `codex-cli/package.json` version as release intent. If that version
-already has a tag, the workflow exits successfully as a no-op; if the tag does
-not exist, it validates the metadata and publishes exactly that committed
-version instead of generating fallback notes in CI. The full preflight,
+The active release workflow file is `.github/workflows/release.yml`, and GitHub
+displays it as `Release Intent`. That name is intentional: the workflow runs
+after relevant `main` pushes, first decides whether the committed package
+version represents a new release, and only then publishes GitHub Release assets.
+
+Prepare release metadata locally with the Every Code harness only when cutting a
+release intentionally: the local command bumps `codex-cli/package.json`, updates
+`CHANGELOG.md`, and writes `docs/release-notes/RELEASE_NOTES.md`. For this repo,
+the committed `codex-cli/package.json` version is release intent. If that
+version already has a tag, the workflow exits successfully as a no-op; if the
+tag does not exist, it validates the metadata and publishes exactly that
+committed version instead of generating fallback notes in CI. The full preflight,
 macOS/Linux release matrix, and Windows asset build run only on the publish pass
 after the metadata PR has merged.
 
