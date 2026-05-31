@@ -187,7 +187,14 @@ pub fn cleanup_current_session_worktrees(code_home: &Path) -> io::Result<Cleanup
     let mut outcome = CleanupOutcome::default();
 
     for session_file in current_session_registry_files(code_home) {
-        let entries = read_session_worktree_entries(&session_file)?;
+        let entries = match read_session_worktree_entries(&session_file) {
+            Ok(entries) => entries,
+            Err(err) => {
+                warn!("failed to read current session worktree registry {:?}: {err}", session_file);
+                outcome.errors += 1;
+                continue;
+            }
+        };
         if !entries.is_empty() {
             let session_dir = session_file
                 .parent()
@@ -1220,6 +1227,21 @@ mod tests {
         unsafe { std::env::set_var("CODE_HOME", path); }
     }
 
+    fn set_home(path: &Path) {
+        // SAFETY: tests that mutate HOME are marked serial.
+        unsafe { std::env::set_var("HOME", path); }
+    }
+
+    fn restore_home(prev: Option<String>) {
+        // SAFETY: tests that mutate HOME are marked serial.
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     #[test]
     fn removes_sessions_outside_retention_window() {
         let temp = TempDir::new().unwrap();
@@ -1488,6 +1510,63 @@ mod tests {
         assert!(registry.contains(worktree_path.to_str().unwrap()));
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    #[serial]
+    fn current_session_cleanup_skips_bad_primary_registry_and_reads_fallback() {
+        let temp = TempDir::new().unwrap();
+        let code_home = temp.path().join("custom-code-home");
+        let home = temp.path().join("home");
+        set_code_home(&code_home);
+        let prev_home = std::env::var("HOME").ok();
+        set_home(&home);
+
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        run_git(&repo_dir, ["init"]).unwrap();
+        fs::write(repo_dir.join("README.md"), b"hello").unwrap();
+        run_git(&repo_dir, ["add", "."]).unwrap();
+        run_git(
+            &repo_dir,
+            [
+                "-c",
+                "user.name=code",
+                "-c",
+                "user.email=code@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let worktree_path = code_home.join("working/repo/branches/auto-review");
+        fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        run_git(&repo_dir, ["worktree", "add", "--detach", worktree_path.to_str().unwrap(), "HEAD"])
+            .unwrap();
+
+        let file_name = format!("pid-{}.txt", std::process::id());
+        let primary_session_dir = code_home.join("working/_session");
+        fs::create_dir_all(&primary_session_dir).unwrap();
+        fs::write(primary_session_dir.join(&file_name), [0xff, 0xfe, 0xfd]).unwrap();
+
+        let fallback_session_dir = home.join(".code/working/_session");
+        fs::create_dir_all(&fallback_session_dir).unwrap();
+        fs::write(
+            fallback_session_dir.join(&file_name),
+            format!("{}\t{}\n", repo_dir.display(), worktree_path.display()),
+        )
+        .unwrap();
+
+        let outcome = cleanup_current_session_worktrees(&code_home).unwrap();
+
+        assert_eq!(outcome.errors, 1);
+        assert_eq!(outcome.worktrees_removed, 1);
+        assert!(!worktree_path.exists());
+        assert!(!fallback_session_dir.join(&file_name).exists());
+
+        restore_home(prev_home);
     }
 
     #[test]
