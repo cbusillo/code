@@ -10,7 +10,7 @@
 ## [0.6.110] - 2026-05-31
 
 - Core: tell the model when another active session is using the same checkout so concurrent work is visible. (b8cd26d9)
-- Skills: define overlapping command-policy precedence and match policies inside shell command segments. (85be576d, 09d4e54a)
+- Skills: render structured workflow metadata and enforce overlapping command policies inside shell segments. (dbe6b1e6, 85be576d, 09d4e54a)
 - Release: skip publish jobs cleanly when the workflow determines no release is intended. (8dd6b9f)
 
 ## [0.6.109] - 2026-05-30

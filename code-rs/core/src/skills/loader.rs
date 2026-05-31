@@ -1841,7 +1841,6 @@ commands:
     #[test]
     fn loader_parses_resources_and_commands() {
         let code_home = tempfile::tempdir().expect("tempdir");
-        let cwd = tempfile::tempdir().expect("tempdir");
         let skill_dir = code_home.path().join("skills").join("plan");
         fs::create_dir_all(&skill_dir).unwrap();
 
@@ -1870,8 +1869,10 @@ Plan skill body
 "#,
         ).unwrap();
 
-        let cfg = make_config_for_cwd(code_home.path(), cwd.path());
-        let outcome = load_skills(&cfg);
+        let outcome = load_skills_from_roots(vec![SkillRoot {
+            path: code_home.path().join("skills"),
+            scope: SkillScope::User,
+        }]);
 
         assert!(outcome.errors.is_empty(), "unexpected errors: {:?}", outcome.errors);
         assert_eq!(outcome.skills.len(), 1);
