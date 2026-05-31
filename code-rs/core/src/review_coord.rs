@@ -3,11 +3,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCK_FILENAME: &str = "review.lock";
 const EPOCH_FILENAME: &str = "snapshot.epoch";
-const MALFORMED_LOCK_STALE_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewLockInfo {
@@ -162,23 +161,6 @@ pub fn read_lock_info(scope: Option<&Path>) -> Option<ReviewLockInfo> {
     serde_json::from_str(&buf).ok()
 }
 
-fn lock_file_exists(scope: Option<&Path>) -> bool {
-    lock_path(scope).map(|path| path.exists()).unwrap_or(false)
-}
-
-fn malformed_lock_is_old_enough_to_clear(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    let Ok(age) = SystemTime::now().duration_since(modified) else {
-        return false;
-    };
-    age >= MALFORMED_LOCK_STALE_AFTER
-}
-
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // Safety: kill with signal 0 performs permission/aliveness check only
@@ -205,17 +187,7 @@ fn pid_alive(_pid: u32) -> bool {
 pub fn clear_stale_lock_if_dead(scope: Option<&Path>) -> std::io::Result<bool> {
     let info = match read_lock_info(scope) {
         Some(i) => i,
-        None => {
-            if lock_file_exists(scope) {
-                if let Ok(path) = lock_path(scope) {
-                    if malformed_lock_is_old_enough_to_clear(&path) {
-                        let _ = fs::remove_file(path);
-                        return Ok(true);
-                    }
-                }
-            }
-            return Ok(false);
-        }
+        None => return Ok(false),
     };
     if pid_alive(info.pid) {
         return Ok(false);
@@ -236,9 +208,7 @@ impl Drop for ReviewGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filetime::FileTime;
     use std::path::Path;
-    use std::time::Duration;
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -321,7 +291,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn fresh_malformed_lock_is_not_cleared() {
+    fn malformed_lock_is_not_cleared() {
         let dir = TempDir::new().unwrap();
         set_code_home(dir.path());
         let cwd = dir.path();
@@ -336,21 +306,76 @@ mod tests {
 
     #[test]
     #[serial]
-    fn old_malformed_lock_is_cleared_as_stale() {
+    fn malformed_lock_with_pid_is_not_cleared() {
         let dir = TempDir::new().unwrap();
         set_code_home(dir.path());
         let cwd = dir.path();
         let path = lock_path(Some(cwd)).unwrap();
-        fs::write(&path, b"not json").unwrap();
-        let stale_time = FileTime::from_system_time(
-            SystemTime::now() - MALFORMED_LOCK_STALE_AFTER - Duration::from_secs(1),
-        );
-        filetime::set_file_mtime(&path, stale_time).unwrap();
+        let pid = std::process::id();
+        fs::write(&path, format!("{{\n  \"pid\": {pid},\n")).unwrap();
+
+        assert!(!clear_stale_lock_if_dead(Some(cwd)).unwrap());
+        assert!(path.exists());
+        let guard = try_acquire_lock("live-malformed", cwd).unwrap();
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn valid_lock_with_dead_pid_is_cleared() {
+        let dir = TempDir::new().unwrap();
+        set_code_home(dir.path());
+        let cwd = dir.path();
+        let path = lock_path(Some(cwd)).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!pid_alive(pid));
+        let info = ReviewLockInfo {
+            pid,
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            intent: "dead-review".to_string(),
+            git_head: None,
+            snapshot_epoch: current_snapshot_epoch_for(cwd),
+        };
+        fs::write(&path, serde_json::to_string_pretty(&info).unwrap()).unwrap();
 
         assert!(clear_stale_lock_if_dead(Some(cwd)).unwrap());
         assert!(!path.exists());
-        let guard = try_acquire_lock("after-malformed", cwd).unwrap();
+        let guard = try_acquire_lock("after-dead-malformed", cwd).unwrap();
         assert!(guard.is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn valid_lock_with_live_pid_is_not_cleared() {
+        let dir = TempDir::new().unwrap();
+        set_code_home(dir.path());
+        let cwd = dir.path();
+        let path = lock_path(Some(cwd)).unwrap();
+        let info = ReviewLockInfo {
+            pid: std::process::id(),
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            intent: "live-review".to_string(),
+            git_head: None,
+            snapshot_epoch: current_snapshot_epoch_for(cwd),
+        };
+        fs::write(&path, serde_json::to_string_pretty(&info).unwrap()).unwrap();
+
+        assert!(!clear_stale_lock_if_dead(Some(cwd)).unwrap());
+        assert!(path.exists());
+        let guard = try_acquire_lock("live-valid", cwd).unwrap();
+        assert!(guard.is_none());
     }
 
     #[test]
