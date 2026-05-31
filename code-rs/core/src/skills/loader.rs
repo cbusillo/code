@@ -1919,4 +1919,76 @@ Plan skill body
         assert!(!outcome.errors.is_empty(), "expected validation failure");
         assert!(outcome.errors[0].message.contains("references resource_path"));
     }
+
+    #[test]
+    fn bundled_system_skills_expose_structured_workflow_metadata() {
+        let code_home = tempfile::tempdir().expect("code home");
+        let cfg = make_config_for_cwd(code_home.path(), code_home.path());
+        install_system_skills(code_home.path()).expect("install system skills");
+
+        let outcome = load_skills_from_roots(vec![system_skills_root(&cfg)]);
+
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+
+        let plan = outcome
+            .skills
+            .iter()
+            .find(|skill| skill.name == "plan")
+            .expect("plan skill");
+        assert_resource_command_counts(plan, 3, 3, 1);
+        assert!(plan.commands.iter().any(|command| command.name == "create-plan"));
+
+        let creator = outcome
+            .skills
+            .iter()
+            .find(|skill| skill.name == "skill-creator")
+            .expect("skill-creator skill");
+        assert_resource_command_counts(creator, 3, 3, 1);
+        assert!(creator.commands.iter().any(|command| command.name == "init-skill"));
+        assert!(
+            creator
+                .workflow_defaults
+                .iter()
+                .any(|default| default.name == "resource_dirs")
+        );
+
+        let installer = outcome
+            .skills
+            .iter()
+            .find(|skill| skill.name == "skill-installer")
+            .expect("skill-installer skill");
+        assert_resource_command_counts(installer, 3, 4, 4);
+        assert!(
+            installer
+                .commands
+                .iter()
+                .any(|command| command.name == "install-skill-from-repo")
+        );
+        assert!(
+            installer
+                .workflow_defaults
+                .iter()
+                .any(|default| default.name == "default_method")
+        );
+    }
+
+    fn assert_resource_command_counts(
+        skill: &SkillMetadata,
+        resources: usize,
+        commands: usize,
+        workflow_defaults: usize,
+    ) {
+        assert_eq!(skill.resources.len(), resources, "{} resources", skill.name);
+        assert_eq!(skill.commands.len(), commands, "{} commands", skill.name);
+        assert_eq!(
+            skill.workflow_defaults.len(),
+            workflow_defaults,
+            "{} workflow defaults",
+            skill.name
+        );
+    }
 }

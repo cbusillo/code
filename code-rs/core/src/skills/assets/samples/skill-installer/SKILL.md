@@ -3,13 +3,53 @@ name: skill-installer
 description: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).
 metadata:
   short-description: Install curated skills from openai/skills or other repos
+resources:
+  - path: scripts/list-curated-skills.py
+    kind: script
+    description: List curated skills with installed annotations.
+  - path: scripts/install-skill-from-github.py
+    kind: script
+    description: Install skills from GitHub repo paths or GitHub tree URLs.
+  - path: scripts/github_utils.py
+    kind: script
+    description: Shared GitHub API and download helper code for installer scripts.
+commands:
+  - name: list-curated-skills
+    resource_path: scripts/list-curated-skills.py
+    example_argv: ["python", "scripts/list-curated-skills.py"]
+    purpose: Print curated installable skills with installed annotations.
+  - name: list-curated-skills-json
+    resource_path: scripts/list-curated-skills.py
+    example_argv: ["python", "scripts/list-curated-skills.py", "--format", "json"]
+    purpose: Print curated installable skills as JSON.
+  - name: install-skill-from-repo
+    resource_path: scripts/install-skill-from-github.py
+    example_argv: ["python", "scripts/install-skill-from-github.py", "--repo", "<owner>/<repo>", "--path", "<path/to/skill>"]
+    purpose: Install one or more skills from GitHub repo paths.
+  - name: install-skill-from-url
+    resource_path: scripts/install-skill-from-github.py
+    example_argv: ["python", "scripts/install-skill-from-github.py", "--url", "https://github.com/<owner>/<repo>/tree/<ref>/<path>"]
+    purpose: Install a skill from a GitHub tree URL.
+workflow_defaults:
+  - name: install_location
+    value: $CODEX_HOME/skills or ~/.codex/skills
+    description: Default destination for installed skills.
+  - name: curated_source
+    value: https://github.com/openai/skills/tree/main/skills/.curated
+    description: Default curated skill source.
+  - name: default_ref
+    value: main
+    description: Default Git reference for GitHub skill installs.
+  - name: default_method
+    value: auto
+    description: Default installer method before download/git fallback decisions.
 ---
 
 # Skill Installer
 
 Helps install skills. By default these are from https://github.com/openai/skills/tree/main/skills/.curated, but users can also provide other locations.
 
-Use the helper scripts based on the task:
+Use the structured commands in this skill's frontmatter based on the task:
 - List curated skills when the user asks what is available, or if the user uses this skill without specifying what to do.
 - Install from the curated list when the user provides a skill name.
 - Install from another repo when the user provides a GitHub repo/path (including private repos).
@@ -29,14 +69,10 @@ Which ones would you like installed?
 
 After installing a skill, tell the user: "Restart Codex to pick up new skills."
 
-## Scripts
+## Script Execution
 
-All of these scripts use network, so when running in the sandbox, request escalation when running them.
-
-- `scripts/list-curated-skills.py` (prints curated list with installed annotations)
-- `scripts/list-curated-skills.py --format json`
-- `scripts/install-skill-from-github.py --repo <owner>/<repo> --path <path/to/skill> [<path/to/skill> ...]`
-- `scripts/install-skill-from-github.py --url https://github.com/<owner>/<repo>/tree/<ref>/<path>`
+All of the structured commands use network, so when running in the sandbox,
+request escalation when running them.
 
 ## Behavior and Options
 
