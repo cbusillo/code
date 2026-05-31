@@ -1,6 +1,18 @@
 ---
 name: test-tui
 description: Guide for testing Codex TUI interactively
+commands:
+  - name: start-tui
+    source: repo
+    example_argv: ["just", "codex", "-c", "log_dir=<some_temp_dir>"]
+    purpose: Start the TUI interactively from the repo recipe with logs directed to a temp directory.
+workflow_defaults:
+  - name: rust_log
+    value: RUST_LOG=trace
+    description: Always set trace logging when starting the TUI for interactive testing.
+  - name: input_delivery
+    value: text_then_enter
+    description: Send text first, then Enter as a separate write when driving the TUI programmatically.
 ---
 
 You can start and use Codex TUI to verify changes. 
