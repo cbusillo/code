@@ -74,6 +74,41 @@
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": ["code-everywhere"],
+  "prWorkflow": {
+    "mergePolicy": {
+      "requireExplicitUserApproval": true,
+      "readyStateIsMergeIntent": false,
+      "fixTrainSettling": "Auto-review and related fixes can arrive after CI turns green; treat green and mergeable PRs as ready for a merge decision, not automatic merge intent."
+    },
+    "watchSkill": "babysit-pr"
+  },
+  "release": {
+    "intent": {
+      "kind": "package-version",
+      "file": "codex-cli/package.json",
+      "workflow": "Release Intent"
+    },
+    "metadataFiles": [
+      "codex-cli/package.json",
+      "CHANGELOG.md",
+      "docs/release-notes/RELEASE_NOTES.md"
+    ],
+    "batchingPolicy": "Prefer batching small dogfood fixes after a fix train settles instead of cutting one release per PR.",
+    "cutImmediatelyWhen": [
+      "dogfood-blocking regression",
+      "data-loss or security fix",
+      "broken install/update/release path",
+      "explicit user release request"
+    ],
+    "deferWhen": [
+      "docs-only",
+      "test-only",
+      "CI-only",
+      "cursor/metadata-only",
+      "ordinary cleanup",
+      "related fixes still actively landing"
+    ]
+  },
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
