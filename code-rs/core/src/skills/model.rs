@@ -17,6 +17,9 @@ pub struct SkillMetadata {
     pub scope: SkillScope,
     pub content: String,
     pub policy: Option<SkillPolicy>,
+    pub resources: Vec<SkillResource>,
+    pub commands: Vec<SkillCommand>,
+    pub workflow_defaults: Vec<SkillWorkflowDefault>,
 }
 
 impl SkillMetadata {
@@ -26,6 +29,36 @@ impl SkillMetadata {
             .and_then(|policy| policy.allow_implicit_invocation)
             .unwrap_or(true)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillResource {
+    pub path: PathBuf,
+    pub kind: SkillResourceKind,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillResourceKind {
+    Script,
+    Reference,
+    Template,
+    Asset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillCommand {
+    pub name: String,
+    pub resource_path: PathBuf,
+    pub example_argv: Vec<String>,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillWorkflowDefault {
+    pub name: String,
+    pub value: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

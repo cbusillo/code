@@ -3,6 +3,33 @@ name: plan
 description: Generate a plan for how an agent should accomplish a complex coding task. Use when a user asks for a plan, and optionally when they want to save, find, read, update, or delete plan files in $CODEX_HOME/plans (default ~/.codex/plans).
 metadata:
   short-description: Generate a plan for a complex task
+resources:
+  - path: scripts/create_plan.py
+    kind: script
+    description: Python script to create plan files
+  - path: scripts/read_plan_frontmatter.py
+    kind: script
+    description: Python script to read plan frontmatter
+  - path: scripts/list_plans.py
+    kind: script
+    description: Python script to list saved plan summaries
+commands:
+  - name: create-plan
+    resource_path: scripts/create_plan.py
+    example_argv: ["python", "./scripts/create_plan.py", "--name", "<plan-name>", "--description", "<description>", "--body-file", "<body-file-path>"]
+    purpose: Create a plan file (body only; frontmatter is written for you).
+  - name: read-plan-frontmatter
+    resource_path: scripts/read_plan_frontmatter.py
+    example_argv: ["python", "./scripts/read_plan_frontmatter.py", "<plan-file-path>"]
+    purpose: Read frontmatter summary for a plan.
+  - name: list-plans
+    resource_path: scripts/list_plans.py
+    example_argv: ["python", "./scripts/list_plans.py", "--query", "<query>"]
+    purpose: List plan summaries.
+workflow_defaults:
+  - name: save_location
+    value: $CODEX_HOME/plans or ~/.codex/plans
+    description: Keep plan files outside repository code.
 ---
 
 # Plan
@@ -56,28 +83,6 @@ This skill can also be used to draft codebase or system overviews.
 - Keep the plan name stable unless the user explicitly wants a rename.
 - If renaming, update both frontmatter `name` and filename together.
 
-## Scripts (low-freedom helpers)
-
-Create a plan file (body only; frontmatter is written for you). Run from the plan skill directory:
-
-```bash
-python ./scripts/create_plan.py \
-  --name codex-rate-limit-overview \
-  --description "Scope and update plan for Codex rate limiting" \
-  --body-file /tmp/plan-body.md
-```
-
-Read frontmatter summary for a plan (run from the plan skill directory):
-
-```bash
-python ./scripts/read_plan_frontmatter.py ~/.codex/plans/codex-rate-limit-overview.md
-```
-
-List plan summaries (optional filter; run from the plan skill directory):
-
-```bash
-python ./scripts/list_plans.py --query "rate limit"
-```
 
 ## Plan file format
 

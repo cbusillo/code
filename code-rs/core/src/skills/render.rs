@@ -1,4 +1,5 @@
 use crate::skills::model::SkillMetadata;
+use crate::skills::model::SkillResourceKind;
 use crate::skills::command_policy::render_command_policy_summary;
 
 pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
@@ -27,6 +28,7 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
             let name = skill.name.as_str();
             let description = skill.description.as_str();
             lines.push(format!("- {name}: {description} (file: {path_str})"));
+            lines.extend(render_structured_skill_guidance(skill));
             lines.extend(render_command_policy_summary(skill));
         }
     }
@@ -65,16 +67,64 @@ pub fn render_skills_section(skills: &[SkillMetadata]) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+fn render_structured_skill_guidance(skill: &SkillMetadata) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for resource in &skill.resources {
+        let kind = match resource.kind {
+            SkillResourceKind::Script => "script",
+            SkillResourceKind::Reference => "reference",
+            SkillResourceKind::Template => "template",
+            SkillResourceKind::Asset => "asset",
+        };
+        let mut line = format!("  - resource: {} ({kind})", resource.path.to_string_lossy().replace('\\', "/"));
+        if let Some(desc) = resource.description.as_ref() {
+            line.push_str(&format!("; description: {desc}"));
+        }
+        lines.push(line);
+    }
+
+    for command in &skill.commands {
+        let example = if command.example_argv.is_empty() {
+            command.name.clone()
+        } else {
+            command.example_argv.join(" ")
+        };
+        let line = format!(
+            "  - command `{}`: run `{}` (helper script: {}); purpose: {}",
+            command.name,
+            example,
+            command.resource_path.to_string_lossy().replace('\\', "/"),
+            command.purpose
+        );
+        lines.push(line);
+    }
+
+    for default in &skill.workflow_defaults {
+        let mut line = format!("  - workflow default `{}`: {}", default.name, default.value);
+        if let Some(description) = default.description.as_ref() {
+            line.push_str(&format!("; description: {description}"));
+        }
+        lines.push(line);
+    }
+
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::model::SkillCommand;
     use crate::skills::model::SkillCommandMatcher;
     use crate::skills::model::SkillCommandPolicy;
     use crate::skills::model::SkillCommandPolicyAction;
     use crate::skills::model::SkillCommandPolicyPreferred;
     use crate::skills::model::SkillCommandPolicyPreferredKind;
     use crate::skills::model::SkillPolicy;
+    use crate::skills::model::SkillResource;
+    use crate::skills::model::SkillResourceKind;
     use crate::skills::model::SkillScope;
+    use crate::skills::model::SkillWorkflowDefault;
     use std::path::PathBuf;
 
     fn skill(name: &str, allow_implicit_invocation: Option<bool>) -> SkillMetadata {
@@ -85,10 +135,13 @@ mod tests {
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             scope: SkillScope::User,
             content: String::new(),
+            resources: Vec::new(),
             policy: allow_implicit_invocation.map(|allow_implicit_invocation| SkillPolicy {
                 allow_implicit_invocation: Some(allow_implicit_invocation),
                 command_policies: Vec::new(),
             }),
+            commands: Vec::new(),
+            workflow_defaults: Vec::new(),
         }
     }
 
@@ -177,12 +230,56 @@ mod tests {
     }
 
     #[test]
-    fn render_skills_section_resolves_relative_paths_from_skill_dir() {
-        let rendered = render_skills_section(&[skill("helper", None)])
-            .expect("implicit skill should render");
+    fn render_skills_section_includes_resources_and_commands() {
+        let mut skill = skill("plan", None);
+        skill.resources = vec![
+            SkillResource {
+                path: PathBuf::from("/tmp/plan/scripts/create_plan.py"),
+                kind: SkillResourceKind::Script,
+                description: Some("Helper to create a plan".to_string()),
+            },
+        ];
+        skill.commands = vec![
+            SkillCommand {
+                name: "create-plan".to_string(),
+                resource_path: PathBuf::from("/tmp/plan/scripts/create_plan.py"),
+                example_argv: vec!["python".to_string(), "scripts/create_plan.py".to_string(), "--name".to_string()],
+                purpose: "Create and save a new plan".to_string(),
+            },
+        ];
+        skill.workflow_defaults = vec![SkillWorkflowDefault {
+            name: "save_location".to_string(),
+            value: "$CODEX_HOME/plans".to_string(),
+            description: Some("Keep plans outside repos".to_string()),
+        }];
 
-        assert!(rendered.contains(
-            "When `SKILL.md` references bundled skill resources or scripts with relative paths such as `scripts/foo.py`, resolve them relative to the directory containing that `SKILL.md` first, and only consider other paths if needed."
-        ));
+        let rendered = render_skills_section(&[skill]).expect("skill should render");
+
+        assert!(rendered.contains("resource: /tmp/plan/scripts/create_plan.py (script); description: Helper to create a plan"));
+        assert!(rendered.contains("command `create-plan`: run `python scripts/create_plan.py --name` (helper script: /tmp/plan/scripts/create_plan.py); purpose: Create and save a new plan"));
+        assert!(rendered.contains("workflow default `save_location`: $CODEX_HOME/plans; description: Keep plans outside repos"));
+    }
+
+    #[test]
+    fn render_skills_section_omits_structured_guidance_for_manual_only_skills() {
+        let mut skill = skill("manual-plan", Some(false));
+        skill.resources = vec![SkillResource {
+            path: PathBuf::from("/tmp/plan/scripts/create_plan.py"),
+            kind: SkillResourceKind::Script,
+            description: Some("Helper to create a plan".to_string()),
+        }];
+        skill.commands = vec![SkillCommand {
+            name: "create-plan".to_string(),
+            resource_path: PathBuf::from("/tmp/plan/scripts/create_plan.py"),
+            example_argv: vec!["python".to_string(), "scripts/create_plan.py".to_string()],
+            purpose: "Create and save a new plan".to_string(),
+        }];
+
+        let rendered = render_skills_section(&[skill]).expect("manual skill should render");
+
+        assert!(rendered.contains("### Manual-only skills"));
+        assert!(rendered.contains("- manual-plan"));
+        assert!(!rendered.contains("command `create-plan`"));
+        assert!(!rendered.contains("Helper to create a plan"));
     }
 }
