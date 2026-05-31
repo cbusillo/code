@@ -1,5 +1,8 @@
 use crate::git_worktree;
 use crate::process_liveness::check_pid_alive;
+use crate::review_coord::{
+    bump_snapshot_epoch_for, clear_stale_lock_if_dead, read_lock_info, try_acquire_lock,
+};
 use crate::rollout::SESSIONS_SUBDIR;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -186,13 +189,21 @@ pub fn cleanup_current_session_worktrees(code_home: &Path) -> io::Result<Cleanup
     for session_file in current_session_registry_files(code_home) {
         let entries = read_session_worktree_entries(&session_file)?;
         if !entries.is_empty() {
+            let session_dir = session_file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
             let stats = reclaim_session_worktree_entries(
-                code_home,
+                &session_dir,
                 &entries,
                 &HashSet::new(),
                 ReclaimReason::CurrentSession,
             );
+            let deferred = stats.deferred_worktrees;
             apply_worktree_stats(&mut outcome, stats);
+            if deferred > 0 {
+                continue;
+            }
         }
         let _ = fs::remove_file(&session_file);
     }
@@ -370,10 +381,11 @@ fn cleanup_worktrees(
         Duration::from_secs(retention_days as u64 * 86_400)
     };
 
-    let session_scan = collect_session_worktrees(&working_root.join("_session"));
+    let session_dir = working_root.join("_session");
+    let session_scan = collect_session_worktrees(&session_dir);
     let active = session_scan.active;
     let dead_stats = reclaim_session_worktree_entries(
-        code_home,
+        &session_dir,
         &session_scan.dead_entries,
         &active,
         ReclaimReason::DeadSession,
@@ -464,6 +476,9 @@ fn cleanup_worktrees(
 
             match removal_result {
                 Ok(()) => {
+                    if let Some(repo_root) = repo_root.as_deref() {
+                        bump_snapshot_epoch_for(repo_root);
+                    }
                     git_worktree::remove_branch_metadata(&branch_path);
                     purge_session_registry(&working_root.join("_session"), &branch_path);
 
@@ -588,20 +603,36 @@ fn collect_session_worktrees(session_dir: &Path) -> SessionWorktreeScan {
 }
 
 fn reclaim_session_worktree_entries(
-    code_home: &Path,
+    session_dir: &Path,
     entries: &[SessionWorktreeEntry],
     active: &HashSet<PathBuf>,
     reason: ReclaimReason,
 ) -> WorktreeCleanupStats {
     let mut stats = WorktreeCleanupStats::default();
-    let session_dir = code_home.join("working").join("_session");
+
+    let mut deferred = Vec::new();
 
     for entry in entries {
         let canonical = canonicalize_or_original(&entry.worktree_path);
         if active.contains(&canonical) || active.contains(&entry.worktree_path) {
             stats.skipped_active += 1;
+            deferred.push(entry.clone());
             continue;
         }
+
+        let lock_guard = if matches!(reason, ReclaimReason::CurrentSession) {
+            match try_enter_worktree_cleanup(&entry.git_root) {
+                CleanupLock::Acquired(guard) => Some(guard),
+                CleanupLock::SelfHeld => None,
+                CleanupLock::Busy => {
+                    stats.skipped_active += 1;
+                    deferred.push(entry.clone());
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         if matches!(reason, ReclaimReason::DeadSession)
             && worktree_has_uncommitted_changes(&entry.worktree_path).unwrap_or(false)
@@ -609,6 +640,7 @@ fn reclaim_session_worktree_entries(
             stats.skipped_dirty_paths.insert(canonical);
             stats.skipped_dirty_paths.insert(entry.worktree_path.clone());
             stats.skipped_dirty += 1;
+            deferred.push(entry.clone());
             continue;
         }
 
@@ -621,16 +653,99 @@ fn reclaim_session_worktree_entries(
             stats.removed_files += dir_stats.files;
             stats.reclaimed_bytes += dir_stats.bytes;
         }
+        drop(lock_guard);
+    }
+
+    if matches!(reason, ReclaimReason::CurrentSession) && !deferred.is_empty() {
+        stats.deferred_worktrees = deferred.len();
+        rewrite_session_registry(session_dir, &deferred);
     }
 
     stats
 }
 
+enum CleanupLock {
+    Acquired(crate::review_coord::ReviewGuard),
+    SelfHeld,
+    Busy,
+}
+
+fn try_enter_worktree_cleanup(git_root: &Path) -> CleanupLock {
+    let current_pid = std::process::id();
+    let mut lock_info = None;
+
+    for attempt in 0..3 {
+        if let Ok(Some(guard)) = try_acquire_lock("tui-worktree-cleanup", git_root) {
+            return CleanupLock::Acquired(guard);
+        }
+
+        if let Ok(true) = clear_stale_lock_if_dead(Some(git_root)) {
+            continue;
+        }
+
+        lock_info = read_lock_info(Some(git_root));
+        if matches!(lock_info.as_ref(), Some(info) if info.pid == current_pid) {
+            return CleanupLock::SelfHeld;
+        }
+
+        std::thread::sleep(Duration::from_millis(150 * (attempt + 1)));
+    }
+
+    let detail = lock_info
+        .as_ref()
+        .map(|info| format!("pid {} (intent: {})", info.pid, info.intent))
+        .unwrap_or_else(|| "unknown holder".to_string());
+    debug!(
+        "deferring cleanup of worktree for {:?}; cleanup lock busy ({detail})",
+        git_root
+    );
+
+    CleanupLock::Busy
+}
+
+fn rewrite_session_registry(session_dir: &Path, entries: &[SessionWorktreeEntry]) {
+    if entries.is_empty() {
+        return;
+    }
+
+    if let Err(err) = fs::create_dir_all(session_dir) {
+        warn!("failed to recreate session registry directory {:?}: {err}", session_dir);
+        return;
+    }
+
+    let path = session_dir.join(format!("pid-{}.txt", std::process::id()));
+    let mut opts = OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    match opts.open(&path) {
+        Ok(mut file) => {
+            for entry in entries {
+                let _ = writeln!(
+                    file,
+                    "{}\t{}",
+                    entry.git_root.display(),
+                    entry.worktree_path.display()
+                );
+            }
+        }
+        Err(err) => warn!("failed to rewrite session registry {:?}: {err}", path),
+    }
+}
+
 fn remove_worktree_entry(git_root: &Path, worktree_path: &Path, stats: &mut WorktreeCleanupStats) {
     run_git_worktree_remove_from(git_root, worktree_path);
     match fs::remove_dir_all(worktree_path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Ok(()) => {
+            bump_snapshot_epoch_for(git_root);
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            bump_snapshot_epoch_for(git_root);
+        }
         Err(err) => {
             stats.errors += 1;
             warn!("failed to remove session worktree {:?}: {err}", worktree_path);
@@ -865,6 +980,7 @@ struct WorktreeCleanupStats {
     remaining_worktrees: usize,
     remaining_files: usize,
     remaining_bytes: u64,
+    deferred_worktrees: usize,
     errors: usize,
 }
 
@@ -876,6 +992,7 @@ impl WorktreeCleanupStats {
         self.skipped_active += other.skipped_active;
         self.skipped_dirty += other.skipped_dirty;
         self.skipped_dirty_paths.extend(other.skipped_dirty_paths);
+        self.deferred_worktrees += other.deferred_worktrees;
         self.errors += other.errors;
     }
 }
@@ -1094,8 +1211,14 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+    use serial_test::serial;
     use tempfile::TempDir;
     use time::macros::datetime;
+
+    fn set_code_home(path: &Path) {
+        // SAFETY: tests that mutate CODE_HOME are marked serial.
+        unsafe { std::env::set_var("CODE_HOME", path); }
+    }
 
     #[test]
     fn removes_sessions_outside_retention_window() {
@@ -1263,6 +1386,111 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn current_session_cleanup_bumps_snapshot_epoch_after_removal() {
+        let temp = TempDir::new().unwrap();
+        let code_home = temp.path();
+        set_code_home(code_home);
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        run_git(&repo_dir, ["init"]).unwrap();
+        fs::write(repo_dir.join("README.md"), b"hello").unwrap();
+        run_git(&repo_dir, ["add", "."]).unwrap();
+        run_git(
+            &repo_dir,
+            [
+                "-c",
+                "user.name=code",
+                "-c",
+                "user.email=code@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let worktree_path = code_home.join("working/repo/branches/auto-review");
+        fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        run_git(&repo_dir, ["worktree", "add", "--detach", worktree_path.to_str().unwrap(), "HEAD"])
+            .unwrap();
+        let session_dir = code_home.join("working/_session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let entries = vec![SessionWorktreeEntry {
+            git_root: repo_dir.clone(),
+            worktree_path: worktree_path.clone(),
+        }];
+
+        let before = crate::review_coord::current_snapshot_epoch_for(&repo_dir);
+        let stats = reclaim_session_worktree_entries(
+            &session_dir,
+            &entries,
+            &HashSet::new(),
+            ReclaimReason::CurrentSession,
+        );
+
+        assert_eq!(stats.removed_worktrees, 1);
+        assert!(!worktree_path.exists());
+        assert_eq!(crate::review_coord::current_snapshot_epoch_for(&repo_dir), before + 1);
+    }
+
+    #[test]
+    #[serial]
+    fn current_session_cleanup_defers_when_review_lock_busy() {
+        let temp = TempDir::new().unwrap();
+        let code_home = temp.path();
+        set_code_home(code_home);
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        run_git(&repo_dir, ["init"]).unwrap();
+        fs::write(repo_dir.join("README.md"), b"hello").unwrap();
+        run_git(&repo_dir, ["add", "."]).unwrap();
+        run_git(
+            &repo_dir,
+            [
+                "-c",
+                "user.name=code",
+                "-c",
+                "user.email=code@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let worktree_path = code_home.join("working/repo/branches/auto-review");
+        fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        run_git(&repo_dir, ["worktree", "add", "--detach", worktree_path.to_str().unwrap(), "HEAD"])
+            .unwrap();
+        let session_dir = code_home.join("working/_session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let entries = vec![SessionWorktreeEntry {
+            git_root: repo_dir.clone(),
+            worktree_path: worktree_path.clone(),
+        }];
+        let mut child = spawn_sleeping_child();
+        write_review_lock_for_pid(code_home, &repo_dir, child.id(), "other-review");
+
+        let stats = reclaim_session_worktree_entries(
+            &session_dir,
+            &entries,
+            &HashSet::new(),
+            ReclaimReason::CurrentSession,
+        );
+
+        assert_eq!(stats.removed_worktrees, 0);
+        assert_eq!(stats.deferred_worktrees, 1);
+        assert_eq!(stats.skipped_active, 1);
+        assert!(worktree_path.exists());
+        let registry_path = session_dir.join(format!("pid-{}.txt", std::process::id()));
+        let registry = fs::read_to_string(registry_path).unwrap();
+        assert!(registry.contains(worktree_path.to_str().unwrap()));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
     fn keeps_dirty_worktrees_from_dead_session_registry() {
         let temp = TempDir::new().unwrap();
         let code_home = temp.path();
@@ -1340,6 +1568,40 @@ mod tests {
             .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch_name}")])
             .status();
         output.map(|status| status.success()).unwrap_or(false)
+    }
+
+    fn write_review_lock_for_pid(code_home: &Path, repo_root: &Path, pid: u32, intent: &str) {
+        let normalized_scope = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf());
+        let key = crc32fast::hash(normalized_scope.to_string_lossy().as_bytes());
+        let lock_dir = code_home.join("state/review").join(format!("repo-{key:08x}"));
+        fs::create_dir_all(&lock_dir).unwrap();
+        let info = crate::review_coord::ReviewLockInfo {
+            pid,
+            started_at: 0,
+            intent: intent.to_string(),
+            git_head: None,
+            snapshot_epoch: crate::review_coord::current_snapshot_epoch_for(repo_root),
+        };
+        let body = serde_json::to_string_pretty(&info).unwrap();
+        fs::write(lock_dir.join("review.lock"), body).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleeping_child() -> std::process::Child {
+        std::process::Command::new("sh")
+            .args(["-c", "sleep 10"])
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn spawn_sleeping_child() -> std::process::Child {
+        std::process::Command::new("cmd")
+            .args(["/C", "timeout /T 10 >NUL"])
+            .spawn()
+            .unwrap()
     }
 
     #[cfg(target_os = "linux")]
