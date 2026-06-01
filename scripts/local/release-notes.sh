@@ -82,7 +82,7 @@ CHANGELOG.md House Style
 
 Release Notes
 - Write exactly these sections in order:
-  1. Title: ## @just-every/code v${new_version}
+  1. Title: ## Every Code v${new_version}
   2. One brief intro sentence.
   3. Section header: ### Changes
      - Curate the most interesting release highlights for readers of a GitHub release page.
