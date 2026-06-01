@@ -90,7 +90,7 @@ Examples:
   and `.github/github.json` PR workflow metadata when watching fix trains,
   auto-review lag, CI, review comments, and merge readiness.
 - Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
-- After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build validates dev-fast artifacts, while the rebuild recipe owns the PATH-resolved release binary and embeds the package version.
+- After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build validates dev-fast artifacts, while the rebuild recipe owns the PATH-resolved release binary and embeds the `VERSION` file value.
 - During active local work, run
   `just local-cleanup-space --apply --keep-current-fast-cache` when repo-local
   build caches grow large; this removes stale per-branch `./build-fast.sh`

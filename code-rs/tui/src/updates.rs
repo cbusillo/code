@@ -243,7 +243,7 @@ fn resolve_install_target(exe_path: &Path) -> PathBuf {
 }
 
 fn is_direct_binary_install_path(exe_path: &Path) -> bool {
-    let path = exe_path.to_string_lossy();
+    let path = exe_path.to_string_lossy().replace('\\', "/");
     path.contains("/.code/bin/")
         || path.contains("/.local/bin/")
         || path.contains("/usr/local/bin/")
@@ -699,6 +699,18 @@ mod tests {
     fn upgrade_resolution_allows_unmanaged_usr_local_bin() {
         match resolve_upgrade_resolution_for_exe(Path::new(
             "/usr/local/bin/chris-code",
+        )) {
+            UpgradeResolution::Command { display, .. } => {
+                assert_eq!(display, "chris-code update --yes");
+            }
+            UpgradeResolution::Manual { instructions } => panic!("unexpected manual resolution: {instructions}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_resolution_allows_windows_direct_binary_paths() {
+        match resolve_upgrade_resolution_for_exe(Path::new(
+            r"C:\Users\me\.code\bin\chris-code.exe",
         )) {
             UpgradeResolution::Command { display, .. } => {
                 assert_eq!(display, "chris-code update --yes");

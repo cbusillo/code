@@ -377,7 +377,7 @@ fn install_mode_description(exe: &Path) -> &'static str {
 }
 
 fn is_direct_binary_install_path(exe: &Path) -> bool {
-    let path = exe.to_string_lossy();
+    let path = exe.to_string_lossy().replace('\\', "/");
     path.contains("/.code/bin/")
         || path.contains("/.local/bin/")
         || path.contains("/usr/local/bin/")
@@ -528,6 +528,12 @@ mod tests {
         )));
         assert!(is_direct_binary_install_path(Path::new(
             "/usr/local/bin/chris-code"
+        )));
+        assert!(is_direct_binary_install_path(Path::new(
+            r"C:\Users\me\.code\bin\code.exe"
+        )));
+        assert!(!is_direct_binary_install_path(Path::new(
+            r"C:\Users\me\AppData\Roaming\npm\code.exe"
         )));
     }
 
