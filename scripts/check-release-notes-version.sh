@@ -27,35 +27,35 @@ while [ "$#" -gt 0 ]; do
 done
 
 notes_file="${REPO_ROOT}/docs/release-notes/RELEASE_NOTES.md"
-pkg_json="${REPO_ROOT}/codex-cli/package.json"
+version_file="${REPO_ROOT}/VERSION"
 
 if [ ! -f "$notes_file" ]; then
 	echo "release notes file missing: $notes_file" >&2
 	exit 1
 fi
 
-if [ ! -f "$pkg_json" ]; then
-	echo "package.json missing: $pkg_json" >&2
+if [ ! -f "$version_file" ]; then
+	echo "VERSION file missing: $version_file" >&2
 	exit 1
 fi
 
-package_version=$(jq -r '.version // empty' "$pkg_json")
+package_version=$(tr -d '[:space:]' <"$version_file")
 
-if [ -z "$package_version" ]; then
-	echo "Failed to read version from $pkg_json" >&2
+if ! [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	echo "Failed to read semver from $version_file" >&2
 	exit 1
 fi
 
 if [ -n "$expected_version" ] && [ "$package_version" != "$expected_version" ]; then
-	echo "package version mismatch" >&2
+	echo "release version mismatch" >&2
 	echo "  expected: $expected_version" >&2
 	echo "  actual:   $package_version" >&2
 	echo "Run 'just local-release-notes' before publishing this release." >&2
 	exit 1
 fi
 
-expected_header="## @just-every/code v${package_version}"
-actual_header=$(grep -m1 '^## @just-every/code v' "$notes_file" || true)
+expected_header="## Every Code v${package_version}"
+actual_header=$(grep -m1 '^## Every Code v' "$notes_file" || true)
 
 if [ "$actual_header" != "$expected_header" ]; then
 	echo "release notes header mismatch" >&2

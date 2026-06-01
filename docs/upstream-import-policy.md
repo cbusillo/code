@@ -95,9 +95,8 @@ original/direct upstream and provenance source.
 - **Patch harness:** local validation for changed files, project tool discovery,
   and workspace-aware validator execution.
 - **Release workflow:** GitHub Releases and local PATH rebuilds are Every Code
-  infrastructure. GitHub Releases are the canonical internal update source;
-  npm and Homebrew publishing are deferred unless package-manager distribution
-  becomes intentional again.
+  infrastructure. GitHub Releases are the canonical update source; npm and
+  Homebrew publishing are not part of the current release path.
 - **Model defaults:** local defaults may intentionally differ from upstream, but
   request wire compatibility should use upstream model metadata when available.
 
@@ -158,18 +157,19 @@ defer until nearby release-worthy fixes settle into one batch.
 
 The active release workflow file is `.github/workflows/release.yml`, and GitHub
 displays it as `Release Intent`. That name is intentional: the workflow runs
-after relevant `main` pushes, first decides whether the committed package
-version represents a new release, and only then publishes GitHub Release assets.
+after relevant `main` pushes, first decides whether the committed `VERSION`
+represents a new release, and only then publishes GitHub
+Release assets.
 
 Prepare release metadata locally with the Every Code harness only when cutting a
-release intentionally: the local command bumps `codex-cli/package.json`, updates
-`CHANGELOG.md`, and writes `docs/release-notes/RELEASE_NOTES.md`. For this repo,
-the committed `codex-cli/package.json` version is release intent. If that
-version already has a tag, the workflow exits successfully as a no-op; if the
-tag does not exist, it validates the metadata and publishes exactly that
-committed version instead of generating fallback notes in CI. The full preflight,
-macOS/Linux release matrix, and Windows asset build run only on the publish pass
-after the metadata PR has merged.
+release intentionally: the local command bumps `VERSION`, updates `CHANGELOG.md`,
+and writes `docs/release-notes/RELEASE_NOTES.md`. For this repo, the committed
+`VERSION` value is release intent. If that version already has a tag, the
+workflow exits successfully as a no-op; if the tag does not exist, it validates
+the metadata and publishes exactly that committed version instead of generating
+fallback notes in CI. The full preflight, macOS/Linux release matrix, and
+Windows asset build run only on the publish pass after the metadata PR has
+merged.
 
 Release tags use the plain `v<version>` format, for example `v0.6.101`.
 
@@ -190,7 +190,7 @@ code exec -m gpt-5.5 --sandbox read-only --max-seconds 30 "Reply with exactly OK
 
 Run `just local-code-rebuild` after any release-readiness `./build-fast.sh` run:
 the fast build creates dev-fast artifacts for validation, while the rebuild
-recipe owns the PATH-resolved release binary and embeds the package version.
+recipe owns the PATH-resolved release binary and embeds `VERSION`.
 
 Generate and review release metadata before pushing the release PR:
 
@@ -199,7 +199,7 @@ just local-release-notes
 scripts/check-release-notes-version.sh
 ```
 
-Commit the resulting `codex-cli/package.json`, `CHANGELOG.md`, and
+Commit the resulting `VERSION`, `CHANGELOG.md`, and
 `docs/release-notes/RELEASE_NOTES.md` changes on a release metadata branch.
 
 If an old manual Homebrew link exists, remove it so PATH resolution stays
@@ -218,7 +218,7 @@ scripts/wait-for-gh-run.sh --workflow 'Release Intent' --branch main
 ```
 
 A successful workflow run is not enough evidence that a release was published:
-non-release runs also complete successfully as no-ops when the package version
+non-release runs also complete successfully as no-ops when `VERSION`
 already has a tag. When cutting a release, verify the tag or GitHub Release
 directly after the workflow succeeds:
 

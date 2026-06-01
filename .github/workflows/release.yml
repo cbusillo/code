@@ -4,8 +4,8 @@ on:
   push:
     branches: [ main ]
     # Ignore common non-release paths. For other main pushes, the workflow
-    # determines whether the committed package version represents release
-    # intent. Runs with no new package version are successful no-ops.
+    # determines whether the committed VERSION represents release intent. Runs
+    # with no new VERSION are successful no-ops.
     paths-ignore:
       - '.github/workflows/issue-triage.yml'
       - '.github/workflows/preview-build.yml'
@@ -486,41 +486,27 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Update package.json version
+      - name: Prepare release tag
         id: version
-        working-directory: codex-cli
         shell: bash
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
           NEW_VERSION="${{ needs.determine-version.outputs.version }}"
-          npm version "$NEW_VERSION" --no-git-tag-version --allow-same-version
-          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-          git add package.json
-          if git diff --staged --quiet; then
-            echo "skip_push=true" >> "$GITHUB_OUTPUT"
-          else
-            git commit -m "chore(release): ${NEW_VERSION}"
-            echo "skip_push=false" >> "$GITHUB_OUTPUT"
+          if [[ "$(tr -d '[:space:]' < VERSION)" != "$NEW_VERSION" ]]; then
+            echo "VERSION does not match release intent ${NEW_VERSION}" >&2
+            exit 1
           fi
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           if ! git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
             git tag "v${NEW_VERSION}"
           fi
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        if: steps.version.outputs.skip_push == 'true'
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
 
       - name: Prepare release assets
-        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -534,26 +520,22 @@ jobs:
           ls -la release-assets/ || true
 
       - name: Verify local release notes metadata
-        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: |
           set -euo pipefail
           scripts/check-release-notes-version.sh --version "${{ steps.version.outputs.version }}"
 
       - name: Push tag
-        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: git push origin "v${{ steps.version.outputs.version }}" || true
 
       - name: Verify release notes header matches version
-        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         run: |
           set -euo pipefail
           scripts/check-release-notes-version.sh
 
       - name: Generate update manifest
-        if: steps.version.outputs.skip_push == 'true'
         shell: bash
         env:
           NEW_VERSION: ${{ steps.version.outputs.version }}
@@ -567,7 +549,6 @@ jobs:
             --output release-assets/update-manifest.json
 
       - name: Create GitHub Release
-        if: steps.version.outputs.skip_push == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}

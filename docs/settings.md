@@ -15,7 +15,7 @@ Full-screen settings panel for Every Code’s TUI. Use it to change models, them
 ## Sections
 - **Model**: pick the default chat model and reasoning effort.
 - **Theme**: choose a theme and spinner; applies immediately.
-- **Updates**: view upgrade channel/status. `/update` opens here before running installers.
+- **Updates**: view GitHub Release update status, run upgrades, and toggle automatic upgrades. `/update` opens here.
 - **Agents**: see built-in/custom agents, enable/disable, force read-only, add per-agent instructions. Open the Subagent editor to configure `/plan`/`/solve`/`/code` or custom slash commands.
 - **Prompts**: edit saved prompt snippets.
 - **Auto Drive**: set review/agents/QA/cross-check toggles, continue mode (manual/immediate/ten-seconds/sixty-seconds), model override, or “use chat model.” Updates apply to active runs.

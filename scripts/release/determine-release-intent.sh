@@ -5,9 +5,9 @@ usage() {
 	cat <<'USAGE'
 Usage: scripts/release/determine-release-intent.sh [--github-output PATH] [--github-step-summary PATH]
 
-Determines whether the committed package version should publish a GitHub
-Release. A release is intended when codex-cli/package.json names a version whose
-v<version> tag does not exist yet.
+Determines whether the committed Every Code version should publish a GitHub
+Release. A release is intended when VERSION names a version whose v<version> tag
+does not exist yet.
 USAGE
 }
 
@@ -45,7 +45,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 repo_root="$(git rev-parse --show-toplevel)"
-current_version="$(node -p "require('${repo_root}/codex-cli/package.json').version")"
+version_file="${repo_root}/VERSION"
+current_version="$(tr -d '[:space:]' <"$version_file")"
+if [[ ! "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	echo "invalid VERSION: ${current_version:-<empty>}" >&2
+	exit 1
+fi
 new_version="$current_version"
 
 if git rev-parse "v${new_version}" >/dev/null 2>&1; then

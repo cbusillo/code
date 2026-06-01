@@ -426,14 +426,13 @@ jobs:
           comm -13 .github/auto/DEFAULT_CRATES.txt .github/auto/UPSTREAM_CRATES.txt > .github/auto/DELETED_ON_DEFAULT.txt || true
 
           git diff --name-only "origin/${DEFAULT_BRANCH}..upstream/${UPSTREAM_BRANCH}" > .github/auto/DELTA_FILES.txt || true
-          awk 'BEGIN{tui=cli=core=docs=tests=other=0}
+          awk 'BEGIN{tui=core=docs=tests=other=0}
                /^codex-rs\/tui\//{tui++; next}
-               /^codex-cli\//{cli++; next}
                /^codex-rs\/(core|common|protocol|exec|file-search)\//{core++; next}
                /^docs\//{docs++; next}
                /(^|\/)tests?\//{tests++; next}
                {other++}
-               END{printf("tui=%d cli=%d core=%d docs=%d tests=%d other=%d\n",tui,cli,core,docs,tests,other)}' \
+               END{printf("tui=%d core=%d docs=%d tests=%d other=%d\n",tui,core,docs,tests,other)}' \
             .github/auto/DELTA_FILES.txt > .github/auto/CHANGE_HISTOGRAM.txt
 
           FILES_COUNT=$(wc -l < .github/auto/DELTA_FILES.txt | tr -d ' ')
@@ -515,7 +514,6 @@ jobs:
           MERGE_MODE: ${{ steps.prep.outputs.merge_mode || 'one-shot' }}
           OURS_GLOBS: |
             codex-rs/tui/**
-            codex-cli/**
             .github/workflows/**
             AGENTS.md
             README.md
@@ -794,11 +792,6 @@ jobs:
           # Remove any accidentally committed artifacts under .github/auto/** (these should be uploaded, not tracked)
           auto_tracked=$(git ls-files -- '.github/auto/**' || true)
           if [ -n "$auto_tracked" ]; then echo "$auto_tracked" | xargs -r git rm -f --; removed=true; fi
-          # Remove any tracked upstream images disallowed by local policy
-          for p in .github/codex-cli-*.png .github/codex-cli-*.jpg .github/codex-cli-*.jpeg .github/codex-cli-*.webp; do
-            files=$(git ls-files -- "$p" || true)
-            if [ -n "$files" ]; then echo "$files" | xargs -r git rm -f --; removed=true; fi
-          done
           # Belt-and-suspenders: drop any accidentally committed cargo cache dirs
           # Cover both repo-root and nested workspace (e.g., codex-rs/.cargo-home)
           for d in .cargo-home .cargo2 codex-rs/.cargo-home codex-rs/.cargo2; do
@@ -831,10 +824,10 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           set -euo pipefail
-          # Guide-only branding report: detect user-visible 'Codex' strings under TUI/CLI affected by this merge.
+          # Guide-only branding report: detect user-visible 'Codex' strings under TUI affected by this merge.
           mkdir -p .github/auto
           : > .github/auto/VERIFY_branding.log
-          changed_files=$(git diff --name-only "origin/${DEFAULT_BRANCH}..origin/upstream-merge" -- 'codex-rs/tui/**' 'codex-cli/**' | tr '\n' ' ' || true)
+          changed_files=$(git diff --name-only "origin/${DEFAULT_BRANCH}..origin/upstream-merge" -- 'codex-rs/tui/**' | tr '\n' ' ' || true)
           if [ -n "${changed_files:-}" ]; then
             echo "[branding] scanning changed TUI/CLI files for user-visible 'Codex' strings..." | tee -a .github/auto/VERIFY_branding.log
             git diff -U0 --no-color "origin/${DEFAULT_BRANCH}..origin/upstream-merge" -- $changed_files \

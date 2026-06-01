@@ -1,4 +1,4 @@
-## @just-every/code v0.6.113
+## Every Code v0.6.113
 
 This release ships a small reliability fix for skill metadata and upstream cursor checks.
 

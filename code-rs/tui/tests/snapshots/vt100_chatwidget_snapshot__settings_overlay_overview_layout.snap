@@ -14,7 +14,7 @@ expression: output
  |   + Switch between preset color palettes and adjust contrast.                                  |
  |                                                                                                |
  |   Updates            Auto update: Disabled                                                     |
- |   + Control CLI auto-update cadence and release channels.                                      |
+ |   + Control GitHub Release update checks and automatic upgrades.                               |
  |                                                                                                |
  |                                                                                                |
 

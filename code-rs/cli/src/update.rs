@@ -86,14 +86,12 @@ pub async fn run_update(args: UpdateCommand) -> anyhow::Result<()> {
     }
 
     let install_target = resolve_install_target(&exe);
-    let install = detect_install_source_for_path(&install_target);
     println!("command:        {}", identity.command_name);
     println!("install target: {}", install_target.display());
-    println!("install source: {}", install.description());
-    if !install.can_self_update() {
+    println!("install mode:   {}", install_mode_description(&install_target));
+    if !is_direct_binary_install_path(&install_target) {
         bail!(
-            "refusing self-update for {} install; install the release manually instead",
-            install.description()
+            "refusing self-update because this executable is not an Every Code direct binary; install the latest GitHub Release manually instead"
         );
     }
 
@@ -249,7 +247,7 @@ fn command_name_from_path(path: &Path) -> Option<String> {
 }
 
 fn valid_command_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
+    let trimmed = name.trim().trim_end_matches(".exe");
     if trimmed.is_empty() || trimmed.contains(std::path::MAIN_SEPARATOR) {
         None
     } else {
@@ -366,55 +364,24 @@ fn current_target() -> anyhow::Result<String> {
     }
 }
 
-#[derive(Debug)]
-enum InstallSource {
-    Direct,
-    Homebrew,
-    Npm,
-    Cargo,
-    Unknown(PathBuf),
-}
-
-impl InstallSource {
-    fn can_self_update(&self) -> bool {
-        matches!(self, InstallSource::Direct)
-    }
-
-    fn description(&self) -> String {
-        match self {
-            InstallSource::Direct => "direct binary".to_string(),
-            InstallSource::Homebrew => "Homebrew".to_string(),
-            InstallSource::Npm => "npm/pnpm/bun".to_string(),
-            InstallSource::Cargo => "cargo".to_string(),
-            InstallSource::Unknown(path) => format!("unknown ({})", path.display()),
-        }
-    }
-}
-
 fn resolve_install_target(exe: &Path) -> PathBuf {
     fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf())
 }
 
-fn detect_install_source_for_path(exe: &Path) -> InstallSource {
-    let path = exe.to_string_lossy();
-    if path.contains("/Cellar/") || path.contains("/Homebrew/") || path.contains("/homebrew/") {
-        return InstallSource::Homebrew;
+fn install_mode_description(exe: &Path) -> &'static str {
+    if is_direct_binary_install_path(exe) {
+        "Every Code direct binary"
+    } else {
+        "unsupported for self-update"
     }
-    if path.contains("/node_modules/") || path.contains("/.bun/") {
-        return InstallSource::Npm;
-    }
-    if path.contains("/.cargo/bin/") {
-        return InstallSource::Cargo;
-    }
-    if path.contains("/.code/bin/")
+}
+
+fn is_direct_binary_install_path(exe: &Path) -> bool {
+    let path = exe.to_string_lossy().replace('\\', "/");
+    path.contains("/.code/bin/")
         || path.contains("/.local/bin/")
         || path.contains("/usr/local/bin/")
         || path.contains("/code-rs/target/release/")
-    {
-        return InstallSource::Direct;
-    }
-
-    InstallSource::Unknown(exe.to_path_buf())
 }
 
 fn compare_versions(current: &str, latest: &str) -> VersionOrdering {
@@ -546,31 +513,28 @@ mod tests {
     }
 
     #[test]
-    fn detect_install_source_classifies_managed_paths() {
-        assert!(matches!(
-            detect_install_source_for_path(Path::new(
-                "/opt/homebrew/Cellar/code/0.6.101/bin/code"
-            )),
-            InstallSource::Homebrew
-        ));
-        assert!(matches!(
-            detect_install_source_for_path(Path::new(
-                "/Users/me/.npm-global/lib/node_modules/@just-every/code/bin/code"
-            )),
-            InstallSource::Npm
-        ));
-        assert!(matches!(
-            detect_install_source_for_path(Path::new("/Users/me/.cargo/bin/code")),
-            InstallSource::Cargo
-        ));
-        assert!(matches!(
-            detect_install_source_for_path(Path::new("/Users/me/.local/bin/code")),
-            InstallSource::Direct
-        ));
-        assert!(matches!(
-            detect_install_source_for_path(Path::new("/usr/local/bin/chris-code")),
-            InstallSource::Direct
-        ));
+    fn direct_binary_install_path_allows_owned_locations_only() {
+        assert!(!is_direct_binary_install_path(Path::new(
+            "/opt/homebrew/Cellar/code/0.6.101/bin/code"
+        )));
+        assert!(!is_direct_binary_install_path(Path::new(
+            "/Users/me/.npm-global/lib/node_modules/@just-every/code/bin/code"
+        )));
+        assert!(!is_direct_binary_install_path(Path::new(
+            "/Users/me/.cargo/bin/code"
+        )));
+        assert!(is_direct_binary_install_path(Path::new(
+            "/Users/me/.local/bin/code"
+        )));
+        assert!(is_direct_binary_install_path(Path::new(
+            "/usr/local/bin/chris-code"
+        )));
+        assert!(is_direct_binary_install_path(Path::new(
+            r"C:\Users\me\.code\bin\code.exe"
+        )));
+        assert!(!is_direct_binary_install_path(Path::new(
+            r"C:\Users\me\AppData\Roaming\npm\code.exe"
+        )));
     }
 
     #[test]
@@ -626,13 +590,10 @@ mod tests {
     }
 
     #[test]
-    fn detect_install_source_refuses_build_cache_binaries() {
-        assert!(matches!(
-            detect_install_source_for_path(Path::new(
-                "/Users/me/Developer/code/.code/working/_target-cache/code/main/code-rs/dev-fast/code"
-            )),
-            InstallSource::Unknown(_)
-        ));
+    fn direct_binary_install_path_refuses_build_cache_binaries() {
+        assert!(!is_direct_binary_install_path(Path::new(
+            "/Users/me/Developer/code/.code/working/_target-cache/code/main/code-rs/dev-fast/code"
+        )));
     }
 
     #[cfg(target_family = "unix")]
