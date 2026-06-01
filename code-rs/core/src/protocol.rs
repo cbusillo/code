@@ -1644,6 +1644,17 @@ pub struct AgentInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub source_kind: Option<AgentSourceKind>,
+
+    /// Session that launched this agent. Used to avoid applying background
+    /// automation results to the wrong live session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub owner_session_id: Option<String>,
+
+    /// Git snapshot/base the agent worktree was created from, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub worktree_base: Option<String>,
 }
 
 /// User's decision in response to an ExecApprovalRequest.

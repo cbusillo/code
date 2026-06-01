@@ -11786,6 +11786,8 @@ mod agent_completion_wake_tests {
             last_activity_at: None,
             seconds_since_last_activity: None,
             source_kind,
+            owner_session_id: None,
+            worktree_base: None,
         }
     }
 
@@ -11970,6 +11972,8 @@ async fn send_agent_status_update(sess: &Session) {
                         .max(0) as u64
                 }),
                 source_kind: agent.source_kind,
+                owner_session_id: agent.owner_session_id.map(|id| id.to_string()),
+                worktree_base: agent.worktree_base,
             }
         })
         .collect();
