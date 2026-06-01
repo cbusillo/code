@@ -481,6 +481,7 @@ pub(crate) enum AppEvent {
 
     /// Background Auto Review lifecycle notifications
     BackgroundReviewStarted {
+        run_id: Uuid,
         worktree_path: PathBuf,
         branch: String,
         agent_id: Option<String>,
@@ -488,6 +489,7 @@ pub(crate) enum AppEvent {
         owner_session_id: Option<Uuid>,
     },
     BackgroundReviewFinished {
+        run_id: Uuid,
         worktree_path: PathBuf,
         branch: String,
         has_findings: bool,

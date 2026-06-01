@@ -1381,6 +1381,17 @@ fn auto_review_identity_mismatch_is_final(reason: &str) -> bool {
     !matches!(reason, "owner_session_id_missing" | "snapshot_missing")
 }
 
+fn background_review_run_matches(
+    expected_run_id: Option<uuid::Uuid>,
+    run_id: uuid::Uuid,
+) -> Result<(), &'static str> {
+    if expected_run_id.is_some_and(|expected| expected != run_id) {
+        Err("run_id")
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct BackgroundReviewState {
     worktree_path: std::path::PathBuf,
@@ -2095,6 +2106,7 @@ pub(crate) struct ChatWidget<'a> {
     auto_resolve_attempts_baseline: u32,
     turn_had_code_edits: bool,
     background_review: Option<BackgroundReviewState>,
+    background_review_run_id: Option<Uuid>,
     auto_review_status: Option<AutoReviewStatus>,
     auto_review_notice: Option<AutoReviewNotice>,
     deferred_auto_review_notice_lines: Option<Vec<String>>,
@@ -7200,6 +7212,7 @@ impl ChatWidget<'_> {
             auto_resolve_attempts_baseline: config.auto_drive.auto_resolve_review_attempts.get(),
             turn_had_code_edits: false,
             background_review: None,
+            background_review_run_id: None,
             auto_review_status: None,
             auto_review_notice: None,
             deferred_auto_review_notice_lines: None,
@@ -7593,6 +7606,7 @@ impl ChatWidget<'_> {
             auto_resolve_attempts_baseline: config.auto_drive.auto_resolve_review_attempts.get(),
             turn_had_code_edits: false,
             background_review: None,
+            background_review_run_id: None,
             auto_review_status: None,
             auto_review_notice: None,
             deferred_auto_review_notice_lines: None,
@@ -31525,6 +31539,7 @@ Have we met every part of this goal and is there no further work to do?"#
 async fn run_background_review(
     config: Config,
     app_event_tx: AppEventSender,
+    run_id: Uuid,
     owner_session_id: Uuid,
     base_snapshot: Option<GhostCommit>,
     turn_context: Option<String>,
@@ -31546,6 +31561,7 @@ async fn run_background_review(
             });
         if busy {
             app_event_tx.send(AppEvent::BackgroundReviewFinished {
+                run_id,
                 worktree_path: std::path::PathBuf::new(),
                 branch: String::new(),
                 has_findings: false,
@@ -31756,6 +31772,7 @@ async fn run_background_review(
         drop(manager);
 
         app_event_tx_clone.send(AppEvent::BackgroundReviewStarted {
+            run_id,
             worktree_path: worktree_path.clone(),
             branch: branch.clone(),
             agent_id: Some(agent_id.clone()),
@@ -31768,6 +31785,7 @@ async fn run_background_review(
 
     if let Err(err) = outcome {
         app_event_tx.send(AppEvent::BackgroundReviewFinished {
+            run_id,
             worktree_path: std::path::PathBuf::new(),
             branch: String::new(),
             has_findings: false,
@@ -34144,8 +34162,11 @@ use code_core::protocol::OrderMeta;
         chat.config.tui.auto_review_enabled = true;
         chat.active_task_ids.insert("foreground-task".to_string());
         chat.bottom_pane.set_task_running(true);
+        let run_id = uuid::Uuid::new_v4();
+        chat.background_review_run_id = Some(run_id);
 
-        chat.on_background_review_started(
+        chat.on_background_review_started_for_run(
+            run_id,
             PathBuf::from("/tmp/wt"),
             "auto-review-branch".to_string(),
             Some("agent-123".to_string()),
@@ -34627,8 +34648,11 @@ use code_core::protocol::OrderMeta;
         );
         assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
         assert_no_code_ops_pending(&mut code_op_rx);
+        let run_id = uuid::Uuid::new_v4();
+        chat.background_review_run_id = Some(run_id);
 
-        chat.on_background_review_started(
+        chat.on_background_review_started_for_run(
+            run_id,
             PathBuf::from("/tmp/current-wt"),
             "auto-review-current".to_string(),
             Some("agent-current".to_string()),
@@ -34648,6 +34672,85 @@ use code_core::protocol::OrderMeta;
         assert!(history_contains_text(chat, "Merge /tmp/current-wt to apply fixes."));
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
+    }
+
+    #[test]
+    fn background_review_start_event_with_wrong_run_id_does_not_replace_current_run() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let run_id = uuid::Uuid::new_v4();
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: None,
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_started_for_run(
+            uuid::Uuid::new_v4(),
+            PathBuf::from("/tmp/stale-wt"),
+            "auto-review-stale".to_string(),
+            Some("agent-stale".to_string()),
+            Some("snap-stale".to_string()),
+            None,
+        );
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("wrong-run start should not clear current review");
+        assert!(state.worktree_path.as_os_str().is_empty());
+        assert!(state.branch.is_empty());
+        assert!(state.agent_id.is_none());
+        assert!(state.snapshot.is_none());
+        assert_eq!(chat.background_review_run_id, Some(run_id));
+    }
+
+    #[test]
+    fn background_review_finish_event_with_wrong_run_id_does_not_clear_current_run() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished_for_run(
+            uuid::Uuid::new_v4(),
+            PathBuf::from("/tmp/stale-wt"),
+            "auto-review-stale".to_string(),
+            true,
+            1,
+            Some("stale findings".to_string()),
+            None,
+            Some("agent-current".to_string()),
+            Some("snap-current".to_string()),
+            Some(session_id),
+        );
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("wrong-run completion should not clear current review");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
+        assert_eq!(chat.background_review_run_id, Some(run_id));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
     }
 
     #[test]
@@ -39678,6 +39781,7 @@ impl ChatWidget<'_> {
 
         let stale = self.background_review.take();
         self.background_review_guard = None;
+        self.background_review_run_id = None;
 
         let Some(stale) = stale else {
             return;
@@ -39703,6 +39807,8 @@ impl ChatWidget<'_> {
             Some(AutoReviewStatus { status: AutoReviewIndicatorStatus::Fixed, .. })
         );
         let owner_session_id = self.session_id.unwrap_or_else(Uuid::new_v4);
+        let run_id = Uuid::new_v4();
+        self.background_review_run_id = Some(run_id);
         self.background_review = Some(BackgroundReviewState {
             worktree_path: std::path::PathBuf::new(),
             branch: String::new(),
@@ -39736,6 +39842,7 @@ impl ChatWidget<'_> {
             run_background_review(
                 config,
                 app_event_tx,
+                run_id,
                 owner_session_id,
                 base_snapshot_for_task,
                 turn_context,
@@ -39786,6 +39893,7 @@ impl ChatWidget<'_> {
                     self.clear_auto_review_indicator();
                     self.background_review = None;
                     self.background_review_guard = None;
+                    self.background_review_run_id = None;
                     self.remember_processed_auto_review_agent(&agent.id);
                     continue;
                 }
@@ -40613,8 +40721,9 @@ impl ChatWidget<'_> {
         !duplicate
     }
 
-    pub(crate) fn on_background_review_started(
+    pub(crate) fn on_background_review_started_for_run(
         &mut self,
+        run_id: Uuid,
         worktree_path: std::path::PathBuf,
         branch: String,
         agent_id: Option<String>,
@@ -40622,6 +40731,15 @@ impl ChatWidget<'_> {
         owner_session_id: Option<Uuid>,
     ) {
         let foreground_active = self.foreground_activity_running_excluding_auto_review();
+        if let Err(reason) = background_review_run_matches(self.background_review_run_id, run_id) {
+            tracing::debug!(
+                reason,
+                run_id = %run_id,
+                expected_run_id = self.background_review_run_id.map(|id| id.to_string()).unwrap_or_default(),
+                "ignoring stale or cross-session auto-review start"
+            );
+            return;
+        }
         if let Some(state) = self.background_review.as_mut() {
             state.worktree_path = worktree_path.clone();
             state.branch = branch.clone();
@@ -40660,6 +40778,36 @@ impl ChatWidget<'_> {
         snapshot: Option<String>,
         owner_session_id: Option<Uuid>,
     ) {
+        let run_id = self
+            .background_review_run_id
+            .unwrap_or_else(Uuid::new_v4);
+        self.on_background_review_finished_for_run(
+            run_id,
+            worktree_path,
+            branch,
+            has_findings,
+            findings,
+            summary,
+            error,
+            agent_id,
+            snapshot,
+            owner_session_id,
+        );
+    }
+
+    pub(crate) fn on_background_review_finished_for_run(
+        &mut self,
+        run_id: Uuid,
+        worktree_path: std::path::PathBuf,
+        branch: String,
+        has_findings: bool,
+        findings: usize,
+        summary: Option<String>,
+        error: Option<String>,
+        agent_id: Option<String>,
+        snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
+    ) {
         let foreground_active = self.foreground_activity_running_excluding_auto_review();
         let effective_findings = if has_findings {
             findings.max(1)
@@ -40668,6 +40816,15 @@ impl ChatWidget<'_> {
         };
 
         if let Some(state) = self.background_review.as_ref() {
+            if let Err(reason) = background_review_run_matches(self.background_review_run_id, run_id) {
+                tracing::debug!(
+                    reason,
+                    run_id = %run_id,
+                    expected_run_id = self.background_review_run_id.map(|id| id.to_string()).unwrap_or_default(),
+                    "ignoring stale or cross-session auto-review completion"
+                );
+                return;
+            }
             if let Err(reason) = state.identity().matches_completion(
                 agent_id.as_deref(),
                 snapshot.as_deref(),
@@ -40715,6 +40872,7 @@ impl ChatWidget<'_> {
         // Clear flags up front so subsequent auto reviews can start even if this finishes with an error
         self.background_review = None;
         self.background_review_guard = None;
+        self.background_review_run_id = None;
         release_background_lock(&agent_id);
         let snapshot_note = inflight_snapshot
             .as_deref()
@@ -41069,6 +41227,7 @@ impl ChatWidget<'_> {
         }
 
         self.background_review = None;
+        self.background_review_run_id = None;
     }
 
     fn update_review_settings_model_row(&mut self) {
