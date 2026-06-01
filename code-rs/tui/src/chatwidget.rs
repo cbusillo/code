@@ -1392,6 +1392,13 @@ fn background_review_run_matches(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoReviewCompletionDisposition {
+    Current,
+    Superseded,
+    Ignore,
+}
+
 #[derive(Clone, Debug)]
 struct BackgroundReviewState {
     worktree_path: std::path::PathBuf,
@@ -34466,8 +34473,134 @@ use code_core::protocol::OrderMeta;
         assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
         assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
         assert!(chat.processed_auto_review_agents.contains("agent-stale"));
-        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert!(history_contains_text(chat, "Auto Review: superseded result archived"));
+        assert!(history_contains_text(chat, "1 issue(s) found"));
+        assert!(history_contains_text(chat, "snap-stale"));
         assert!(!history_contains_text(chat, "Merge /tmp/current-wt to apply fixes."));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn pre_start_auto_review_same_session_terminal_status_does_not_adopt_current_review() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            Some(session_id),
+            Some("snap-stale"),
+        )]);
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("pre-start terminal status should not clear current review");
+        assert!(state.agent_id.is_none());
+        assert!(state.snapshot.is_none());
+        assert!(chat.processed_auto_review_agents.contains("agent-stale"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn processed_pre_start_auto_review_terminal_status_can_match_after_start_event() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let agent = completed_auto_review_agent(
+            "agent-current",
+            "auto-review-current",
+            Some(session_id),
+            Some("snap-current"),
+        );
+        chat.observe_auto_review_status(&[agent.clone()]);
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+
+        chat.on_background_review_started_for_run(
+            run_id,
+            PathBuf::from("/tmp/current-wt"),
+            "auto-review-current".to_string(),
+            Some("agent-current".to_string()),
+            Some("snap-current".to_string()),
+            Some(session_id),
+        );
+        chat.observe_auto_review_status(&[agent]);
+
+        assert!(chat.background_review.is_none());
+        assert!(history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        let note = expect_post_turn_developer_input(&mut code_op_rx);
+        assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
+    }
+
+    #[test]
+    fn duplicate_superseded_auto_review_status_is_archived_once() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let agent = completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            Some(session_id),
+            Some("snap-stale"),
+        );
+        chat.observe_auto_review_status(&[agent.clone()]);
+        chat.observe_auto_review_status(&[agent]);
+
+        let archived_count = chat
+            .history_cells
+            .iter()
+            .filter(|cell| {
+                cell.display_lines_trimmed().iter().any(|line| {
+                    line.spans.iter().any(|span| {
+                        span.content.contains("Auto Review: superseded result archived")
+                    })
+                })
+            })
+            .count();
+        assert_eq!(archived_count, 1);
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 
@@ -34751,7 +34884,7 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
-    fn background_review_finish_event_with_wrong_run_id_does_not_clear_current_run() {
+    fn background_review_finish_event_with_wrong_run_id_archives_without_clearing_current_run() {
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
         let mut code_op_rx = replace_code_op_channel(chat);
@@ -34789,8 +34922,64 @@ use code_core::protocol::OrderMeta;
         assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
         assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
         assert_eq!(chat.background_review_run_id, Some(run_id));
-        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
+        assert!(history_contains_text(chat, "Auto Review: superseded result archived"));
+        assert!(history_contains_text(chat, "1 issue(s) found"));
+        assert!(history_contains_text(chat, "stale findings"));
+        assert!(!history_contains_text(chat, "Merge /tmp/stale-wt to apply fixes."));
         assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn superseded_auto_review_finish_with_active_agent_id_keeps_active_review_lock() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let guard = try_acquire_lock("auto-review", cwd.path())
+            .expect("acquire lock")
+            .expect("lock should be available");
+        insert_background_lock("agent-current", guard);
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished_for_run(
+            uuid::Uuid::new_v4(),
+            PathBuf::from("/tmp/stale-wt"),
+            "auto-review-stale".to_string(),
+            true,
+            1,
+            Some("stale findings".to_string()),
+            None,
+            Some("agent-current".to_string()),
+            Some("snap-current".to_string()),
+            Some(session_id),
+        );
+
+        let lock_present = BACKGROUND_REVIEW_LOCKS
+            .lock()
+            .expect("background review locks")
+            .contains_key("agent-current");
+        assert!(lock_present, "superseded completion should not release active review lock");
+        assert_no_code_ops_pending(&mut code_op_rx);
+
+        release_background_lock(&Some("agent-current".to_string()));
     }
 
     #[test]
@@ -39907,7 +40096,16 @@ impl ChatWidget<'_> {
             let phase = detect_auto_review_phase(agent.last_progress.as_deref());
 
             if let Some(state) = self.background_review.as_ref() {
+                if is_terminal && (state.agent_id.is_none() || state.snapshot.is_none()) {
+                    self.remember_processed_auto_review_agent(&agent.id);
+                    continue;
+                }
                 if let Err(reason) = state.identity().matches_agent(self.session_id, agent) {
+                    let owner_session_id = agent
+                        .owner_session_id
+                        .as_deref()
+                        .and_then(|id| Uuid::parse_str(id).ok());
+                    let same_session = owner_session_id.is_some() && owner_session_id == self.session_id;
                     tracing::debug!(
                         reason,
                         agent_id = %agent.id,
@@ -39918,10 +40116,21 @@ impl ChatWidget<'_> {
                         expected_snapshot = state.snapshot.as_deref().unwrap_or(""),
                         "ignoring stale or cross-session auto-review agent status"
                     );
-                    if is_terminal {
-                        self.remember_processed_auto_review_agent(&agent.id);
+                    if !is_terminal {
+                        continue;
                     }
-                    continue;
+                    if agent
+                        .last_progress
+                        .as_deref()
+                        .is_some_and(|progress| progress.contains(SKIP_REVIEW_PROGRESS_SENTINEL))
+                    {
+                        self.remember_processed_auto_review_agent(&agent.id);
+                        continue;
+                    }
+                    if !same_session || !auto_review_identity_mismatch_is_final(reason) {
+                        self.remember_processed_auto_review_agent(&agent.id);
+                        continue;
+                    }
                 }
             }
 
@@ -39970,7 +40179,11 @@ impl ChatWidget<'_> {
             }
 
             if is_terminal && self.processed_auto_review_agents.contains(&agent.id) {
-                if self.background_review.is_some() {
+                let matches_current_review = self
+                    .background_review
+                    .as_ref()
+                    .is_some_and(|state| state.identity().matches_agent(self.session_id, agent).is_ok());
+                if matches_current_review {
                     self.forget_processed_auto_review_agent(&agent.id);
                 } else {
                     continue;
@@ -39984,7 +40197,7 @@ impl ChatWidget<'_> {
                 (
                     state.worktree_path.clone(),
                     state.branch.clone(),
-                    state.snapshot.clone(),
+                    agent.worktree_base.clone().or_else(|| state.snapshot.clone()),
                 )
             } else {
                 let Some(branch) = agent
@@ -40009,6 +40222,36 @@ impl ChatWidget<'_> {
             };
 
             let (has_findings, findings, summary) = Self::parse_agent_review_result(agent.result.as_deref());
+            let owner_session_id = agent
+                .owner_session_id
+                .as_deref()
+                .and_then(|id| Uuid::parse_str(id).ok());
+
+            match self.classify_auto_review_completion(
+                None,
+                Some(agent.id.as_str()),
+                snapshot.as_deref(),
+                owner_session_id,
+            ) {
+                AutoReviewCompletionDisposition::Current => {}
+                AutoReviewCompletionDisposition::Superseded => {
+                    self.record_superseded_auto_review_completion(
+                        &branch,
+                        &worktree_path,
+                        has_findings,
+                        findings,
+                        summary.as_deref(),
+                        agent.error.as_deref(),
+                        Some(agent.id.as_str()),
+                        snapshot.as_deref(),
+                    );
+                    continue;
+                }
+                AutoReviewCompletionDisposition::Ignore => {
+                    self.remember_processed_auto_review_agent(&agent.id);
+                    continue;
+                }
+            }
 
             self.remember_processed_auto_review_agent(&agent.id);
             self.on_background_review_finished(
@@ -40020,10 +40263,7 @@ impl ChatWidget<'_> {
                 agent.error.clone(),
                 Some(agent.id.clone()),
                 snapshot,
-                agent
-                    .owner_session_id
-                    .as_deref()
-                    .and_then(|id| Uuid::parse_str(id).ok()),
+                owner_session_id,
             );
         }
     }
@@ -40643,6 +40883,27 @@ impl ChatWidget<'_> {
         line
     }
 
+    fn auto_review_superseded_notice_line(
+        snapshot: Option<&str>,
+        summary: Option<&str>,
+        findings: usize,
+    ) -> String {
+        let mut line = if findings > 0 {
+            format!("Auto Review: superseded result archived. {findings} issue(s) found")
+        } else {
+            "Auto Review: superseded result archived".to_string()
+        };
+        if let Some(snapshot) = snapshot.map(str::trim).filter(|value| !value.is_empty()) {
+            line.push_str(&format!(" for snapshot {snapshot}"));
+        }
+        if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
+            line.push_str(". ");
+            line.push_str(summary);
+        }
+        line.push_str(" [Ctrl+A] Show");
+        line
+    }
+
     fn auto_review_clean_notice_lines(
         branch: &str,
         worktree_path: &std::path::Path,
@@ -40739,6 +41000,49 @@ impl ChatWidget<'_> {
         }
     }
 
+    fn append_auto_review_historical_notice_lines(&mut self, lines: Vec<String>) {
+        let message_lines = lines
+            .into_iter()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                (!trimmed.is_empty()).then(|| MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: trimmed.to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if message_lines.is_empty() {
+            return;
+        }
+
+        let state = PlainMessageState {
+            id: HistoryId::ZERO,
+            role: PlainMessageRole::System,
+            kind: PlainMessageKind::Notice,
+            header: Some(MessageHeader { label: "Auto Review".to_string(), badge: None }),
+            lines: message_lines,
+            metadata: None,
+        };
+
+        let base_key = self
+            .last_assistant_cell_index()
+            .and_then(|idx| self.cell_order_seq.get(idx).copied())
+            .unwrap_or_else(|| OrderKey {
+                req: 0,
+                out: -1,
+                seq: 0,
+            });
+
+        let insert_key = Self::order_key_successor(base_key);
+        self.history_insert_plain_state_with_key(state, insert_key, "auto-review-superseded");
+    }
+
     fn should_record_auto_review_failure_note(
         &mut self,
         classification: AutoReviewFailureClassification,
@@ -40768,6 +41072,102 @@ impl ChatWidget<'_> {
 
         self.last_auto_review_failure = Some(candidate);
         !duplicate
+    }
+
+    fn classify_auto_review_completion(
+        &self,
+        run_id: Option<Uuid>,
+        agent_id: Option<&str>,
+        snapshot: Option<&str>,
+        owner_session_id: Option<Uuid>,
+    ) -> AutoReviewCompletionDisposition {
+        let Some(state) = self.background_review.as_ref() else {
+            return if owner_session_id.is_some() && owner_session_id == self.session_id {
+                AutoReviewCompletionDisposition::Superseded
+            } else {
+                AutoReviewCompletionDisposition::Ignore
+            };
+        };
+
+        let run_mismatch = run_id
+            .map(|id| background_review_run_matches(self.background_review_run_id, id))
+            .transpose()
+            .err();
+        let identity_mismatch = state
+            .identity()
+            .matches_completion(agent_id, snapshot, owner_session_id)
+            .err();
+
+        if run_mismatch.is_none() && identity_mismatch.is_none() {
+            return AutoReviewCompletionDisposition::Current;
+        }
+
+        let same_session = owner_session_id.is_some() && owner_session_id == self.session_id;
+        if !same_session {
+            return AutoReviewCompletionDisposition::Ignore;
+        }
+
+        let mismatch_is_final = run_mismatch
+            .is_some_and(auto_review_identity_mismatch_is_final)
+            || identity_mismatch.is_some_and(auto_review_identity_mismatch_is_final);
+        if mismatch_is_final {
+            AutoReviewCompletionDisposition::Superseded
+        } else {
+            AutoReviewCompletionDisposition::Ignore
+        }
+    }
+
+    fn record_superseded_auto_review_completion(
+        &mut self,
+        branch: &str,
+        worktree_path: &std::path::Path,
+        has_findings: bool,
+        findings: usize,
+        summary: Option<&str>,
+        error: Option<&str>,
+        agent_id: Option<&str>,
+        snapshot: Option<&str>,
+    ) {
+        if let Some(agent_id) = agent_id {
+            let matches_active_agent = self
+                .background_review
+                .as_ref()
+                .and_then(|state| state.agent_id.as_deref())
+                == Some(agent_id);
+            if !matches_active_agent {
+                let lock_agent_id = Some(agent_id.to_string());
+                release_background_lock(&lock_agent_id);
+            }
+            if self.processed_auto_review_agents.contains(agent_id) {
+                return;
+            }
+            self.remember_processed_auto_review_agent(agent_id);
+        } else {
+            release_background_lock(&None);
+        }
+
+        if let Some(error) = error {
+            let summarized_error = Self::summarize_auto_review_error(error);
+            let classification = Self::classify_auto_review_error(error);
+            self.append_auto_review_historical_notice_lines(vec![format!(
+                "Auto Review: superseded result archived. Review failed during {}. {} [Ctrl+A] Show",
+                classification.phase, summarized_error
+            )]);
+            return;
+        }
+
+        if has_findings {
+            self.append_auto_review_historical_notice_lines(vec![
+                Self::auto_review_superseded_notice_line(snapshot, summary, findings.max(1)),
+            ]);
+        } else {
+            tracing::debug!(
+                branch,
+                worktree_path = %worktree_path.display(),
+                snapshot = snapshot.unwrap_or(""),
+                "archived superseded clean auto-review result"
+            );
+        }
     }
 
     pub(crate) fn on_background_review_started_for_run(
@@ -40864,35 +41264,29 @@ impl ChatWidget<'_> {
             findings
         };
 
-        if let Some(state) = self.background_review.as_ref() {
-            if let Err(reason) = background_review_run_matches(self.background_review_run_id, run_id) {
-                tracing::debug!(
-                    reason,
-                    run_id = %run_id,
-                    expected_run_id = self.background_review_run_id.map(|id| id.to_string()).unwrap_or_default(),
-                    "ignoring stale or cross-session auto-review completion"
+        match self.classify_auto_review_completion(
+            Some(run_id),
+            agent_id.as_deref(),
+            snapshot.as_deref(),
+            owner_session_id,
+        ) {
+            AutoReviewCompletionDisposition::Current => {}
+            AutoReviewCompletionDisposition::Superseded => {
+                self.record_superseded_auto_review_completion(
+                    &branch,
+                    &worktree_path,
+                    has_findings,
+                    findings,
+                    summary.as_deref(),
+                    error.as_deref(),
+                    agent_id.as_deref(),
+                    snapshot.as_deref(),
                 );
                 return;
             }
-            if let Err(reason) = state.identity().matches_completion(
-                agent_id.as_deref(),
-                snapshot.as_deref(),
-                owner_session_id,
-            ) {
-                tracing::debug!(
-                    reason,
-                    agent_id = agent_id.as_deref().unwrap_or(""),
-                    expected_agent_id = state.agent_id.as_deref().unwrap_or(""),
-                    owner_session_id = ?owner_session_id,
-                    expected_owner_session_id = ?state.owner_session_id,
-                    snapshot = snapshot.as_deref().unwrap_or(""),
-                    expected_snapshot = state.snapshot.as_deref().unwrap_or(""),
-                    "ignoring stale or cross-session auto-review completion"
-                );
+            AutoReviewCompletionDisposition::Ignore => {
                 if let Some(id) = agent_id.as_deref() {
-                    if auto_review_identity_mismatch_is_final(reason) {
-                        self.remember_processed_auto_review_agent(id);
-                    }
+                    self.remember_processed_auto_review_agent(id);
                 }
                 return;
             }
