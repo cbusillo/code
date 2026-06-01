@@ -362,7 +362,15 @@ impl LoginAccountsState {
                     .as_ref()
                     .is_some_and(|id| id == &account_id);
                 if removed_active {
-                    let _ = auth::logout(&self.code_home);
+                    if let Err(err) = auth::remove_auth_file(&self.code_home) {
+                        self.feedback = Some(Feedback {
+                            message: format!("Failed to remove active auth: {err}"),
+                            is_error: true,
+                        });
+                        self.mode = ViewMode::List;
+                        self.reload_accounts();
+                        return;
+                    }
                 }
                 self.feedback = Some(Feedback {
                     message: "Account disconnected".to_string(),

@@ -310,6 +310,43 @@ pub fn remove_account(code_home: &Path, account_id: &str) -> io::Result<Option<S
     Ok(removed)
 }
 
+pub fn remove_account_matching_credentials(
+    code_home: &Path,
+    mode: AuthMode,
+    openai_api_key: Option<&str>,
+    tokens: Option<&TokenData>,
+) -> io::Result<Option<StoredAccount>> {
+    let path = accounts_file_path(code_home);
+    let mut data = read_accounts_file(&path)?;
+
+    let removed = match mode {
+        AuthMode::ApiKey => openai_api_key.and_then(|api_key| {
+            data.accounts
+                .iter()
+                .position(|account| match_api_key_account(account, api_key))
+        }),
+        AuthMode::ChatGPT | AuthMode::ChatgptAuthTokens => tokens.and_then(|tokens| {
+            data.accounts
+                .iter()
+                .position(|account| match_chatgpt_account(account, tokens))
+        }),
+    }
+    .map(|pos| data.accounts.remove(pos));
+
+    if let Some(removed) = &removed {
+        if data
+            .active_account_id
+            .as_ref()
+            .is_some_and(|active| active == &removed.id)
+        {
+            data.active_account_id = None;
+        }
+    }
+
+    write_accounts_file(&path, &data)?;
+    Ok(removed)
+}
+
 pub fn upsert_api_key_account(
     code_home: &Path,
     api_key: String,
