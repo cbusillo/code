@@ -95,9 +95,8 @@ original/direct upstream and provenance source.
 - **Patch harness:** local validation for changed files, project tool discovery,
   and workspace-aware validator execution.
 - **Release workflow:** GitHub Releases and local PATH rebuilds are Every Code
-  infrastructure. GitHub Releases are the canonical internal update source;
-  npm and Homebrew publishing are deferred unless package-manager distribution
-  becomes intentional again.
+  infrastructure. GitHub Releases are the canonical update source; npm and
+  Homebrew publishing are not part of the current release path.
 - **Model defaults:** local defaults may intentionally differ from upstream, but
   request wire compatibility should use upstream model metadata when available.
 

@@ -92,8 +92,8 @@ code
 
 Use `code update-check` to inspect the current GitHub Release manifest and
 `code update --yes` to install a newer verified direct binary when one is
-available. npm and Homebrew publishing are deferred unless package-manager
-distribution becomes intentional again.
+available. Every Code releases are distributed through GitHub Releases; npm and
+Homebrew publishing are not part of the current release path.
 
 **Authenticate** (one of the following):
 - **Sign in with ChatGPT** (Plus/Pro/Team; uses models available to your plan)
