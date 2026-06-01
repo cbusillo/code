@@ -8,7 +8,7 @@
     "build": "cd code-rs && cargo build --release --bin code --bin code-tui --bin code-exec",
     "build:dev": "cd code-rs && cargo build --bin code --bin code-tui --bin code-exec",
     "build:quick": "cd code-rs && cargo build --release --bin code",
-    "test:local": "if [ -d code-rs ]; then (cd code-rs && cargo run -p code-cli -- --version); elif [ -d codex-cli ]; then (cd codex-cli && npm link && coder --version); else echo 'no CLI workspace found' >&2; exit 1; fi",
+    "test:local": "cd code-rs && cargo run -p code-cli -- --version",
     "fix": "cargo fmt && cargo fix --allow-dirty && cargo clippy --fix --allow-dirty"
   },
   "devDependencies": {
