@@ -238,35 +238,16 @@ async def command_list_async(_args: argparse.Namespace) -> int:
 async def command_text_async(args: argparse.Namespace) -> int:
     async def capture(connection: Any) -> dict[str, Any]:
         session = await find_session(connection, args.session_id)
-        iterm2 = import_iterm2()
-        response = await iterm2.rpc.async_get_screen_contents(
-            connection,
-            session.session_id,
-            None,
-            False,
-        )
-        status = response.get_buffer_response.status
-        ok_status = iterm2.api_pb2.GetBufferResponse.Status.Value("OK")
-        if status != ok_status:
-            status_name = iterm2.api_pb2.GetBufferResponse.Status.Name(status)
-            raise UserFacingError(
-                f"iTerm2 screen contents request failed: {status_name}",
-                Advice(
-                    summary="The iTerm2 SDK connected but could not read the selected session's screen.",
-                    action="Advise the user to confirm the session is still visible and rerun the list command.",
-                ),
-            )
-        contents = iterm2.screen.ScreenContents(response.get_buffer_response)
-        lines = [contents.line(index).string for index in range(contents.number_of_lines)]
+        line_info = await session.async_get_line_info()
+        first_line = line_info.first_visible_line_number
+        line_count = line_info.mutable_area_height
+        lines = await session.async_get_contents(first_line, line_count)
         return {
             "session_id": getattr(session, "session_id", None),
             "name": getattr(session, "name", None),
-            "cursor": {
-                "x": getattr(contents.cursor_coord, "x", None),
-                "y": getattr(contents.cursor_coord, "y", None),
-            },
-            "rows": contents.number_of_lines,
-            "contents": "\n".join(lines),
+            "first_visible_line_number": first_line,
+            "rows": len(lines),
+            "contents": "\n".join(line.string for line in lines),
         }
 
     payload = await run_with_iterm2(capture)
