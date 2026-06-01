@@ -14,7 +14,7 @@ expression: output
  |   + Switch between preset color palettes and adjust contrast.                                  |
  |                                                                                                |
  |   Updates            Auto update: Disabled                                                     |
- |   + Control GitHub Release update checks and automatic upgrades.                              |
+ |   + Control GitHub Release update checks and automatic upgrades.                               |
  | ↑ ↓ Move    Enter Open    Esc Close    ? Help                                                  |
  |                                                                                                |
  +------------------------------------------------------------------------------------------------+

@@ -14,7 +14,7 @@ expression: open
  |   + Switch between preset |                                        |                           |
  |                           |• ↑/↓  Move between sections            |                           |
  |   Updates            Auto |• Enter  Open selected section          |                           |
- |   + Control CLI auto-updat|• Tab    Jump forward between sections  |                           |
+ |   + Control GitHub Release|• Tab    Jump forward between sections  |                           |
  |                           |• Esc    Close settings                 |                           |
  |   ------------------------|• ?      Toggle this help               |-------------------------- |
  |                           |                                        |                           |

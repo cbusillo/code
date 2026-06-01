@@ -218,13 +218,13 @@ fn upgrade_command_name(exe_path: &Path, install_target: &Path) -> String {
 }
 
 fn command_name_from_path(path: &Path) -> Option<String> {
-    path.file_name()
-        .and_then(|name| name.to_str())
+    path.to_str()
+        .and_then(|value| value.rsplit(['/', '\\']).next())
         .and_then(valid_command_name)
 }
 
 fn valid_command_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
+    let trimmed = name.trim().trim_end_matches(".exe");
     if trimmed.is_empty() || trimmed.contains(std::path::MAIN_SEPARATOR) {
         None
     } else {

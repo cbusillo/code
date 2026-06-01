@@ -247,7 +247,7 @@ fn command_name_from_path(path: &Path) -> Option<String> {
 }
 
 fn valid_command_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
+    let trimmed = name.trim().trim_end_matches(".exe");
     if trimmed.is_empty() || trimmed.contains(std::path::MAIN_SEPARATOR) {
         None
     } else {
