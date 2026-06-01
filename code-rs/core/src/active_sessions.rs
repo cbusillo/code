@@ -147,7 +147,7 @@ pub fn active_session_model_notice(conflicts: &[ActiveSessionRecord]) -> Option<
     };
 
     Some(format!(
-        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Prefer doing implementation work in a separate git worktree before modifying files. If you stay in this checkout, re-read target files immediately before editing and keep edits tightly scoped. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
+        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Before editing files, either create/switch to an isolated git worktree for implementation work, or explicitly state why you are staying in this checkout. If you stay in this checkout, re-read target files immediately before editing and keep edits tightly scoped. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
     ))
 }
 
