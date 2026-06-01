@@ -39,6 +39,12 @@ use super::state::{
 };
 
 impl App<'_> {
+    fn fresh_chat_config(&self) -> code_core::config::Config {
+        let mut config = self.config.clone();
+        config.experimental_resume = None;
+        config
+    }
+
     fn handle_login_mode_change(&mut self, using_chatgpt_auth: bool) {
         self.config.using_chatgpt_auth = using_chatgpt_auth;
         if let AppState::Chat { widget } = &mut self.app_state {
@@ -108,7 +114,7 @@ impl App<'_> {
         }
 
         let mut new_widget = ChatWidget::new(
-            self.config.clone(),
+            self.fresh_chat_config(),
             self.app_event_tx.clone(),
             None,
             Vec::new(),
@@ -645,7 +651,7 @@ impl App<'_> {
                         widget.abort_active_turn_for_new_chat();
                     }
                     let mut new_widget = ChatWidget::new(
-                        self.config.clone(),
+                        self.fresh_chat_config(),
                         self.app_event_tx.clone(),
                         None,
                         Vec::new(),
@@ -2316,7 +2322,7 @@ impl App<'_> {
                     }
                 }
                 AppEvent::OnboardingComplete(ChatWidgetArgs {
-                    config,
+                    mut config,
                     enhanced_keys_supported,
                     initial_images,
                     initial_prompt,
@@ -2326,6 +2332,7 @@ impl App<'_> {
                     resume_picker,
                     latest_upgrade_version,
                 }) => {
+                    config.experimental_resume = None;
                     let mut w = ChatWidget::new(
                         config,
                         app_event_tx.clone(),
@@ -2605,7 +2612,78 @@ fn next_event_priority_impl(
 #[cfg(test)]
 mod next_event_priority_tests {
     use super::*;
+    use crate::chatwidget::smoke_helpers::enter_test_runtime_guard;
+    use code_core::config::{ConfigOverrides, ConfigToml};
     use std::sync::mpsc::channel;
+    use tempfile::tempdir;
+
+    fn test_terminal_info() -> crate::tui::TerminalInfo {
+        crate::tui::TerminalInfo {
+            picker: None,
+            font_size: (8, 16),
+        }
+    }
+
+    #[test]
+    fn fresh_chat_config_clears_resume_path() {
+        let code_home = tempdir().expect("tempdir");
+        let mut config = code_core::config::Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            code_home.path().to_path_buf(),
+        )
+        .expect("config");
+        let resume_path = code_home.path().join("rollout.jsonl");
+        config.experimental_resume = Some(resume_path.clone());
+
+        let app = App::new(
+            config,
+            None,
+            Vec::new(),
+            false,
+            false,
+            false,
+            test_terminal_info(),
+            false,
+            false,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            app.config.experimental_resume.as_deref(),
+            Some(resume_path.as_path()),
+            "startup config should preserve the resume source"
+        );
+        assert!(
+            app.fresh_chat_config().experimental_resume.is_none(),
+            "fresh chat sessions must not inherit a resume path"
+        );
+
+        let _runtime_guard = enter_test_runtime_guard();
+        let mut app = app;
+        app.app_state = AppState::Chat {
+            widget: Box::new(ChatWidget::new(
+                app.config.clone(),
+                app.app_event_tx.clone(),
+                None,
+                Vec::new(),
+                false,
+                test_terminal_info(),
+                false,
+                None,
+            )),
+        };
+
+        app.start_new_chat_session().expect("new chat session");
+        let AppState::Chat { widget } = &app.app_state else {
+            panic!("expected chat state");
+        };
+        assert!(
+            widget.config_ref().experimental_resume.is_none(),
+            "/new must build a widget that starts a fresh conversation"
+        );
+    }
 
     #[test]
     fn next_event_priority_serves_bulk_amid_high_burst() {
