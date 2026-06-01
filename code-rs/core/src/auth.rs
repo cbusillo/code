@@ -456,6 +456,9 @@ pub fn logout(code_home: &Path) -> std::io::Result<bool> {
 
     let removed_account = if let Some(account_id) = active_account_id {
         let removed = crate::auth_accounts::remove_account(code_home, &account_id)?.is_some();
+        if !removed {
+            let _ = crate::auth_accounts::set_active_account_id(code_home, None)?;
+        }
         let removed_matching = if let Some(auth) = &current_auth {
             remove_account_matching_auth(code_home, auth)?
         } else {
@@ -478,26 +481,32 @@ fn remove_account_matching_auth(code_home: &Path, auth: &AuthDotJson) -> std::io
         tokens,
         last_refresh: _,
     } = auth;
-    if let Some(mode) = auth_mode.or_else(|| {
-        if tokens.is_some() {
-            Some(AuthMode::ChatGPT)
-        } else if openai_api_key.is_some() {
-            Some(AuthMode::ApiKey)
-        } else {
-            None
-        }
-    }) {
-        Ok(crate::auth_accounts::remove_account_matching_credentials(
+    let mut candidate_modes = Vec::new();
+    if let Some(mode) = auth_mode {
+        candidate_modes.push(*mode);
+    }
+    if tokens.is_some() && !candidate_modes.contains(&AuthMode::ChatGPT) {
+        candidate_modes.push(AuthMode::ChatGPT);
+    }
+    if openai_api_key.is_some() && !candidate_modes.contains(&AuthMode::ApiKey) {
+        candidate_modes.push(AuthMode::ApiKey);
+    }
+
+    let mut removed = false;
+    for mode in candidate_modes {
+        removed |= crate::auth_accounts::remove_account_matching_credentials(
             code_home,
             mode,
             openai_api_key.as_deref(),
             tokens.as_ref(),
         )?
-        .is_some())
-    } else {
-        let _ = crate::auth_accounts::set_active_account_id(code_home, None)?;
-        Ok(false)
+        .is_some();
     }
+
+    if auth_mode.is_none() && tokens.is_none() && openai_api_key.is_none() {
+        let _ = crate::auth_accounts::set_active_account_id(code_home, None)?;
+    }
+    Ok(removed)
 }
 
 /// Writes an `auth.json` that contains only the API key. Intended for CLI use.
@@ -1549,6 +1558,29 @@ mod tests {
     }
 
     #[test]
+    fn logout_clears_stale_active_pointer_without_matching_auth() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let _ = crate::auth_accounts::set_active_account_id(
+            dir.path(),
+            Some("missing-account".to_string()),
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some("sk-missing".to_string()),
+            tokens: None,
+            last_refresh: None,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::list_accounts(dir.path())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn logout_removes_auth_json_account_when_active_points_elsewhere() -> Result<(), std::io::Error>
     {
         let dir = tempdir()?;
@@ -1586,6 +1618,57 @@ mod tests {
         assert!(crate::auth_accounts::find_account(dir.path(), &active.id)?.is_none());
         assert!(crate::auth_accounts::find_account(dir.path(), &stale_account.id)?.is_none());
         assert!(crate::auth_accounts::find_account(dir.path(), &other.id)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_matches_api_key_when_auth_mode_is_stale() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let api_key_account = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-active".to_string(),
+            Some("Active".to_string()),
+            true,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ChatGPT),
+            openai_api_key: api_key_account.openai_api_key.clone(),
+            tokens: None,
+            last_refresh: None,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &api_key_account.id)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_matches_chatgpt_tokens_when_auth_mode_is_stale() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let chatgpt_account = crate::auth_accounts::upsert_chatgpt_account(
+            dir.path(),
+            token_data_for_access("expired-access".to_string()),
+            Utc::now() - chrono::Duration::days(3),
+            Some("Stale".to_string()),
+            true,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: None,
+            tokens: chatgpt_account.tokens.clone(),
+            last_refresh: chatgpt_account.last_refresh,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &chatgpt_account.id)?.is_none());
         Ok(())
     }
 
