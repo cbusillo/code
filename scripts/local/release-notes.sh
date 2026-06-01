@@ -11,13 +11,13 @@ if ! command -v code >/dev/null 2>&1; then
 	exit 1
 fi
 
-if ! git diff --quiet -- codex-cli/package.json CHANGELOG.md docs/release-notes/RELEASE_NOTES.md ||
-	! git diff --cached --quiet -- codex-cli/package.json CHANGELOG.md docs/release-notes/RELEASE_NOTES.md; then
+if ! git diff --quiet -- VERSION CHANGELOG.md docs/release-notes/RELEASE_NOTES.md ||
+	! git diff --cached --quiet -- VERSION CHANGELOG.md docs/release-notes/RELEASE_NOTES.md; then
 	echo "release metadata files have uncommitted changes; commit or stash them first" >&2
 	exit 1
 fi
 
-current_version=$(jq -r '.version // empty' codex-cli/package.json)
+current_version=$(tr -d '[:space:]' <VERSION)
 latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -n 1 | sed 's/^v//' || true)
 latest_tag="${latest_tag:-0.0.0}"
 new_version=$(printf '%s\n%s\n' "$current_version" "$latest_tag" | sort -V | tail -n1)
@@ -62,7 +62,7 @@ Inputs
 - Working directory: ${REPO_ROOT}
 
 Primary Tasks
-1. Update codex-cli/package.json to version ${new_version}.
+1. Update VERSION to ${new_version}.
 2. Update CHANGELOG.md with a new entry for this version using the exact house style below.
 3. Generate GitHub release notes at docs/release-notes/RELEASE_NOTES.md.
 
@@ -115,6 +115,6 @@ code exec --cd "$REPO_ROOT" --full-auto --skip-git-repo-check <"$prompt_file"
 scripts/check-release-notes-version.sh --version "$new_version"
 
 echo "Local release metadata is ready for review:"
-echo "  codex-cli/package.json"
+echo "  VERSION"
 echo "  CHANGELOG.md"
 echo "  docs/release-notes/RELEASE_NOTES.md"

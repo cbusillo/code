@@ -85,12 +85,12 @@
   },
   "release": {
     "intent": {
-      "kind": "package-version",
-      "file": "codex-cli/package.json",
+      "kind": "version-file",
+      "file": "VERSION",
       "workflow": "Release Intent"
     },
     "metadataFiles": [
-      "codex-cli/package.json",
+      "VERSION",
       "CHANGELOG.md",
       "docs/release-notes/RELEASE_NOTES.md"
     ],
