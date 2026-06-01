@@ -34572,7 +34572,7 @@ use code_core::protocol::OrderMeta;
             .expect("metadata-free completion should not clear current review");
         assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
         assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
-        assert!(!chat.processed_auto_review_agents.contains("agent-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
         assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
@@ -34608,7 +34608,7 @@ use code_core::protocol::OrderMeta;
             .expect("pre-start completion without session proof should not clear review");
         assert!(state.agent_id.is_none());
         assert!(state.snapshot.is_none());
-        assert!(!chat.processed_auto_review_agents.contains("agent-early"));
+        assert!(chat.processed_auto_review_agents.contains("agent-early"));
         assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
@@ -34643,8 +34643,8 @@ use code_core::protocol::OrderMeta;
             "metadata-free pre-start status should not clear the active review"
         );
         assert!(
-            !chat.processed_auto_review_agents.contains("agent-current"),
-            "missing metadata is not enough proof to permanently discard the agent"
+            chat.processed_auto_review_agents.contains("agent-current"),
+            "missing metadata is cached so it cannot resurface if the active review clears"
         );
         assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
         assert_no_code_ops_pending(&mut code_op_rx);
@@ -34672,6 +34672,46 @@ use code_core::protocol::OrderMeta;
         assert!(history_contains_text(chat, "Merge /tmp/current-wt to apply fixes."));
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
+    }
+
+    #[test]
+    fn cached_metadata_free_terminal_status_does_not_resurface_after_review_clears() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            None,
+            None,
+        )]);
+        assert!(chat.processed_auto_review_agents.contains("agent-stale"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+
+        chat.background_review = None;
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            None,
+            None,
+        )]);
+
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
     }
 
     #[test]
@@ -34829,7 +34869,7 @@ use code_core::protocol::OrderMeta;
             .expect("metadata-free completion should not clear current review");
         assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
         assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
-        assert!(!chat.processed_auto_review_agents.contains("agent-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
         assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
@@ -39879,9 +39919,7 @@ impl ChatWidget<'_> {
                         "ignoring stale or cross-session auto-review agent status"
                     );
                     if is_terminal {
-                        if auto_review_identity_mismatch_is_final(reason) {
-                            self.remember_processed_auto_review_agent(&agent.id);
-                        }
+                        self.remember_processed_auto_review_agent(&agent.id);
                     }
                     continue;
                 }
@@ -39932,7 +39970,11 @@ impl ChatWidget<'_> {
             }
 
             if is_terminal && self.processed_auto_review_agents.contains(&agent.id) {
-                continue;
+                if self.background_review.is_some() {
+                    self.forget_processed_auto_review_agent(&agent.id);
+                } else {
+                    continue;
+                }
             }
             if !is_terminal {
                 continue;
@@ -40463,6 +40505,13 @@ impl ChatWidget<'_> {
                 total_evicted = self.auto_review_processed_evicted_total,
                 "trimmed processed auto-review agent cache"
             );
+        }
+    }
+
+    fn forget_processed_auto_review_agent(&mut self, agent_id: &str) {
+        if self.processed_auto_review_agents.remove(agent_id) {
+            self.processed_auto_review_agent_order
+                .retain(|stored| stored != agent_id);
         }
     }
 
