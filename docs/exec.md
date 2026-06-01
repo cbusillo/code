@@ -46,7 +46,7 @@ Sample output:
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_0","item_type":"reasoning","text":"**Searching for README files**"}}
 {"type":"item.started","item":{"id":"item_1","item_type":"command_execution","command":"bash -lc ls","aggregated_output":"","status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","item_type":"command_execution","command":"bash -lc ls","aggregated_output":"AGENTS.md\nCHANGELOG.md\nREADME.md\ncode-rs\ncodex-rs\ncodex-cli\ndocs\nscripts\nsdk\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","item_type":"command_execution","command":"bash -lc ls","aggregated_output":"AGENTS.md\nCHANGELOG.md\nREADME.md\ncode-rs\ncodex-rs\ndocs\nscripts\nsdk\n","exit_code":0,"status":"completed"}}
 {"type":"item.completed","item":{"id":"item_2","item_type":"reasoning","text":"**Checking repository root for README**"}}
 {"type":"item.completed","item":{"id":"item_3","item_type":"assistant_message","text":"Yep — there’s a `README.md` in the repository root."}}
 {"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122}}

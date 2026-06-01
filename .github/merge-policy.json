@@ -1,7 +1,6 @@
 {
   "prefer_ours_globs": [
     "codex-rs/tui/**",
-    "codex-cli/**",
     "codex-rs/core/src/openai_tools.rs",
     "codex-rs/core/src/codex.rs",
     "codex-rs/core/src/agent_tool.rs",
@@ -18,13 +17,9 @@
     "codex-rs/exec/**",
     "codex-rs/file-search/**"
   ],
-  "purge_globs": [
-    ".github/codex-cli-*.png",
-    ".github/codex-cli-*.jpg",
-    ".github/codex-cli-*.jpeg",
-    ".github/codex-cli-*.webp"
-  ],
+  "purge_globs": [],
   "perma_removed_paths": [
+    "codex-cli/**",
     ".github/workflows/rust-ci.yml",
     ".github/workflows/rust-ci-full.yml"
   ]

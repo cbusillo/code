@@ -674,8 +674,7 @@ if [ $? -eq 0 ]; then
     echo "Binary location: ${BIN_DISPLAY_PATH}"
     echo ""
 
-    # Keep old symlink locations working for compatibility
-    # Create symlink in target/release for npm wrapper expectations
+    # Keep old target symlink locations working for compatibility.
     release_link_target="../${BIN_SUBDIR}/${BIN_FILENAME}"
     dev_fast_link_target="../${BIN_SUBDIR}/${BIN_FILENAME}"
 
@@ -705,7 +704,6 @@ if [ $? -eq 0 ]; then
     }
 
     CLI_TARGET_CODE="../../target/${BIN_SUBDIR}/${BIN_FILENAME}"
-    CLI_TARGET_CODEX="../../${WORKSPACE_DIR}/target/${BIN_SUBDIR}/${BIN_FILENAME}"
     CLI_LINK_ABSOLUTE=""
     if [ "${TARGET_DIR_ABS}" != "${REPO_TARGET_ABS}" ]; then
       release_link_target="${BIN_PATH}"
@@ -730,10 +728,7 @@ if [ $? -eq 0 ]; then
       ln -sf "${release_link_target}" "./target/release/${CRATE_PREFIX}"
     fi
 
-    # Update the symlinks in active and compatibility CLI wrapper directories.
-    if [ -d "../codex-cli/bin" ]; then
-      create_cli_symlinks "../codex-cli/bin" "${CLI_TARGET_CODEX}"
-    fi
+    # Update the symlinks in active CLI wrapper directories.
     if [ -d "./code-cli/bin" ]; then
       create_cli_symlinks "./code-cli/bin" "${CLI_TARGET_CODE}"
     fi
