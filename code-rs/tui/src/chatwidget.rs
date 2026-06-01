@@ -681,6 +681,43 @@ impl ChatWidget<'_> {
         }
         false
     }
+
+    fn auto_review_agent_matches_inflight(
+        state: &BackgroundReviewState,
+        current_session_id: Option<uuid::Uuid>,
+        agent: &code_core::protocol::AgentInfo,
+    ) -> bool {
+        if let Some(expected_agent_id) = state.agent_id.as_deref() {
+            if expected_agent_id != agent.id {
+                return false;
+            }
+        }
+
+        if let Some(agent_session_id) = agent
+            .owner_session_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        {
+            if state
+                .owner_session_id
+                .or(current_session_id)
+                .is_some_and(|expected| expected != agent_session_id)
+            {
+                return false;
+            }
+        }
+
+        if let Some(expected_snapshot) = state.snapshot.as_deref() {
+            if let Some(agent_snapshot) = agent.worktree_base.as_deref() {
+                if expected_snapshot != agent_snapshot {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     fn format_code_bridge_call(&self, args: &JsonValue) -> Option<String> {
         let action = args.get("action")?.as_str()?.to_lowercase();
         let mut out = String::from("Code Bridge\n");
@@ -1299,6 +1336,7 @@ struct BackgroundReviewState {
     branch: String,
     agent_id: Option<String>,
     snapshot: Option<String>,
+    owner_session_id: Option<uuid::Uuid>,
     base: Option<GhostCommit>,
     last_seen: std::time::Instant,
 }
@@ -31459,6 +31497,7 @@ async fn run_background_review(
                 error: None,
                 agent_id: None,
                 snapshot: None,
+                owner_session_id: Some(owner_session_id),
             });
             return;
         }
@@ -31664,6 +31703,7 @@ async fn run_background_review(
             branch: branch.clone(),
             agent_id: Some(agent_id.clone()),
             snapshot: Some(snapshot_id.clone()),
+            owner_session_id: Some(owner_session_id),
         });
         Ok::<(PathBuf, String, String, String), String>((worktree_path, branch, agent_id, snapshot_id))
     }
@@ -31679,6 +31719,7 @@ async fn run_background_review(
             error: Some(err),
             agent_id: None,
             snapshot: None,
+            owner_session_id: Some(owner_session_id),
         });
     }
 }
@@ -33258,6 +33299,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: std::time::Instant::now(),
         });
@@ -33271,6 +33313,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         assert!(
@@ -33332,6 +33375,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: std::time::Instant::now(),
         });
@@ -33345,6 +33389,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let mut transcript = String::new();
@@ -33385,6 +33430,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-visible".to_string()),
             snapshot: Some("ghost-visible".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33398,6 +33444,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-visible".to_string()),
             Some("ghost-visible".to_string()),
+            None,
         );
 
         let notice_present = chat.history_cells.iter().any(|cell| {
@@ -33458,6 +33505,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33471,6 +33519,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         assert!(
@@ -33505,6 +33554,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-clean".to_string()),
             snapshot: Some("ghost-clean".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33518,6 +33568,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-clean".to_string()),
             Some("ghost-clean".to_string()),
+            None,
         );
 
         assert!(
@@ -33542,6 +33593,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33567,6 +33619,7 @@ use code_core::protocol::OrderMeta;
             Some(noisy_error),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let note = chat
@@ -33610,6 +33663,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33624,6 +33678,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let note = chat
@@ -33649,6 +33704,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33663,6 +33719,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let note = chat
@@ -33686,6 +33743,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33700,6 +33758,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let note = chat
@@ -33724,6 +33783,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33738,6 +33798,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let note = chat
@@ -33765,6 +33826,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33777,6 +33839,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
         let first = chat
             .last_developer_message
@@ -33789,6 +33852,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33801,6 +33865,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         assert_no_code_ops_pending(&mut code_op_rx);
@@ -33819,6 +33884,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: Some(base),
             last_seen: Instant::now(),
         });
@@ -33833,6 +33899,7 @@ use code_core::protocol::OrderMeta;
             Some(error.to_string()),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         let note = chat
@@ -33859,6 +33926,7 @@ use code_core::protocol::OrderMeta;
             branch: String::new(),
             agent_id: None,
             snapshot: None,
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33871,6 +33939,7 @@ use code_core::protocol::OrderMeta;
             0,
             None,
             Some(error.to_string()),
+            None,
             None,
             None,
         );
@@ -33898,6 +33967,7 @@ use code_core::protocol::OrderMeta;
             branch: String::new(),
             agent_id: None,
             snapshot: None,
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33910,6 +33980,7 @@ use code_core::protocol::OrderMeta;
             0,
             None,
             Some(error.to_string()),
+            None,
             None,
             None,
         );
@@ -33936,6 +34007,7 @@ use code_core::protocol::OrderMeta;
             branch: String::new(),
             agent_id: None,
             snapshot: None,
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33948,6 +34020,7 @@ use code_core::protocol::OrderMeta;
             0,
             None,
             Some(error.to_string()),
+            None,
             None,
             None,
         );
@@ -33973,6 +34046,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -33986,6 +34060,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         assert!(
@@ -34018,6 +34093,7 @@ use code_core::protocol::OrderMeta;
             "auto-review-branch".to_string(),
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         assert!(chat.bottom_pane.is_task_running());
@@ -34039,6 +34115,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-123".to_string()),
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: std::time::Instant::now(),
         });
@@ -34063,6 +34140,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-123".to_string()),
             Some("ghost123".to_string()),
+            None,
         );
 
         assert!(chat.pending_agent_notes.is_empty());
@@ -34106,6 +34184,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: None,
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: std::time::Instant::now(),
         });
@@ -34132,6 +34211,8 @@ use code_core::protocol::OrderMeta;
             last_activity_at: None,
             seconds_since_last_activity: None,
             source_kind: Some(AgentSourceKind::AutoReview),
+            owner_session_id: None,
+            worktree_base: None,
         };
 
         chat.observe_auto_review_status(&[agent]);
@@ -34188,6 +34269,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: None,
             snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: std::time::Instant::now(),
         });
@@ -34214,6 +34296,8 @@ use code_core::protocol::OrderMeta;
             last_activity_at: None,
             seconds_since_last_activity: None,
             source_kind: Some(AgentSourceKind::AutoReview),
+            owner_session_id: None,
+            worktree_base: None,
         };
 
         chat.observe_auto_review_status(&[agent]);
@@ -34235,6 +34319,189 @@ use code_core::protocol::OrderMeta;
             !developer_seen,
             "busy observe path should not render a [developer] merge-hint message"
         );
+    }
+
+    fn auto_review_agent_result_json() -> String {
+        r#"{
+            "findings":[{"title":"bug","body":"details","confidence_score":0.5,"priority":1,"code_location":{"absolute_file_path":"src/lib.rs","line_range":{"start":1,"end":1}}}],
+            "overall_correctness":"incorrect",
+            "overall_explanation":"needs work",
+            "overall_confidence_score":0.6
+        }"#
+        .to_string()
+    }
+
+    fn completed_auto_review_agent(
+        id: &str,
+        branch: &str,
+        owner_session_id: Option<uuid::Uuid>,
+        worktree_base: Option<&str>,
+    ) -> code_core::protocol::AgentInfo {
+        code_core::protocol::AgentInfo {
+            id: id.to_string(),
+            name: "Auto Review".to_string(),
+            status: "completed".to_string(),
+            batch_id: Some(branch.to_string()),
+            model: Some("code-review".to_string()),
+            last_progress: None,
+            result: Some(auto_review_agent_result_json()),
+            error: None,
+            elapsed_ms: None,
+            token_count: None,
+            last_activity_at: None,
+            seconds_since_last_activity: None,
+            source_kind: Some(AgentSourceKind::AutoReview),
+            owner_session_id: owner_session_id.map(|id| id.to_string()),
+            worktree_base: worktree_base.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn stale_auto_review_status_does_not_clear_current_review() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            Some(session_id),
+            Some("snap-stale"),
+        )]);
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("current review should remain active");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-stale"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert!(!history_contains_text(chat, "Merge /tmp/current-wt to apply fixes."));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn cross_session_auto_review_status_does_not_surface_findings() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let other_session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-current",
+            "auto-review-current",
+            Some(other_session_id),
+            Some("snap-current"),
+        )]);
+
+        assert!(
+            chat.background_review.is_some(),
+            "current session review should remain active"
+        );
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn stale_auto_review_skip_sentinel_does_not_clear_current_review() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let mut agent = completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            Some(session_id),
+            Some("snap-stale"),
+        );
+        agent.last_progress = Some(SKIP_REVIEW_PROGRESS_SENTINEL.to_string());
+        chat.observe_auto_review_status(&[agent]);
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("stale skip sentinel should not clear current review");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-stale"));
+    }
+
+    #[test]
+    fn stale_background_review_finished_event_does_not_clear_current_review() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let other_session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished(
+            PathBuf::from("/tmp/stale-wt"),
+            "auto-review-stale".to_string(),
+            true,
+            1,
+            Some("stale findings".to_string()),
+            None,
+            Some("agent-stale".to_string()),
+            Some("snap-stale".to_string()),
+            Some(other_session_id),
+        );
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("stale completion should not clear current review");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-stale"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
     }
 
     #[test]
@@ -34273,6 +34540,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-esc".to_string()),
             snapshot: Some("ghost999".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -34297,6 +34565,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-esc".to_string()),
             Some("ghost999".to_string()),
+            None,
         );
 
         let pending_after_review = chat.pending_dispatched_user_messages.len();
@@ -34336,6 +34605,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-branch".to_string(),
             agent_id: Some("agent-auto-review".to_string()),
             snapshot: Some("ghost-long".to_string()),
+            owner_session_id: None,
             base: None,
             last_seen: Instant::now(),
         });
@@ -34362,6 +34632,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 });
             }
 
@@ -34387,6 +34659,8 @@ use code_core::protocol::OrderMeta;
                 last_activity_at: None,
                 seconds_since_last_activity: None,
                 source_kind: Some(AgentSourceKind::AutoReview),
+                owner_session_id: None,
+                worktree_base: None,
             });
 
             chat.handle_code_event(Event {
@@ -34421,6 +34695,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-auto-review".to_string()),
             Some("ghost-long".to_string()),
+            None,
         );
         assert!(
             chat.pending_dispatched_user_messages.len() == pending_before_review,
@@ -34458,6 +34733,8 @@ use code_core::protocol::OrderMeta;
             last_activity_at: None,
             seconds_since_last_activity: None,
             source_kind: Some(AgentSourceKind::AutoReview),
+            owner_session_id: None,
+            worktree_base: None,
         };
 
         chat.observe_auto_review_status(&[agent]);
@@ -34530,6 +34807,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-running".to_string(),
             agent_id: Some("agent-running".to_string()),
             snapshot: Some("ghost-running".to_string()),
+            owner_session_id: None,
             base: Some(GhostCommit::new("running-base".to_string(), None)),
             last_seen: Instant::now(),
         });
@@ -34552,6 +34830,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-running".to_string()),
             Some("ghost-running".to_string()),
+            None,
         );
 
         let pending_after_finish = chat
@@ -34603,6 +34882,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-running".to_string(),
             agent_id: Some("agent-running".to_string()),
             snapshot: Some("ghost-running".to_string()),
+            owner_session_id: None,
             base: Some(GhostCommit::new("running-base".to_string(), None)),
             last_seen: Instant::now(),
         });
@@ -34620,6 +34900,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-running".to_string()),
             Some("ghost-running".to_string()),
+            None,
         );
 
         assert_eq!(launches.load(Ordering::SeqCst), 1, "follow-up should start immediately");
@@ -34657,6 +34938,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-running".to_string(),
             agent_id: Some("agent-running".to_string()),
             snapshot: Some("ghost-running".to_string()),
+            owner_session_id: None,
             base: Some(GhostCommit::new("running-base".to_string(), None)),
             last_seen: Instant::now(),
         });
@@ -34689,6 +34971,7 @@ use code_core::protocol::OrderMeta;
             None,
             Some("agent-running".to_string()),
             Some("ghost-running".to_string()),
+            None,
         );
 
         assert_eq!(launches.load(Ordering::SeqCst), 1, "collapsed follow-up should run once");
@@ -34723,6 +35006,7 @@ use code_core::protocol::OrderMeta;
             branch: "auto-review-running".to_string(),
             agent_id: Some("agent-running".to_string()),
             snapshot: Some("ghost-running".to_string()),
+            owner_session_id: None,
             base: Some(base.clone()),
             last_seen: stale_started,
         });
@@ -35493,6 +35777,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 }],
                 context: None,
                 task: None,
@@ -37199,6 +37485,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 }],
                 context: None,
                 task: None,
@@ -37291,6 +37579,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 }],
                 context: None,
                 task: None,
@@ -37343,6 +37633,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 }],
                 context: None,
                 task: None,
@@ -37392,6 +37684,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 }],
                 context: None,
                 task: None,
@@ -37437,6 +37731,8 @@ use code_core::protocol::OrderMeta;
                     last_activity_at: None,
                     seconds_since_last_activity: None,
                     source_kind: None,
+                    owner_session_id: None,
+                    worktree_base: None,
                 }],
                 context: None,
                 task: None,
@@ -39179,11 +39475,13 @@ impl ChatWidget<'_> {
             self.auto_review_status,
             Some(AutoReviewStatus { status: AutoReviewIndicatorStatus::Fixed, .. })
         );
+        let owner_session_id = self.session_id.unwrap_or_else(Uuid::new_v4);
         self.background_review = Some(BackgroundReviewState {
             worktree_path: std::path::PathBuf::new(),
             branch: String::new(),
             agent_id: None,
             snapshot: None,
+            owner_session_id: Some(owner_session_id),
             base: base_snapshot.clone(),
             last_seen: std::time::Instant::now(),
         });
@@ -39204,7 +39502,6 @@ impl ChatWidget<'_> {
 
         let config = self.config.clone();
         let app_event_tx = self.app_event_tx.clone();
-        let owner_session_id = self.session_id.unwrap_or_else(Uuid::new_v4);
         let base_snapshot_for_task = base_snapshot.clone();
         let turn_context = self.turn_context_block();
         let prefer_fallback = had_notice || had_fixed_indicator;
@@ -39226,6 +39523,31 @@ impl ChatWidget<'_> {
         for agent in agents {
             if !Self::is_auto_review_agent(agent) {
                 continue;
+            }
+
+            let status = agent_status_from_str(agent.status.as_str());
+            let is_terminal = matches!(
+                status,
+                AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Cancelled
+            );
+            let phase = detect_auto_review_phase(agent.last_progress.as_deref());
+
+            if let Some(state) = self.background_review.as_ref() {
+                if !Self::auto_review_agent_matches_inflight(state, self.session_id, agent) {
+                    tracing::debug!(
+                        agent_id = %agent.id,
+                        agent_owner_session_id = agent.owner_session_id.as_deref().unwrap_or(""),
+                        agent_worktree_base = agent.worktree_base.as_deref().unwrap_or(""),
+                        expected_agent_id = state.agent_id.as_deref().unwrap_or(""),
+                        expected_owner_session_id = ?state.owner_session_id,
+                        expected_snapshot = state.snapshot.as_deref().unwrap_or(""),
+                        "ignoring stale or cross-session auto-review agent status"
+                    );
+                    if is_terminal {
+                        self.remember_processed_auto_review_agent(&agent.id);
+                    }
+                    continue;
+                }
             }
 
             if let Some(progress) = agent.last_progress.as_deref() {
@@ -39250,13 +39572,6 @@ impl ChatWidget<'_> {
                     }
                 }
             }
-
-            let status = agent_status_from_str(agent.status.as_str());
-            let is_terminal = matches!(
-                status,
-                AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Cancelled
-            );
-            let phase = detect_auto_review_phase(agent.last_progress.as_deref());
 
             if matches!(status, AgentStatus::Running | AgentStatus::Pending) {
                 let findings = self.auto_review_status.and_then(|s| s.findings);
@@ -39325,6 +39640,10 @@ impl ChatWidget<'_> {
                 agent.error.clone(),
                 Some(agent.id.clone()),
                 snapshot,
+                agent
+                    .owner_session_id
+                    .as_deref()
+                    .and_then(|id| Uuid::parse_str(id).ok()),
             );
         }
     }
@@ -40070,6 +40389,7 @@ impl ChatWidget<'_> {
         branch: String,
         agent_id: Option<String>,
         snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
     ) {
         let foreground_active = self.foreground_activity_running_excluding_auto_review();
         if let Some(state) = self.background_review.as_mut() {
@@ -40077,6 +40397,7 @@ impl ChatWidget<'_> {
             state.branch = branch.clone();
             state.agent_id = agent_id;
             state.snapshot = snapshot;
+            state.owner_session_id = owner_session_id;
             state.last_seen = Instant::now();
         }
         if self.auto_review_status.is_none() {
@@ -40107,6 +40428,7 @@ impl ChatWidget<'_> {
         error: Option<String>,
         agent_id: Option<String>,
         snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
     ) {
         let foreground_active = self.foreground_activity_running_excluding_auto_review();
         let effective_findings = if has_findings {
@@ -40114,6 +40436,43 @@ impl ChatWidget<'_> {
         } else {
             findings
         };
+
+        if let Some(state) = self.background_review.as_ref() {
+            let mut mismatch_reason = None;
+            if let Some(expected_agent_id) = state.agent_id.as_deref() {
+                if agent_id.as_deref().is_some_and(|actual| actual != expected_agent_id) {
+                    mismatch_reason = Some("agent_id");
+                }
+            }
+            if let Some(expected_session_id) = state.owner_session_id {
+                if owner_session_id.is_some_and(|actual| actual != expected_session_id) {
+                    mismatch_reason = Some("owner_session_id");
+                }
+            }
+            if let Some(expected_snapshot) = state.snapshot.as_deref() {
+                if snapshot.as_deref().is_some_and(|actual| actual != expected_snapshot) {
+                    mismatch_reason = Some("snapshot");
+                }
+            }
+            if let Some(reason) = mismatch_reason {
+                tracing::debug!(
+                    reason,
+                    agent_id = agent_id.as_deref().unwrap_or(""),
+                    expected_agent_id = state.agent_id.as_deref().unwrap_or(""),
+                    owner_session_id = ?owner_session_id,
+                    expected_owner_session_id = ?state.owner_session_id,
+                    snapshot = snapshot.as_deref().unwrap_or(""),
+                    expected_snapshot = state.snapshot.as_deref().unwrap_or(""),
+                    "ignoring stale or cross-session auto-review completion"
+                );
+                if let Some(id) = agent_id.as_deref() {
+                    self.remember_processed_auto_review_agent(id);
+                }
+                if owner_session_id.is_some() || snapshot.is_some() || agent_id.is_some() {
+                    return;
+                }
+            }
+        }
 
         let inflight_worktree_path = self
             .background_review

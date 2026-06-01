@@ -1847,12 +1847,18 @@ impl App<'_> {
                         );
                     }
                 }
-                AppEvent::BackgroundReviewStarted { worktree_path, branch, agent_id, snapshot } => {
+                AppEvent::BackgroundReviewStarted { worktree_path, branch, agent_id, snapshot, owner_session_id } => {
                     if let AppState::Chat { widget } = &mut self.app_state {
-                        widget.on_background_review_started(worktree_path, branch, agent_id, snapshot);
+                        widget.on_background_review_started(
+                            worktree_path,
+                            branch,
+                            agent_id,
+                            snapshot,
+                            owner_session_id,
+                        );
                     }
                 }
-                AppEvent::BackgroundReviewFinished { worktree_path, branch, has_findings, findings, summary, error, agent_id, snapshot } => {
+                AppEvent::BackgroundReviewFinished { worktree_path, branch, has_findings, findings, summary, error, agent_id, snapshot, owner_session_id } => {
                     if let AppState::Chat { widget } = &mut self.app_state {
                         widget.on_background_review_finished(
                             worktree_path,
@@ -1863,6 +1869,7 @@ impl App<'_> {
                             error.clone(),
                             agent_id.clone(),
                             snapshot.clone(),
+                            owner_session_id,
                         );
                     }
                 }

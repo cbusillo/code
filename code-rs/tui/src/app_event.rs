@@ -485,6 +485,7 @@ pub(crate) enum AppEvent {
         branch: String,
         agent_id: Option<String>,
         snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
     },
     BackgroundReviewFinished {
         worktree_path: PathBuf,
@@ -495,6 +496,7 @@ pub(crate) enum AppEvent {
         error: Option<String>,
         agent_id: Option<String>,
         snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
     },
 
     /// Run the review command with the given argument string (mirrors `/review <args>`)

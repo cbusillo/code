@@ -636,6 +636,8 @@ fn agent_info_for_status(agent: &Agent, now: DateTime<Utc>) -> AgentInfo {
             _ => None,
         },
         source_kind: agent.source_kind.clone(),
+        owner_session_id: agent.owner_session_id.map(|id| id.to_string()),
+        worktree_base: agent.worktree_base.clone(),
     }
 }
 
