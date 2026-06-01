@@ -693,29 +693,61 @@ impl ChatWidget<'_> {
             }
         }
 
-        if let Some(agent_session_id) = agent
+        if let Some(expected_session_id) = state.owner_session_id.or(current_session_id) {
+            let Some(agent_session_id) = agent
+                .owner_session_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            else {
+                return false;
+            };
+            if expected_session_id != agent_session_id {
+                return false;
+            }
+        } else if let Some(agent_session_id) = agent
             .owner_session_id
             .as_deref()
             .and_then(|id| uuid::Uuid::parse_str(id).ok())
         {
-            if state
-                .owner_session_id
-                .or(current_session_id)
-                .is_some_and(|expected| expected != agent_session_id)
-            {
+            if current_session_id.is_some_and(|expected| expected != agent_session_id) {
                 return false;
             }
         }
 
         if let Some(expected_snapshot) = state.snapshot.as_deref() {
-            if let Some(agent_snapshot) = agent.worktree_base.as_deref() {
-                if expected_snapshot != agent_snapshot {
-                    return false;
-                }
+            let Some(agent_snapshot) = agent.worktree_base.as_deref() else {
+                return false;
+            };
+            if expected_snapshot != agent_snapshot {
+                return false;
             }
         }
 
         true
+    }
+
+    fn background_review_completion_mismatch(
+        state: &BackgroundReviewState,
+        agent_id: Option<&str>,
+        snapshot: Option<&str>,
+        owner_session_id: Option<Uuid>,
+    ) -> Option<&'static str> {
+        if let Some(expected_agent_id) = state.agent_id.as_deref() {
+            if agent_id != Some(expected_agent_id) {
+                return Some("agent_id");
+            }
+        }
+        if let Some(expected_session_id) = state.owner_session_id {
+            if owner_session_id != Some(expected_session_id) {
+                return Some("owner_session_id");
+            }
+        }
+        if let Some(expected_snapshot) = state.snapshot.as_deref() {
+            if snapshot != Some(expected_snapshot) {
+                return Some("snapshot");
+            }
+        }
+        None
     }
 
     fn format_code_bridge_call(&self, args: &JsonValue) -> Option<String> {
@@ -34464,6 +34496,78 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn auto_review_status_missing_metadata_does_not_surface_findings() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-current",
+            "auto-review-current",
+            None,
+            None,
+        )]);
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("metadata-free completion should not clear current review");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn pre_start_auto_review_terminal_status_does_not_surface_findings() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.observe_auto_review_status(&[completed_auto_review_agent(
+            "agent-early",
+            "auto-review-early",
+            None,
+            Some("snap-early"),
+        )]);
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("pre-start completion without session proof should not clear review");
+        assert!(state.agent_id.is_none());
+        assert!(state.snapshot.is_none());
+        assert!(chat.processed_auto_review_agents.contains("agent-early"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
     fn stale_background_review_finished_event_does_not_clear_current_review() {
         let mut harness = ChatWidgetHarness::new();
         let chat = harness.chat();
@@ -34500,6 +34604,46 @@ use code_core::protocol::OrderMeta;
         assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
         assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
         assert!(chat.processed_auto_review_agents.contains("agent-stale"));
+        assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        assert_no_code_ops_pending(&mut code_op_rx);
+    }
+
+    #[test]
+    fn background_review_finished_missing_metadata_does_not_clear_current_review() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished(
+            PathBuf::from("/tmp/current-wt"),
+            "auto-review-current".to_string(),
+            true,
+            1,
+            Some("missing metadata findings".to_string()),
+            None,
+            Some("agent-current".to_string()),
+            None,
+            None,
+        );
+
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("metadata-free completion should not clear current review");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-current"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-current"));
+        assert!(chat.processed_auto_review_agents.contains("agent-current"));
         assert!(!history_contains_text(chat, "Auto Review: 1 issue(s) found"));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
@@ -40438,23 +40582,12 @@ impl ChatWidget<'_> {
         };
 
         if let Some(state) = self.background_review.as_ref() {
-            let mut mismatch_reason = None;
-            if let Some(expected_agent_id) = state.agent_id.as_deref() {
-                if agent_id.as_deref().is_some_and(|actual| actual != expected_agent_id) {
-                    mismatch_reason = Some("agent_id");
-                }
-            }
-            if let Some(expected_session_id) = state.owner_session_id {
-                if owner_session_id.is_some_and(|actual| actual != expected_session_id) {
-                    mismatch_reason = Some("owner_session_id");
-                }
-            }
-            if let Some(expected_snapshot) = state.snapshot.as_deref() {
-                if snapshot.as_deref().is_some_and(|actual| actual != expected_snapshot) {
-                    mismatch_reason = Some("snapshot");
-                }
-            }
-            if let Some(reason) = mismatch_reason {
+            if let Some(reason) = Self::background_review_completion_mismatch(
+                state,
+                agent_id.as_deref(),
+                snapshot.as_deref(),
+                owner_session_id,
+            ) {
                 tracing::debug!(
                     reason,
                     agent_id = agent_id.as_deref().unwrap_or(""),
@@ -40468,9 +40601,7 @@ impl ChatWidget<'_> {
                 if let Some(id) = agent_id.as_deref() {
                     self.remember_processed_auto_review_agent(id);
                 }
-                if owner_session_id.is_some() || snapshot.is_some() || agent_id.is_some() {
-                    return;
-                }
+                return;
             }
         }
 
