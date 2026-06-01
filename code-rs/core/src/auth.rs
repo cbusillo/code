@@ -436,16 +436,68 @@ pub fn get_auth_file(code_home: &Path) -> PathBuf {
 
 /// Delete the auth.json file inside `code_home` if it exists. Returns `Ok(true)`
 /// if a file was removed, `Ok(false)` if no auth file was present.
-pub fn logout(code_home: &Path) -> std::io::Result<bool> {
+pub fn remove_auth_file(code_home: &Path) -> std::io::Result<bool> {
     let auth_file = get_auth_file(code_home);
     let removed = match std::fs::remove_file(&auth_file) {
         Ok(_) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => return Err(err),
     };
-
-    let _ = crate::auth_accounts::set_active_account_id(code_home, None)?;
     Ok(removed)
+}
+
+/// Log out of the current account. This removes auth.json and disconnects the
+/// active stored account while preserving unrelated stored accounts.
+pub fn logout(code_home: &Path) -> std::io::Result<bool> {
+    let auth_file = get_auth_file(code_home);
+    let current_auth = try_read_auth_json(&auth_file).ok();
+    let removed = remove_auth_file(code_home)?;
+    let active_account_id = crate::auth_accounts::get_active_account_id(code_home)?;
+
+    let removed_account = if let Some(account_id) = active_account_id {
+        let removed = crate::auth_accounts::remove_account(code_home, &account_id)?.is_some();
+        let removed_matching = if let Some(auth) = &current_auth {
+            remove_account_matching_auth(code_home, auth)?
+        } else {
+            false
+        };
+        removed || removed_matching
+    } else if let Some(auth) = &current_auth {
+        remove_account_matching_auth(code_home, auth)?
+    } else {
+        let _ = crate::auth_accounts::set_active_account_id(code_home, None)?;
+        false
+    };
+    Ok(removed || removed_account)
+}
+
+fn remove_account_matching_auth(code_home: &Path, auth: &AuthDotJson) -> std::io::Result<bool> {
+    let AuthDotJson {
+        auth_mode,
+        openai_api_key,
+        tokens,
+        last_refresh: _,
+    } = auth;
+    if let Some(mode) = auth_mode.or_else(|| {
+        if tokens.is_some() {
+            Some(AuthMode::ChatGPT)
+        } else if openai_api_key.is_some() {
+            Some(AuthMode::ApiKey)
+        } else {
+            None
+        }
+    }) {
+        Ok(crate::auth_accounts::remove_account_matching_credentials(
+            code_home,
+            mode,
+            openai_api_key.as_deref(),
+            tokens.as_ref(),
+        )?
+        .is_some())
+    } else {
+        let _ = crate::auth_accounts::set_active_account_id(code_home, None)?;
+        Ok(false)
+    }
 }
 
 /// Writes an `auth.json` that contains only the API key. Intended for CLI use.
@@ -1333,6 +1385,237 @@ mod tests {
         let removed = logout(dir.path())?;
         assert!(removed);
         assert!(!dir.path().join("auth.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn remove_auth_file_does_not_touch_stored_accounts() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let active = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-active".to_string(),
+            Some("Active".to_string()),
+            true,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: active.openai_api_key.clone(),
+            tokens: None,
+            last_refresh: None,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = remove_auth_file(dir.path())?;
+
+        assert!(removed);
+        assert!(!dir.path().join("auth.json").exists());
+        assert_eq!(
+            crate::auth_accounts::get_active_account_id(dir.path())?.as_deref(),
+            Some(active.id.as_str())
+        );
+        assert!(crate::auth_accounts::find_account(dir.path(), &active.id)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_removes_only_active_stored_account() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let active = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-active".to_string(),
+            Some("Active".to_string()),
+            true,
+        )?;
+        let other = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-other".to_string(),
+            Some("Other".to_string()),
+            false,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: active.openai_api_key.clone(),
+            tokens: None,
+            last_refresh: None,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(!dir.path().join("auth.json").exists());
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &active.id)?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &other.id)?.is_some());
+        let accounts = crate::auth_accounts::list_accounts(dir.path())?;
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, other.id);
+        Ok(())
+    }
+
+    #[test]
+    fn logout_removes_stale_active_chatgpt_account() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let stale_account = crate::auth_accounts::upsert_chatgpt_account(
+            dir.path(),
+            token_data_for_access("expired-access".to_string()),
+            Utc::now() - chrono::Duration::days(3),
+            Some("Stale".to_string()),
+            true,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ChatGPT),
+            openai_api_key: None,
+            tokens: stale_account.tokens.clone(),
+            last_refresh: stale_account.last_refresh,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::find_account(dir.path(), &stale_account.id)?.is_none());
+        assert!(crate::auth_accounts::list_accounts(dir.path())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_matches_auth_json_when_active_account_missing() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let stale_account = crate::auth_accounts::upsert_chatgpt_account(
+            dir.path(),
+            token_data_for_access("expired-access".to_string()),
+            Utc::now() - chrono::Duration::days(3),
+            Some("Stale".to_string()),
+            false,
+        )?;
+        let other = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-other".to_string(),
+            Some("Other".to_string()),
+            false,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ChatGPT),
+            openai_api_key: None,
+            tokens: stale_account.tokens.clone(),
+            last_refresh: stale_account.last_refresh,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::find_account(dir.path(), &stale_account.id)?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &other.id)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_matches_auth_json_when_active_pointer_is_stale() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let stale_account = crate::auth_accounts::upsert_chatgpt_account(
+            dir.path(),
+            token_data_for_access("expired-access".to_string()),
+            Utc::now() - chrono::Duration::days(3),
+            Some("Stale".to_string()),
+            false,
+        )?;
+        let other = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-other".to_string(),
+            Some("Other".to_string()),
+            false,
+        )?;
+        let _ = crate::auth_accounts::set_active_account_id(
+            dir.path(),
+            Some("missing-account".to_string()),
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ChatGPT),
+            openai_api_key: None,
+            tokens: stale_account.tokens.clone(),
+            last_refresh: stale_account.last_refresh,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &stale_account.id)?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &other.id)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_removes_auth_json_account_when_active_points_elsewhere() -> Result<(), std::io::Error>
+    {
+        let dir = tempdir()?;
+        let active = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-active".to_string(),
+            Some("Active".to_string()),
+            true,
+        )?;
+        let stale_account = crate::auth_accounts::upsert_chatgpt_account(
+            dir.path(),
+            token_data_for_access("expired-access".to_string()),
+            Utc::now() - chrono::Duration::days(3),
+            Some("Stale".to_string()),
+            false,
+        )?;
+        let other = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-other".to_string(),
+            Some("Other".to_string()),
+            false,
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::ChatGPT),
+            openai_api_key: None,
+            tokens: stale_account.tokens.clone(),
+            last_refresh: stale_account.last_refresh,
+        };
+        write_auth_json(&get_auth_file(dir.path()), &auth_dot_json)?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &active.id)?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &stale_account.id)?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &other.id)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_removes_active_stored_account_without_auth_json() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+        let active = crate::auth_accounts::upsert_api_key_account(
+            dir.path(),
+            "sk-active".to_string(),
+            Some("Active".to_string()),
+            true,
+        )?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::find_account(dir.path(), &active.id)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn logout_without_auth_or_active_account_returns_false() -> Result<(), std::io::Error> {
+        let dir = tempdir()?;
+
+        let removed = logout(dir.path())?;
+
+        assert!(!removed);
+        assert!(crate::auth_accounts::get_active_account_id(dir.path())?.is_none());
+        assert!(crate::auth_accounts::list_accounts(dir.path())?.is_empty());
         Ok(())
     }
 
