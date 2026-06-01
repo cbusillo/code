@@ -501,6 +501,34 @@ jobs:
           fi
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Sync compatibility npm package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+          node - "$NEW_VERSION" <<'NODE'
+            const fs = require('fs');
+            const path = require('path');
+
+            const version = process.argv[2];
+            const repoRoot = process.cwd();
+            const npmFiles = [
+              path.join(repoRoot, 'codex-cli', 'package.json'),
+              path.join(repoRoot, 'codex-cli', '.pack', 'package', 'package.json'),
+            ].filter((file) => fs.existsSync(file));
+
+            for (const file of npmFiles) {
+              const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+              pkg.version = version;
+              if (pkg.optionalDependencies) {
+                for (const key of Object.keys(pkg.optionalDependencies)) {
+                  pkg.optionalDependencies[key] = version;
+                }
+              }
+              fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
+            }
+          NODE
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
