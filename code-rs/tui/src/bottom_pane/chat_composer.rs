@@ -107,11 +107,12 @@ pub(crate) enum AutoReviewPhase {
     Resolving,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AutoReviewFooterStatus {
     pub(crate) status: AutoReviewIndicatorStatus,
     pub(crate) findings: Option<usize>,
     pub(crate) phase: AutoReviewPhase,
+    pub(crate) detail: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,7 +306,7 @@ impl ChatComposer {
 
     #[cfg(test)]
     pub(crate) fn auto_review_status(&self) -> Option<AutoReviewFooterStatus> {
-        self.auto_review_status
+        self.auto_review_status.clone()
     }
 
     /// Returns true if the input starts with a slash command and the cursor
@@ -2440,7 +2441,7 @@ impl ChatComposer {
             Span::from(agent_hint_label_text).style(label_style),
         ];
 
-        let status_spans = match status.status {
+        let mut status_spans = match status.status {
             AutoReviewIndicatorStatus::Running => {
                 let phase_label = match status.phase {
                     AutoReviewPhase::Resolving => "Auto Review: Resolving",
@@ -2491,6 +2492,11 @@ impl ChatComposer {
                 ]
             }
         };
+
+        if let Some(detail) = status.detail.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            status_spans.push(Span::from(" "));
+            status_spans.push(Span::styled(format!("({detail})"), label_style));
+        }
 
         (status_spans, agent_hint_spans)
     }
@@ -2580,7 +2586,7 @@ impl ChatComposer {
                 // Auto Review status + agent hint
                 let mut auto_review_status_spans: Vec<Span<'static>> = Vec::new();
                 let mut auto_review_agent_hint: Vec<Span<'static>> = Vec::new();
-                if let Some(status) = self.auto_review_status {
+                if let Some(status) = self.auto_review_status.clone() {
                     let (status_spans, agent_hint_spans) =
                         Self::auto_review_footer_sections(status, self.agent_hint_label);
                     auto_review_status_spans = status_spans;
@@ -3390,6 +3396,7 @@ mod tests {
             status: AutoReviewIndicatorStatus::Running,
             findings: None,
             phase: AutoReviewPhase::Reviewing,
+            detail: Some("current snap abcdef1".to_string()),
         }));
 
         let area = Rect {
