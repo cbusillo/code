@@ -1735,6 +1735,20 @@ fn persist_auto_review_scope_metadata(
     store.save()
 }
 
+fn persist_auto_review_prompt_estimate(
+    cwd: &Path,
+    run_id: Uuid,
+    prompt_token_estimate: u64,
+) -> std::io::Result<()> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    if let Some(run) = store.get_mut(run_id) {
+        run.prompt_token_estimate = Some(prompt_token_estimate);
+        run.mark_activity(now);
+    }
+    store.save()
+}
+
 fn find_duplicate_auto_review_run(
     cwd: &Path,
     diff_fingerprint: &str,
@@ -32114,6 +32128,14 @@ async fn run_background_review(
             turn_context.as_deref(),
             prompt_token_budget,
         );
+        let prompt_token_estimate = estimate_auto_review_prompt_tokens(&review_prompt);
+        if let Err(err) = persist_auto_review_prompt_estimate(
+            &config.cwd,
+            run_id,
+            prompt_token_estimate,
+        ) {
+            tracing::warn!(?err, run_id = %run_id, "failed to persist auto-review prompt estimate");
+        }
 
         let mut manager = code_core::AGENT_MANAGER.write().await;
         let agent_id = manager
@@ -33036,6 +33058,28 @@ use code_core::protocol::OrderMeta;
         assert!(prompt.contains("Snapshot: abc123."));
         assert!(estimate_auto_review_prompt_tokens(&prompt) <= 800);
         assert!(prompt.contains("```diff") || prompt.contains("Changed files to prioritize"));
+    }
+
+    #[test]
+    fn auto_review_prompt_estimate_is_persisted() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let run_id = Uuid::new_v4();
+        let mut store = AutoReviewRunStore::open(cwd.path()).expect("open store");
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .expect("insert run");
+
+        persist_auto_review_prompt_estimate(cwd.path(), run_id, 12_345)
+            .expect("persist prompt estimate");
+
+        let loaded = AutoReviewRunStore::open(cwd.path()).expect("reload store");
+        let run = loaded.get(run_id).expect("run loaded");
+        assert_eq!(run.prompt_token_estimate, Some(12_345));
+        assert!(run.last_activity_at.is_some());
     }
 
     #[test]
