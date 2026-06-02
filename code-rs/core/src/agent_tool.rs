@@ -479,6 +479,16 @@ const DEFAULT_CONTEXT_FILE_BUDGET_TOKENS: u64 = 100_000;
 const MAX_CONTEXT_FILE_BUDGET_TOKENS: u64 = 900_000;
 const CONTEXT_FILE_TOKEN_BYTES_ESTIMATE: u64 = 4;
 const AGENT_PROMPT_STDIN_THRESHOLD_BYTES: usize = 32 * 1024;
+const AGENT_PROMPT_ARGV_THRESHOLD_BYTES: usize = {
+    #[cfg(target_os = "windows")]
+    {
+        8 * 1024
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        AGENT_PROMPT_STDIN_THRESHOLD_BYTES
+    }
+};
 const MAX_STATUS_TERMINAL_AGENTS: usize = 128;
 const DEFAULT_AGENT_PROVIDER_MAX_RETRIES: usize = 2;
 const AGENT_PROVIDER_RETRY_BASE_DELAY: StdDuration = StdDuration::from_secs(2);
@@ -1785,24 +1795,24 @@ fn deliver_agent_prompt(
     family: &str,
     args: &mut Vec<String>,
     prompt: &str,
+    supports_stdin_prompt: bool,
     force_stdin: bool,
 ) -> Result<Option<String>, String> {
-    let use_stdin = force_stdin || prompt.len() > AGENT_PROMPT_STDIN_THRESHOLD_BYTES;
+    let use_stdin = force_stdin || prompt.len() > AGENT_PROMPT_ARGV_THRESHOLD_BYTES;
     if !use_stdin {
         args.push(prompt.to_string());
         return Ok(None);
     }
 
-    match family {
-        "codex" | "code" => {
-            args.push("-".to_string());
-            Ok(Some(prompt.to_string()))
-        }
-        other => Err(format!(
-            "agent prompt is {} bytes, above the {} byte argv delivery threshold, and provider family '{other}' does not support large-prompt stdin delivery. Use a built-in Every Code/Codex agent such as code-gpt-5.4, reduce context_files, or lower context_budget_tokens.",
+    if supports_stdin_prompt {
+        args.push("-".to_string());
+        Ok(Some(prompt.to_string()))
+    } else {
+        Err(format!(
+            "agent prompt is {} bytes, above the {} byte argv delivery threshold, and provider family '{family}' does not support large-prompt stdin delivery in this configuration. Use a built-in Every Code/Codex agent such as code-gpt-5.4, reduce context_files, or lower context_budget_tokens.",
             prompt.len(),
-            AGENT_PROMPT_STDIN_THRESHOLD_BYTES
-        )),
+            AGENT_PROMPT_ARGV_THRESHOLD_BYTES
+        ))
     }
 }
 
@@ -2498,7 +2508,7 @@ async fn execute_model_with_permissions(
             final_args.push("--reasoning-effort".into());
             final_args.push(clamped_effort.to_string().to_ascii_lowercase());
             final_args.push("-p".into());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
         "antigravity" | "claude" | "gemini" | "qwen" => {
             let mut defaults = default_params_for(slug_for_defaults, read_only);
@@ -2515,7 +2525,7 @@ async fn execute_model_with_permissions(
                 }
             }
             final_args.push("-p".into());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
         "codex" | "code" => {
             let have_mode_args = config
@@ -2532,7 +2542,7 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override.clone());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, use_current_exe, false)?;
         }
         "cloud" => {
             if built_in_cloud {
@@ -2552,11 +2562,11 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override);
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
         _ => {
             final_args.extend(spec_model_args.iter().cloned());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
     }
 
@@ -2700,19 +2710,7 @@ async fn execute_model_with_permissions(
         .await;
 
         match child_result {
-            Ok(mut child) => {
-                if let Some(stdin_content) = prompt_stdin_for_child {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        stdin
-                            .write_all(stdin_content.as_bytes())
-                            .await
-                            .map_err(|err| format!("failed to write agent prompt to stdin: {err}"))?;
-                    } else {
-                        return Err("failed to open agent stdin for large prompt delivery".to_string());
-                    }
-                }
-                stream_child_output(agent_id, child).await?
-            }
+            Ok(child) => stream_child_output(agent_id, child, prompt_stdin_for_child).await?,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     return Err(format_agent_not_found_error(&command, &command_for_spawn));
@@ -2747,19 +2745,7 @@ async fn execute_model_with_permissions(
         cmd.kill_on_drop(true);
 
         match spawn_tokio_command_with_retry(&mut cmd).await {
-            Ok(mut child) => {
-                if let Some(stdin_content) = prompt_stdin {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        stdin
-                            .write_all(stdin_content.as_bytes())
-                            .await
-                            .map_err(|err| format!("failed to write agent prompt to stdin: {err}"))?;
-                    } else {
-                        return Err("failed to open agent stdin for large prompt delivery".to_string());
-                    }
-                }
-                stream_child_output(agent_id, child).await?
-            }
+            Ok(child) => stream_child_output(agent_id, child, prompt_stdin).await?,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     return Err(format_agent_not_found_error(&command, &command_for_spawn));
@@ -2794,6 +2780,7 @@ const STREAM_PROGRESS_BYTES: usize = 2 * 1024;
 async fn stream_child_output(
     agent_id: &str,
     mut child: tokio::process::Child,
+    stdin_content: Option<String>,
 ) -> Result<(std::process::ExitStatus, String, String), String> {
     let agent_id_owned = agent_id.to_string();
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -2819,10 +2806,30 @@ async fn stream_child_output(
         tokio::spawn(async move { stream_reader_to_progress(agent, "stderr", stderr).await })
     });
 
+    let stdin_task = if let Some(stdin_content) = stdin_content {
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err("failed to open agent stdin for large prompt delivery".to_string());
+        };
+        Some(tokio::spawn(async move {
+            stdin
+                .write_all(stdin_content.as_bytes())
+                .await
+                .map_err(|err| format!("failed to write agent prompt to stdin: {err}"))
+        }))
+    } else {
+        None
+    };
+
     let status = child
         .wait()
         .await
         .map_err(|e| format!("Failed to wait for agent process: {e}"))?;
+
+    if let Some(handle) = stdin_task {
+        handle
+            .await
+            .map_err(|e| format!("Failed to join agent stdin writer: {e}"))??;
+    }
 
     let stdout_buf = match stdout_task {
         Some(handle) => handle
@@ -3107,11 +3114,11 @@ async fn execute_cloud_built_in_streaming(
     _config: Option<AgentConfig>,
     model_slug: &str,
 ) -> Result<String, String> {
-    if prompt.len() > AGENT_PROMPT_STDIN_THRESHOLD_BYTES {
+    if prompt.len() > AGENT_PROMPT_ARGV_THRESHOLD_BYTES {
         return Err(format!(
             "built-in cloud agent prompt is {} bytes, above the {} byte argv delivery threshold. Use a built-in Every Code/Codex agent such as code-gpt-5.4 for large context_files, or reduce the inlined context.",
             prompt.len(),
-            AGENT_PROMPT_STDIN_THRESHOLD_BYTES
+            AGENT_PROMPT_ARGV_THRESHOLD_BYTES
         ));
     }
 
@@ -4568,6 +4575,43 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn large_code_agent_prompt_streams_output_while_writing_stdin() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _reset_binary = EnvReset::capture("CODE_BINARY_PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let current = script_path(dir.path(), "current");
+        write_stdout_before_stdin_probe_script(&current);
+
+        unsafe {
+            std::env::set_var("CODE_BINARY_PATH", &current);
+        }
+
+        let prompt = "x".repeat(super::AGENT_PROMPT_STDIN_THRESHOLD_BYTES + 1);
+        let output = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            execute_model_with_permissions(
+                "agent-test",
+                "code-gpt-5.4",
+                &prompt,
+                true,
+                None,
+                None,
+                ReasoningEffort::Low,
+                None,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("large prompt execution should not deadlock")
+        .expect("execute read-only agent");
+
+        assert!(output.contains(&format!("stdin_len={}", prompt.len())));
+    }
+
     #[tokio::test]
     async fn large_external_agent_prompt_fails_before_spawn() {
         let dir = tempdir().expect("tempdir");
@@ -4604,6 +4648,44 @@ mod tests {
         .expect_err("large external prompt should fail");
 
         assert!(err.contains("argv delivery threshold"));
+    }
+
+    #[tokio::test]
+    async fn large_custom_code_command_prompt_fails_before_spawn() {
+        let dir = tempdir().expect("tempdir");
+        let custom_code = script_path(dir.path(), "custom-code");
+        write_argv_script(&custom_code);
+
+        let cfg = AgentConfig {
+            name: "code-gpt-5.4".to_string(),
+            command: custom_code.display().to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+        let prompt = "x".repeat(super::AGENT_PROMPT_STDIN_THRESHOLD_BYTES + 1);
+
+        let err = execute_model_with_permissions(
+            "agent-test",
+            "code-gpt-5.4",
+            &prompt,
+            true,
+            None,
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("large custom code prompt should fail");
+
+        assert!(err.contains("does not support large-prompt stdin delivery"));
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -5003,6 +5085,23 @@ printf 'prompt_arg=%s stdin_len=%s\n' "$prompt_arg" "$stdin_len"
 exit 0
 "#;
         std::fs::write(path, script).expect("write prompt probe script");
+        let mut perms = std::fs::metadata(path)
+            .expect("script metadata")
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script");
+    }
+
+    #[cfg(unix)]
+    fn write_stdout_before_stdin_probe_script(path: &Path) {
+        let script = r#"#!/bin/sh
+python3 -c 'print("o" * 200000)'
+stdin_len=$(wc -c | awk '{print $1}')
+printf 'stdin_len=%s\n' "$stdin_len"
+exit 0
+"#;
+        std::fs::write(path, script).expect("write output probe script");
         let mut perms = std::fs::metadata(path)
             .expect("script metadata")
             .permissions();
