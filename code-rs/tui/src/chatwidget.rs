@@ -5158,21 +5158,9 @@ impl ChatWidget<'_> {
                     return;
             }
             if role == "assistant" {
-                let normalized_new = Self::normalize_text(text);
-                if let Some(last_cell) = self.history_cells.last() {
-                    if let Some(existing) = last_cell
-                        .as_any()
-                        .downcast_ref::<crate::history_cell::AssistantMarkdownCell>()
-                    {
-                        let normalized_existing =
-                            Self::normalize_text(existing.markdown());
-                        if normalized_existing == normalized_new {
-                            tracing::debug!(
-                                "replay: skipping duplicate assistant message"
-                            );
-                            return;
-                        }
-                    }
+                if self.history_has_assistant_text(text) {
+                    tracing::debug!("replay: skipping duplicate assistant message");
+                    return;
                 }
                 let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
                 crate::markdown::append_markdown(text, &mut lines, &self.config);
@@ -5354,33 +5342,56 @@ impl ChatWidget<'_> {
 
     fn history_has_assistant_text(&self, text: &str) -> bool {
         let normalized = Self::normalize_text(text);
-        let normalized_preview = Self::normalize_text(&Self::markdown_to_plain_preview(text));
-        self.history_cells.iter().any(|cell| {
+        for cell in self.history_cells.iter().rev() {
+            if let Some(plain) = cell
+                .as_any()
+                .downcast_ref::<crate::history_cell::PlainHistoryCell>()
+            {
+                match plain.state().kind {
+                    PlainMessageKind::User => break,
+                    PlainMessageKind::Assistant => {
+                        let existing_text = Self::message_lines_to_full_text(&plain.state().lines);
+                        if Self::normalize_text(&existing_text) == normalized {
+                            return true;
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
+
             if let Some(existing) = cell
                 .as_any()
                 .downcast_ref::<crate::history_cell::AssistantMarkdownCell>()
             {
-                let existing_normalized = Self::normalize_text(existing.markdown());
-                if existing_normalized == normalized {
+                if Self::normalize_text(existing.markdown()) == normalized {
                     return true;
                 }
-                let existing_preview = Self::normalize_text(&Self::markdown_to_plain_preview(
-                    existing.markdown(),
-                ));
-                return existing_preview == normalized_preview;
+                continue;
             }
-            if let Some(existing) = cell
-                .as_any()
-                .downcast_ref::<crate::history_cell::PlainHistoryCell>()
-            {
-                if existing.state().kind == PlainMessageKind::Assistant {
-                    let existing_text = Self::message_lines_to_plain_preview(&existing.state().lines);
-                    let existing_normalized = Self::normalize_text(&existing_text);
-                    return existing_normalized == normalized || existing_normalized == normalized_preview;
+        }
+
+        false
+    }
+
+    fn message_lines_to_full_text(lines: &[MessageLine]) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        for line in lines {
+            match line.kind {
+                MessageLineKind::Blank | MessageLineKind::Metadata => continue,
+                _ => {
+                    let mut text = String::new();
+                    for span in &line.spans {
+                        text.push_str(&span.text);
+                    }
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        segments.push(trimmed.to_string());
+                    }
                 }
             }
-            false
-        })
+        }
+        segments.join(" ")
     }
 
     fn is_auto_review_cell(item: &dyn HistoryCell) -> bool {
@@ -39638,6 +39649,225 @@ use code_core::protocol::OrderMeta;
             inserted_text.contains("new-assistant"),
             "resume insertion should surface the new assistant answer at the tail"
         );
+    }
+
+    #[test]
+    fn replay_item_skips_assistant_message_restored_from_snapshot() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let assistant_text = "Right now the active workstream is dogfooding Auto Review.";
+        let snapshot = HistorySnapshot {
+            records: vec![HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: assistant_text.to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                }],
+                metadata: None,
+            })],
+            next_id: 2,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![OrderKeySnapshot {
+                req: 1,
+                out: 0,
+                seq: 0,
+            }],
+            order_debug: Vec::new(),
+        };
+
+        chat.restore_history_snapshot(&snapshot);
+        chat.render_replay_item(
+            ChatWidget::auto_drive_make_assistant_message(assistant_text.to_string())
+                .expect("assistant replay item"),
+        );
+
+        let assistant_cells = chat
+            .history_cells
+            .iter()
+            .filter(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::PlainHistoryCell>()
+                    .map(|plain| plain.state().kind == PlainMessageKind::Assistant)
+                    .unwrap_or(false)
+                    || cell
+                        .as_any()
+                        .downcast_ref::<history_cell::AssistantMarkdownCell>()
+                        .map(|assistant| assistant.markdown().contains(assistant_text))
+                        .unwrap_or(false)
+            })
+            .count();
+
+        assert_eq!(
+            assistant_cells, 1,
+            "replaying a response item already restored from a snapshot must not duplicate the final answer"
+        );
+    }
+
+    #[test]
+    fn replay_item_allows_repeated_assistant_text_after_later_user_turn() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let make_plain = |id: u64, role: PlainMessageRole, kind: PlainMessageKind, text: &str| {
+            PlainMessageState {
+                id: HistoryId(id),
+                role,
+                kind,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: text.to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                }],
+                metadata: None,
+            }
+        };
+
+        let snapshot = HistorySnapshot {
+            records: vec![
+                HistoryRecord::PlainMessage(make_plain(
+                    1,
+                    PlainMessageRole::Assistant,
+                    PlainMessageKind::Assistant,
+                    "OK",
+                )),
+                HistoryRecord::PlainMessage(make_plain(
+                    2,
+                    PlainMessageRole::User,
+                    PlainMessageKind::User,
+                    "next question",
+                )),
+                HistoryRecord::PlainMessage(make_plain(
+                    3,
+                    PlainMessageRole::Assistant,
+                    PlainMessageKind::Assistant,
+                    "Done",
+                )),
+            ],
+            next_id: 4,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![
+                OrderKeySnapshot {
+                    req: 1,
+                    out: 0,
+                    seq: 0,
+                },
+                OrderKeySnapshot {
+                    req: 2,
+                    out: 0,
+                    seq: 0,
+                },
+                OrderKeySnapshot {
+                    req: 2,
+                    out: 1,
+                    seq: 0,
+                },
+            ],
+            order_debug: Vec::new(),
+        };
+
+        chat.restore_history_snapshot(&snapshot);
+        chat.render_replay_item(
+            ChatWidget::auto_drive_make_assistant_message("OK".to_string())
+                .expect("assistant replay item"),
+        );
+
+        let ok_count = chat
+            .history_cells
+            .iter()
+            .filter(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::PlainHistoryCell>()
+                    .map(|plain| {
+                        plain.state().kind == PlainMessageKind::Assistant
+                            && ChatWidget::message_lines_to_full_text(&plain.state().lines).trim()
+                                == "OK"
+                    })
+                    .unwrap_or(false)
+                    || cell
+                        .as_any()
+                        .downcast_ref::<history_cell::AssistantMarkdownCell>()
+                        .map(|assistant| assistant.markdown().trim() == "OK")
+                        .unwrap_or(false)
+            })
+            .count();
+
+        assert_eq!(
+            ok_count, 2,
+            "replayed assistant text should not dedupe across a later user turn"
+        );
+    }
+
+    #[test]
+    fn replay_item_does_not_dedupe_long_assistant_prefix_matches() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let prefix = "This answer starts the same way but diverges after the preview window.";
+        let first = format!("{prefix} First full answer with extra unique context A.");
+        let second = format!("{prefix} Second full answer with extra unique context B.");
+        let snapshot = HistorySnapshot {
+            records: vec![HistoryRecord::AssistantMessage(AssistantMessageState {
+                id: HistoryId(1),
+                stream_id: Some("stream-1".to_string()),
+                markdown: first.clone(),
+                mid_turn: false,
+                citations: Vec::new(),
+                metadata: None,
+                token_usage: None,
+                created_at: SystemTime::UNIX_EPOCH,
+            })],
+            next_id: 2,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![OrderKeySnapshot {
+                req: 1,
+                out: 0,
+                seq: 0,
+            }],
+            order_debug: Vec::new(),
+        };
+
+        chat.restore_history_snapshot(&snapshot);
+        chat.render_replay_item(
+            ChatWidget::auto_drive_make_assistant_message(second.clone())
+                .expect("assistant replay item"),
+        );
+
+        let assistant_markdowns: Vec<String> = chat
+            .history_cells
+            .iter()
+            .filter_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::AssistantMarkdownCell>()
+                    .map(|assistant| assistant.markdown().to_string())
+            })
+            .collect();
+
+        assert_eq!(assistant_markdowns.len(), 2);
+        assert!(assistant_markdowns.iter().any(|text| text == &first));
+        assert!(assistant_markdowns.iter().any(|text| text == &second));
     }
 
 
