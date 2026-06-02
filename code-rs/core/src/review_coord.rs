@@ -29,6 +29,13 @@ fn state_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+fn state_dir_path() -> std::io::Result<PathBuf> {
+    let mut dir = crate::config::find_code_home()?;
+    dir.push("state");
+    dir.push("review");
+    Ok(dir)
+}
+
 fn scoped_dir(scope: Option<&Path>) -> std::io::Result<PathBuf> {
     let mut dir = state_dir()?;
     if let Some(scope) = scope {
@@ -42,8 +49,24 @@ fn scoped_dir(scope: Option<&Path>) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+fn scoped_dir_path(scope: Option<&Path>) -> std::io::Result<PathBuf> {
+    let mut dir = state_dir_path()?;
+    if let Some(scope) = scope {
+        let normalized_scope = scope
+            .canonicalize()
+            .unwrap_or_else(|_| scope.to_path_buf());
+        let key = crc32fast::hash(normalized_scope.to_string_lossy().as_bytes());
+        dir.push(format!("repo-{key:08x}"));
+    }
+    Ok(dir)
+}
+
 pub fn scoped_review_state_dir(scope: &Path) -> std::io::Result<PathBuf> {
     scoped_dir(Some(scope))
+}
+
+pub fn scoped_review_state_dir_path(scope: &Path) -> std::io::Result<PathBuf> {
+    scoped_dir_path(Some(scope))
 }
 
 fn epoch_path(scope: Option<&Path>) -> std::io::Result<PathBuf> {

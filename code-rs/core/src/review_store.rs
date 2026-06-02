@@ -1,5 +1,6 @@
 use crate::protocol::ReviewOutputEvent;
 use crate::review_coord::scoped_review_state_dir;
+use crate::review_coord::scoped_review_state_dir_path;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -255,7 +256,7 @@ impl AutoReviewRunStore {
     }
 
     pub fn open_existing(scope: &Path) -> io::Result<Option<Self>> {
-        let root = auto_review_dir(scope)?;
+        let root = auto_review_dir_path(scope)?;
         if !root.exists() {
             return Ok(None);
         }
@@ -410,6 +411,10 @@ impl AutoReviewRunStore {
 
 pub fn auto_review_dir(scope: &Path) -> io::Result<PathBuf> {
     Ok(scoped_review_state_dir(scope)?.join(AUTO_REVIEW_DIR))
+}
+
+pub fn auto_review_dir_path(scope: &Path) -> io::Result<PathBuf> {
+    Ok(scoped_review_state_dir_path(scope)?.join(AUTO_REVIEW_DIR))
 }
 
 fn read_runs_file(path: &Path) -> io::Result<BTreeMap<Uuid, AutoReviewRun>> {
@@ -1068,7 +1073,8 @@ mod tests {
 
         let store = AutoReviewRunStore::open_existing(repo.path()).unwrap();
         assert!(store.is_none());
-        assert!(!auto_review_dir(repo.path()).unwrap().exists());
+        assert!(!auto_review_dir_path(repo.path()).unwrap().exists());
+        assert!(!code_home.path().join("state").join("review").exists());
     }
 
     #[test]
