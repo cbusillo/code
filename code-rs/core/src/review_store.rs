@@ -62,6 +62,13 @@ impl AutoReviewRunStatus {
     pub fn is_in_flight(self) -> bool {
         !self.is_terminal()
     }
+
+    pub fn is_adoptable_duplicate(self) -> bool {
+        matches!(
+            self,
+            AutoReviewRunStatus::Reviewing | AutoReviewRunStatus::Resolving
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +227,27 @@ impl AutoReviewRun {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoReviewDuplicateDisposition {
+    Adopt,
+    ReuseTerminal,
+    SupersedeTerminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoReviewDuplicateMatch {
+    pub run_id: Uuid,
+    pub status: AutoReviewRunStatus,
+    pub disposition: AutoReviewDuplicateDisposition,
+    pub agent_id: Option<String>,
+    pub snapshot_commit: Option<String>,
+    pub owner_session_id: Option<Uuid>,
+    pub worktree_path: Option<PathBuf>,
+    pub branch: Option<String>,
+    pub finding_count: usize,
+    pub summary_digest: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AutoReviewLedgerOptions {
     pub max_bytes: usize,
@@ -369,6 +397,89 @@ impl AutoReviewRunStore {
         Ok(changed)
     }
 
+    pub fn find_duplicate_by_fingerprint(
+        &self,
+        diff_fingerprint: &str,
+    ) -> Option<AutoReviewDuplicateMatch> {
+        self.find_duplicate_by_fingerprint_excluding(diff_fingerprint, None)
+    }
+
+    pub fn find_duplicate_by_fingerprint_excluding(
+        &self,
+        diff_fingerprint: &str,
+        excluded_run_id: Option<Uuid>,
+    ) -> Option<AutoReviewDuplicateMatch> {
+        let fingerprint = diff_fingerprint.trim();
+        if fingerprint.is_empty() {
+            return None;
+        }
+
+        self.runs
+            .values()
+            .filter(|run| Some(run.run_id) != excluded_run_id)
+            .filter(|run| run.diff_fingerprint.as_deref() == Some(fingerprint))
+            .filter(|run| {
+                !matches!(
+                    run.status,
+                    AutoReviewRunStatus::Lost
+                        | AutoReviewRunStatus::Skipped
+                        | AutoReviewRunStatus::Superseded
+                )
+            })
+            .max_by(|left, right| {
+                duplicate_priority(left)
+                    .cmp(&duplicate_priority(right))
+                    .then_with(|| left.updated_at.cmp(&right.updated_at))
+                    .then_with(|| left.created_at.cmp(&right.created_at))
+                    .then_with(|| left.run_id.cmp(&right.run_id))
+            })
+            .map(|run| AutoReviewDuplicateMatch {
+                run_id: run.run_id,
+                status: run.status,
+                disposition: duplicate_disposition(run),
+                agent_id: run.agent_id.clone(),
+                snapshot_commit: run.snapshot_commit.clone(),
+                owner_session_id: run.owner_session_id,
+                worktree_path: run.worktree_path.clone(),
+                branch: run.branch.clone().or_else(|| run.batch_id.clone()),
+                finding_count: run.finding_count,
+                summary_digest: run.summary_digest.clone(),
+            })
+    }
+
+    pub fn mark_superseded_by_fingerprint(
+        &mut self,
+        diff_fingerprint: &str,
+        superseded_by: Uuid,
+        now: u64,
+    ) -> io::Result<usize> {
+        let fingerprint = diff_fingerprint.trim();
+        if fingerprint.is_empty() {
+            return Ok(0);
+        }
+
+        let mut changed = 0usize;
+        for run in self.runs.values_mut() {
+            if run.run_id == superseded_by
+                || run.diff_fingerprint.as_deref() != Some(fingerprint)
+                || run.status.is_in_flight()
+                || run.status == AutoReviewRunStatus::Superseded
+                || run.finding_count > 0
+                || !run.finding_digests.is_empty()
+            {
+                continue;
+            }
+            run.freshness = AutoReviewFreshness::Superseded;
+            run.superseded_by = Some(superseded_by);
+            run.mark_status(AutoReviewRunStatus::Superseded, now);
+            changed = changed.saturating_add(1);
+        }
+        if changed > 0 {
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
     pub fn write_output(&mut self, run_id: Uuid, output: &ReviewOutputEvent) -> io::Result<PathBuf> {
         if !self.runs.contains_key(&run_id) {
             return Err(io::Error::new(
@@ -406,6 +517,29 @@ impl AutoReviewRunStore {
 
     pub fn compact_ledger(&self, options: AutoReviewLedgerOptions) -> Option<String> {
         compact_ledger_from_runs(self.runs.values(), options)
+    }
+}
+
+fn duplicate_priority(run: &AutoReviewRun) -> u8 {
+    if run.status.is_adoptable_duplicate() {
+        return 4;
+    }
+    if run.finding_count > 0 || !run.finding_digests.is_empty() {
+        return 3;
+    }
+    if run.status == AutoReviewRunStatus::Completed {
+        return 2;
+    }
+    1
+}
+
+fn duplicate_disposition(run: &AutoReviewRun) -> AutoReviewDuplicateDisposition {
+    if run.status.is_adoptable_duplicate() {
+        AutoReviewDuplicateDisposition::Adopt
+    } else if run.status == AutoReviewRunStatus::Completed {
+        AutoReviewDuplicateDisposition::ReuseTerminal
+    } else {
+        AutoReviewDuplicateDisposition::SupersedeTerminal
     }
 }
 
@@ -843,6 +977,122 @@ mod tests {
         let loaded = AutoReviewRunStore::open(repo.path()).unwrap();
         assert!(loaded.get(first_id).is_some());
         assert!(loaded.get(second_id).is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_prefers_in_flight_fingerprint_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let completed_id = Uuid::new_v4();
+        let mut completed = AutoReviewRun::new(completed_id, AutoReviewRunSource::Tui, 1);
+        completed.diff_fingerprint = Some("diff:abc".to_string());
+        completed.mark_status(AutoReviewRunStatus::Completed, 2);
+        store.upsert(completed).unwrap();
+
+        let live_id = Uuid::new_v4();
+        let mut live = AutoReviewRun::new(live_id, AutoReviewRunSource::Tui, 3);
+        live.diff_fingerprint = Some("diff:abc".to_string());
+        live.agent_id = Some("agent-live".to_string());
+        live.snapshot_commit = Some("snap-live".to_string());
+        live.mark_status(AutoReviewRunStatus::Reviewing, 4);
+        store.upsert(live).unwrap();
+
+        let duplicate = store
+            .find_duplicate_by_fingerprint("diff:abc")
+            .expect("duplicate");
+        assert_eq!(duplicate.run_id, live_id);
+        assert_eq!(duplicate.disposition, AutoReviewDuplicateDisposition::Adopt);
+        assert_eq!(duplicate.agent_id.as_deref(), Some("agent-live"));
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_does_not_adopt_pending_fingerprint_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let pending_id = Uuid::new_v4();
+        let mut pending = AutoReviewRun::new(pending_id, AutoReviewRunSource::Tui, 1);
+        pending.diff_fingerprint = Some("diff:abc".to_string());
+        store.upsert(pending).unwrap();
+
+        let duplicate = store
+            .find_duplicate_by_fingerprint("diff:abc")
+            .expect("duplicate");
+        assert_eq!(duplicate.run_id, pending_id);
+        assert_eq!(
+            duplicate.disposition,
+            AutoReviewDuplicateDisposition::SupersedeTerminal
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_reuses_terminal_finding_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1);
+        run.diff_fingerprint = Some("diff:abc".to_string());
+        run.finding_count = 1;
+        run.mark_status(AutoReviewRunStatus::Completed, 2);
+        store.upsert(run).unwrap();
+
+        let duplicate = store
+            .find_duplicate_by_fingerprint("diff:abc")
+            .expect("duplicate");
+        assert_eq!(duplicate.run_id, run_id);
+        assert_eq!(
+            duplicate.disposition,
+            AutoReviewDuplicateDisposition::ReuseTerminal
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn supersede_by_fingerprint_omits_runs_with_findings() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let new_id = Uuid::new_v4();
+        let clean_id = Uuid::new_v4();
+        let finding_id = Uuid::new_v4();
+
+        let mut clean = AutoReviewRun::new(clean_id, AutoReviewRunSource::Tui, 1);
+        clean.diff_fingerprint = Some("diff:abc".to_string());
+        clean.mark_status(AutoReviewRunStatus::Completed, 2);
+        store.upsert(clean).unwrap();
+
+        let mut finding = AutoReviewRun::new(finding_id, AutoReviewRunSource::Tui, 3);
+        finding.diff_fingerprint = Some("diff:abc".to_string());
+        finding.finding_count = 1;
+        finding.mark_status(AutoReviewRunStatus::Completed, 4);
+        store.upsert(finding).unwrap();
+
+        let changed = store
+            .mark_superseded_by_fingerprint("diff:abc", new_id, 10)
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        let loaded = AutoReviewRunStore::open(repo.path()).unwrap();
+        let clean = loaded.get(clean_id).unwrap();
+        assert_eq!(clean.status, AutoReviewRunStatus::Superseded);
+        assert_eq!(clean.superseded_by, Some(new_id));
+
+        let finding = loaded.get(finding_id).unwrap();
+        assert_eq!(finding.status, AutoReviewRunStatus::Completed);
+        assert_eq!(finding.superseded_by, None);
     }
 
     #[test]
