@@ -16,6 +16,11 @@ const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MAX_RUNS: usize = 500;
 const MAX_FINDING_DIGESTS: usize = 25;
 const MAX_FINDING_DIGEST_TITLE_CHARS: usize = 160;
+const DEFAULT_LEDGER_MAX_BYTES: usize = 2_400;
+const DEFAULT_LEDGER_MAX_RUNS: usize = 5;
+const LEDGER_RECENT_ACTIONABLE_SECS: u64 = 24 * 60 * 60;
+const LEDGER_IN_FLIGHT_ACTIVITY_SECS: u64 = 60 * 60;
+const LEDGER_MAX_FINDINGS_PER_RUN: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -214,6 +219,23 @@ impl AutoReviewRun {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AutoReviewLedgerOptions {
+    pub max_bytes: usize,
+    pub max_runs: usize,
+    pub now: u64,
+}
+
+impl AutoReviewLedgerOptions {
+    pub fn new(now: u64) -> Self {
+        Self {
+            max_bytes: DEFAULT_LEDGER_MAX_BYTES,
+            max_runs: DEFAULT_LEDGER_MAX_RUNS,
+            now,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AutoReviewRunsFile {
     schema_version: u32,
@@ -230,6 +252,14 @@ pub struct AutoReviewRunStore {
 impl AutoReviewRunStore {
     pub fn open(scope: &Path) -> io::Result<Self> {
         Self::open_in_dir(auto_review_dir(scope)?)
+    }
+
+    pub fn open_existing(scope: &Path) -> io::Result<Option<Self>> {
+        let root = auto_review_dir(scope)?;
+        if !root.exists() {
+            return Ok(None);
+        }
+        Self::open_in_dir(root).map(Some)
     }
 
     pub fn open_in_dir(root: PathBuf) -> io::Result<Self> {
@@ -372,6 +402,10 @@ impl AutoReviewRunStore {
         let text = fs::read_to_string(path)?;
         serde_json::from_str(&text).map_err(io::Error::other)
     }
+
+    pub fn compact_ledger(&self, options: AutoReviewLedgerOptions) -> Option<String> {
+        compact_ledger_from_runs(self.runs.values(), options)
+    }
 }
 
 pub fn auto_review_dir(scope: &Path) -> io::Result<PathBuf> {
@@ -469,6 +503,192 @@ fn finding_digests(output: &ReviewOutputEvent) -> Vec<AutoReviewFindingDigest> {
         .collect()
 }
 
+fn compact_ledger_from_runs<'a, I>(
+    runs: I,
+    options: AutoReviewLedgerOptions,
+) -> Option<String>
+where
+    I: IntoIterator<Item = &'a AutoReviewRun>,
+{
+    let max_bytes = options.max_bytes.max(64);
+    let mut selected = runs
+        .into_iter()
+        .filter(|run| run_is_ledger_actionable(run, options.now))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return None;
+    }
+
+    selected.sort_by(|left, right| {
+        ledger_priority(right)
+            .cmp(&ledger_priority(left))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.created_at.cmp(&left.created_at))
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    selected.truncate(options.max_runs.max(1));
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "<auto_review_ledger schema_version=\"1\" max_bytes=\"{max_bytes}\">"
+    ));
+    lines.push("Auto Review state for this repo. Details are not included in this request; treat run ids as stable references for future detail lookup.".to_string());
+    for run in selected {
+        append_ledger_run(&mut lines, run, options.now);
+    }
+    lines.push("</auto_review_ledger>".to_string());
+
+    let mut ledger = lines.join("\n");
+    if ledger.len() > max_bytes {
+        truncate_ledger_to_bytes(&mut ledger, max_bytes);
+    }
+    Some(ledger)
+}
+
+fn run_is_ledger_actionable(run: &AutoReviewRun, now: u64) -> bool {
+    if run.status.is_in_flight() {
+        let reference_time = run.last_activity_at.unwrap_or(run.updated_at);
+        return now.saturating_sub(reference_time) <= LEDGER_IN_FLIGHT_ACTIVITY_SECS
+            || matches!(run.freshness, AutoReviewFreshness::Current | AutoReviewFreshness::LongRunning);
+    }
+    if matches!(
+        run.status,
+        AutoReviewRunStatus::Lost | AutoReviewRunStatus::Superseded | AutoReviewRunStatus::Skipped
+    ) {
+        return false;
+    }
+    let has_error_detail = run.error_summary.is_some() || run.error_class.is_some();
+    let terminal_actionable = run.finding_count > 0
+        || !run.finding_digests.is_empty()
+        || has_error_detail
+        || (matches!(run.status, AutoReviewRunStatus::Failed | AutoReviewRunStatus::Cancelled)
+            && has_error_detail);
+    if !terminal_actionable {
+        return false;
+    }
+    let reference_time = run.completed_at.or(run.last_activity_at).unwrap_or(run.updated_at);
+    now.saturating_sub(reference_time) <= LEDGER_RECENT_ACTIONABLE_SECS
+}
+
+fn ledger_priority(run: &AutoReviewRun) -> u8 {
+    if run.status.is_in_flight() {
+        return 5;
+    }
+    if run.finding_count > 0 || !run.finding_digests.is_empty() {
+        return 4;
+    }
+    if matches!(run.status, AutoReviewRunStatus::Failed | AutoReviewRunStatus::Cancelled) {
+        return 3;
+    }
+    1
+}
+
+fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
+    let age_secs = now.saturating_sub(run.updated_at);
+    let activity_age_secs = run
+        .last_activity_at
+        .map(|last_activity| now.saturating_sub(last_activity));
+    let snapshot = run
+        .snapshot_commit
+        .as_deref()
+        .and_then(short_sha)
+        .unwrap_or("unknown");
+    let branch = run.branch.as_deref().or(run.batch_id.as_deref()).unwrap_or("unknown");
+    let mut line = format!(
+        "run id={} status={:?} freshness={:?} source={:?} branch={} snapshot={} age={}s",
+        run.run_id, run.status, run.freshness, run.source, branch, snapshot, age_secs
+    );
+    if let Some(activity_age_secs) = activity_age_secs {
+        line.push_str(&format!(" last_activity={}s", activity_age_secs));
+    }
+    if let Some(agent_id) = run.agent_id.as_deref().and_then(short_agent_id) {
+        line.push_str(&format!(" agent={agent_id}"));
+    }
+    if run.finding_count > 0 {
+        line.push_str(&format!(" findings={}", run.finding_count));
+    }
+    if run.omitted_finding_digest_count > 0 {
+        line.push_str(&format!(" omitted_findings={}", run.omitted_finding_digest_count));
+    }
+    if let Some(summary) = run.summary_digest.as_deref() {
+        line.push_str(" summary=");
+        line.push_str(&single_line(summary, 180));
+    }
+    if let Some(error) = run.error_summary.as_deref() {
+        line.push_str(" error=");
+        line.push_str(&single_line(error, 180));
+    }
+    lines.push(line);
+
+    for finding in run.finding_digests.iter().take(LEDGER_MAX_FINDINGS_PER_RUN) {
+        let location = finding
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let line_start = finding
+            .line_start
+            .map(|line| line.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        lines.push(format!(
+            "  finding id={} priority={} location={}:{} title={}",
+            finding.finding_id,
+            finding.priority,
+            location,
+            line_start,
+            single_line(&finding.title, 160)
+        ));
+    }
+    if run.finding_digests.len() > LEDGER_MAX_FINDINGS_PER_RUN {
+        lines.push(format!(
+            "  more_findings={} full_output=lazy",
+            run.finding_digests.len() - LEDGER_MAX_FINDINGS_PER_RUN
+        ));
+    }
+}
+
+fn short_sha(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(&value[..value.len().min(12)])
+    }
+}
+
+fn short_agent_id(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(&value[..value.len().min(8)])
+    }
+}
+
+fn single_line(value: &str, max_chars: usize) -> String {
+    let flattened = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    summarize(&flattened, max_chars).unwrap_or_default()
+}
+
+fn truncate_ledger_to_bytes(ledger: &mut String, max_bytes: usize) {
+    let marker = "\n<truncated />\n</auto_review_ledger>";
+    if max_bytes <= marker.len() {
+        ledger.clear();
+        ledger.push_str(&marker[..max_bytes.min(marker.len())]);
+        return;
+    }
+    let target = max_bytes - marker.len();
+    let mut cutoff = 0usize;
+    for (idx, _) in ledger.char_indices() {
+        if idx > target {
+            break;
+        }
+        cutoff = idx;
+    }
+    ledger.truncate(cutoff);
+    ledger.push_str(marker);
+}
+
 fn summarize(text: &str, max_chars: usize) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -515,6 +735,25 @@ mod tests {
             overall_correctness: "incorrect".to_string(),
             overall_explanation: "summary".to_string(),
             overall_confidence_score: 0.8,
+        }
+    }
+
+    fn finding_digest(idx: usize) -> AutoReviewFindingDigest {
+        AutoReviewFindingDigest {
+            finding_id: format!("f{idx}"),
+            priority: 2,
+            title: format!("finding title {idx}"),
+            path: Some(PathBuf::from(format!("/repo/src/file{idx}.rs"))),
+            line_start: Some(idx as u32),
+            line_end: Some(idx as u32 + 1),
+        }
+    }
+
+    fn ledger_options(now: u64) -> AutoReviewLedgerOptions {
+        AutoReviewLedgerOptions {
+            now,
+            max_bytes: 2_400,
+            max_runs: 5,
         }
     }
 
@@ -681,5 +920,179 @@ mod tests {
         assert!(loaded.get(oldest).is_none());
         assert!(loaded.get(middle).is_some());
         assert!(loaded.get(newest).is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_idle_clean_runs() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 10);
+        run.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        assert!(store.compact_ledger(ledger_options(30)).is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_includes_active_run_activity_and_snapshot() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 100);
+        run.agent_id = Some("agent-1234567890".to_string());
+        run.branch = Some("auto-review".to_string());
+        run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.freshness = AutoReviewFreshness::Current;
+        run.mark_activity(120);
+        run.mark_status(AutoReviewRunStatus::Reviewing, 130);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(160)).expect("ledger");
+        assert!(ledger.contains("<auto_review_ledger"));
+        assert!(ledger.contains(&run_id.to_string()));
+        assert!(ledger.contains("status=Reviewing"));
+        assert!(ledger.contains("last_activity=40s"));
+        assert!(ledger.contains("snapshot=abcdef123456"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_inactive_in_flight_run_without_current_freshness() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        run.mark_activity(2);
+        run.mark_status(AutoReviewRunStatus::Reviewing, 3);
+        run.freshness = AutoReviewFreshness::Unknown;
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        assert!(
+            store
+                .compact_ledger(ledger_options(LEDGER_IN_FLIGHT_ACTIVITY_SECS + 20))
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_includes_current_long_running_run() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        run.mark_activity(2);
+        run.mark_status(AutoReviewRunStatus::Reviewing, 3);
+        run.freshness = AutoReviewFreshness::LongRunning;
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store
+            .compact_ledger(ledger_options(LEDGER_IN_FLIGHT_ACTIVITY_SECS + 20))
+            .expect("ledger");
+        assert!(ledger.contains("freshness=LongRunning"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_includes_recent_findings_with_digest_cap() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Exec, 100);
+        run.mark_status(AutoReviewRunStatus::Completed, 140);
+        run.finding_count = 6;
+        run.finding_digests = (1..=5).map(finding_digest).collect();
+        run.omitted_finding_digest_count = 1;
+        run.summary_digest = Some("review found important issues".to_string());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(160)).expect("ledger");
+        assert!(ledger.contains("findings=6"));
+        assert!(ledger.contains("omitted_findings=1"));
+        assert!(ledger.contains("finding id=f1"));
+        assert!(ledger.contains("finding id=f3"));
+        assert!(!ledger.contains("finding id=f4"));
+        assert!(ledger.contains("more_findings=2"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_old_terminal_findings() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Exec, 1);
+        run.mark_status(AutoReviewRunStatus::Completed, 2);
+        run.finding_count = 1;
+        run.finding_digests = vec![finding_digest(1)];
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        assert!(
+            store
+                .compact_ledger(ledger_options(LEDGER_RECENT_ACTIONABLE_SECS + 10))
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_clean_cancelled_run() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Exec, 1);
+        run.mark_status(AutoReviewRunStatus::Cancelled, 2);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        assert!(store.compact_ledger(ledger_options(10)).is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn open_existing_does_not_create_auto_review_dir() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+
+        let store = AutoReviewRunStore::open_existing(repo.path()).unwrap();
+        assert!(store.is_none());
+        assert!(!auto_review_dir(repo.path()).unwrap().exists());
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_honors_byte_cap() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        for idx in 0..10 {
+            let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, idx);
+            run.mark_status(AutoReviewRunStatus::Reviewing, idx + 1);
+            run.summary_digest = Some("a very long summary ".repeat(40));
+            store.upsert(run).unwrap();
+        }
+
+        let ledger = store
+            .compact_ledger(AutoReviewLedgerOptions {
+                now: 20,
+                max_bytes: 180,
+                max_runs: 10,
+            })
+            .expect("ledger");
+        assert!(ledger.len() <= 180, "ledger len was {}", ledger.len());
+        assert!(ledger.contains("truncated"));
     }
 }

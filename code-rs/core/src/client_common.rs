@@ -202,7 +202,7 @@ impl Prompt {
                     "prepended developer message",
                     1,
                     trimmed.len(),
-                    Some(format!("developer:prepend:{:016x}", stable_hash(trimmed))),
+                    duplicate_key_for_prepend_developer_message(trimmed),
                 );
                 input_with_instructions.push(ResponseItem::Message {
                     id: None,
@@ -351,10 +351,20 @@ impl Prompt {
 }
 
 fn classify_prepend_developer_message(text: &str) -> ContextSourceKind {
-    if text.contains("<memory") || text.to_ascii_lowercase().contains("memory") {
+    if text.contains("<auto_review_ledger") {
+        ContextSourceKind::AutoReviewLedger
+    } else if text.contains("<memory") || text.to_ascii_lowercase().contains("memory") {
         ContextSourceKind::MemoryInstructions
     } else {
         ContextSourceKind::DeveloperInstructions
+    }
+}
+
+fn duplicate_key_for_prepend_developer_message(text: &str) -> Option<String> {
+    if classify_prepend_developer_message(text) == ContextSourceKind::AutoReviewLedger {
+        Some("developer:prepend:auto_review_ledger".to_string())
+    } else {
+        Some(format!("developer:prepend:{:016x}", stable_hash(text)))
     }
 }
 
@@ -488,6 +498,7 @@ fn label_for_input_item(item: &ResponseItem) -> &'static str {
         ContextSourceKind::ExplicitSkill => "explicit skill",
         ContextSourceKind::EnvironmentContext => "environment context",
         ContextSourceKind::BrowserStatus => "browser/status context",
+        ContextSourceKind::AutoReviewLedger => "auto review ledger",
         ContextSourceKind::ToolOutput => "tool output",
         ContextSourceKind::DeveloperInstructions => "developer message",
         ContextSourceKind::UserInstructions => "user/project instructions",
@@ -1226,6 +1237,25 @@ mod tests {
             }
             other => panic!("unexpected third item: {other:?}"),
         }
+    }
+
+    #[test]
+    fn auto_review_ledger_developer_message_has_distinct_context_source() {
+        let mut prompt = Prompt::default();
+        prompt.prepend_developer_messages.push(
+            "<auto_review_ledger schema_version=\"1\">\nrun id=abc status=Reviewing\n</auto_review_ledger>"
+                .to_string(),
+        );
+
+        let (_input, ledger) = prompt.get_formatted_input_with_ledger();
+        let entry = ledger
+            .entries()
+            .iter()
+            .find(|entry| entry.source == ContextSourceKind::AutoReviewLedger)
+            .expect("auto review ledger entry");
+        assert_eq!(entry.label, "prepended developer message");
+        assert_eq!(entry.persistence, ContextPersistence::RequestOnly);
+        assert_eq!(entry.duplicate_key.as_deref(), Some("developer:prepend:auto_review_ledger"));
     }
 
     #[test]

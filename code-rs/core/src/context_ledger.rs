@@ -19,6 +19,7 @@ pub enum ContextSourceKind {
     ExplicitSkill,
     EnvironmentContext,
     BrowserStatus,
+    AutoReviewLedger,
     StatusItem,
     ConversationHistory,
     PendingInput,
