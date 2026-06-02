@@ -390,6 +390,8 @@ pub struct Agent {
     #[serde(default)]
     pub worktree_base: Option<String>,
     #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
+    #[serde(default)]
     pub source_kind: Option<AgentSourceKind>,
     #[serde(skip)]
     pub log_tag: Option<String>,
@@ -1112,6 +1114,41 @@ impl AgentManager {
         owner_session_id: Uuid,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
+        let workspace_root = std::env::current_dir().ok();
+        self.create_agent_in_workspace(
+            model,
+            name,
+            prompt,
+            context,
+            output_goal,
+            files,
+            context_files,
+            context_budget_tokens,
+            read_only,
+            batch_id,
+            owner_session_id,
+            workspace_root,
+            reasoning_effort,
+        )
+        .await
+    }
+
+    pub async fn create_agent_in_workspace(
+        &mut self,
+        model: String,
+        name: Option<String>,
+        prompt: String,
+        context: Option<String>,
+        output_goal: Option<String>,
+        files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
+        read_only: bool,
+        batch_id: Option<String>,
+        owner_session_id: Uuid,
+        workspace_root: Option<PathBuf>,
+        reasoning_effort: code_protocol::config_types::ReasoningEffort,
+    ) -> String {
         self.create_agent_internal(
             model,
             name,
@@ -1128,6 +1165,7 @@ impl AgentManager {
             None,
             None,
             None,
+            workspace_root,
             reasoning_effort,
         )
         .await
@@ -1149,6 +1187,43 @@ impl AgentManager {
         owner_session_id: Uuid,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
+        let workspace_root = std::env::current_dir().ok();
+        self.create_agent_with_config_in_workspace(
+            model,
+            name,
+            prompt,
+            context,
+            output_goal,
+            files,
+            context_files,
+            context_budget_tokens,
+            read_only,
+            batch_id,
+            config,
+            owner_session_id,
+            workspace_root,
+            reasoning_effort,
+        )
+        .await
+    }
+
+    pub async fn create_agent_with_config_in_workspace(
+        &mut self,
+        model: String,
+        name: Option<String>,
+        prompt: String,
+        context: Option<String>,
+        output_goal: Option<String>,
+        files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
+        read_only: bool,
+        batch_id: Option<String>,
+        config: AgentConfig,
+        owner_session_id: Uuid,
+        workspace_root: Option<PathBuf>,
+        reasoning_effort: code_protocol::config_types::ReasoningEffort,
+    ) -> String {
         self.create_agent_internal(
             model,
             name,
@@ -1165,6 +1240,7 @@ impl AgentManager {
             None,
             None,
             None,
+            workspace_root,
             reasoning_effort,
         )
         .await
@@ -1188,6 +1264,7 @@ impl AgentManager {
         worktree_branch: Option<String>,
         worktree_base: Option<String>,
         source_kind: Option<AgentSourceKind>,
+        workspace_root: Option<PathBuf>,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         self
@@ -1207,6 +1284,7 @@ impl AgentManager {
                 worktree_branch,
                 worktree_base,
                 source_kind,
+                workspace_root,
                 reasoning_effort,
             )
             .await
@@ -1229,6 +1307,7 @@ impl AgentManager {
         worktree_branch: Option<String>,
         worktree_base: Option<String>,
         source_kind: Option<AgentSourceKind>,
+        workspace_root: Option<PathBuf>,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         let agent_id = Uuid::new_v4().to_string();
@@ -1270,6 +1349,7 @@ impl AgentManager {
             worktree_path: None,
             branch_name: worktree_branch,
             worktree_base,
+            workspace_root,
             source_kind,
             log_tag,
             config: config.clone(),
@@ -1942,7 +2022,11 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
 
     drop(manager); // Release the lock before executing
 
-    let prompt_workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let prompt_workspace = agent
+        .workspace_root
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
     let (mut full_prompt, context_files_prompt) = match build_agent_full_prompt(
         &prompt,
         config.as_ref(),
@@ -3825,6 +3909,7 @@ mod tests {
             worktree_path: None,
             branch_name: None,
             worktree_base: None,
+            workspace_root: None,
             source_kind: None,
             log_tag: None,
             config: None,
@@ -3978,6 +4063,40 @@ mod tests {
             .expect("summary present");
 
         assert!(prompt.block.contains("a&amp;b&quot;c.txt"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_agent_preserves_explicit_workspace_root_for_context_files() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let process_cwd = tempfile::tempdir().expect("process cwd");
+        std::fs::write(workspace.path().join("context.txt"), "workspace context")
+            .expect("write workspace context");
+
+        let old_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(process_cwd.path()).expect("set process cwd");
+        let mut manager = AgentManager::new();
+        let agent_id = manager
+            .create_agent_in_workspace(
+                "code-gpt-5.5".to_string(),
+                Some("workspace-root".to_string()),
+                "task".to_string(),
+                None,
+                None,
+                Vec::new(),
+                vec!["context.txt".to_string()],
+                Some(100),
+                true,
+                Some("batch".to_string()),
+                Uuid::new_v4(),
+                Some(workspace.path().to_path_buf()),
+                ReasoningEffort::Low,
+            )
+            .await;
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+
+        let agent = manager.agents.get(&agent_id).expect("agent stored");
+        assert_eq!(agent.workspace_root.as_deref(), Some(workspace.path()));
     }
 
     #[tokio::test]
@@ -4213,6 +4332,7 @@ mod tests {
                 worktree_path: None,
                 branch_name: None,
                 worktree_base: None,
+                workspace_root: None,
                 source_kind: None,
                 log_tag: None,
                 config: None,
@@ -4955,6 +5075,7 @@ exit 0
                     worktree_path: Some("/tmp/wt".to_string()),
                     branch_name: Some("code-branch".to_string()),
                     worktree_base: None,
+                    workspace_root: None,
                     source_kind: None,
                     log_tag: None,
                     config: None,
@@ -5014,6 +5135,7 @@ exit 0
                 worktree_path: Some("/tmp/wt-stays".to_string()),
                 branch_name: Some("branch-stays".to_string()),
                 worktree_base: None,
+                workspace_root: None,
                 source_kind: None,
                 log_tag: None,
                 config: None,
@@ -5088,6 +5210,7 @@ exit 0
                     worktree_path: Some(format!("/tmp/worktree-{idx}")),
                     branch_name: Some(format!("code-branch-{idx}")),
                     worktree_base: None,
+                    workspace_root: None,
                     source_kind: None,
                     log_tag: None,
                     config: None,

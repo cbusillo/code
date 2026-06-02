@@ -31890,6 +31890,7 @@ async fn run_background_review(
                 Some(branch.clone()),
                 Some(snapshot_id.clone()),
                 Some(code_core::protocol::AgentSourceKind::AutoReview),
+                Some(config.cwd.clone()),
                 config.auto_review_model_reasoning_effort.into(),
             )
             .await;

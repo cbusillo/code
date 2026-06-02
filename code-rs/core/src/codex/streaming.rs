@@ -8781,7 +8781,7 @@ pub(crate) async fn handle_run_agent(
                     );
 
                     let agent_id = manager
-                        .create_agent_with_config(
+                        .create_agent_with_config_in_workspace(
                             model.clone(),
                             agent_name.clone(),
                             params.task.clone(),
@@ -8794,6 +8794,7 @@ pub(crate) async fn handle_run_agent(
                             Some(batch_id.clone()),
                             config.clone(),
                             sess.session_uuid(),
+                            Some(sess.get_cwd().to_path_buf()),
                             sess.model_reasoning_effort.into(),
                         )
                         .await;
@@ -8809,7 +8810,7 @@ pub(crate) async fn handle_run_agent(
                     }
                     let read_only = resolve_agent_read_only(params.write, params.read_only, None);
                     let agent_id = manager
-                        .create_agent(
+                        .create_agent_in_workspace(
                             model.clone(),
                             agent_name.clone(),
                             params.task.clone(),
@@ -8821,6 +8822,7 @@ pub(crate) async fn handle_run_agent(
                             read_only,
                             Some(batch_id.clone()),
                             sess.session_uuid(),
+                            Some(sess.get_cwd().to_path_buf()),
                             sess.model_reasoning_effort.into(),
                         )
                         .await;
@@ -8880,7 +8882,7 @@ pub(crate) async fn handle_run_agent(
 
                 let read_only = resolve_agent_read_only(params.write, params.read_only, None);
                 let agent_id = manager
-                    .create_agent(
+                    .create_agent_in_workspace(
                         "code".to_string(),
                         agent_name.clone(),
                         params.task.clone(),
@@ -8892,6 +8894,7 @@ pub(crate) async fn handle_run_agent(
                         read_only,
                         Some(batch_id.clone()),
                         sess.session_uuid(),
+                        Some(sess.get_cwd().to_path_buf()),
                         sess.model_reasoning_effort.into(),
                     )
                     .await;
