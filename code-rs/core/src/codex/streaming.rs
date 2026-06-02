@@ -8227,6 +8227,8 @@ pub(crate) async fn handle_agent_tool(
             let context = create_opts.context.take();
             let output = create_opts.output.take();
             let files = create_opts.files.take();
+            let context_files = create_opts.context_files.take();
+            let context_budget_tokens = create_opts.context_budget_tokens.take();
             let write = create_opts.write.take();
             let read_only = create_opts.read_only.take();
             let mut normalized_name = normalize_agent_name(create_opts.name.take());
@@ -8240,6 +8242,8 @@ pub(crate) async fn handle_agent_tool(
                 context: context.clone(),
                 output: output.clone(),
                 files: files.clone(),
+                context_files: context_files.clone(),
+                context_budget_tokens,
                 write,
                 read_only,
                 name: normalized_name.clone(),
@@ -8282,6 +8286,26 @@ pub(crate) async fn handle_agent_tool(
                         ),
                     );
                 }
+            }
+            if let Some(ref context_files_vec) = context_files {
+                if !context_files_vec.is_empty() {
+                    create_event.insert(
+                        "context_files".to_string(),
+                        serde_json::Value::Array(
+                            context_files_vec
+                                .iter()
+                                .cloned()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                }
+            }
+            if let Some(budget) = context_budget_tokens {
+                create_event.insert(
+                    "context_budget_tokens".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(budget)),
+                );
             }
             if let Some(flag) = write {
                 create_event.insert("write".to_string(), serde_json::Value::Bool(flag));
@@ -8764,6 +8788,8 @@ pub(crate) async fn handle_run_agent(
                             params.context.clone(),
                             params.output.clone(),
                             params.files.clone().unwrap_or_default(),
+                            params.context_files.clone().unwrap_or_default(),
+                            params.context_budget_tokens,
                             read_only,
                             Some(batch_id.clone()),
                             config.clone(),
@@ -8790,6 +8816,8 @@ pub(crate) async fn handle_run_agent(
                             params.context.clone(),
                             params.output.clone(),
                             params.files.clone().unwrap_or_default(),
+                            params.context_files.clone().unwrap_or_default(),
+                            params.context_budget_tokens,
                             read_only,
                             Some(batch_id.clone()),
                             sess.session_uuid(),
@@ -8859,6 +8887,8 @@ pub(crate) async fn handle_run_agent(
                         params.context.clone(),
                         params.output.clone(),
                         params.files.clone().unwrap_or_default(),
+                        params.context_files.clone().unwrap_or_default(),
+                        params.context_budget_tokens,
                         read_only,
                         Some(batch_id.clone()),
                         sess.session_uuid(),
