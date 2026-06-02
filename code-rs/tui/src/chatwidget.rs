@@ -31881,6 +31881,8 @@ async fn run_background_review(
                 None,
                 None,
                 Vec::new(),
+                Vec::new(),
+                None,
                 false,
                 Some(branch.clone()),
                 Some(agent_config.clone()),
@@ -31888,6 +31890,7 @@ async fn run_background_review(
                 Some(branch.clone()),
                 Some(snapshot_id.clone()),
                 Some(code_core::protocol::AgentSourceKind::AutoReview),
+                Some(config.cwd.clone()),
                 config.auto_review_model_reasoning_effort.into(),
             )
             .await;

@@ -60,12 +60,16 @@ agent {
     "task": "Implement JWT middleware (RS256) with key rotation and unit/integration tests. Preserve existing OAuth flows. Provide README usage snippet.",
     "context": "Service: services/api (Rust Axum). Secrets via env. CI: `cargo test --all`.",
     "files": ["services/api", "services/api/src", "services/api/Cargo.toml"],
+    "context_files": [".code/context/large-context-bundle.txt"], // Optional: inline workspace text file contents into the subagent's initial prompt; use only when the extra context is worth the cost.
+    "context_budget_tokens": 700000, // Required for very large context_files; defaults conservatively.
     "models": ["code-gpt-5.4","claude-sonnet-4.6","antigravity"], // Agent/model selector slugs; external CLI selectors use that tool's configured model.
     "output": "Middleware + passing tests + README snippet",
     "write": true // Allow changes - will launch every agent in a separate worktree
   }
 }
 agent {"action":"wait","wait":{"batch_id":"<batch_id>","return_all":true,"timeout_seconds":600}} // Long timeout or you can do separate work and check back later.
+
+Use `files` for lightweight path hints. Use `context_files` only when the subagent must receive selected text file contents in its initial prompt; pair large `context_files` with an explicit `context_budget_tokens` value so the launch cost is deliberate.
 
 ##  Agent/Model Selector Guide for `agent.create.models`
 {MODEL_DESCRIPTIONS}

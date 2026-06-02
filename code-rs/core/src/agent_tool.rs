@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
+use serde::de;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -9,7 +10,7 @@ use std::io::Write as IoWrite;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -370,6 +371,10 @@ pub struct Agent {
     pub context: Option<String>,
     pub output_goal: Option<String>,
     pub files: Vec<String>,
+    #[serde(default)]
+    pub context_files: Vec<String>,
+    #[serde(default)]
+    pub context_budget_tokens: Option<u64>,
     pub read_only: bool,
     pub status: AgentStatus,
     pub result: Option<String>,
@@ -384,6 +389,8 @@ pub struct Agent {
     pub branch_name: Option<String>,
     #[serde(default)]
     pub worktree_base: Option<String>,
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
     #[serde(default)]
     pub source_kind: Option<AgentSourceKind>,
     #[serde(skip)]
@@ -468,6 +475,10 @@ const MAX_AGENT_PROGRESS_ENTRIES: usize = 96;
 const MAX_AGENT_PROGRESS_LINE_BYTES: usize = 2048;
 const MAX_AGENT_RESULT_BYTES: usize = 64 * 1024;
 const MAX_TRACKED_TERMINAL_AGENTS: usize = 512;
+const DEFAULT_CONTEXT_FILE_BUDGET_TOKENS: u64 = 100_000;
+const MAX_CONTEXT_FILE_BUDGET_TOKENS: u64 = 900_000;
+const CONTEXT_FILE_TOKEN_BYTES_ESTIMATE: u64 = 4;
+const AGENT_PROMPT_STDIN_THRESHOLD_BYTES: usize = 32 * 1024;
 const MAX_STATUS_TERMINAL_AGENTS: usize = 128;
 const DEFAULT_AGENT_PROVIDER_MAX_RETRIES: usize = 2;
 const AGENT_PROVIDER_RETRY_BASE_DELAY: StdDuration = StdDuration::from_secs(2);
@@ -814,6 +825,8 @@ impl AgentManager {
         agent.context = None;
         agent.output_goal = None;
         agent.files.clear();
+        agent.context_files.clear();
+        agent.context_budget_tokens = None;
 
         delta
     }
@@ -1094,9 +1107,46 @@ impl AgentManager {
         context: Option<String>,
         output_goal: Option<String>,
         files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
         read_only: bool,
         batch_id: Option<String>,
         owner_session_id: Uuid,
+        reasoning_effort: code_protocol::config_types::ReasoningEffort,
+    ) -> String {
+        let workspace_root = std::env::current_dir().ok();
+        self.create_agent_in_workspace(
+            model,
+            name,
+            prompt,
+            context,
+            output_goal,
+            files,
+            context_files,
+            context_budget_tokens,
+            read_only,
+            batch_id,
+            owner_session_id,
+            workspace_root,
+            reasoning_effort,
+        )
+        .await
+    }
+
+    pub async fn create_agent_in_workspace(
+        &mut self,
+        model: String,
+        name: Option<String>,
+        prompt: String,
+        context: Option<String>,
+        output_goal: Option<String>,
+        files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
+        read_only: bool,
+        batch_id: Option<String>,
+        owner_session_id: Uuid,
+        workspace_root: Option<PathBuf>,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         self.create_agent_internal(
@@ -1106,6 +1156,8 @@ impl AgentManager {
             context,
             output_goal,
             files,
+            context_files,
+            context_budget_tokens,
             read_only,
             batch_id,
             None,
@@ -1113,6 +1165,7 @@ impl AgentManager {
             None,
             None,
             None,
+            workspace_root,
             reasoning_effort,
         )
         .await
@@ -1126,10 +1179,49 @@ impl AgentManager {
         context: Option<String>,
         output_goal: Option<String>,
         files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
         read_only: bool,
         batch_id: Option<String>,
         config: AgentConfig,
         owner_session_id: Uuid,
+        reasoning_effort: code_protocol::config_types::ReasoningEffort,
+    ) -> String {
+        let workspace_root = std::env::current_dir().ok();
+        self.create_agent_with_config_in_workspace(
+            model,
+            name,
+            prompt,
+            context,
+            output_goal,
+            files,
+            context_files,
+            context_budget_tokens,
+            read_only,
+            batch_id,
+            config,
+            owner_session_id,
+            workspace_root,
+            reasoning_effort,
+        )
+        .await
+    }
+
+    pub async fn create_agent_with_config_in_workspace(
+        &mut self,
+        model: String,
+        name: Option<String>,
+        prompt: String,
+        context: Option<String>,
+        output_goal: Option<String>,
+        files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
+        read_only: bool,
+        batch_id: Option<String>,
+        config: AgentConfig,
+        owner_session_id: Uuid,
+        workspace_root: Option<PathBuf>,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         self.create_agent_internal(
@@ -1139,6 +1231,8 @@ impl AgentManager {
             context,
             output_goal,
             files,
+            context_files,
+            context_budget_tokens,
             read_only,
             batch_id,
             Some(config),
@@ -1146,6 +1240,7 @@ impl AgentManager {
             None,
             None,
             None,
+            workspace_root,
             reasoning_effort,
         )
         .await
@@ -1160,6 +1255,8 @@ impl AgentManager {
         context: Option<String>,
         output_goal: Option<String>,
         files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
         read_only: bool,
         batch_id: Option<String>,
         config: Option<AgentConfig>,
@@ -1167,6 +1264,7 @@ impl AgentManager {
         worktree_branch: Option<String>,
         worktree_base: Option<String>,
         source_kind: Option<AgentSourceKind>,
+        workspace_root: Option<PathBuf>,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         self
@@ -1177,6 +1275,8 @@ impl AgentManager {
                 context,
                 output_goal,
                 files,
+                context_files,
+                context_budget_tokens,
                 read_only,
                 batch_id,
                 config,
@@ -1184,6 +1284,7 @@ impl AgentManager {
                 worktree_branch,
                 worktree_base,
                 source_kind,
+                workspace_root,
                 reasoning_effort,
             )
             .await
@@ -1197,6 +1298,8 @@ impl AgentManager {
         context: Option<String>,
         output_goal: Option<String>,
         files: Vec<String>,
+        context_files: Vec<String>,
+        context_budget_tokens: Option<u64>,
         read_only: bool,
         batch_id: Option<String>,
         config: Option<AgentConfig>,
@@ -1204,6 +1307,7 @@ impl AgentManager {
         worktree_branch: Option<String>,
         worktree_base: Option<String>,
         source_kind: Option<AgentSourceKind>,
+        workspace_root: Option<PathBuf>,
         reasoning_effort: code_protocol::config_types::ReasoningEffort,
     ) -> String {
         let agent_id = Uuid::new_v4().to_string();
@@ -1231,6 +1335,8 @@ impl AgentManager {
             context,
             output_goal,
             files,
+            context_files,
+            context_budget_tokens,
             read_only,
             status: AgentStatus::Pending,
             result: None,
@@ -1243,6 +1349,7 @@ impl AgentManager {
             worktree_path: None,
             branch_name: worktree_branch,
             worktree_base,
+            workspace_root,
             source_kind,
             log_tag,
             config: config.clone(),
@@ -1639,6 +1746,247 @@ fn generate_branch_id(model: &str, agent: &str) -> String {
 
 use crate::git_worktree::setup_worktree;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextFilesPrompt {
+    block: String,
+    estimated_tokens: u64,
+    included_files: usize,
+    budget_tokens: u64,
+}
+
+fn estimate_context_file_tokens(content: &str) -> u64 {
+    let word_count = content
+        .split_whitespace()
+        .filter(|segment| !segment.is_empty())
+        .count() as u64;
+    let byte_estimate = (content.len() as u64)
+        .saturating_add(CONTEXT_FILE_TOKEN_BYTES_ESTIMATE - 1)
+        / CONTEXT_FILE_TOKEN_BYTES_ESTIMATE;
+    word_count.max(byte_estimate).max(1)
+}
+
+fn is_probably_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|byte| *byte == 0)
+}
+
+fn xml_attr_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn context_budget_byte_limit(budget: u64) -> u64 {
+    budget.saturating_mul(CONTEXT_FILE_TOKEN_BYTES_ESTIMATE)
+}
+
+fn deliver_agent_prompt(
+    family: &str,
+    args: &mut Vec<String>,
+    prompt: &str,
+    force_stdin: bool,
+) -> Result<Option<String>, String> {
+    let use_stdin = force_stdin || prompt.len() > AGENT_PROMPT_STDIN_THRESHOLD_BYTES;
+    if !use_stdin {
+        args.push(prompt.to_string());
+        return Ok(None);
+    }
+
+    match family {
+        "codex" | "code" => {
+            args.push("-".to_string());
+            Ok(Some(prompt.to_string()))
+        }
+        other => Err(format!(
+            "agent prompt is {} bytes, above the {} byte argv delivery threshold, and provider family '{other}' does not support large-prompt stdin delivery. Use a built-in Every Code/Codex agent such as code-gpt-5.4, reduce context_files, or lower context_budget_tokens.",
+            prompt.len(),
+            AGENT_PROMPT_STDIN_THRESHOLD_BYTES
+        )),
+    }
+}
+
+fn canonicalize_allowed_context_file(path: &str, workspace_root: &Path) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("context_files contains an empty path".to_string());
+    }
+
+    let requested = Path::new(trimmed);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        workspace_root.join(requested)
+    };
+
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|err| format!("failed to resolve context file {trimmed}: {err}"))?;
+    let canonical_root = workspace_root.canonicalize().map_err(|err| {
+        format!(
+            "failed to resolve workspace root {}: {err}",
+            workspace_root.display()
+        )
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!(
+            "context file {} is outside the workspace root {}",
+            canonical.display(),
+            canonical_root.display()
+        ));
+    }
+    if canonical.is_dir() {
+        return Err(format!(
+            "context file {} is a directory; list explicit files instead",
+            canonical.display()
+        ));
+    }
+
+    Ok(canonical)
+}
+
+fn build_context_files_prompt(
+    context_files: &[String],
+    context_budget_tokens: Option<u64>,
+    workspace_root: &Path,
+) -> Result<Option<ContextFilesPrompt>, String> {
+    if context_files.is_empty() {
+        return Ok(None);
+    }
+
+    let requested_budget = context_budget_tokens.unwrap_or(DEFAULT_CONTEXT_FILE_BUDGET_TOKENS);
+    if requested_budget > MAX_CONTEXT_FILE_BUDGET_TOKENS {
+        return Err(format!(
+            "context_budget_tokens {requested_budget} exceeds the maximum {MAX_CONTEXT_FILE_BUDGET_TOKENS}"
+        ));
+    }
+    let budget = requested_budget;
+    let mut seen = HashSet::new();
+    let mut entries: Vec<(String, String, u64, u64)> = Vec::new();
+    let mut total_tokens = 0_u64;
+
+    for path in context_files {
+        let canonical = canonicalize_allowed_context_file(path, workspace_root)?;
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        let metadata = fs::metadata(&canonical)
+            .map_err(|err| format!("failed to inspect context file {}: {err}", canonical.display()))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "context file {} is not a regular file",
+                canonical.display()
+            ));
+        }
+        let byte_len = metadata.len();
+        let remaining_budget = budget.saturating_sub(total_tokens);
+        let byte_limit = context_budget_byte_limit(remaining_budget);
+        if byte_len > byte_limit {
+            return Err(format!(
+                "context file {} is {} bytes, above the remaining budget of {} estimated tokens ({} bytes max). Set context_budget_tokens high enough to launch this agent intentionally.",
+                canonical.display(),
+                byte_len,
+                remaining_budget,
+                byte_limit
+            ));
+        }
+        let bytes = fs::read(&canonical)
+            .map_err(|err| format!("failed to read context file {}: {err}", canonical.display()))?;
+        if is_probably_binary(&bytes) {
+            return Err(format!(
+                "context file {} appears to be binary; context_files only supports UTF-8 text",
+                canonical.display()
+            ));
+        }
+        let content = String::from_utf8(bytes).map_err(|err| {
+            format!(
+                "context file {} is not valid UTF-8: {err}",
+                canonical.display()
+            )
+        })?;
+        let estimated_tokens = estimate_context_file_tokens(&content);
+        total_tokens = total_tokens.saturating_add(estimated_tokens);
+        if total_tokens > budget {
+            return Err(format!(
+                "context_files estimated {total_tokens} tokens, above budget {budget}. Set context_budget_tokens high enough to launch this agent intentionally."
+            ));
+        }
+        entries.push((
+            canonical.display().to_string(),
+            content,
+            estimated_tokens,
+            byte_len,
+        ));
+    }
+
+    let mut block = String::new();
+    block.push_str("Preloaded context files:\n");
+    block.push_str(&format!(
+        "Included {} file(s), estimated {} tokens, budget {} tokens. These files were snapshotted before the subagent launched; do not re-read them unless fresh contents are needed.\n",
+        entries.len(),
+        total_tokens,
+        budget
+    ));
+    for (path, content, estimated_tokens, bytes) in &entries {
+        block.push_str(&format!(
+            "\n<context_file path=\"{}\" bytes=\"{}\" estimated_tokens=\"{}\">\n{}\n</context_file>\n",
+            xml_attr_escape(path),
+            bytes,
+            estimated_tokens,
+            content
+        ));
+    }
+
+    Ok(Some(ContextFilesPrompt {
+        block,
+        estimated_tokens: total_tokens,
+        included_files: entries.len(),
+        budget_tokens: budget,
+    }))
+}
+
+fn build_agent_full_prompt(
+    prompt: &str,
+    config: Option<&AgentConfig>,
+    context: Option<&String>,
+    output_goal: Option<&String>,
+    files: &[String],
+    context_files: &[String],
+    context_budget_tokens: Option<u64>,
+    workspace_root: &Path,
+) -> Result<(String, Option<ContextFilesPrompt>), String> {
+    let mut full_prompt = prompt.to_string();
+    if let Some(cfg) = config {
+        if let Some(instr) = cfg.instructions.as_ref() {
+            if !instr.trim().is_empty() {
+                full_prompt = format!("{}\n\n{}", instr.trim(), full_prompt);
+            }
+        }
+    }
+    if let Some(context) = context {
+        let trimmed = full_prompt.trim_start();
+        if trimmed.starts_with('/') {
+            full_prompt = format!("{full_prompt}\n\nContext: {context}");
+        } else {
+            full_prompt = format!("Context: {context}\n\nAgent: {full_prompt}");
+        }
+    }
+    if let Some(output_goal) = output_goal {
+        full_prompt = format!("{}\n\nDesired output: {}", full_prompt, output_goal);
+    }
+    if !files.is_empty() {
+        full_prompt = format!("{}\n\nFiles to consider: {}", full_prompt, files.join(", "));
+    }
+
+    let context_prompt =
+        build_context_files_prompt(context_files, context_budget_tokens, workspace_root)?;
+    if let Some(context_prompt) = context_prompt.as_ref() {
+        full_prompt = format!("{}\n\n{}", full_prompt, context_prompt.block);
+    }
+
+    Ok((full_prompt, context_prompt))
+}
+
 async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
     let mut manager = AGENT_MANAGER.write().await;
 
@@ -1666,36 +2014,51 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
     let context = agent.context.clone();
     let output_goal = agent.output_goal.clone();
     let files = agent.files.clone();
+    let context_files = agent.context_files.clone();
+    let context_budget_tokens = agent.context_budget_tokens;
     let reasoning_effort = agent.reasoning_effort;
     let source_kind = agent.source_kind.clone();
     let log_tag = agent.log_tag.clone();
 
     drop(manager); // Release the lock before executing
 
-    // Build the full prompt with context
-    let mut full_prompt = prompt.clone();
-    // Prepend any per-agent instructions from config when available
-    if let Some(cfg) = config.as_ref() {
-        if let Some(instr) = cfg.instructions.as_ref() {
-            if !instr.trim().is_empty() {
-                full_prompt = format!("{}\n\n{}", instr.trim(), full_prompt);
-            }
+    let prompt_workspace = agent
+        .workspace_root
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let (mut full_prompt, context_files_prompt) = match build_agent_full_prompt(
+        &prompt,
+        config.as_ref(),
+        context.as_ref(),
+        output_goal.as_ref(),
+        &files,
+        &context_files,
+        context_budget_tokens,
+        &prompt_workspace,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let mut manager = AGENT_MANAGER.write().await;
+            manager
+                .add_progress(&agent_id, format!("context_files failed: {err}"))
+                .await;
+            manager.update_agent_result(&agent_id, Err(err)).await;
+            return;
         }
-    }
-    if let Some(context) = &context {
-        let trimmed = full_prompt.trim_start();
-        if trimmed.starts_with('/') {
-            // Preserve leading slash commands so downstream executors can parse them.
-            full_prompt = format!("{full_prompt}\n\nContext: {context}");
-        } else {
-            full_prompt = format!("Context: {context}\n\nAgent: {full_prompt}");
-        }
-    }
-    if let Some(output_goal) = &output_goal {
-        full_prompt = format!("{}\n\nDesired output: {}", full_prompt, output_goal);
-    }
-    if !files.is_empty() {
-        full_prompt = format!("{}\n\nFiles to consider: {}", full_prompt, files.join(", "));
+    };
+    if let Some(summary) = context_files_prompt.as_ref() {
+        let mut manager = AGENT_MANAGER.write().await;
+        manager
+            .add_progress(
+                &agent_id,
+                format!(
+                    "Inlined {} context file(s), estimated {} tokens (budget {}).",
+                    summary.included_files, summary.estimated_tokens, summary.budget_tokens
+                ),
+            )
+            .await;
+        drop(manager);
     }
 
     // Setup working directory and execute
@@ -2076,6 +2439,7 @@ async fn execute_model_with_permissions(
     let use_current_exe = should_use_current_exe_for_agent(family, command_missing, config.as_ref());
 
     let mut final_args: Vec<String> = command_extra_args;
+    let prompt_stdin: Option<String>;
 
     if let Some(ref cfg) = config {
         if read_only {
@@ -2134,7 +2498,7 @@ async fn execute_model_with_permissions(
             final_args.push("--reasoning-effort".into());
             final_args.push(clamped_effort.to_string().to_ascii_lowercase());
             final_args.push("-p".into());
-            final_args.push(prompt.to_string());
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
         }
         "antigravity" | "claude" | "gemini" | "qwen" => {
             let mut defaults = default_params_for(slug_for_defaults, read_only);
@@ -2151,7 +2515,7 @@ async fn execute_model_with_permissions(
                 }
             }
             final_args.push("-p".into());
-            final_args.push(prompt.to_string());
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
         }
         "codex" | "code" => {
             let have_mode_args = config
@@ -2168,7 +2532,7 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override.clone());
-            final_args.push(prompt.to_string());
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
         }
         "cloud" => {
             if built_in_cloud {
@@ -2188,11 +2552,11 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override);
-            final_args.push(prompt.to_string());
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
         }
         _ => {
             final_args.extend(spec_model_args.iter().cloned());
-            final_args.push(prompt.to_string());
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
         }
     }
 
@@ -2318,6 +2682,7 @@ async fn execute_model_with_permissions(
         // Resolve the command and args we prepared above into Vec<String> for spawn helpers.
         let program = resolve_program_path(use_current_exe, &command_for_spawn)?;
         let args = final_args.clone();
+        let prompt_stdin_for_child = prompt_stdin.clone();
 
         let child_result: std::io::Result<tokio::process::Child> = crate::spawn::spawn_child_async(
             program.clone(),
@@ -2325,13 +2690,29 @@ async fn execute_model_with_permissions(
             Some(program.to_string_lossy().as_ref()),
             working_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))),
             &SandboxPolicy::DangerFullAccess,
-            StdioPolicy::RedirectForShellTool,
+            if prompt_stdin_for_child.is_some() {
+                StdioPolicy::RedirectForShellToolWithPipedStdin
+            } else {
+                StdioPolicy::RedirectForShellTool
+            },
             env.clone(),
         )
         .await;
 
         match child_result {
-            Ok(child) => stream_child_output(agent_id, child).await?,
+            Ok(mut child) => {
+                if let Some(stdin_content) = prompt_stdin_for_child {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin
+                            .write_all(stdin_content.as_bytes())
+                            .await
+                            .map_err(|err| format!("failed to write agent prompt to stdin: {err}"))?;
+                    } else {
+                        return Err("failed to open agent stdin for large prompt delivery".to_string());
+                    }
+                }
+                stream_child_output(agent_id, child).await?
+            }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     return Err(format_agent_not_found_error(&command, &command_for_spawn));
@@ -2351,7 +2732,11 @@ async fn execute_model_with_permissions(
         }
 
         cmd.args(final_args.clone());
-        cmd.stdin(Stdio::null());
+        if prompt_stdin.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         for (k, v) in &env {
@@ -2362,7 +2747,19 @@ async fn execute_model_with_permissions(
         cmd.kill_on_drop(true);
 
         match spawn_tokio_command_with_retry(&mut cmd).await {
-            Ok(child) => stream_child_output(agent_id, child).await?,
+            Ok(mut child) => {
+                if let Some(stdin_content) = prompt_stdin {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin
+                            .write_all(stdin_content.as_bytes())
+                            .await
+                            .map_err(|err| format!("failed to write agent prompt to stdin: {err}"))?;
+                    } else {
+                        return Err("failed to open agent stdin for large prompt delivery".to_string());
+                    }
+                }
+                stream_child_output(agent_id, child).await?
+            }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     return Err(format_agent_not_found_error(&command, &command_for_spawn));
@@ -2710,6 +3107,14 @@ async fn execute_cloud_built_in_streaming(
     _config: Option<AgentConfig>,
     model_slug: &str,
 ) -> Result<String, String> {
+    if prompt.len() > AGENT_PROMPT_STDIN_THRESHOLD_BYTES {
+        return Err(format!(
+            "built-in cloud agent prompt is {} bytes, above the {} byte argv delivery threshold. Use a built-in Every Code/Codex agent such as code-gpt-5.4 for large context_files, or reduce the inlined context.",
+            prompt.len(),
+            AGENT_PROMPT_STDIN_THRESHOLD_BYTES
+        ));
+    }
+
     // Program and argv
     let program = current_code_binary_path()?;
     let mut args: Vec<String> = vec!["cloud".into(), "submit".into(), "--wait".into()];
@@ -2886,7 +3291,27 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 allowed_values: None,
             }),
             description: Some(
-                "Optional array of file paths to include in context".to_string(),
+                "Optional array of file paths for the agent to consider. Contents are not inlined; use context_files when the subagent needs file contents in its initial prompt.".to_string(),
+            ),
+        },
+    );
+    create_properties.insert(
+        "context_files".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String {
+                description: None,
+                allowed_values: None,
+            }),
+            description: Some(
+                "Optional array of text file paths whose contents should be snapshotted and inlined into the spawned agent's initial prompt. Use sparingly for curated large context.".to_string(),
+            ),
+        },
+    );
+    create_properties.insert(
+        "context_budget_tokens".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Approximate token budget for inlined context_files. Defaults to 100000 and caps at 900000; set explicitly for expensive large-context launches.".to_string(),
             ),
         },
     );
@@ -3077,6 +3502,9 @@ pub struct RunAgentParams {
     pub context: Option<String>,
     pub output: Option<String>,
     pub files: Option<Vec<String>>,
+    pub context_files: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64_number")]
+    pub context_budget_tokens: Option<u64>,
     #[serde(default)]
     pub write: Option<bool>,
     #[serde(default)]
@@ -3092,6 +3520,9 @@ pub struct AgentCreateOptions {
     pub context: Option<String>,
     pub output: Option<String>,
     pub files: Option<Vec<String>>,
+    pub context_files: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64_number")]
+    pub context_budget_tokens: Option<u64>,
     #[serde(default)]
     pub write: Option<bool>,
     #[serde(default)]
@@ -3262,6 +3693,37 @@ where
     })
 }
 
+fn deserialize_optional_u64_number<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Number(number) => {
+            if let Some(int_value) = number.as_u64() {
+                return Ok(Some(int_value));
+            }
+            if let Some(float_value) = number.as_f64()
+                && float_value.is_finite()
+                && float_value >= 0.0
+                && float_value.fract() == 0.0
+                && float_value <= u64::MAX as f64
+            {
+                return Ok(Some(float_value as u64));
+            }
+            Err(de::Error::custom(format!(
+                "expected context_budget_tokens to be a non-negative integer, got {number}"
+            )))
+        }
+        other => Err(de::Error::custom(format!(
+            "expected context_budget_tokens to be a number, got {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Agent;
@@ -3285,6 +3747,8 @@ mod tests {
     use super::remove_review_output_json;
     use super::current_code_binary_path;
     use super::agent_retry_delay;
+    use super::build_agent_full_prompt;
+    use super::build_context_files_prompt;
     use super::AGENT_MANAGER;
     use crate::config_types::AgentConfig;
     use crate::openai_tools::{JsonSchema, OpenAiTool};
@@ -3427,6 +3891,8 @@ mod tests {
             context: None,
             output_goal: None,
             files: Vec::new(),
+            context_files: Vec::new(),
+            context_budget_tokens: None,
             read_only: true,
             status,
             result: None,
@@ -3443,6 +3909,7 @@ mod tests {
             worktree_path: None,
             branch_name: None,
             worktree_base: None,
+            workspace_root: None,
             source_kind: None,
             log_tag: None,
             config: None,
@@ -3482,6 +3949,156 @@ mod tests {
         assert_eq!(custom, std::path::PathBuf::from("custom-coder"));
     }
 
+    #[test]
+    fn context_files_inline_text_and_preserve_files_as_hints() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("bundle.txt");
+        std::fs::write(&file, "alpha beta gamma").expect("write context file");
+
+        let files = vec!["src/main.rs".to_string()];
+        let context_files = vec!["bundle.txt".to_string()];
+        let (prompt, summary) = build_agent_full_prompt(
+            "Inspect the bundle and report the sentinel.",
+            None,
+            None,
+            None,
+            &files,
+            &context_files,
+            Some(10),
+            tmp.path(),
+        )
+        .expect("prompt built");
+
+        assert!(prompt.contains("Files to consider: src/main.rs"));
+        assert!(prompt.contains("<context_file"));
+        assert!(prompt.contains("alpha beta gamma"));
+        let summary = summary.expect("summary present");
+        assert_eq!(summary.included_files, 1);
+        assert!(summary.estimated_tokens > 0);
+        assert!(summary.estimated_tokens <= summary.budget_tokens);
+    }
+
+    #[test]
+    fn context_files_fail_when_budget_is_too_small() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("large.txt"), "one two three four five")
+            .expect("write context file");
+
+        let err = build_context_files_prompt(
+            &["large.txt".to_string()],
+            Some(4),
+            tmp.path(),
+        )
+        .expect_err("budget should fail");
+
+        assert!(err.contains("above the remaining budget"));
+    }
+
+    #[test]
+    fn context_files_reject_oversized_file_before_reading() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let large = tmp.path().join("large.txt");
+        std::fs::write(&large, "x".repeat(128)).expect("write context file");
+
+        let err = build_context_files_prompt(&["large.txt".to_string()], Some(1), tmp.path())
+            .expect_err("oversized file should fail before read");
+
+        assert!(err.contains("above the remaining budget"));
+        assert!(err.contains("bytes max"));
+    }
+
+    #[test]
+    fn context_files_reject_budget_above_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("small.txt"), "ok").expect("write context file");
+
+        let err = build_context_files_prompt(
+            &["small.txt".to_string()],
+            Some(super::MAX_CONTEXT_FILE_BUDGET_TOKENS + 1),
+            tmp.path(),
+        )
+        .expect_err("oversized budget should fail");
+
+        assert!(err.contains("exceeds the maximum"));
+    }
+
+    #[test]
+    fn context_files_reject_path_escape() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+
+        let err = build_context_files_prompt(
+            &[outside.path().display().to_string()],
+            Some(100),
+            tmp.path(),
+        )
+        .expect_err("outside file should fail");
+
+        assert!(err.contains("outside the workspace root"));
+    }
+
+    #[test]
+    fn context_files_reject_binary_content() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("blob.bin"), [b'a', 0, b'b']).expect("write binary");
+
+        let err = build_context_files_prompt(
+            &["blob.bin".to_string()],
+            Some(100),
+            tmp.path(),
+        )
+        .expect_err("binary should fail");
+
+        assert!(err.contains("appears to be binary"));
+    }
+
+    #[test]
+    fn context_files_escape_path_attributes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let name = "a&b\"c.txt";
+        std::fs::write(tmp.path().join(name), "ok").expect("write context file");
+
+        let prompt = build_context_files_prompt(&[name.to_string()], Some(100), tmp.path())
+            .expect("prompt should build")
+            .expect("summary present");
+
+        assert!(prompt.block.contains("a&amp;b&quot;c.txt"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_agent_preserves_explicit_workspace_root_for_context_files() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let process_cwd = tempfile::tempdir().expect("process cwd");
+        std::fs::write(workspace.path().join("context.txt"), "workspace context")
+            .expect("write workspace context");
+
+        let old_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(process_cwd.path()).expect("set process cwd");
+        let mut manager = AgentManager::new();
+        let agent_id = manager
+            .create_agent_in_workspace(
+                "code-gpt-5.5".to_string(),
+                Some("workspace-root".to_string()),
+                "task".to_string(),
+                None,
+                None,
+                Vec::new(),
+                vec!["context.txt".to_string()],
+                Some(100),
+                true,
+                Some("batch".to_string()),
+                Uuid::new_v4(),
+                Some(workspace.path().to_path_buf()),
+                ReasoningEffort::Low,
+            )
+            .await;
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+
+        let agent = manager.agents.get(&agent_id).expect("agent stored");
+        assert_eq!(agent.workspace_root.as_deref(), Some(workspace.path()));
+    }
+
     #[tokio::test]
     async fn agent_status_updates_are_broadcast_to_all_sessions() {
         let mut manager = AgentManager::new();
@@ -3519,6 +4136,8 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                Vec::new(),
+                None,
                 true,
                 Some("batch-a".to_string()),
                 session_a,
@@ -3533,6 +4152,8 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                Vec::new(),
+                None,
                 true,
                 Some("batch-b".to_string()),
                 session_b,
@@ -3693,6 +4314,8 @@ mod tests {
                 context: None,
                 output_goal: None,
                 files: Vec::new(),
+                context_files: Vec::new(),
+                context_budget_tokens: None,
                 read_only: true,
                 status: AgentStatus::Completed,
                 result: Some("ok".to_string()),
@@ -3709,6 +4332,7 @@ mod tests {
                 worktree_path: None,
                 branch_name: None,
                 worktree_base: None,
+                workspace_root: None,
                 source_kind: None,
                 log_tag: None,
                 config: None,
@@ -3906,6 +4530,80 @@ mod tests {
         .expect("execute read-only agent");
 
         assert_eq!(output.trim(), "detached");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn large_code_agent_prompt_is_delivered_over_stdin() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _reset_binary = EnvReset::capture("CODE_BINARY_PATH");
+
+        let dir = tempdir().expect("tempdir");
+        let current = script_path(dir.path(), "current");
+        write_large_prompt_probe_script(&current);
+
+        unsafe {
+            std::env::set_var("CODE_BINARY_PATH", &current);
+        }
+
+        let prompt = "x".repeat(super::AGENT_PROMPT_STDIN_THRESHOLD_BYTES + 1);
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "code-gpt-5.4",
+            &prompt,
+            true,
+            None,
+            None,
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute read-only agent");
+
+        assert_eq!(
+            output.trim(),
+            format!("prompt_arg=- stdin_len={}", prompt.len())
+        );
+    }
+
+    #[tokio::test]
+    async fn large_external_agent_prompt_fails_before_spawn() {
+        let dir = tempdir().expect("tempdir");
+        let copilot = script_path(dir.path(), "copilot");
+        write_argv_script(&copilot);
+
+        let cfg = AgentConfig {
+            name: "github-copilot".to_string(),
+            command: copilot.display().to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+        let prompt = "x".repeat(super::AGENT_PROMPT_STDIN_THRESHOLD_BYTES + 1);
+
+        let err = execute_model_with_permissions(
+            "agent-test",
+            "github-copilot",
+            &prompt,
+            true,
+            None,
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("large external prompt should fail");
+
+        assert!(err.contains("argv delivery threshold"));
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -4293,6 +4991,26 @@ exit 0
         std::fs::set_permissions(path, perms).expect("chmod script");
     }
 
+    #[cfg(unix)]
+    fn write_large_prompt_probe_script(path: &Path) {
+        let script = r#"#!/bin/sh
+prompt_arg=""
+for arg in "$@"; do
+  prompt_arg="$arg"
+done
+stdin_len=$(wc -c | awk '{print $1}')
+printf 'prompt_arg=%s stdin_len=%s\n' "$prompt_arg" "$stdin_len"
+exit 0
+"#;
+        std::fs::write(path, script).expect("write prompt probe script");
+        let mut perms = std::fs::metadata(path)
+            .expect("script metadata")
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script");
+    }
+
     #[test]
     fn gemini_config_dir_is_injected_when_missing_api_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4339,6 +5057,8 @@ exit 0
                     context: Some("ctx".repeat(256)),
                     output_goal: Some("goal".repeat(256)),
                     files: vec!["a".repeat(256)],
+                    context_files: vec!["context".repeat(128)],
+                    context_budget_tokens: Some(10_000),
                     read_only: false,
                     status: AgentStatus::Completed,
                     result: Some("result".repeat(1024)),
@@ -4355,6 +5075,7 @@ exit 0
                     worktree_path: Some("/tmp/wt".to_string()),
                     branch_name: Some("code-branch".to_string()),
                     worktree_base: None,
+                    workspace_root: None,
                     source_kind: None,
                     log_tag: None,
                     config: None,
@@ -4394,6 +5115,8 @@ exit 0
                 context: Some("context".repeat(1024)),
                 output_goal: Some("goal".repeat(1024)),
                 files: vec!["file".repeat(1024)],
+                context_files: vec!["context-file".repeat(1024)],
+                context_budget_tokens: Some(10_000),
                 read_only: false,
                 status: AgentStatus::Completed,
                 result: Some("result".repeat(32 * 1024)),
@@ -4412,6 +5135,7 @@ exit 0
                 worktree_path: Some("/tmp/wt-stays".to_string()),
                 branch_name: Some("branch-stays".to_string()),
                 worktree_base: None,
+                workspace_root: None,
                 source_kind: None,
                 log_tag: None,
                 config: None,
@@ -4430,6 +5154,8 @@ exit 0
         assert!(agent.context.is_none());
         assert!(agent.output_goal.is_none());
         assert!(agent.files.is_empty());
+        assert!(agent.context_files.is_empty());
+        assert!(agent.context_budget_tokens.is_none());
         assert_eq!(agent.worktree_path.as_deref(), Some("/tmp/wt-stays"));
         assert_eq!(agent.branch_name.as_deref(), Some("branch-stays"));
         assert!(agent.progress.len() <= MAX_AGENT_PROGRESS_ENTRIES);
@@ -4466,6 +5192,8 @@ exit 0
                     context: None,
                     output_goal: None,
                     files: Vec::new(),
+                    context_files: Vec::new(),
+                    context_budget_tokens: None,
                     read_only: false,
                     status: AgentStatus::Completed,
                     result: Some("ok".to_string()),
@@ -4482,6 +5210,7 @@ exit 0
                     worktree_path: Some(format!("/tmp/worktree-{idx}")),
                     branch_name: Some(format!("code-branch-{idx}")),
                     worktree_base: None,
+                    workspace_root: None,
                     source_kind: None,
                     log_tag: None,
                     config: None,

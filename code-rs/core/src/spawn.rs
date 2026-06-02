@@ -41,7 +41,9 @@ fn unix_child_session_strategy(stdio_policy: StdioPolicy) -> UnixChildSessionStr
         // long-lived descendants (for example via `nohup ... &`). Starting the
         // shell tool in a new session ensures those descendants cannot retain
         // the TUI's controlling terminal and steal foreground ownership.
-        StdioPolicy::RedirectForShellTool => UnixChildSessionStrategy::NewSession,
+        StdioPolicy::RedirectForShellTool | StdioPolicy::RedirectForShellToolWithPipedStdin => {
+            UnixChildSessionStrategy::NewSession
+        }
         // Interactive children should keep terminal semantics while still being
         // isolated in their own process group for targeted signal handling.
         StdioPolicy::Inherit => UnixChildSessionStrategy::NewProcessGroup,
@@ -136,6 +138,7 @@ pub async fn spawn_tokio_command_with_retry(cmd: &mut Command) -> io::Result<Chi
 #[derive(Debug, Clone, Copy)]
 pub enum StdioPolicy {
     RedirectForShellTool,
+    RedirectForShellToolWithPipedStdin,
     Inherit,
 }
 
@@ -181,7 +184,9 @@ pub(crate) async fn spawn_child_async(
     unsafe {
         #[cfg(target_os = "linux")]
         let exec_memory_max_bytes = match stdio_policy {
-            StdioPolicy::RedirectForShellTool => crate::cgroup::default_exec_memory_max_bytes(),
+            StdioPolicy::RedirectForShellTool | StdioPolicy::RedirectForShellToolWithPipedStdin => {
+                crate::cgroup::default_exec_memory_max_bytes()
+            }
             StdioPolicy::Inherit => None,
         };
         #[cfg(unix)]
@@ -230,6 +235,10 @@ pub(crate) async fn spawn_child_async(
             // https://github.com/BurntSushi/ripgrep/blob/e2362d4d5185d02fa857bf381e7bd52e66fafc73/crates/core/flags/hiargs.rs#L1101-L1103
             cmd.stdin(Stdio::null());
 
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        StdioPolicy::RedirectForShellToolWithPipedStdin => {
+            cmd.stdin(Stdio::piped());
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         }
         StdioPolicy::Inherit => {
