@@ -489,6 +489,19 @@ agent-instructions = "Summarize the repository areas most relevant to the user's
 
 With the example above you can run `/context` inside the TUI to create a summary cell that the main `/code` turn can reference later. Because `context-collector` is an ordinary agent, any command-line static analysis utilities it invokes (such as your blast radius tool) should be described in the `agent-instructions` so the orchestrator launches the right workflow. You can also customise the built-in commands by providing an entry with the same `name` (`plan`, `solve`, or `code`) and pointing their `agents` list at your long-context helper.
 
+When launching agents directly with `agent.create`, `files` is path-only guidance. Use `context_files` for text files whose contents should be inlined into the spawned agent's initial prompt, and set `context_budget_tokens` explicitly for large bundles:
+
+```json
+{
+  "files": ["src/"],
+  "context_files": [".code/context/large-context-bundle.txt"],
+  "context_budget_tokens": 700000,
+  "models": ["code-gpt-5.4"]
+}
+```
+
+The runtime snapshots workspace-local regular UTF-8 `context_files`, estimates the inlined token count, and fails fast when the estimate exceeds the budget. This keeps normal agent creation cheap while allowing deliberate large-context GPT-5.4 runs.
+
 ## validation
 
 Controls the quick validation harness that runs before applying patches. The

@@ -31881,6 +31881,8 @@ async fn run_background_review(
                 None,
                 None,
                 Vec::new(),
+                Vec::new(),
+                None,
                 false,
                 Some(branch.clone()),
                 Some(agent_config.clone()),
