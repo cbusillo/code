@@ -30,6 +30,7 @@ use crate::protocol::McpListToolsResponseEvent;
 use crate::protocol::TaskLifecycleEvent;
 use crate::protocol::TaskLifecyclePhase;
 use crate::protocol::TaskOriginKind;
+use crate::review_store::{AutoReviewLedgerOptions, AutoReviewRunStore};
 use code_app_server_protocol::AuthMode as AppAuthMode;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
@@ -39,6 +40,7 @@ use code_protocol::models::FunctionCallOutputPayload;
 use code_protocol::models::ShellCommandToolCallParams;
 use code_protocol::models::ShellToolCallParams;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AgentTaskKind {
@@ -1536,6 +1538,21 @@ fn build_prepend_developer_messages(
         messages.push(notice.clone());
     }
     messages
+}
+
+fn build_auto_review_ledger_message(cwd: &Path) -> Option<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    match AutoReviewRunStore::open_existing(cwd) {
+        Ok(Some(store)) => store.compact_ledger(AutoReviewLedgerOptions::new(now)),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(?err, "failed to open auto-review run store for request ledger");
+            None
+        }
+    }
 }
 
 fn active_session_model_notice_for_request(
@@ -3074,6 +3091,7 @@ async fn run_turn(
     let mut did_context_model_fallback = false;
     let mut forced_model_override: Option<String> = None;
     let mut fallback_metadata_warning_sent = false;
+    let auto_review_ledger_message = build_auto_review_ledger_message(&tc.cwd);
     // Attempt input starts as the provided input, and may be augmented with
     // items from a previous dropped stream attempt so we don't lose progress.
     let mut attempt_input: Vec<ResponseItem> = input.clone();
@@ -3105,6 +3123,9 @@ async fn run_turn(
             {
                 prepend_developer_messages.push(memory_prompt);
             }
+        }
+        if let Some(auto_review_ledger) = auto_review_ledger_message.clone() {
+            prepend_developer_messages.push(auto_review_ledger);
         }
 
         let mut prompt = Prompt {

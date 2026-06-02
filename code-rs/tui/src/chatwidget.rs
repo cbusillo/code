@@ -17315,6 +17315,7 @@ impl ChatWidget<'_> {
             ContextSourceKind::ExplicitSkill => "explicit skill",
             ContextSourceKind::EnvironmentContext => "environment",
             ContextSourceKind::BrowserStatus => "browser status",
+            ContextSourceKind::AutoReviewLedger => "auto review ledger",
             ContextSourceKind::StatusItem => "status item",
             ContextSourceKind::ConversationHistory => "history",
             ContextSourceKind::PendingInput => "pending input",
