@@ -40,6 +40,8 @@ impl RateLimitSwitchState {
                     }
                 })
                 .or_insert(until);
+        } else {
+            self.blocked_until.remove(account_id);
         }
     }
 
@@ -54,6 +56,7 @@ impl RateLimitSwitchState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CandidateScore {
+    reset_at: Option<DateTime<Utc>>,
     used_percent: f64,
 }
 
@@ -67,35 +70,50 @@ fn account_has_credentials(account: &auth_accounts::StoredAccount) -> bool {
 fn usage_reset_blocked_until(
     snapshot: &account_usage::StoredRateLimitSnapshot,
 ) -> Option<DateTime<Utc>> {
-    if snapshot
+    let reached = snapshot
         .snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.rate_limit_reached_type)
-        .is_some_and(|reached| {
-            matches!(
-                reached,
-                RateLimitReachedType::RateLimitReached
-                    | RateLimitReachedType::WorkspaceOwnerCreditsDepleted
-                    | RateLimitReachedType::WorkspaceMemberCreditsDepleted
-                    | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
-                    | RateLimitReachedType::WorkspaceMemberUsageLimitReached
+        .is_some_and(is_usage_limit_reached_type);
+    let (primary_exhausted, secondary_exhausted) = snapshot
+        .snapshot
+        .as_ref()
+        .map(|snapshot| {
+            (
+                snapshot.primary_used_percent >= 100.0,
+                snapshot.secondary_used_percent >= 100.0,
             )
         })
-    {
-        return snapshot
-            .primary_next_reset_at
+        .unwrap_or_default();
+
+    let hinted_limit = snapshot.last_usage_limit_hit_at.is_some();
+
+    if reached || primary_exhausted || secondary_exhausted || hinted_limit {
+        let primary_reset = (reached || primary_exhausted || hinted_limit)
+            .then_some(snapshot.primary_next_reset_at)
+            .flatten();
+        let secondary_reset = (reached || secondary_exhausted || hinted_limit)
+            .then_some(snapshot.secondary_next_reset_at)
+            .flatten();
+        return primary_reset
             .into_iter()
-            .chain(snapshot.secondary_next_reset_at)
+            .chain(secondary_reset)
             .max()
             .or(snapshot.last_usage_limit_hit_at);
     }
 
-    snapshot
-        .primary_next_reset_at
-        .into_iter()
-        .chain(snapshot.secondary_next_reset_at)
-        .max()
-        .or(snapshot.last_usage_limit_hit_at)
+    None
+}
+
+fn is_usage_limit_reached_type(reached: RateLimitReachedType) -> bool {
+    matches!(
+        reached,
+        RateLimitReachedType::RateLimitReached
+            | RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+            | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+            | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+            | RateLimitReachedType::WorkspaceMemberUsageLimitReached
+    )
 }
 
 fn usage_used_percent(snapshot: &account_usage::StoredRateLimitSnapshot) -> Option<f64> {
@@ -110,8 +128,51 @@ fn usage_used_percent(snapshot: &account_usage::StoredRateLimitSnapshot) -> Opti
     }
 }
 
+fn usage_preferred_reset_at(
+    snapshot: &account_usage::StoredRateLimitSnapshot,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let secondary_reset = snapshot.secondary_next_reset_at.filter(|reset_at| *reset_at > now);
+    let primary_reset = snapshot.primary_next_reset_at.filter(|reset_at| *reset_at > now);
+    secondary_reset.or(primary_reset)
+}
+
+fn candidate_score(
+    snapshot_map: &HashMap<String, account_usage::StoredRateLimitSnapshot>,
+    account_id: &str,
+    now: DateTime<Utc>,
+) -> CandidateScore {
+    let snapshot = snapshot_map.get(account_id);
+    CandidateScore {
+        reset_at: snapshot.and_then(|snapshot| usage_preferred_reset_at(snapshot, now)),
+        used_percent: snapshot.and_then(usage_used_percent).unwrap_or(0.0),
+    }
+}
+
+fn score_is_better(score: CandidateScore, best_score: CandidateScore) -> bool {
+    match (score.reset_at, best_score.reset_at) {
+        (Some(reset_at), Some(best_reset_at)) if reset_at != best_reset_at => {
+            reset_at < best_reset_at
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => score.used_percent < best_score.used_percent,
+    }
+}
+
 fn is_blocked(now: DateTime<Utc>, blocked_until: Option<DateTime<Utc>>) -> bool {
     blocked_until.is_some_and(|until| until > now)
+}
+
+fn has_unexpired_tried_marker(
+    state: &RateLimitSwitchState,
+    account_id: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    state.has_tried(account_id)
+        && !state
+            .blocked_until(account_id)
+            .is_some_and(|blocked_until| blocked_until <= now)
 }
 
 pub(crate) fn select_next_account_id(
@@ -155,7 +216,7 @@ pub(crate) fn select_next_account_id(
         if current.is_some_and(|id| id == account.id) {
             continue;
         }
-        if state.has_tried(&account.id) {
+        if has_unexpired_tried_marker(state, &account.id, now) {
             continue;
         }
 
@@ -168,15 +229,11 @@ pub(crate) fn select_next_account_id(
             continue;
         }
 
-        let used_percent = snapshot_map
-            .get(&account.id)
-            .and_then(usage_used_percent)
-            .unwrap_or(0.0);
-        let score = CandidateScore { used_percent };
+        let score = candidate_score(&snapshot_map, &account.id, now);
         match best_chatgpt {
             None => best_chatgpt = Some((*account, score)),
             Some((_, best_score)) => {
-                if score.used_percent < best_score.used_percent {
+                if score_is_better(score, best_score) {
                     best_chatgpt = Some((*account, score));
                 }
             }
@@ -200,7 +257,10 @@ pub(crate) fn select_next_account_id(
             .chain(snapshot_map.get(&account.id).and_then(usage_reset_blocked_until))
             .max();
         let blocked = is_blocked(now, blocked_until);
-        let exhausted = state.limited_chatgpt_accounts.contains(&account.id);
+        let expired_tried_block = state
+            .blocked_until(&account.id)
+            .is_some_and(|blocked_until| blocked_until <= now);
+        let exhausted = state.limited_chatgpt_accounts.contains(&account.id) && !expired_tried_block;
         let tried = state.has_tried(&account.id);
         blocked || (tried && exhausted)
     });
@@ -220,6 +280,63 @@ pub(crate) fn select_next_account_id(
     }
 
     Ok(None)
+}
+
+pub fn switch_active_account_to_preferred_for_new_session(
+    code_home: &Path,
+    now: DateTime<Utc>,
+) -> io::Result<Option<String>> {
+    let current_account_id = auth_accounts::get_active_account_id(code_home)?;
+    let accounts = auth_accounts::list_accounts(code_home)?;
+
+    if let Some(current_account_id) = current_account_id.as_deref()
+        && let Some(current) = accounts.iter().find(|account| account.id == current_account_id)
+        && !current.mode.is_chatgpt()
+    {
+        return Ok(None);
+    }
+
+    let snapshots = account_usage::list_rate_limit_snapshots(code_home).unwrap_or_default();
+    let snapshot_map: HashMap<String, account_usage::StoredRateLimitSnapshot> = snapshots
+        .into_iter()
+        .map(|snap| (snap.account_id.clone(), snap))
+        .collect();
+
+    let mut best_chatgpt: Option<(&auth_accounts::StoredAccount, CandidateScore)> = None;
+    let mut chatgpt_accounts: Vec<&auth_accounts::StoredAccount> = accounts
+        .iter()
+        .filter(|acc| acc.mode.is_chatgpt())
+        .filter(|acc| account_has_credentials(acc))
+        .collect();
+    chatgpt_accounts.sort_by(|a, b| a.id.cmp(&b.id));
+
+    for account in chatgpt_accounts {
+        let blocked_until = snapshot_map.get(&account.id).and_then(usage_reset_blocked_until);
+        if is_blocked(now, blocked_until) {
+            continue;
+        }
+
+        let score = candidate_score(&snapshot_map, &account.id, now);
+        match best_chatgpt {
+            None => best_chatgpt = Some((account, score)),
+            Some((_, best_score)) => {
+                if score_is_better(score, best_score) {
+                    best_chatgpt = Some((account, score));
+                }
+            }
+        }
+    }
+
+    let Some((account, _)) = best_chatgpt else {
+        return Ok(None);
+    };
+
+    if current_account_id.as_deref() == Some(account.id.as_str()) {
+        return Ok(None);
+    }
+
+    auth::activate_account(code_home, &account.id)?;
+    Ok(Some(account.id.clone()))
 }
 
 pub fn switch_active_account_on_rate_limit(
@@ -483,6 +600,357 @@ mod tests {
             Some(a.id.as_str()),
         )
         .expect("select");
+        assert_eq!(next.as_deref(), Some(c.id.as_str()));
+    }
+
+    #[test]
+    fn rate_limit_switch_prefers_candidate_with_earliest_weekly_reset() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+        let c = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-c", "c@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert c");
+
+        let now = fixed_now();
+        let mut later_reset = sample_snapshot(5.0);
+        later_reset.secondary_reset_after_seconds = Some(7_200);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &b.id,
+            Some("Pro"),
+            &later_reset,
+            now,
+        )
+        .expect("later snapshot");
+        let mut earlier_reset = sample_snapshot(50.0);
+        earlier_reset.secondary_reset_after_seconds = Some(3_600);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &c.id,
+            Some("Pro"),
+            &earlier_reset,
+            now,
+        )
+        .expect("earlier snapshot");
+
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now,
+            Some(a.id.as_str()),
+        )
+        .expect("select");
+        assert_eq!(next.as_deref(), Some(c.id.as_str()));
+    }
+
+    #[test]
+    fn new_session_switches_to_earliest_weekly_reset_account() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+
+        let now = fixed_now();
+        let mut active_snapshot = sample_snapshot(10.0);
+        active_snapshot.secondary_reset_after_seconds = Some(7_200);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &a.id,
+            Some("Pro"),
+            &active_snapshot,
+            now,
+        )
+        .expect("active snapshot");
+        let mut preferred_snapshot = sample_snapshot(80.0);
+        preferred_snapshot.secondary_reset_after_seconds = Some(3_600);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &b.id,
+            Some("Pro"),
+            &preferred_snapshot,
+            now,
+        )
+        .expect("preferred snapshot");
+
+        let switched = switch_active_account_to_preferred_for_new_session(home.path(), now)
+            .expect("switch");
+        assert_eq!(switched.as_deref(), Some(b.id.as_str()));
+
+        let active = auth_accounts::get_active_account_id(home.path())
+            .expect("active account")
+            .expect("active account id");
+        assert_eq!(active, b.id);
+    }
+
+    #[test]
+    fn new_session_does_not_switch_from_api_key_account() {
+        let home = tempdir().expect("tmp");
+        let api = auth_accounts::upsert_api_key_account(
+            home.path(),
+            "sk-test".to_string(),
+            None,
+            true,
+        )
+        .expect("insert api");
+        let chatgpt = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-chat", "chat@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert chatgpt");
+
+        let now = fixed_now();
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &chatgpt.id,
+            Some("Pro"),
+            &sample_snapshot(20.0),
+            now,
+        )
+        .expect("snapshot");
+
+        let switched = switch_active_account_to_preferred_for_new_session(home.path(), now)
+            .expect("switch");
+        assert!(switched.is_none());
+
+        let active = auth_accounts::get_active_account_id(home.path())
+            .expect("active account")
+            .expect("active account id");
+        assert_eq!(active, api.id);
+    }
+
+    #[test]
+    fn temporary_block_expires_and_allows_account_again() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+
+        let now = fixed_now();
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(&a.id, AuthMode::ChatGPT, Some(now + chrono::Duration::hours(1)));
+
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now,
+            Some(b.id.as_str()),
+        )
+        .expect("select while blocked");
+        assert!(next.is_none());
+
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now + chrono::Duration::hours(2),
+            Some(b.id.as_str()),
+        )
+        .expect("select after reset");
+        assert_eq!(next.as_deref(), Some(a.id.as_str()));
+    }
+
+    #[test]
+    fn preferred_reset_uses_primary_when_secondary_is_stale() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+        let c = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-c", "c@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert c");
+
+        let now = fixed_now();
+        let mut stale_secondary = sample_snapshot(50.0);
+        stale_secondary.primary_reset_after_seconds = Some(1_800);
+        stale_secondary.secondary_reset_after_seconds = Some(1_800);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &b.id,
+            Some("Pro"),
+            &stale_secondary,
+            now - chrono::Duration::hours(1),
+        )
+        .expect("stale secondary snapshot");
+        let mut later_reset = sample_snapshot(5.0);
+        later_reset.secondary_reset_after_seconds = Some(7_200);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &c.id,
+            Some("Pro"),
+            &later_reset,
+            now,
+        )
+        .expect("later snapshot");
+
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &b.id,
+            Some("Pro"),
+            &crate::protocol::RateLimitSnapshotEvent {
+                primary_reset_after_seconds: Some(1_800),
+                secondary_reset_after_seconds: Some(1),
+                ..sample_snapshot(50.0)
+            },
+            now - chrono::Duration::seconds(2),
+        )
+        .expect("mixed reset snapshot");
+
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now,
+            Some(a.id.as_str()),
+        )
+        .expect("select");
+        assert_eq!(next.as_deref(), Some(b.id.as_str()));
+    }
+
+    #[test]
+    fn new_limit_without_reset_consumes_expired_temporary_block() {
+        let home = tempdir().expect("tmp");
+        let a = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-a", "a@example.com"),
+            Utc::now(),
+            None,
+            true,
+        )
+        .expect("insert a");
+        let b = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-b", "b@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert b");
+        let c = auth_accounts::upsert_chatgpt_account(
+            home.path(),
+            chatgpt_tokens("acct-c", "c@example.com"),
+            Utc::now(),
+            None,
+            false,
+        )
+        .expect("insert c");
+
+        let now = fixed_now();
+        let mut preferred_snapshot = sample_snapshot(30.0);
+        preferred_snapshot.secondary_reset_after_seconds = Some(1_800);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &a.id,
+            Some("Pro"),
+            &preferred_snapshot,
+            now + chrono::Duration::hours(2),
+        )
+        .expect("preferred snapshot");
+        let mut later_snapshot = sample_snapshot(10.0);
+        later_snapshot.secondary_reset_after_seconds = Some(7_200);
+        account_usage::record_rate_limit_snapshot(
+            home.path(),
+            &c.id,
+            Some("Pro"),
+            &later_snapshot,
+            now + chrono::Duration::hours(2),
+        )
+        .expect("later snapshot");
+
+        let mut state = RateLimitSwitchState::default();
+        state.mark_limited(&a.id, AuthMode::ChatGPT, Some(now + chrono::Duration::hours(1)));
+
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now + chrono::Duration::hours(2),
+            Some(b.id.as_str()),
+        )
+        .expect("select after reset");
+        assert_eq!(next.as_deref(), Some(a.id.as_str()));
+
+        state.mark_limited(&a.id, AuthMode::ChatGPT, None);
+        let next = select_next_account_id(
+            home.path(),
+            &state,
+            false,
+            now + chrono::Duration::hours(2),
+            Some(b.id.as_str()),
+        )
+        .expect("select after second failure");
         assert_eq!(next.as_deref(), Some(c.id.as_str()));
     }
 

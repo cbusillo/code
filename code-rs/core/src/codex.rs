@@ -1238,6 +1238,35 @@ impl Codex {
             dynamic_tools: config.dynamic_tools.clone(),
         };
 
+        if config.auto_switch_accounts_on_rate_limit
+            && crate::auth::read_code_api_key_from_env().is_none()
+            && resume_path.is_none()
+            && matches!(&session_source, SessionSource::Cli)
+        {
+            match crate::account_switching::switch_active_account_to_preferred_for_new_session(
+                &config.code_home,
+                Utc::now(),
+            ) {
+                Ok(Some(account_id)) => {
+                    info!(
+                        to_account_id = %account_id,
+                        reason = "new_session_preferred_reset",
+                        "auto-switching active account for new session"
+                    );
+                    if let Some(auth_manager) = auth_manager.as_ref() {
+                        auth_manager.reload();
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "failed to auto-select preferred account for new session"
+                    );
+                }
+            }
+        }
+
         let config = Arc::new(config);
 
         // Generate a unique ID for the lifetime of this Codex session.
