@@ -1795,6 +1795,7 @@ fn deliver_agent_prompt(
     family: &str,
     args: &mut Vec<String>,
     prompt: &str,
+    supports_stdin_prompt: bool,
     force_stdin: bool,
 ) -> Result<Option<String>, String> {
     let use_stdin = force_stdin || prompt.len() > AGENT_PROMPT_ARGV_THRESHOLD_BYTES;
@@ -1803,16 +1804,15 @@ fn deliver_agent_prompt(
         return Ok(None);
     }
 
-    match family {
-        "codex" | "code" => {
-            args.push("-".to_string());
-            Ok(Some(prompt.to_string()))
-        }
-        other => Err(format!(
-            "agent prompt is {} bytes, above the {} byte argv delivery threshold, and provider family '{other}' does not support large-prompt stdin delivery. Use a built-in Every Code/Codex agent such as code-gpt-5.4, reduce context_files, or lower context_budget_tokens.",
+    if supports_stdin_prompt {
+        args.push("-".to_string());
+        Ok(Some(prompt.to_string()))
+    } else {
+        Err(format!(
+            "agent prompt is {} bytes, above the {} byte argv delivery threshold, and provider family '{family}' does not support large-prompt stdin delivery in this configuration. Use a built-in Every Code/Codex agent such as code-gpt-5.4, reduce context_files, or lower context_budget_tokens.",
             prompt.len(),
             AGENT_PROMPT_ARGV_THRESHOLD_BYTES
-        )),
+        ))
     }
 }
 
@@ -2508,7 +2508,7 @@ async fn execute_model_with_permissions(
             final_args.push("--reasoning-effort".into());
             final_args.push(clamped_effort.to_string().to_ascii_lowercase());
             final_args.push("-p".into());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
         "antigravity" | "claude" | "gemini" | "qwen" => {
             let mut defaults = default_params_for(slug_for_defaults, read_only);
@@ -2525,7 +2525,7 @@ async fn execute_model_with_permissions(
                 }
             }
             final_args.push("-p".into());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
         "codex" | "code" => {
             let have_mode_args = config
@@ -2542,7 +2542,7 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override.clone());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, use_current_exe, false)?;
         }
         "cloud" => {
             if built_in_cloud {
@@ -2562,11 +2562,11 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override);
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
         _ => {
             final_args.extend(spec_model_args.iter().cloned());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, false, false)?;
         }
     }
 
@@ -4648,6 +4648,44 @@ mod tests {
         .expect_err("large external prompt should fail");
 
         assert!(err.contains("argv delivery threshold"));
+    }
+
+    #[tokio::test]
+    async fn large_custom_code_command_prompt_fails_before_spawn() {
+        let dir = tempdir().expect("tempdir");
+        let custom_code = script_path(dir.path(), "custom-code");
+        write_argv_script(&custom_code);
+
+        let cfg = AgentConfig {
+            name: "code-gpt-5.4".to_string(),
+            command: custom_code.display().to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+        let prompt = "x".repeat(super::AGENT_PROMPT_STDIN_THRESHOLD_BYTES + 1);
+
+        let err = execute_model_with_permissions(
+            "agent-test",
+            "code-gpt-5.4",
+            &prompt,
+            true,
+            None,
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("large custom code prompt should fail");
+
+        assert!(err.contains("does not support large-prompt stdin delivery"));
     }
 
     #[cfg(not(target_os = "windows"))]
