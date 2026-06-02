@@ -5175,12 +5175,20 @@ impl ChatWidget<'_> {
 
     fn history_has_assistant_text(&self, text: &str) -> bool {
         let normalized = Self::normalize_text(text);
+        let normalized_preview = Self::normalize_text(&Self::markdown_to_plain_preview(text));
         self.history_cells.iter().any(|cell| {
             if let Some(existing) = cell
                 .as_any()
                 .downcast_ref::<crate::history_cell::AssistantMarkdownCell>()
             {
-                return Self::normalize_text(existing.markdown()) == normalized;
+                let existing_normalized = Self::normalize_text(existing.markdown());
+                if existing_normalized == normalized {
+                    return true;
+                }
+                let existing_preview = Self::normalize_text(&Self::markdown_to_plain_preview(
+                    existing.markdown(),
+                ));
+                return existing_preview == normalized_preview;
             }
             if let Some(existing) = cell
                 .as_any()
@@ -5188,7 +5196,8 @@ impl ChatWidget<'_> {
             {
                 if existing.state().kind == PlainMessageKind::Assistant {
                     let existing_text = Self::message_lines_to_plain_preview(&existing.state().lines);
-                    return Self::normalize_text(&existing_text) == normalized;
+                    let existing_normalized = Self::normalize_text(&existing_text);
+                    return existing_normalized == normalized || existing_normalized == normalized_preview;
                 }
             }
             false
@@ -13546,6 +13555,9 @@ impl ChatWidget<'_> {
         for line in markdown.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("```") {
                 continue;
             }
             if trimmed.starts_with('#') {
