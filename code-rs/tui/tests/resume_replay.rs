@@ -8,7 +8,9 @@ use code_core::history::{
 };
 use code_core::plan_tool::StepStatus;
 use code_core::protocol::{Event, EventMsg, ReplayHistoryEvent};
-use code_protocol::models::{ContentItem, ResponseItem};
+use code_protocol::models::{
+    ContentItem, FunctionCallOutputBody, FunctionCallOutputPayload, ResponseItem,
+};
 use code_tui::test_helpers::{render_chat_widget_to_vt100, ChatWidgetHarness};
 use serde_json::to_value;
 
@@ -135,6 +137,18 @@ fn final_reasoning_snapshot() -> HistorySnapshot {
     }
 }
 
+fn tool_only_snapshot() -> HistorySnapshot {
+    HistorySnapshot {
+        records: vec![explore_record(1)],
+        next_id: 2,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![OrderKeySnapshot { req: 1, out: 0, seq: 1 }],
+        order_debug: Vec::new(),
+    }
+}
+
 #[test]
 fn replay_history_duplicates_short_assistant_messages() {
     let mut harness = ChatWidgetHarness::new();
@@ -257,5 +271,42 @@ fn replay_history_keeps_spacing_before_final_reasoning() {
     assert!(
         in_between.iter().any(|line| line.trim().is_empty()),
         "expected blank line between exploring and reasoning. screen: {screen}"
+    );
+}
+
+#[test]
+fn replay_history_restores_final_assistant_after_snapshot_tail() {
+    let mut harness = ChatWidgetHarness::new();
+
+    let snapshot_json = to_value(&tool_only_snapshot()).expect("snapshot to json");
+    let items = vec![
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-final-tool".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("## fix/token-percent-remaining".to_string()),
+                success: Some(true),
+            },
+        },
+        message(
+            "assistant",
+            "Removed the local custom override and verified no tracked repo files changed.",
+        ),
+    ];
+
+    harness.handle_event(Event {
+        id: "resume-replay".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items,
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let screen = render_chat_widget_to_vt100(&mut harness, 80, 12);
+
+    assert!(
+        screen.contains("Removed the local custom override"),
+        "screen: {screen}"
     );
 }

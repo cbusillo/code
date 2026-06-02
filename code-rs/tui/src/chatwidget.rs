@@ -5142,6 +5142,59 @@ impl ChatWidget<'_> {
         }
     }
 
+    fn render_replay_assistant_item_if_missing(&mut self, item: ResponseItem) {
+        let ResponseItem::Message { id, role, content, .. } = item else {
+            return;
+        };
+        if role != "assistant" {
+            return;
+        }
+
+        let mut text = String::new();
+        for c in content {
+            match c {
+                ContentItem::OutputText { text: t } | ContentItem::InputText { text: t } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&t);
+                }
+                _ => {}
+            }
+        }
+
+        let text = text.trim();
+        if text.is_empty() || self.history_has_assistant_text(text) {
+            return;
+        }
+
+        let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+        crate::markdown::append_markdown(text, &mut lines, &self.config);
+        self.insert_final_answer_with_id(id, lines, text.to_string());
+    }
+
+    fn history_has_assistant_text(&self, text: &str) -> bool {
+        let normalized = Self::normalize_text(text);
+        self.history_cells.iter().any(|cell| {
+            if let Some(existing) = cell
+                .as_any()
+                .downcast_ref::<crate::history_cell::AssistantMarkdownCell>()
+            {
+                return Self::normalize_text(existing.markdown()) == normalized;
+            }
+            if let Some(existing) = cell
+                .as_any()
+                .downcast_ref::<crate::history_cell::PlainHistoryCell>()
+            {
+                if existing.state().kind == PlainMessageKind::Assistant {
+                    let existing_text = Self::message_lines_to_plain_preview(&existing.state().lines);
+                    return Self::normalize_text(&existing_text) == normalized;
+                }
+            }
+            false
+        })
+    }
+
     fn is_auto_review_cell(item: &dyn HistoryCell) -> bool {
         item.as_any()
             .downcast_ref::<crate::history_cell::PlainHistoryCell>()
@@ -14397,6 +14450,10 @@ impl ChatWidget<'_> {
                     if !items.is_empty() {
                         self.last_seen_request_index =
                             self.last_seen_request_index.max(self.current_request_index);
+                    }
+                } else {
+                    for item in &items {
+                        self.render_replay_assistant_item_if_missing(item.clone());
                     }
                 }
                 if max_req > 0 {
