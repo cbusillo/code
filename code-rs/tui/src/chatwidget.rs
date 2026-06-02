@@ -5,6 +5,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
