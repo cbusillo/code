@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use code_core::history::{
+    AssistantMessageState,
     ExploreEntry, ExploreEntryStatus, ExploreRecord, ExploreSummary, HistoryId, HistoryRecord,
     HistorySnapshot, InlineSpan, OrderKeySnapshot, PlanIcon, PlanProgress, PlanStep, PlanUpdateState,
     ReasoningBlock, ReasoningSection, ReasoningState, TextEmphasis, TextTone,
@@ -13,6 +14,7 @@ use code_protocol::models::{
 };
 use code_tui::test_helpers::{render_chat_widget_to_vt100, ChatWidgetHarness};
 use serde_json::to_value;
+use std::time::SystemTime;
 
 fn assistant_cell_count(screen: &str) -> usize {
     screen
@@ -141,6 +143,27 @@ fn tool_only_snapshot() -> HistorySnapshot {
     HistorySnapshot {
         records: vec![explore_record(1)],
         next_id: 2,
+        exec_call_lookup: Default::default(),
+        tool_call_lookup: Default::default(),
+        stream_lookup: Default::default(),
+        order: vec![OrderKeySnapshot { req: 1, out: 0, seq: 1 }],
+        order_debug: Vec::new(),
+    }
+}
+
+fn assistant_snapshot(id: u64, markdown: &str) -> HistorySnapshot {
+    HistorySnapshot {
+        records: vec![HistoryRecord::AssistantMessage(AssistantMessageState {
+            id: HistoryId(id),
+            stream_id: None,
+            markdown: markdown.to_string(),
+            citations: Vec::new(),
+            metadata: None,
+            token_usage: None,
+            mid_turn: false,
+            created_at: SystemTime::UNIX_EPOCH,
+        })],
+        next_id: id.saturating_add(1),
         exec_call_lookup: Default::default(),
         tool_call_lookup: Default::default(),
         stream_lookup: Default::default(),
@@ -308,5 +331,32 @@ fn replay_history_restores_final_assistant_after_snapshot_tail() {
     assert!(
         screen.contains("Removed the local custom override"),
         "screen: {screen}"
+    );
+}
+
+#[test]
+fn replay_history_deduplicates_snapshot_assistant_with_fenced_replay_markdown() {
+    let mut harness = ChatWidgetHarness::new();
+
+    let answer = "Yes, I'd restart now.\n\nBefore restart/dogfood, the important step is:\n\n```sh\njust local-code-rebuild\n```\n\nThat updates the PATH-resolved code binary.";
+    let snapshot_answer = "Yes, I'd restart now.\n\nBefore restart/dogfood, the important step is:\n\njust local-code-rebuild\n\nThat updates the PATH-resolved code binary.";
+    let snapshot_json = to_value(&assistant_snapshot(1, snapshot_answer)).expect("snapshot to json");
+
+    harness.handle_event(Event {
+        id: "resume-replay".to_string(),
+        event_seq: 0,
+        msg: EventMsg::ReplayHistory(ReplayHistoryEvent {
+            items: vec![message("assistant", answer)],
+            history_snapshot: Some(snapshot_json),
+        }),
+        order: None,
+    });
+
+    let screen = render_chat_widget_to_vt100(&mut harness, 80, 20);
+
+    assert_eq!(
+        1,
+        screen.matches("Yes, I'd restart now.").count(),
+        "expected one restored assistant answer. screen: {screen}"
     );
 }
