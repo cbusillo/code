@@ -1467,6 +1467,7 @@ fn short_auto_review_snapshot(snapshot: Option<&str>) -> Option<String> {
 fn auto_review_running_detail(
     state: Option<&BackgroundReviewState>,
     snapshot: Option<&str>,
+    elapsed_ms: Option<u64>,
 ) -> Option<String> {
     let state = state?;
     if state.agent_id.is_none() || state.snapshot.is_none() {
@@ -1476,10 +1477,24 @@ fn auto_review_running_detail(
     let snapshot = snapshot
         .or(state.snapshot.as_deref())
         .and_then(|snapshot| short_auto_review_snapshot(Some(snapshot)));
-    Some(match snapshot {
-        Some(snapshot) => format!("current snap {snapshot}"),
-        None => "current".to_string(),
-    })
+    let mut parts = Vec::new();
+    if let Some(elapsed_ms) = elapsed_ms {
+        let elapsed_secs = elapsed_ms / 1_000;
+        if elapsed_secs >= 60 {
+            parts.push(format!("{}m", elapsed_secs / 60));
+        } else {
+            parts.push(format!("{}s", elapsed_secs.max(1)));
+        }
+        if elapsed_secs >= AUTO_REVIEW_STALE_SECS {
+            parts.push("stale".to_string());
+        }
+    }
+    if let Some(snapshot) = snapshot {
+        parts.push(format!("snap {snapshot}"));
+    } else {
+        parts.push("current".to_string());
+    }
+    Some(parts.join(", "))
 }
 
 const SKIP_REVIEW_PROGRESS_SENTINEL: &str = "Another review is already running; skipping this /review.";
@@ -34309,7 +34324,7 @@ use code_core::protocol::OrderMeta;
             AutoReviewIndicatorStatus::Running,
             None,
             AutoReviewPhase::Reviewing,
-            auto_review_running_detail(chat.background_review.as_ref(), None),
+            auto_review_running_detail(chat.background_review.as_ref(), None, None),
         );
 
         assert_eq!(
@@ -34332,7 +34347,7 @@ use code_core::protocol::OrderMeta;
             chat.bottom_pane
                 .auto_review_status()
                 .and_then(|status| status.detail),
-            Some("current snap abcdef1".to_string())
+            Some("snap abcdef1".to_string())
         );
     }
 
@@ -34389,7 +34404,41 @@ use code_core::protocol::OrderMeta;
             chat.bottom_pane
                 .auto_review_status()
                 .and_then(|status| status.detail),
-            Some("current snap abcdef1".to_string())
+            Some("snap abcdef1".to_string())
+        );
+    }
+
+    #[test]
+    fn running_auto_review_status_shows_elapsed_and_stale_detail() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("abcdef123456".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+        let mut agent = running_auto_review_agent(
+            "agent-current",
+            "auto-review-branch",
+            Some(session_id),
+            Some("abcdef123456"),
+        );
+        agent.elapsed_ms = Some(25 * 60 * 1_000);
+
+        chat.observe_auto_review_status(&[agent]);
+
+        assert_eq!(
+            chat.bottom_pane
+                .auto_review_status()
+                .and_then(|status| status.detail),
+            Some("25m, stale, snap abcdef1".to_string())
         );
     }
 
@@ -34413,7 +34462,7 @@ use code_core::protocol::OrderMeta;
             AutoReviewIndicatorStatus::Running,
             None,
             AutoReviewPhase::Reviewing,
-            Some("current snap abcdef1".to_string()),
+            Some("snap abcdef1".to_string()),
         );
 
         chat.observe_auto_review_status(&[running_auto_review_agent(
@@ -34427,7 +34476,7 @@ use code_core::protocol::OrderMeta;
             chat.bottom_pane
                 .auto_review_status()
                 .and_then(|status| status.detail),
-            Some("current snap abcdef1".to_string())
+            Some("snap abcdef1".to_string())
         );
     }
 
@@ -40383,7 +40432,7 @@ impl ChatWidget<'_> {
         self.auto_review_status = None;
         self.bottom_pane.set_auto_review_status(None);
         self.auto_review_notice = None;
-        let detail = auto_review_running_detail(self.background_review.as_ref(), None);
+        let detail = auto_review_running_detail(self.background_review.as_ref(), None, None);
         self.set_auto_review_indicator_with_detail(
             AutoReviewIndicatorStatus::Running,
             None,
@@ -40498,6 +40547,7 @@ impl ChatWidget<'_> {
                 let detail = auto_review_running_detail(
                     self.background_review.as_ref(),
                     agent.worktree_base.as_deref(),
+                    agent.elapsed_ms,
                 );
                 self.set_auto_review_indicator_with_detail(
                     AutoReviewIndicatorStatus::Running,
@@ -41564,7 +41614,7 @@ impl ChatWidget<'_> {
             state.owner_session_id = owner_session_id;
             state.last_seen = Instant::now();
         }
-        let detail = auto_review_running_detail(self.background_review.as_ref(), None);
+        let detail = auto_review_running_detail(self.background_review.as_ref(), None, None);
         if let Some(status) = self.auto_review_status.clone() {
             if status.status == AutoReviewIndicatorStatus::Running {
                 self.set_auto_review_indicator_with_detail(

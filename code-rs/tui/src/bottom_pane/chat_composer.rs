@@ -3421,6 +3421,36 @@ mod tests {
     }
 
     #[test]
+    fn auto_review_footer_shows_elapsed_stale_detail() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_tx = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, app_tx, true, false);
+
+        composer.set_auto_review_status(Some(AutoReviewFooterStatus {
+            status: AutoReviewIndicatorStatus::Running,
+            findings: None,
+            phase: AutoReviewPhase::Reviewing,
+            detail: Some("25m, stale, snap abcdef1".to_string()),
+        }));
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+        let mut buf = Buffer::empty(area);
+        composer.render_footer(area, &mut buf);
+
+        let line: String = (0..area.width)
+            .map(|x| buf[(area.x + x, area.y)].symbol().to_string())
+            .collect();
+
+        assert!(line.contains("Auto Review: • Reviewing"), "line: {line}");
+        assert!(line.contains("(25m, stale, snap abcdef1)"), "line: {line}");
+    }
+
+    #[test]
     fn footer_shows_1m_context_suffix_when_extended_context_is_active() {
         let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
         let app_tx = AppEventSender::new(tx);
