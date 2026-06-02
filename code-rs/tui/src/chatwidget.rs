@@ -202,6 +202,7 @@ use code_core::protocol::TokenUsage;
 use code_core::protocol::TurnDiffEvent;
 use code_core::protocol::ViewImageToolCallEvent;
 use code_core::review_store::{
+    AutoReviewDuplicateDisposition,
     AutoReviewFreshness,
     AutoReviewRun,
     AutoReviewRunSource,
@@ -1650,6 +1651,127 @@ fn format_background_review_scope_from_paths(snapshot_id: &str, paths: &[String]
     }
 
     Some(scope.trim_end().to_string())
+}
+
+#[derive(Clone, Debug)]
+struct AutoReviewScopeMetadata {
+    scope_note: Option<String>,
+    diff_excerpt: Option<String>,
+    diff_fingerprint: Option<String>,
+    changed_path_count: usize,
+    listed_paths: Vec<PathBuf>,
+    omitted_path_count: usize,
+}
+
+impl AutoReviewScopeMetadata {
+    fn empty() -> Self {
+        Self {
+            scope_note: None,
+            diff_excerpt: None,
+            diff_fingerprint: None,
+            changed_path_count: 0,
+            listed_paths: Vec::new(),
+            omitted_path_count: 0,
+        }
+    }
+}
+
+fn auto_review_diff_fingerprint(parent_id: Option<&str>, paths: &[String], diff_text: &str) -> Option<String> {
+    let normalized_diff = diff_text.trim();
+    if normalized_diff.is_empty() {
+        return None;
+    }
+
+    let mut normalized_paths = paths
+        .iter()
+        .map(|path| path.trim().trim_start_matches("./"))
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    normalized_paths.sort_unstable();
+    normalized_paths.dedup();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"auto-review-diff-v2\0");
+    hasher.update(parent_id.unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    for path in normalized_paths {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(normalized_diff.as_bytes());
+    let digest = hasher.finalize();
+    Some(format!("diff:{digest:x}"))
+}
+
+fn auto_review_listed_paths(paths: &[String]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut listed = Vec::new();
+    for raw_path in paths {
+        let normalized = raw_path.trim().trim_start_matches("./");
+        if normalized.is_empty() || !seen.insert(normalized.to_string()) {
+            continue;
+        }
+        if should_include_auto_review_scope_path(normalized) {
+            listed.push(PathBuf::from(normalized));
+        }
+    }
+    listed
+}
+
+fn persist_auto_review_scope_metadata(
+    cwd: &Path,
+    run_id: Uuid,
+    metadata: &AutoReviewScopeMetadata,
+) -> std::io::Result<()> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    if let Some(run) = store.get_mut(run_id) {
+        run.diff_fingerprint = metadata.diff_fingerprint.clone();
+        run.changed_path_count = metadata.changed_path_count;
+        run.listed_paths = metadata.listed_paths.clone();
+        run.omitted_path_count = metadata.omitted_path_count;
+        run.mark_activity(now);
+    }
+    store.save()
+}
+
+fn find_duplicate_auto_review_run(
+    cwd: &Path,
+    diff_fingerprint: &str,
+    current_run_id: Uuid,
+) -> Option<code_core::review_store::AutoReviewDuplicateMatch> {
+    let store = AutoReviewRunStore::open_existing(cwd).ok().flatten()?;
+    store.find_duplicate_by_fingerprint_excluding(diff_fingerprint, Some(current_run_id))
+}
+
+fn mark_auto_review_run_skipped_duplicate(
+    cwd: &Path,
+    run_id: Uuid,
+    duplicate_run_id: Uuid,
+    diff_fingerprint: Option<&str>,
+) -> std::io::Result<()> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    if let Some(run) = store.get_mut(run_id) {
+        if let Some(diff_fingerprint) = diff_fingerprint {
+            run.diff_fingerprint = Some(diff_fingerprint.to_string());
+        }
+        run.freshness = AutoReviewFreshness::Superseded;
+        run.superseded_by = Some(duplicate_run_id);
+        run.cancel_reason = Some("duplicate_auto_review_scope".to_string());
+        run.mark_status(AutoReviewRunStatus::Skipped, now);
+    }
+    store.save()
+}
+
+fn supersede_clean_duplicate_auto_reviews(
+    cwd: &Path,
+    diff_fingerprint: &str,
+    superseded_by: Uuid,
+) -> std::io::Result<usize> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    store.mark_superseded_by_fingerprint(diff_fingerprint, superseded_by, now)
 }
 
 fn build_background_review_prompt(
@@ -31778,11 +31900,13 @@ async fn run_background_review(
                         .map_err(|err| format!("failed to collect review scope paths: {err}"))?
                 };
                 if !name_only_output.status.success() {
-                    return Ok::<(Option<String>, Option<String>), String>((None, None));
+                    return Ok::<AutoReviewScopeMetadata, String>(AutoReviewScopeMetadata::empty());
                 }
                 let stdout = String::from_utf8_lossy(&name_only_output.stdout);
                 let paths = stdout.lines().map(str::to_string).collect::<Vec<_>>();
                 let scope_note = format_background_review_scope_from_paths(&snapshot_id, &paths);
+                let listed_paths = auto_review_listed_paths(&paths);
+                let omitted_path_count = paths.len().saturating_sub(listed_paths.len());
 
                 if paths.len() > AUTO_REVIEW_MAX_CHANGED_PATHS {
                     return Err(format!(
@@ -31806,7 +31930,14 @@ async fn run_background_review(
                         .map_err(|err| format!("failed to collect review diff excerpt: {err}"))?
                 };
                 if !diff_output.status.success() {
-                    return Ok((scope_note, None));
+                    return Ok(AutoReviewScopeMetadata {
+                        scope_note,
+                        diff_excerpt: None,
+                        diff_fingerprint: None,
+                        changed_path_count: paths.len(),
+                        listed_paths,
+                        omitted_path_count,
+                    });
                 }
 
                 let diff_text = String::from_utf8_lossy(&diff_output.stdout);
@@ -31826,11 +31957,93 @@ async fn run_background_review(
                         AUTO_REVIEW_DIFF_EXCERPT_CHARS,
                     ))
                 };
-                Ok((scope_note, diff_excerpt))
+                Ok(AutoReviewScopeMetadata {
+                    scope_note,
+                    diff_excerpt,
+                    diff_fingerprint: auto_review_diff_fingerprint(
+                        (!parent_id.is_empty()).then_some(parent_id.as_str()),
+                        &paths,
+                        &diff_text,
+                    ),
+                    changed_path_count: paths.len(),
+                    listed_paths,
+                    omitted_path_count,
+                })
             }
         })
         .await
         .map_err(|e| format!("failed to spawn review scope task: {e}"))??;
+
+        if let Err(err) = persist_auto_review_scope_metadata(&config.cwd, run_id, &review_scope) {
+            tracing::warn!(?err, run_id = %run_id, "failed to persist auto-review scope metadata");
+        }
+
+        if let Some(diff_fingerprint) = review_scope.diff_fingerprint.as_deref()
+            && let Some(duplicate) = find_duplicate_auto_review_run(&config.cwd, diff_fingerprint, run_id)
+        {
+            if let Err(err) = mark_auto_review_run_skipped_duplicate(
+                &config.cwd,
+                run_id,
+                duplicate.run_id,
+                Some(diff_fingerprint),
+            ) {
+                tracing::warn!(?err, run_id = %run_id, "failed to mark duplicate auto-review run skipped");
+            }
+
+            match duplicate.disposition {
+                AutoReviewDuplicateDisposition::Adopt => {
+                    app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
+                        run_id,
+                        worktree_path: duplicate.worktree_path.unwrap_or_default(),
+                        branch: duplicate.branch.unwrap_or_default(),
+                        has_findings: false,
+                        findings: 0,
+                        summary: Some("Auto review skipped: equivalent review is already running.".to_string()),
+                        error: None,
+                        agent_id: None,
+                        snapshot: None,
+                        owner_session_id: Some(owner_session_id),
+                    });
+                    return Ok::<(PathBuf, String, String, String), String>((
+                        PathBuf::new(),
+                        String::new(),
+                        String::new(),
+                        snapshot_id,
+                    ));
+                }
+                AutoReviewDuplicateDisposition::ReuseTerminal => {
+                    app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
+                        run_id,
+                        worktree_path: duplicate.worktree_path.unwrap_or_default(),
+                        branch: duplicate.branch.unwrap_or_default(),
+                        has_findings: duplicate.finding_count > 0,
+                        findings: duplicate.finding_count,
+                        summary: duplicate.summary_digest.or_else(|| {
+                            Some("Auto review skipped: equivalent review already completed.".to_string())
+                        }),
+                        error: None,
+                        agent_id: duplicate.agent_id,
+                        snapshot: duplicate.snapshot_commit,
+                        owner_session_id: Some(owner_session_id),
+                    });
+                    return Ok::<(PathBuf, String, String, String), String>((
+                        PathBuf::new(),
+                        String::new(),
+                        String::new(),
+                        snapshot_id,
+                    ));
+                }
+                AutoReviewDuplicateDisposition::SupersedeTerminal => {
+                    if let Err(err) = supersede_clean_duplicate_auto_reviews(
+                        &config.cwd,
+                        diff_fingerprint,
+                        run_id,
+                    ) {
+                        tracing::warn!(?err, run_id = %run_id, "failed to supersede clean duplicate auto-review runs");
+                    }
+                }
+            }
+        }
 
         // Attempt to hold the shared review lock; if busy or a previous review
         // with findings is still surfaced, fall back to a per-request
@@ -31896,8 +32109,8 @@ async fn run_background_review(
         // Use the /review entrypoint so upstream wiring (model defaults, review formatting) stays intact.
         let review_prompt = build_background_review_prompt(
             &snapshot_id,
-            review_scope.0.as_deref(),
-            review_scope.1.as_deref(),
+            review_scope.scope_note.as_deref(),
+            review_scope.diff_excerpt.as_deref(),
             turn_context.as_deref(),
             prompt_token_budget,
         );
@@ -32752,6 +32965,42 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn auto_review_diff_fingerprint_is_stable_for_equivalent_paths() {
+        let first = auto_review_diff_fingerprint(
+            Some("base"),
+            &["src/lib.rs".to_string(), "./src/main.rs".to_string()],
+            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+        )
+        .expect("fingerprint");
+        let second = auto_review_diff_fingerprint(
+            Some("base"),
+            &["src/main.rs".to_string(), "src/lib.rs".to_string()],
+            "\n diff --git a/src/lib.rs b/src/lib.rs\n+line\n\n",
+        )
+        .expect("fingerprint");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn auto_review_diff_fingerprint_changes_with_base() {
+        let first = auto_review_diff_fingerprint(
+            Some("base-a"),
+            &["src/lib.rs".to_string()],
+            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+        )
+        .expect("fingerprint");
+        let second = auto_review_diff_fingerprint(
+            Some("base-b"),
+            &["src/lib.rs".to_string()],
+            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+        )
+        .expect("fingerprint");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn background_review_prompt_prefers_diff_excerpt_over_commit_scope() {
         let prompt = build_background_review_prompt(
             "abc123",
@@ -33578,6 +33827,47 @@ use code_core::protocol::OrderMeta;
         assert!(
             !developer_seen,
             "auto review should rely on the Auto Review notice instead of a [developer] history message"
+        );
+    }
+
+    #[test]
+    fn duplicate_skipped_background_review_does_not_mark_snapshot_reviewed() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let session_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: Some(GhostCommit::new("base-before-review".to_string(), None)),
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished_for_run(
+            run_id,
+            PathBuf::new(),
+            String::new(),
+            false,
+            0,
+            Some("Auto review skipped: equivalent review is already running.".to_string()),
+            None,
+            None,
+            None,
+            Some(session_id),
+        );
+
+        assert!(chat.background_review.is_none());
+        assert!(chat.auto_review_reviewed_marker.is_none());
+        assert_eq!(
+            chat.pending_auto_review_range
+                .as_ref()
+                .map(|pending| pending.base.id()),
+            Some("base-before-review")
         );
     }
 
@@ -41173,7 +41463,11 @@ impl ChatWidget<'_> {
                 .summary
                 .map(|summary| Self::summarize_plain_review_text(summary, 240));
             run.freshness = AutoReviewFreshness::Current;
-            if let Some(error) = completion.error {
+            if run.status == AutoReviewRunStatus::Skipped
+                && run.cancel_reason.as_deref() == Some("duplicate_auto_review_scope")
+            {
+                run.mark_status(AutoReviewRunStatus::Skipped, now);
+            } else if let Some(error) = completion.error {
                 let classification = Self::classify_auto_review_error(error);
                 run.error_class = Some(classification.failure_class.to_string());
                 run.error_summary = Some(Self::summarize_auto_review_error(error));
