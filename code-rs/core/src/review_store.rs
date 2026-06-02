@@ -270,7 +270,8 @@ impl AutoReviewRunStore {
         self.save()
     }
 
-    pub fn save(&self) -> io::Result<()> {
+    pub fn save(&mut self) -> io::Result<()> {
+        self.merge_latest_from_disk()?;
         write_runs_file(&self.runs_path, self.runs.values())
     }
 
@@ -279,9 +280,25 @@ impl AutoReviewRunStore {
     }
 
     fn compact_in_place(&mut self, max_runs: usize) -> io::Result<()> {
+        self.merge_latest_from_disk()?;
         let keep = most_recent_run_ids(self.runs.values(), max_runs);
         self.runs.retain(|run_id, _| keep.contains(run_id));
-        self.save()
+        write_runs_file(&self.runs_path, self.runs.values())
+    }
+
+    fn merge_latest_from_disk(&mut self) -> io::Result<()> {
+        let latest = read_runs_file(&self.runs_path)?;
+        for (run_id, run) in latest {
+            self.runs
+                .entry(run_id)
+                .and_modify(|existing| {
+                    if run_is_newer(&run, existing) {
+                        *existing = run.clone();
+                    }
+                })
+                .or_insert(run);
+        }
+        Ok(())
     }
 
     pub fn reconcile_orphaned_in_flight<I>(&mut self, live_agent_ids: I, now: u64) -> io::Result<usize>
@@ -298,17 +315,16 @@ impl AutoReviewRunStore {
             if !run.status.is_in_flight() {
                 continue;
             }
-            let Some(agent_id) = run.agent_id.as_deref() else {
-                continue;
-            };
-            if live_agent_ids.contains(agent_id) {
+            if run
+                .agent_id
+                .as_deref()
+                .is_some_and(|agent_id| live_agent_ids.contains(agent_id))
+            {
                 continue;
             }
-            run.status = AutoReviewRunStatus::Lost;
+            run.mark_status(AutoReviewRunStatus::Lost, now);
             run.freshness = AutoReviewFreshness::Lost;
             run.cancel_reason = Some("agent_missing_after_restart".to_string());
-            run.updated_at = now;
-            run.completed_at = Some(now);
             changed = changed.saturating_add(1);
         }
         if changed > 0 {
@@ -318,15 +334,23 @@ impl AutoReviewRunStore {
     }
 
     pub fn write_output(&mut self, run_id: Uuid, output: &ReviewOutputEvent) -> io::Result<PathBuf> {
+        if !self.runs.contains_key(&run_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("auto review run {run_id} is not recorded"),
+            ));
+        }
         let output_path = self.output_path_for(run_id);
         write_json_file(&output_path, output)?;
-        if let Some(run) = self.runs.get_mut(&run_id) {
-            run.output_path = Some(output_path.clone());
-            run.finding_count = output.findings.len();
-            run.finding_digests = finding_digests(output);
-            run.summary_digest = summarize(&output.overall_explanation, 240);
-            self.save()?;
-        }
+        let run = self
+            .runs
+            .get_mut(&run_id)
+            .expect("run existence checked before sidecar write");
+        run.output_path = Some(output_path.clone());
+        run.finding_count = output.findings.len();
+        run.finding_digests = finding_digests(output);
+        run.summary_digest = summarize(&output.overall_explanation, 240);
+        self.save()?;
         Ok(output_path)
     }
 
@@ -392,6 +416,15 @@ where
     temp.persist(path)
         .map_err(|err| io::Error::new(err.error.kind(), err.error))?;
     Ok(())
+}
+
+fn run_is_newer(candidate: &AutoReviewRun, existing: &AutoReviewRun) -> bool {
+    candidate
+        .updated_at
+        .cmp(&existing.updated_at)
+        .then_with(|| candidate.created_at.cmp(&existing.created_at))
+        .then_with(|| candidate.run_id.cmp(&existing.run_id))
+        .is_gt()
 }
 
 fn most_recent_run_ids<'a, I>(runs: I, max_runs: usize) -> std::collections::BTreeSet<Uuid>
@@ -523,6 +556,43 @@ mod tests {
 
     #[test]
     #[serial]
+    fn run_store_rejects_output_for_unknown_run() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let err = store
+            .write_output(Uuid::new_v4(), &review_output())
+            .expect_err("unknown run should error");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    #[serial]
+    fn run_store_merges_latest_disk_state_before_save() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let mut first = AutoReviewRunStore::open(repo.path()).unwrap();
+        let mut second = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        first
+            .upsert(AutoReviewRun::new(first_id, AutoReviewRunSource::Tui, 1))
+            .unwrap();
+        second
+            .upsert(AutoReviewRun::new(second_id, AutoReviewRunSource::Exec, 2))
+            .unwrap();
+
+        let loaded = AutoReviewRunStore::open(repo.path()).unwrap();
+        assert!(loaded.get(first_id).is_some());
+        assert!(loaded.get(second_id).is_some());
+    }
+
+    #[test]
+    #[serial]
     fn run_store_reconciles_orphaned_in_flight_agents() {
         let code_home = TempDir::new().unwrap();
         let repo = TempDir::new().unwrap();
@@ -547,10 +617,15 @@ mod tests {
         terminal.mark_status(AutoReviewRunStatus::Completed, 6);
         store.upsert(terminal).unwrap();
 
+        let agentless_id = Uuid::new_v4();
+        let mut agentless = AutoReviewRun::new(agentless_id, AutoReviewRunSource::Tui, 7);
+        agentless.mark_status(AutoReviewRunStatus::Snapshotting, 8);
+        store.upsert(agentless).unwrap();
+
         let changed = store
             .reconcile_orphaned_in_flight(["agent-live"], 20)
             .unwrap();
-        assert_eq!(changed, 1);
+        assert_eq!(changed, 2);
         assert_eq!(
             store.get(live_id).expect("live run").status,
             AutoReviewRunStatus::Reviewing
@@ -563,6 +638,10 @@ mod tests {
         assert_eq!(
             store.get(terminal_id).expect("terminal run").status,
             AutoReviewRunStatus::Completed
+        );
+        assert_eq!(
+            store.get(agentless_id).expect("agentless run").status,
+            AutoReviewRunStatus::Lost
         );
     }
 
