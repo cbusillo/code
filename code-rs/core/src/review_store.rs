@@ -62,6 +62,13 @@ impl AutoReviewRunStatus {
     pub fn is_in_flight(self) -> bool {
         !self.is_terminal()
     }
+
+    pub fn is_adoptable_duplicate(self) -> bool {
+        matches!(
+            self,
+            AutoReviewRunStatus::Reviewing | AutoReviewRunStatus::Resolving
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,7 +521,7 @@ impl AutoReviewRunStore {
 }
 
 fn duplicate_priority(run: &AutoReviewRun) -> u8 {
-    if run.status.is_in_flight() {
+    if run.status.is_adoptable_duplicate() {
         return 4;
     }
     if run.finding_count > 0 || !run.finding_digests.is_empty() {
@@ -527,7 +534,7 @@ fn duplicate_priority(run: &AutoReviewRun) -> u8 {
 }
 
 fn duplicate_disposition(run: &AutoReviewRun) -> AutoReviewDuplicateDisposition {
-    if run.status.is_in_flight() {
+    if run.status.is_adoptable_duplicate() {
         AutoReviewDuplicateDisposition::Adopt
     } else if run.status == AutoReviewRunStatus::Completed {
         AutoReviewDuplicateDisposition::ReuseTerminal
@@ -1000,6 +1007,29 @@ mod tests {
         assert_eq!(duplicate.run_id, live_id);
         assert_eq!(duplicate.disposition, AutoReviewDuplicateDisposition::Adopt);
         assert_eq!(duplicate.agent_id.as_deref(), Some("agent-live"));
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_does_not_adopt_pending_fingerprint_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let pending_id = Uuid::new_v4();
+        let mut pending = AutoReviewRun::new(pending_id, AutoReviewRunSource::Tui, 1);
+        pending.diff_fingerprint = Some("diff:abc".to_string());
+        store.upsert(pending).unwrap();
+
+        let duplicate = store
+            .find_duplicate_by_fingerprint("diff:abc")
+            .expect("duplicate");
+        assert_eq!(duplicate.run_id, pending_id);
+        assert_eq!(
+            duplicate.disposition,
+            AutoReviewDuplicateDisposition::SupersedeTerminal
+        );
     }
 
     #[test]

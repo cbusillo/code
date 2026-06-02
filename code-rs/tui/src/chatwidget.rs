@@ -5,7 +5,6 @@ use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -32002,7 +32001,7 @@ async fn run_background_review(
                         summary: Some("Auto review skipped: equivalent review is already running.".to_string()),
                         error: None,
                         agent_id: None,
-                        snapshot: Some(snapshot_id.clone()),
+                        snapshot: None,
                         owner_session_id: Some(owner_session_id),
                     });
                     return Ok::<(PathBuf, String, String, String), String>((
@@ -33828,6 +33827,47 @@ use code_core::protocol::OrderMeta;
         assert!(
             !developer_seen,
             "auto review should rely on the Auto Review notice instead of a [developer] history message"
+        );
+    }
+
+    #[test]
+    fn duplicate_skipped_background_review_does_not_mark_snapshot_reviewed() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let session_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: Some(GhostCommit::new("base-before-review".to_string(), None)),
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished_for_run(
+            run_id,
+            PathBuf::new(),
+            String::new(),
+            false,
+            0,
+            Some("Auto review skipped: equivalent review is already running.".to_string()),
+            None,
+            None,
+            None,
+            Some(session_id),
+        );
+
+        assert!(chat.background_review.is_none());
+        assert!(chat.auto_review_reviewed_marker.is_none());
+        assert_eq!(
+            chat.pending_auto_review_range
+                .as_ref()
+                .map(|pending| pending.base.id()),
+            Some("base-before-review")
         );
     }
 
