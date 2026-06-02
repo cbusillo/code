@@ -746,6 +746,20 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
     if let Some(agent_id) = run.agent_id.as_deref().and_then(short_agent_id) {
         line.push_str(&format!(" agent={agent_id}"));
     }
+    if let Some(model) = run.model.as_deref() {
+        line.push_str(" model=");
+        line.push_str(&single_line(model, 40));
+    }
+    if let Some(reasoning_effort) = run.reasoning_effort.as_deref() {
+        line.push_str(" reasoning=");
+        line.push_str(&single_line(reasoning_effort, 24));
+    }
+    if let Some(prompt_token_estimate) = run.prompt_token_estimate {
+        line.push_str(&format!(" prompt_estimate={}t", prompt_token_estimate));
+    }
+    if let Some(token_count) = run.token_count {
+        line.push_str(&format!(" tokens={}t", token_count));
+    }
     if run.finding_count > 0 {
         line.push_str(&format!(" findings={}", run.finding_count));
     }
@@ -1219,6 +1233,10 @@ mod tests {
         run.agent_id = Some("agent-1234567890".to_string());
         run.branch = Some("auto-review".to_string());
         run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.model = Some("gpt-5.4-mini".to_string());
+        run.reasoning_effort = Some("medium".to_string());
+        run.prompt_token_estimate = Some(42_000);
+        run.token_count = Some(84_000);
         run.freshness = AutoReviewFreshness::Current;
         run.mark_activity(120);
         run.mark_status(AutoReviewRunStatus::Reviewing, 130);
@@ -1231,6 +1249,10 @@ mod tests {
         assert!(ledger.contains("status=Reviewing"));
         assert!(ledger.contains("last_activity=40s"));
         assert!(ledger.contains("snapshot=abcdef123456"));
+        assert!(ledger.contains("model=gpt-5.4-mini"));
+        assert!(ledger.contains("reasoning=medium"));
+        assert!(ledger.contains("prompt_estimate=42000t"));
+        assert!(ledger.contains("tokens=84000t"));
     }
 
     #[test]
