@@ -42,6 +42,10 @@ fn scoped_dir(scope: Option<&Path>) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn scoped_review_state_dir(scope: &Path) -> std::io::Result<PathBuf> {
+    scoped_dir(Some(scope))
+}
+
 fn epoch_path(scope: Option<&Path>) -> std::io::Result<PathBuf> {
     let mut dir = scoped_dir(scope)?;
     dir.push(EPOCH_FILENAME);
