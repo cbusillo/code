@@ -38,6 +38,7 @@ pub mod acp;
 pub mod custom_prompts;
 pub mod debug_logger;
 pub mod review_coord;
+pub mod review_store;
 mod environment_context;
 mod reasoning;
 pub mod retention;

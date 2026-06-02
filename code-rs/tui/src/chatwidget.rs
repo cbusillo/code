@@ -201,6 +201,14 @@ use code_core::protocol::TaskCompleteEvent;
 use code_core::protocol::TokenUsage;
 use code_core::protocol::TurnDiffEvent;
 use code_core::protocol::ViewImageToolCallEvent;
+use code_core::review_store::{
+    AutoReviewDuplicateDisposition,
+    AutoReviewFreshness,
+    AutoReviewRun,
+    AutoReviewRunSource,
+    AutoReviewRunStatus,
+    AutoReviewRunStore,
+};
 use code_core::review_coord::{bump_snapshot_epoch_for, try_acquire_lock, ReviewGuard};
 use code_core::ConversationManager;
 use code_core::codex::compact::COMPACTION_CHECKPOINT_MESSAGE;
@@ -1421,6 +1429,20 @@ impl BackgroundReviewState {
     }
 }
 
+struct AutoReviewStoreCompletion<'a> {
+    run_id: Uuid,
+    branch: &'a str,
+    worktree_path: &'a std::path::Path,
+    has_findings: bool,
+    findings: usize,
+    summary: Option<&'a str>,
+    error: Option<&'a str>,
+    agent_id: Option<&'a str>,
+    snapshot: Option<&'a str>,
+    owner_session_id: Option<Uuid>,
+    output: Option<&'a ReviewOutputEvent>,
+}
+
 #[derive(Clone, Debug)]
 struct PendingAutoReviewRange {
     base: GhostCommit,
@@ -1495,6 +1517,13 @@ fn auto_review_running_detail(
         parts.push("current".to_string());
     }
     Some(parts.join(", "))
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 const SKIP_REVIEW_PROGRESS_SENTINEL: &str = "Another review is already running; skipping this /review.";
@@ -1622,6 +1651,127 @@ fn format_background_review_scope_from_paths(snapshot_id: &str, paths: &[String]
     }
 
     Some(scope.trim_end().to_string())
+}
+
+#[derive(Clone, Debug)]
+struct AutoReviewScopeMetadata {
+    scope_note: Option<String>,
+    diff_excerpt: Option<String>,
+    diff_fingerprint: Option<String>,
+    changed_path_count: usize,
+    listed_paths: Vec<PathBuf>,
+    omitted_path_count: usize,
+}
+
+impl AutoReviewScopeMetadata {
+    fn empty() -> Self {
+        Self {
+            scope_note: None,
+            diff_excerpt: None,
+            diff_fingerprint: None,
+            changed_path_count: 0,
+            listed_paths: Vec::new(),
+            omitted_path_count: 0,
+        }
+    }
+}
+
+fn auto_review_diff_fingerprint(parent_id: Option<&str>, paths: &[String], diff_text: &str) -> Option<String> {
+    let normalized_diff = diff_text.trim();
+    if normalized_diff.is_empty() {
+        return None;
+    }
+
+    let mut normalized_paths = paths
+        .iter()
+        .map(|path| path.trim().trim_start_matches("./"))
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    normalized_paths.sort_unstable();
+    normalized_paths.dedup();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"auto-review-diff-v2\0");
+    hasher.update(parent_id.unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    for path in normalized_paths {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(normalized_diff.as_bytes());
+    let digest = hasher.finalize();
+    Some(format!("diff:{digest:x}"))
+}
+
+fn auto_review_listed_paths(paths: &[String]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut listed = Vec::new();
+    for raw_path in paths {
+        let normalized = raw_path.trim().trim_start_matches("./");
+        if normalized.is_empty() || !seen.insert(normalized.to_string()) {
+            continue;
+        }
+        if should_include_auto_review_scope_path(normalized) {
+            listed.push(PathBuf::from(normalized));
+        }
+    }
+    listed
+}
+
+fn persist_auto_review_scope_metadata(
+    cwd: &Path,
+    run_id: Uuid,
+    metadata: &AutoReviewScopeMetadata,
+) -> std::io::Result<()> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    if let Some(run) = store.get_mut(run_id) {
+        run.diff_fingerprint = metadata.diff_fingerprint.clone();
+        run.changed_path_count = metadata.changed_path_count;
+        run.listed_paths = metadata.listed_paths.clone();
+        run.omitted_path_count = metadata.omitted_path_count;
+        run.mark_activity(now);
+    }
+    store.save()
+}
+
+fn find_duplicate_auto_review_run(
+    cwd: &Path,
+    diff_fingerprint: &str,
+    current_run_id: Uuid,
+) -> Option<code_core::review_store::AutoReviewDuplicateMatch> {
+    let store = AutoReviewRunStore::open_existing(cwd).ok().flatten()?;
+    store.find_duplicate_by_fingerprint_excluding(diff_fingerprint, Some(current_run_id))
+}
+
+fn mark_auto_review_run_skipped_duplicate(
+    cwd: &Path,
+    run_id: Uuid,
+    duplicate_run_id: Uuid,
+    diff_fingerprint: Option<&str>,
+) -> std::io::Result<()> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    if let Some(run) = store.get_mut(run_id) {
+        if let Some(diff_fingerprint) = diff_fingerprint {
+            run.diff_fingerprint = Some(diff_fingerprint.to_string());
+        }
+        run.freshness = AutoReviewFreshness::Superseded;
+        run.superseded_by = Some(duplicate_run_id);
+        run.cancel_reason = Some("duplicate_auto_review_scope".to_string());
+        run.mark_status(AutoReviewRunStatus::Skipped, now);
+    }
+    store.save()
+}
+
+fn supersede_clean_duplicate_auto_reviews(
+    cwd: &Path,
+    diff_fingerprint: &str,
+    superseded_by: Uuid,
+) -> std::io::Result<usize> {
+    let now = unix_now_secs();
+    let mut store = AutoReviewRunStore::open(cwd)?;
+    store.mark_superseded_by_fingerprint(diff_fingerprint, superseded_by, now)
 }
 
 fn build_background_review_prompt(
@@ -3115,7 +3265,7 @@ struct AgentInfo {
     last_progress: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentStatus {
     Pending,
     Running,
@@ -7485,6 +7635,7 @@ impl ChatWidget<'_> {
             resume_placeholder_visible: false,
             resume_picker_loading: false,
         };
+        new_widget.reconcile_auto_review_store_after_restart();
         new_widget.load_auto_review_baseline_marker();
         new_widget.spawn_conversation_runtime(config.clone(), auth_manager.clone(), code_op_rx);
         if let Ok(Some(active_id)) = auth_accounts::get_active_account_id(&config.code_home) {
@@ -17286,6 +17437,7 @@ impl ChatWidget<'_> {
             ContextSourceKind::ExplicitSkill => "explicit skill",
             ContextSourceKind::EnvironmentContext => "environment",
             ContextSourceKind::BrowserStatus => "browser status",
+            ContextSourceKind::AutoReviewLedger => "auto review ledger",
             ContextSourceKind::StatusItem => "status item",
             ContextSourceKind::ConversationHistory => "history",
             ContextSourceKind::PendingInput => "pending input",
@@ -31748,11 +31900,13 @@ async fn run_background_review(
                         .map_err(|err| format!("failed to collect review scope paths: {err}"))?
                 };
                 if !name_only_output.status.success() {
-                    return Ok::<(Option<String>, Option<String>), String>((None, None));
+                    return Ok::<AutoReviewScopeMetadata, String>(AutoReviewScopeMetadata::empty());
                 }
                 let stdout = String::from_utf8_lossy(&name_only_output.stdout);
                 let paths = stdout.lines().map(str::to_string).collect::<Vec<_>>();
                 let scope_note = format_background_review_scope_from_paths(&snapshot_id, &paths);
+                let listed_paths = auto_review_listed_paths(&paths);
+                let omitted_path_count = paths.len().saturating_sub(listed_paths.len());
 
                 if paths.len() > AUTO_REVIEW_MAX_CHANGED_PATHS {
                     return Err(format!(
@@ -31776,7 +31930,14 @@ async fn run_background_review(
                         .map_err(|err| format!("failed to collect review diff excerpt: {err}"))?
                 };
                 if !diff_output.status.success() {
-                    return Ok((scope_note, None));
+                    return Ok(AutoReviewScopeMetadata {
+                        scope_note,
+                        diff_excerpt: None,
+                        diff_fingerprint: None,
+                        changed_path_count: paths.len(),
+                        listed_paths,
+                        omitted_path_count,
+                    });
                 }
 
                 let diff_text = String::from_utf8_lossy(&diff_output.stdout);
@@ -31796,11 +31957,93 @@ async fn run_background_review(
                         AUTO_REVIEW_DIFF_EXCERPT_CHARS,
                     ))
                 };
-                Ok((scope_note, diff_excerpt))
+                Ok(AutoReviewScopeMetadata {
+                    scope_note,
+                    diff_excerpt,
+                    diff_fingerprint: auto_review_diff_fingerprint(
+                        (!parent_id.is_empty()).then_some(parent_id.as_str()),
+                        &paths,
+                        &diff_text,
+                    ),
+                    changed_path_count: paths.len(),
+                    listed_paths,
+                    omitted_path_count,
+                })
             }
         })
         .await
         .map_err(|e| format!("failed to spawn review scope task: {e}"))??;
+
+        if let Err(err) = persist_auto_review_scope_metadata(&config.cwd, run_id, &review_scope) {
+            tracing::warn!(?err, run_id = %run_id, "failed to persist auto-review scope metadata");
+        }
+
+        if let Some(diff_fingerprint) = review_scope.diff_fingerprint.as_deref()
+            && let Some(duplicate) = find_duplicate_auto_review_run(&config.cwd, diff_fingerprint, run_id)
+        {
+            if let Err(err) = mark_auto_review_run_skipped_duplicate(
+                &config.cwd,
+                run_id,
+                duplicate.run_id,
+                Some(diff_fingerprint),
+            ) {
+                tracing::warn!(?err, run_id = %run_id, "failed to mark duplicate auto-review run skipped");
+            }
+
+            match duplicate.disposition {
+                AutoReviewDuplicateDisposition::Adopt => {
+                    app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
+                        run_id,
+                        worktree_path: duplicate.worktree_path.unwrap_or_default(),
+                        branch: duplicate.branch.unwrap_or_default(),
+                        has_findings: false,
+                        findings: 0,
+                        summary: Some("Auto review skipped: equivalent review is already running.".to_string()),
+                        error: None,
+                        agent_id: None,
+                        snapshot: None,
+                        owner_session_id: Some(owner_session_id),
+                    });
+                    return Ok::<(PathBuf, String, String, String), String>((
+                        PathBuf::new(),
+                        String::new(),
+                        String::new(),
+                        snapshot_id,
+                    ));
+                }
+                AutoReviewDuplicateDisposition::ReuseTerminal => {
+                    app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
+                        run_id,
+                        worktree_path: duplicate.worktree_path.unwrap_or_default(),
+                        branch: duplicate.branch.unwrap_or_default(),
+                        has_findings: duplicate.finding_count > 0,
+                        findings: duplicate.finding_count,
+                        summary: duplicate.summary_digest.or_else(|| {
+                            Some("Auto review skipped: equivalent review already completed.".to_string())
+                        }),
+                        error: None,
+                        agent_id: duplicate.agent_id,
+                        snapshot: duplicate.snapshot_commit,
+                        owner_session_id: Some(owner_session_id),
+                    });
+                    return Ok::<(PathBuf, String, String, String), String>((
+                        PathBuf::new(),
+                        String::new(),
+                        String::new(),
+                        snapshot_id,
+                    ));
+                }
+                AutoReviewDuplicateDisposition::SupersedeTerminal => {
+                    if let Err(err) = supersede_clean_duplicate_auto_reviews(
+                        &config.cwd,
+                        diff_fingerprint,
+                        run_id,
+                    ) {
+                        tracing::warn!(?err, run_id = %run_id, "failed to supersede clean duplicate auto-review runs");
+                    }
+                }
+            }
+        }
 
         // Attempt to hold the shared review lock; if busy or a previous review
         // with findings is still surfaced, fall back to a per-request
@@ -31866,8 +32109,8 @@ async fn run_background_review(
         // Use the /review entrypoint so upstream wiring (model defaults, review formatting) stays intact.
         let review_prompt = build_background_review_prompt(
             &snapshot_id,
-            review_scope.0.as_deref(),
-            review_scope.1.as_deref(),
+            review_scope.scope_note.as_deref(),
+            review_scope.diff_excerpt.as_deref(),
             turn_context.as_deref(),
             prompt_token_budget,
         );
@@ -32722,6 +32965,42 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn auto_review_diff_fingerprint_is_stable_for_equivalent_paths() {
+        let first = auto_review_diff_fingerprint(
+            Some("base"),
+            &["src/lib.rs".to_string(), "./src/main.rs".to_string()],
+            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+        )
+        .expect("fingerprint");
+        let second = auto_review_diff_fingerprint(
+            Some("base"),
+            &["src/main.rs".to_string(), "src/lib.rs".to_string()],
+            "\n diff --git a/src/lib.rs b/src/lib.rs\n+line\n\n",
+        )
+        .expect("fingerprint");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn auto_review_diff_fingerprint_changes_with_base() {
+        let first = auto_review_diff_fingerprint(
+            Some("base-a"),
+            &["src/lib.rs".to_string()],
+            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+        )
+        .expect("fingerprint");
+        let second = auto_review_diff_fingerprint(
+            Some("base-b"),
+            &["src/lib.rs".to_string()],
+            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+        )
+        .expect("fingerprint");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn background_review_prompt_prefers_diff_excerpt_over_commit_scope() {
         let prompt = build_background_review_prompt(
             "abc123",
@@ -33548,6 +33827,47 @@ use code_core::protocol::OrderMeta;
         assert!(
             !developer_seen,
             "auto review should rely on the Auto Review notice instead of a [developer] history message"
+        );
+    }
+
+    #[test]
+    fn duplicate_skipped_background_review_does_not_mark_snapshot_reviewed() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let session_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: Some(GhostCommit::new("base-before-review".to_string(), None)),
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_finished_for_run(
+            run_id,
+            PathBuf::new(),
+            String::new(),
+            false,
+            0,
+            Some("Auto review skipped: equivalent review is already running.".to_string()),
+            None,
+            None,
+            None,
+            Some(session_id),
+        );
+
+        assert!(chat.background_review.is_none());
+        assert!(chat.auto_review_reviewed_marker.is_none());
+        assert_eq!(
+            chat.pending_auto_review_range
+                .as_ref()
+                .map(|pending| pending.base.id()),
+            Some("base-before-review")
         );
     }
 
@@ -40393,6 +40713,13 @@ impl ChatWidget<'_> {
             return;
         }
 
+        if let Some(run_id) = self.background_review_run_id {
+            self.mark_auto_review_run_lost(
+                run_id,
+                "auto_review_inactive_in_tui",
+                state.agent_id.as_deref(),
+            );
+        }
         let stale = self.background_review.take();
         self.background_review_guard = None;
         self.background_review_run_id = None;
@@ -40422,6 +40749,7 @@ impl ChatWidget<'_> {
         );
         let owner_session_id = self.session_id.unwrap_or_else(Uuid::new_v4);
         let run_id = Uuid::new_v4();
+        self.record_auto_review_launch_in_store(run_id, owner_session_id, base_snapshot.as_ref());
         self.background_review_run_id = Some(run_id);
         self.background_review = Some(BackgroundReviewState {
             worktree_path: std::path::PathBuf::new(),
@@ -40523,6 +40851,25 @@ impl ChatWidget<'_> {
 
             if let Some(progress) = agent.last_progress.as_deref() {
                 if progress.contains(SKIP_REVIEW_PROGRESS_SENTINEL) {
+                    if let Some(run_id) = self.background_review_run_id {
+                        let owner_session_id = agent
+                            .owner_session_id
+                            .as_deref()
+                            .and_then(|id| Uuid::parse_str(id).ok());
+                        self.record_auto_review_completion_in_store(AutoReviewStoreCompletion {
+                            run_id,
+                            branch: agent.batch_id.as_deref().unwrap_or_default(),
+                            worktree_path: Path::new(""),
+                            has_findings: false,
+                            findings: 0,
+                            summary: Some("Auto review skipped: another auto review is already running."),
+                            error: None,
+                            agent_id: Some(agent.id.as_str()),
+                            snapshot: agent.worktree_base.as_deref(),
+                            owner_session_id,
+                            output: None,
+                        });
+                    }
                     // Treat skipped review as benign: clear indicator and state, do not surface.
                     self.clear_auto_review_indicator();
                     self.background_review = None;
@@ -40543,6 +40890,10 @@ impl ChatWidget<'_> {
                         state.branch = batch.clone();
                     }
                 }
+            }
+
+            if let Some(run_id) = self.background_review_run_id {
+                self.record_auto_review_agent_status_in_store(run_id, agent, status);
             }
 
             if matches!(status, AgentStatus::Running | AgentStatus::Pending) {
@@ -40620,6 +40971,7 @@ impl ChatWidget<'_> {
             };
 
             let (has_findings, findings, summary) = Self::parse_agent_review_result(agent.result.as_deref());
+            let output = Self::parse_agent_review_output(agent.result.as_deref());
             let owner_session_id = agent
                 .owner_session_id
                 .as_deref()
@@ -40652,6 +41004,21 @@ impl ChatWidget<'_> {
             }
 
             self.remember_processed_auto_review_agent(&agent.id);
+            if let Some(run_id) = self.background_review_run_id {
+                self.record_auto_review_completion_in_store(AutoReviewStoreCompletion {
+                    run_id,
+                    branch: &branch,
+                    worktree_path: &worktree_path,
+                    has_findings,
+                    findings,
+                    summary: summary.as_deref(),
+                    error: agent.error.as_deref(),
+                    agent_id: Some(agent.id.as_str()),
+                    snapshot: snapshot.as_deref(),
+                    owner_session_id,
+                    output: output.as_ref(),
+                });
+            }
             self.on_background_review_finished(
                 worktree_path,
                 branch,
@@ -40823,6 +41190,307 @@ impl ChatWidget<'_> {
         }
 
         best_match
+    }
+
+    fn parse_agent_review_output(raw: Option<&str>) -> Option<ReviewOutputEvent> {
+        #[derive(serde::Deserialize)]
+        struct MultiRunReview {
+            #[serde(flatten)]
+            latest: ReviewOutputEvent,
+            #[serde(default)]
+            runs: Vec<ReviewOutputEvent>,
+        }
+
+        let text = raw?.trim();
+        if text.is_empty() {
+            return None;
+        }
+
+        if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(text) {
+            return wrapper.runs.last().cloned().or(Some(wrapper.latest));
+        }
+        if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(text) {
+            return Some(output);
+        }
+        if let Some(output) = Self::extract_review_output_from_mixed_text(text) {
+            return Some(output);
+        }
+        if let Some(start) = text.find("```")
+            && let Some((body, _)) = text[start + 3..].split_once("```")
+        {
+            let candidate = body.trim_start_matches("json").trim();
+            if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
+                return Some(output);
+            }
+        }
+        None
+    }
+
+    fn extract_review_output_from_mixed_text(text: &str) -> Option<ReviewOutputEvent> {
+        #[derive(serde::Deserialize)]
+        struct MultiRunReview {
+            #[serde(flatten)]
+            latest: ReviewOutputEvent,
+            #[serde(default)]
+            runs: Vec<ReviewOutputEvent>,
+        }
+
+        let mut brace_depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut object_start = None;
+        let mut best_match: Option<ReviewOutputEvent> = None;
+
+        for (idx, ch) in text.char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => {
+                    if brace_depth == 0 {
+                        object_start = Some(idx);
+                    }
+                    brace_depth = brace_depth.saturating_add(1);
+                }
+                '}' => {
+                    if brace_depth == 0 {
+                        continue;
+                    }
+                    brace_depth -= 1;
+                    if brace_depth == 0
+                        && let Some(start) = object_start.take()
+                    {
+                        let candidate = &text[start..=idx];
+                        if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(candidate) {
+                            best_match = wrapper.runs.last().cloned().or(Some(wrapper.latest));
+                            continue;
+                        }
+                        if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
+                            best_match = Some(output);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        best_match
+    }
+
+    fn durable_auto_review_status(status: AgentStatus) -> AutoReviewRunStatus {
+        match status {
+            AgentStatus::Pending => AutoReviewRunStatus::Pending,
+            AgentStatus::Running => AutoReviewRunStatus::Reviewing,
+            AgentStatus::Completed => AutoReviewRunStatus::Completed,
+            AgentStatus::Failed => AutoReviewRunStatus::Failed,
+            AgentStatus::Cancelled => AutoReviewRunStatus::Cancelled,
+        }
+    }
+
+    fn update_auto_review_store<F>(&self, run_id: Uuid, update: F)
+    where
+        F: FnOnce(&mut AutoReviewRun, u64),
+    {
+        let now = unix_now_secs();
+        let mut store = match AutoReviewRunStore::open(&self.config.cwd) {
+            Ok(store) => store,
+            Err(err) => {
+                tracing::warn!(?err, run_id = %run_id, "failed to open auto-review run store");
+                return;
+            }
+        };
+
+        let mut run = store
+            .get(run_id)
+            .cloned()
+            .unwrap_or_else(|| AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, now));
+        update(&mut run, now);
+        if let Err(err) = store.upsert(run) {
+            tracing::warn!(?err, run_id = %run_id, "failed to persist auto-review run");
+        }
+    }
+
+    fn reconcile_auto_review_store_after_restart(&self) {
+        let now = unix_now_secs();
+        match AutoReviewRunStore::open(&self.config.cwd) {
+            Ok(mut store) => {
+                if let Err(err) = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), now) {
+                    tracing::warn!(?err, "failed to reconcile auto-review run store after restart");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(?err, "failed to open auto-review run store for restart reconciliation");
+            }
+        }
+    }
+
+    fn mark_auto_review_run_lost(
+        &self,
+        run_id: Uuid,
+        reason: &str,
+        agent_id: Option<&str>,
+    ) {
+        self.update_auto_review_store(run_id, |run, now| {
+            run.agent_id = agent_id.map(str::to_string).or_else(|| run.agent_id.clone());
+            run.freshness = AutoReviewFreshness::Lost;
+            run.cancel_reason = Some(reason.to_string());
+            run.mark_status(AutoReviewRunStatus::Lost, now);
+        });
+    }
+
+    fn record_auto_review_launch_in_store(
+        &self,
+        run_id: Uuid,
+        owner_session_id: Uuid,
+        base_snapshot: Option<&GhostCommit>,
+    ) {
+        self.update_auto_review_store(run_id, |run, now| {
+            run.source = AutoReviewRunSource::Tui;
+            run.owner_session_id = Some(owner_session_id);
+            run.base_commit = base_snapshot.map(|base| base.id().to_string());
+            run.model = Some(self.config.auto_review_model.clone());
+            run.reasoning_effort = Some(self.config.auto_review_model_reasoning_effort.to_string());
+            run.freshness = AutoReviewFreshness::Current;
+            run.mark_status(AutoReviewRunStatus::Snapshotting, now);
+            run.mark_activity(now);
+        });
+    }
+
+    fn record_auto_review_started_in_store(
+        &self,
+        run_id: Uuid,
+        worktree_path: &std::path::Path,
+        branch: &str,
+        agent_id: Option<&str>,
+        snapshot: Option<&str>,
+        owner_session_id: Option<Uuid>,
+    ) {
+        self.update_auto_review_store(run_id, |run, now| {
+            run.source = AutoReviewRunSource::Tui;
+            if let Some(owner_session_id) = owner_session_id {
+                run.owner_session_id = Some(owner_session_id);
+            }
+            run.agent_id = agent_id.map(str::to_string).or_else(|| run.agent_id.clone());
+            run.batch_id = (!branch.trim().is_empty()).then(|| branch.to_string()).or_else(|| run.batch_id.clone());
+            run.branch = (!branch.trim().is_empty()).then(|| branch.to_string()).or_else(|| run.branch.clone());
+            if !worktree_path.as_os_str().is_empty() {
+                run.worktree_path = Some(worktree_path.to_path_buf());
+            }
+            run.snapshot_commit = snapshot.map(str::to_string).or_else(|| run.snapshot_commit.clone());
+            run.model = Some(self.config.auto_review_model.clone());
+            run.reasoning_effort = Some(self.config.auto_review_model_reasoning_effort.to_string());
+            run.freshness = AutoReviewFreshness::Current;
+            run.mark_status(AutoReviewRunStatus::Reviewing, now);
+            run.mark_activity(now);
+        });
+    }
+
+    fn record_auto_review_agent_status_in_store(
+        &self,
+        run_id: Uuid,
+        agent: &code_core::protocol::AgentInfo,
+        status: AgentStatus,
+    ) {
+        let durable_status = Self::durable_auto_review_status(status);
+        self.update_auto_review_store(run_id, |run, now| {
+            run.source = AutoReviewRunSource::Tui;
+            run.agent_id = Some(agent.id.clone());
+            run.batch_id = agent.batch_id.clone().or_else(|| run.batch_id.clone());
+            run.branch = agent.batch_id.clone().or_else(|| run.branch.clone());
+            run.snapshot_commit = agent.worktree_base.clone().or_else(|| run.snapshot_commit.clone());
+            run.owner_session_id = agent
+                .owner_session_id
+                .as_deref()
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .or(run.owner_session_id);
+            run.model = agent.model.clone().or_else(|| run.model.clone());
+            run.token_count = agent.token_count.or(run.token_count);
+            run.freshness = if durable_status.is_terminal() {
+                AutoReviewFreshness::Current
+            } else if agent
+                .seconds_since_last_activity
+                .is_some_and(|seconds| seconds >= AUTO_REVIEW_STALE_SECS)
+            {
+                AutoReviewFreshness::Inactive
+            } else {
+                AutoReviewFreshness::Current
+            };
+            run.mark_status(durable_status, now);
+            if !durable_status.is_terminal() || agent.last_activity_at.is_some() {
+                run.mark_activity(now);
+            }
+            if let Some(error) = agent.error.as_deref() {
+                let classification = Self::classify_auto_review_error(error);
+                run.error_class = Some(classification.failure_class.to_string());
+                run.error_summary = Some(Self::summarize_auto_review_error(error));
+            }
+        });
+    }
+
+    fn record_auto_review_completion_in_store(&self, completion: AutoReviewStoreCompletion<'_>) {
+        self.update_auto_review_store(completion.run_id, |run, now| {
+            run.source = AutoReviewRunSource::Tui;
+            run.owner_session_id = completion.owner_session_id.or(run.owner_session_id);
+            run.agent_id = completion.agent_id.map(str::to_string).or_else(|| run.agent_id.clone());
+            run.batch_id = (!completion.branch.trim().is_empty())
+                .then(|| completion.branch.to_string())
+                .or_else(|| run.batch_id.clone());
+            run.branch = (!completion.branch.trim().is_empty())
+                .then(|| completion.branch.to_string())
+                .or_else(|| run.branch.clone());
+            if !completion.worktree_path.as_os_str().is_empty() {
+                run.worktree_path = Some(completion.worktree_path.to_path_buf());
+            }
+            run.snapshot_commit = completion
+                .snapshot
+                .map(str::to_string)
+                .or_else(|| run.snapshot_commit.clone());
+            run.finding_count = completion.findings;
+            run.summary_digest = completion
+                .summary
+                .map(|summary| Self::summarize_plain_review_text(summary, 240));
+            run.freshness = AutoReviewFreshness::Current;
+            if run.status == AutoReviewRunStatus::Skipped
+                && run.cancel_reason.as_deref() == Some("duplicate_auto_review_scope")
+            {
+                run.mark_status(AutoReviewRunStatus::Skipped, now);
+            } else if let Some(error) = completion.error {
+                let classification = Self::classify_auto_review_error(error);
+                run.error_class = Some(classification.failure_class.to_string());
+                run.error_summary = Some(Self::summarize_auto_review_error(error));
+                run.mark_status(AutoReviewRunStatus::Failed, now);
+            } else if completion.snapshot.is_none() && !completion.has_findings {
+                run.mark_status(AutoReviewRunStatus::Skipped, now);
+            } else {
+                run.mark_status(AutoReviewRunStatus::Completed, now);
+            }
+        });
+
+        if let Some(output) = completion.output {
+            match AutoReviewRunStore::open(&self.config.cwd) {
+                Ok(mut store) => {
+                    if let Err(err) = store.write_output(completion.run_id, output) {
+                        tracing::warn!(?err, run_id = %completion.run_id, "failed to persist auto-review output");
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(?err, run_id = %completion.run_id, "failed to open auto-review run store for output");
+                }
+            }
+        }
     }
 
     fn summarize_plain_review_text(text: &str, max_chars: usize) -> String {
@@ -41612,11 +42280,19 @@ impl ChatWidget<'_> {
         if let Some(state) = self.background_review.as_mut() {
             state.worktree_path = worktree_path.clone();
             state.branch = branch.clone();
-            state.agent_id = agent_id;
-            state.snapshot = snapshot;
+            state.agent_id = agent_id.clone();
+            state.snapshot = snapshot.clone();
             state.owner_session_id = owner_session_id;
             state.last_seen = Instant::now();
         }
+        self.record_auto_review_started_in_store(
+            run_id,
+            &worktree_path,
+            &branch,
+            agent_id.as_deref(),
+            snapshot.as_deref(),
+            owner_session_id,
+        );
         let detail = auto_review_running_detail(self.background_review.as_ref(), None, None);
         if let Some(status) = self.auto_review_status.clone() {
             if status.status == AutoReviewIndicatorStatus::Running {
@@ -41790,6 +42466,19 @@ impl ChatWidget<'_> {
             resolved_worktree_path.display().to_string()
         };
         let errored = error.is_some();
+        self.record_auto_review_completion_in_store(AutoReviewStoreCompletion {
+            run_id,
+            branch: &resolved_branch,
+            worktree_path: &resolved_worktree_path,
+            has_findings,
+            findings: effective_findings,
+            summary: summary.as_deref(),
+            error: error.as_deref(),
+            agent_id: agent_id.as_deref(),
+            snapshot: inflight_snapshot.as_deref(),
+            owner_session_id,
+            output: None,
+        });
         let notice_line = has_findings.then(|| {
             Self::auto_review_notice_line(
                 &worktree_label,
