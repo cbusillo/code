@@ -2542,7 +2542,7 @@ async fn execute_model_with_permissions(
             final_args.push(effort_override.clone());
             final_args.push("-c".into());
             final_args.push(auto_effort_override.clone());
-            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, use_current_exe, false)?;
+            prompt_stdin = deliver_agent_prompt(family, &mut final_args, prompt, true, false)?;
         }
         "cloud" => {
             if built_in_cloud {
@@ -4650,11 +4650,12 @@ mod tests {
         assert!(err.contains("argv delivery threshold"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn large_custom_code_command_prompt_fails_before_spawn() {
+    async fn large_custom_code_command_prompt_uses_stdin() {
         let dir = tempdir().expect("tempdir");
         let custom_code = script_path(dir.path(), "custom-code");
-        write_argv_script(&custom_code);
+        write_large_prompt_probe_script(&custom_code);
 
         let cfg = AgentConfig {
             name: "code-gpt-5.4".to_string(),
@@ -4670,7 +4671,7 @@ mod tests {
         };
         let prompt = "x".repeat(super::AGENT_PROMPT_STDIN_THRESHOLD_BYTES + 1);
 
-        let err = execute_model_with_permissions(
+        let output = execute_model_with_permissions(
             "agent-test",
             "code-gpt-5.4",
             &prompt,
@@ -4683,9 +4684,12 @@ mod tests {
             None,
         )
         .await
-        .expect_err("large custom code prompt should fail");
+        .expect("large custom code prompt should use stdin");
 
-        assert!(err.contains("does not support large-prompt stdin delivery"));
+        assert_eq!(
+            output.trim(),
+            format!("prompt_arg=- stdin_len={}", prompt.len())
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
