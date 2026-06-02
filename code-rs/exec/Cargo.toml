@@ -48,6 +48,7 @@ tokio = { workspace = true, features = [
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 once_cell = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -56,4 +57,3 @@ libc = "0.2"
 [dev-dependencies]
 filetime = { workspace = true }
 tempfile = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
