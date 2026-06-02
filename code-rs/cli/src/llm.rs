@@ -1,9 +1,13 @@
+use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::Parser;
 use code_common::CliConfigOverrides;
 use code_core::config::Config;
 use code_core::config::ConfigOverrides;
+use code_core::ResponseEvent;
 use code_core::ModelClient;
 use code_core::ModelProviderInfo;
 use code_core::agent_defaults::model_guide_markdown_with_custom;
@@ -30,6 +34,11 @@ pub enum LlmSubcommand {
 }
 
 #[derive(Debug, Parser)]
+#[command(group(
+    clap::ArgGroup::new("message_input")
+        .required(true)
+        .args(["message", "message_file"])
+))]
 pub struct RequestArgs {
     /// Developer message to prepend (kept separate from system instructions)
     #[arg(long)]
@@ -37,7 +46,11 @@ pub struct RequestArgs {
 
     /// Primary user message/content
     #[arg(long)]
-    pub message: String,
+    pub message: Option<String>,
+
+    /// Read primary user message/content from a UTF-8 file
+    #[arg(long = "message-file", value_name = "PATH")]
+    pub message_file: Option<PathBuf>,
 
     /// `text.format.type` (e.g. json_schema)
     #[arg(long = "format-type", default_value = "json_schema")]
@@ -52,11 +65,11 @@ pub struct RequestArgs {
     pub format_strict: bool,
 
     /// Inline JSON for the schema (mutually exclusive with --schema-file)
-    #[arg(long = "schema-json")] 
+    #[arg(long = "schema-json")]
     pub schema_json: Option<String>,
 
     /// Path to a JSON schema file (mutually exclusive with --schema-json)
-    #[arg(long = "schema-file")] 
+    #[arg(long = "schema-file")]
     pub schema_file: Option<PathBuf>,
 
     /// Optional model override (e.g. gpt-4.1, gpt-5.1)
@@ -88,6 +101,7 @@ async fn run_llm_request(
     };
 
     let config = Config::load_with_cli_overrides(overrides_vec, overrides)?;
+    let message = read_request_message(&args)?;
 
     // Build Prompt with custom developer + user messages, no extra tools
     let mut input: Vec<ResponseItem> = Vec::new();
@@ -101,7 +115,7 @@ async fn run_llm_request(
     input.push(ResponseItem::Message {
         id: None,
         role: "user".to_string(),
-        content: vec![ContentItem::InputText { text: args.message.clone() }],
+        content: vec![ContentItem::InputText { text: message }],
         end_turn: None,
         phase: None,
     });
@@ -157,31 +171,205 @@ async fn run_llm_request(
     // Collect the assistant message text from the stream (no TUI events)
     let mut stream = client.stream(&prompt).await?;
     let mut final_text: String = String::new();
+    let mut saw_output_text_delta = false;
     tracing::info!("LLM: created");
     while let Some(ev) = stream.next().await {
         let ev = ev?;
         match ev {
-            code_core::ResponseEvent::ReasoningSummaryDelta { delta, .. } => { tracing::info!(target: "llm", "thinking: {}", delta); }
-            code_core::ResponseEvent::ReasoningContentDelta { delta, .. } => { tracing::info!(target: "llm", "reasoning: {}", delta); }
-            code_core::ResponseEvent::OutputItemDone { item, .. } => {
-                if let ResponseItem::Message { content, .. } = item {
-                    for c in content {
-                        if let ContentItem::OutputText { text } = c {
-                            final_text.push_str(&text);
-                        }
-                    }
-                }
+            ResponseEvent::ReasoningSummaryDelta { delta, .. } => { tracing::info!(target: "llm", "thinking: {}", delta); }
+            ResponseEvent::ReasoningContentDelta { delta, .. } => { tracing::info!(target: "llm", "reasoning: {}", delta); }
+            ResponseEvent::OutputItemDone { item, .. } => {
+                append_output_item_done(&mut final_text, &mut saw_output_text_delta, item);
             }
-            code_core::ResponseEvent::OutputTextDelta { delta, .. } => {
+            ResponseEvent::OutputTextDelta { delta, .. } => {
                 tracing::info!(target: "llm", "delta: {}", delta);
-                // For completeness, but we only print at the end to stay simple
-                final_text.push_str(&delta);
+                append_output_text_delta(&mut final_text, &mut saw_output_text_delta, delta);
             }
-            code_core::ResponseEvent::Completed { .. } => { tracing::info!("LLM: completed"); break; }
+            ResponseEvent::Completed { .. } => { tracing::info!("LLM: completed"); break; }
             _ => {}
         }
     }
 
     println!("{}", final_text);
     Ok(())
+}
+
+fn read_request_message(args: &RequestArgs) -> anyhow::Result<String> {
+    read_request_message_from(args, || {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .context("failed to read --message - from stdin")?;
+        Ok(input)
+    })
+}
+
+fn read_request_message_from<F>(args: &RequestArgs, read_stdin: F) -> anyhow::Result<String>
+where
+    F: FnOnce() -> anyhow::Result<String>,
+{
+    match (&args.message, &args.message_file) {
+        (Some(_), Some(_)) => anyhow::bail!("--message and --message-file are mutually exclusive"),
+        (Some(message), None) if message == "-" => read_stdin(),
+        (Some(message), None) => Ok(message.clone()),
+        (None, Some(path)) => read_message_file(path),
+        (None, None) => anyhow::bail!("one of --message or --message-file is required"),
+    }
+}
+
+fn read_message_file(path: &Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read --message-file {}", path.display()))
+}
+
+fn append_output_text_delta(
+    final_text: &mut String,
+    saw_output_text_delta: &mut bool,
+    delta: String,
+) {
+    *saw_output_text_delta = true;
+    final_text.push_str(&delta);
+}
+
+fn append_output_item_done(
+    final_text: &mut String,
+    saw_output_text_delta: &mut bool,
+    item: ResponseItem,
+) {
+    if *saw_output_text_delta {
+        return;
+    }
+
+    if let ResponseItem::Message { content, .. } = item {
+        for c in content {
+            if let ContentItem::OutputText { text } = c {
+                final_text.push_str(&text);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with_message(message: Option<&str>, message_file: Option<PathBuf>) -> RequestArgs {
+        RequestArgs {
+            developer: "developer".to_string(),
+            message: message.map(str::to_string),
+            message_file,
+            format_type: "json_schema".to_string(),
+            format_name: None,
+            format_strict: true,
+            schema_json: None,
+            schema_file: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn request_message_uses_inline_message() {
+        let args = args_with_message(Some("hello"), None);
+
+        let message = read_request_message_from(&args, || anyhow::bail!("stdin should not be read"))
+            .expect("inline message should resolve");
+
+        assert_eq!(message, "hello");
+    }
+
+    #[test]
+    fn request_message_dash_reads_stdin() {
+        let args = args_with_message(Some("-"), None);
+
+        let message = read_request_message_from(&args, || Ok("from stdin".to_string()))
+            .expect("stdin message should resolve");
+
+        assert_eq!(message, "from stdin");
+    }
+
+    #[test]
+    fn request_message_reads_message_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prompt.txt");
+        std::fs::write(&path, "from file").expect("write prompt file");
+        let args = args_with_message(None, Some(path));
+
+        let message = read_request_message_from(&args, || anyhow::bail!("stdin should not be read"))
+            .expect("file message should resolve");
+
+        assert_eq!(message, "from file");
+    }
+
+    #[test]
+    fn request_message_rejects_multiple_sources() {
+        let args = args_with_message(Some("hello"), Some(PathBuf::from("prompt.txt")));
+
+        let err = read_request_message_from(&args, || anyhow::bail!("stdin should not be read"))
+            .expect_err("multiple message sources should fail");
+
+        assert!(
+            err.to_string()
+                .contains("--message and --message-file are mutually exclusive")
+        );
+    }
+
+    #[test]
+    fn request_cli_requires_a_message_source() {
+        let err = LlmCli::try_parse_from(["code", "request", "--developer", "developer"])
+            .expect_err("missing message source should fail");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn request_cli_rejects_multiple_message_sources() {
+        let err = LlmCli::try_parse_from([
+            "code",
+            "request",
+            "--developer",
+            "developer",
+            "--message",
+            "hello",
+            "--message-file",
+            "prompt.txt",
+        ])
+        .expect_err("multiple message sources should fail");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn output_item_done_is_used_when_no_deltas_arrive() {
+        let mut final_text = String::new();
+        let mut saw_delta = false;
+
+        append_output_item_done(&mut final_text, &mut saw_delta, output_message("complete"));
+
+        assert_eq!(final_text, "complete");
+        assert!(!saw_delta);
+    }
+
+    #[test]
+    fn output_item_done_does_not_duplicate_streamed_deltas() {
+        let mut final_text = String::new();
+        let mut saw_delta = false;
+
+        append_output_text_delta(&mut final_text, &mut saw_delta, "partial".to_string());
+        append_output_item_done(&mut final_text, &mut saw_delta, output_message("partial"));
+
+        assert_eq!(final_text, "partial");
+        assert!(saw_delta);
+    }
+
+    fn output_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
 }
