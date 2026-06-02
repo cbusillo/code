@@ -89,7 +89,10 @@ Examples:
 - PR readiness is not merge intent. Use the shared `babysit-pr`/GitHub skills
   and `.github/github.json` PR workflow metadata when watching fix trains,
   auto-review lag, CI, review comments, and merge readiness.
-- Use `just local-code-rebuild` to rebuild the current branch into the PATH-resolved binary.
+- Before restarting or dogfooding the Every Code harness, run `just local-code-rebuild`
+  so the PATH-resolved `code` command uses the current branch's binary.
+- Use `just local-code-rebuild` whenever you need to rebuild the current branch into
+  the PATH-resolved binary.
 - After `./build-fast.sh`, run `just local-code-rebuild` again before release smoke checks; the fast build validates dev-fast artifacts, while the rebuild recipe owns the PATH-resolved release binary and embeds the `VERSION` file value.
 - During active local work, run
   `just local-cleanup-space --apply --keep-current-fast-cache` when repo-local
