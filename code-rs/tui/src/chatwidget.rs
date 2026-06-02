@@ -5309,14 +5309,80 @@ impl ChatWidget<'_> {
         }
     }
 
-    fn render_replay_assistant_item_if_missing(&mut self, item: ResponseItem) {
-        let ResponseItem::Message { id, role, content, .. } = item else {
-            return;
-        };
-        if role != "assistant" {
+    fn render_replay_items_after_snapshot_tail(&mut self, items: &[ResponseItem]) {
+        let history_messages = self.replay_message_history_texts();
+        if history_messages.is_empty() {
+            for item in items {
+                self.render_replay_item(item.clone());
+            }
             return;
         }
 
+        let item_messages: Vec<(usize, String, String)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                let (role, text) = Self::response_message_text(item)?;
+                if text.starts_with("== System Status ==") || text.starts_with("<user_action>") {
+                    return None;
+                }
+                Some((idx, role.to_string(), Self::normalize_text(&text)))
+            })
+            .collect();
+
+        if let Some(anchor_index) = Self::find_replay_snapshot_anchor(&history_messages, &item_messages) {
+            for item in items.iter().skip(anchor_index + 1) {
+                self.render_replay_item(item.clone());
+            }
+            return;
+        }
+
+        tracing::warn!(
+            "replay: failed to align restored history snapshot with response items; replaying raw items with normal dedupe"
+        );
+        for item in items {
+            self.render_replay_item(item.clone());
+        }
+    }
+
+    fn find_replay_snapshot_anchor(
+        history_messages: &[(String, String)],
+        item_messages: &[(usize, String, String)],
+    ) -> Option<usize> {
+        if history_messages.is_empty() || item_messages.is_empty() {
+            return None;
+        }
+
+        let history_len = history_messages.len();
+        let mut previous_lengths = vec![0usize; history_len + 1];
+        let mut best: Option<(usize, usize)> = None;
+
+        for (item_pos, (_, item_role, item_text)) in item_messages.iter().enumerate() {
+            let mut current_lengths = vec![0usize; history_len + 1];
+            for (history_pos, (history_role, history_text)) in history_messages.iter().enumerate() {
+                if item_role == history_role && item_text == history_text {
+                    let matched_len = previous_lengths[history_pos] + 1;
+                    current_lengths[history_pos + 1] = matched_len;
+                    if history_pos + 1 == history_len {
+                        match best {
+                            Some((best_len, best_item_pos))
+                                if best_len > matched_len
+                                    || (best_len == matched_len && best_item_pos > item_pos) => {}
+                            _ => best = Some((matched_len, item_pos)),
+                        }
+                    }
+                }
+            }
+            previous_lengths = current_lengths;
+        }
+
+        best.map(|(_, item_pos)| item_messages[item_pos].0)
+    }
+
+    fn response_message_text(item: &ResponseItem) -> Option<(&str, String)> {
+        let ResponseItem::Message { role, content, .. } = item else {
+            return None;
+        };
         let mut text = String::new();
         for c in content {
             match c {
@@ -5324,20 +5390,55 @@ impl ChatWidget<'_> {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    text.push_str(&t);
+                    text.push_str(t);
                 }
                 _ => {}
             }
         }
-
         let text = text.trim();
-        if text.is_empty() || self.history_has_assistant_text(text) {
-            return;
+        if text.is_empty() {
+            None
+        } else {
+            Some((role.as_str(), text.to_string()))
+        }
+    }
+
+    fn replay_message_history_texts(&self) -> Vec<(String, String)> {
+        let mut messages = Vec::new();
+
+        for cell in &self.history_cells {
+            if let Some(plain) = cell
+                .as_any()
+                .downcast_ref::<crate::history_cell::PlainHistoryCell>()
+            {
+                let role = match plain.state().kind {
+                    PlainMessageKind::Assistant => "assistant",
+                    PlainMessageKind::User => "user",
+                    _ => {
+                        continue;
+                    }
+                };
+                {
+                    let text = Self::message_lines_to_full_text(&plain.state().lines);
+                    if !text.trim().is_empty() {
+                        messages.push((role.to_string(), Self::normalize_text(&text)));
+                    }
+                }
+                continue;
+            }
+
+            if let Some(existing) = cell
+                .as_any()
+                .downcast_ref::<crate::history_cell::AssistantMarkdownCell>()
+            {
+                let text = existing.markdown().trim();
+                if !text.is_empty() {
+                    messages.push(("assistant".to_string(), Self::normalize_text(text)));
+                }
+            }
         }
 
-        let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-        crate::markdown::append_markdown(text, &mut lines, &self.config);
-        self.insert_final_answer_with_id(id, lines, text.to_string());
+        messages
     }
 
     fn history_has_assistant_text(&self, text: &str) -> bool {
@@ -14655,9 +14756,7 @@ impl ChatWidget<'_> {
                             self.last_seen_request_index.max(self.current_request_index);
                     }
                 } else {
-                    for item in &items {
-                        self.render_replay_assistant_item_if_missing(item.clone());
-                    }
+                    self.render_replay_items_after_snapshot_tail(&items);
                 }
                 if max_req > 0 {
                     self.last_seen_request_index = self.last_seen_request_index.max(max_req);
@@ -39868,6 +39967,325 @@ use code_core::protocol::OrderMeta;
         assert_eq!(assistant_markdowns.len(), 2);
         assert!(assistant_markdowns.iter().any(|text| text == &first));
         assert!(assistant_markdowns.iter().any(|text| text == &second));
+    }
+
+    #[test]
+    fn replay_snapshot_only_renders_items_after_snapshot_tail() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let stale_answer = "Merged PR #347 into `main`.";
+        let restored_tail = "The repo is on the right source commit now.";
+        let later_answer = "The missing final message is persisted; replay needs the snapshot tail.";
+        let make_assistant = |id: u64, stream_id: &str, markdown: &str| {
+            HistoryRecord::AssistantMessage(AssistantMessageState {
+                id: HistoryId(id),
+                stream_id: Some(stream_id.to_string()),
+                markdown: markdown.to_string(),
+                mid_turn: false,
+                citations: Vec::new(),
+                metadata: None,
+                token_usage: None,
+                created_at: SystemTime::UNIX_EPOCH,
+            })
+        };
+
+        let snapshot = HistorySnapshot {
+            records: vec![
+                make_assistant(1, "stream-stale", stale_answer),
+                make_assistant(2, "stream-tail", restored_tail),
+            ],
+            next_id: 3,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![
+                OrderKeySnapshot {
+                    req: 1,
+                    out: 0,
+                    seq: 0,
+                },
+                OrderKeySnapshot {
+                    req: 2,
+                    out: 0,
+                    seq: 0,
+                },
+            ],
+            order_debug: Vec::new(),
+        };
+
+        let replay_items = vec![
+            ChatWidget::auto_drive_make_assistant_message(stale_answer.to_string())
+                .expect("stale assistant replay item"),
+            ChatWidget::auto_drive_make_user_message("I see a stale review in the TUI".to_string())
+                .expect("user replay item"),
+            ChatWidget::auto_drive_make_assistant_message(restored_tail.to_string())
+                .expect("tail assistant replay item"),
+            ChatWidget::auto_drive_make_user_message("restarted, but your last message appears to be missing now".to_string())
+                .expect("later user replay item"),
+            ChatWidget::auto_drive_make_assistant_message(later_answer.to_string())
+                .expect("later assistant replay item"),
+        ];
+
+        chat.handle_code_event(Event {
+            id: "replay".to_string(),
+            event_seq: 0,
+            order: None,
+            msg: EventMsg::ReplayHistory(code_core::protocol::ReplayHistoryEvent {
+                items: replay_items,
+                history_snapshot: Some(serde_json::to_value(snapshot).expect("snapshot value")),
+            }),
+        });
+
+        let assistant_markdowns: Vec<String> = chat
+            .history_cells
+            .iter()
+            .filter_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::AssistantMarkdownCell>()
+                    .map(|assistant| assistant.markdown().to_string())
+            })
+            .collect();
+
+        assert_eq!(
+            assistant_markdowns
+                .iter()
+                .filter(|text| text.as_str() == stale_answer)
+                .count(),
+            1,
+            "snapshot replay must not append old assistant answers before the restored tail"
+        );
+        assert!(
+            assistant_markdowns.iter().any(|text| text == later_answer),
+            "snapshot replay should still append assistant answers recorded after the restored tail"
+        );
+    }
+
+    #[test]
+    fn replay_snapshot_anchors_on_tail_user_message() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let tail_user = "restarted, but your last message appears to be missing now";
+        let later_answer = "Replay now resumes after the restored user prompt.";
+        let snapshot = HistorySnapshot {
+            records: vec![HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::User,
+                kind: PlainMessageKind::User,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: tail_user.to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                }],
+                metadata: None,
+            })],
+            next_id: 2,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![OrderKeySnapshot {
+                req: 1,
+                out: 0,
+                seq: 0,
+            }],
+            order_debug: Vec::new(),
+        };
+
+        let replay_items = vec![
+            ChatWidget::auto_drive_make_user_message(tail_user.to_string())
+                .expect("tail user replay item"),
+            ChatWidget::auto_drive_make_assistant_message(later_answer.to_string())
+                .expect("later assistant replay item"),
+        ];
+
+        chat.handle_code_event(Event {
+            id: "replay".to_string(),
+            event_seq: 0,
+            order: None,
+            msg: EventMsg::ReplayHistory(code_core::protocol::ReplayHistoryEvent {
+                items: replay_items,
+                history_snapshot: Some(serde_json::to_value(snapshot).expect("snapshot value")),
+            }),
+        });
+
+        let user_count = chat
+            .history_cells
+            .iter()
+            .filter(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::PlainHistoryCell>()
+                    .map(|plain| {
+                        plain.state().kind == PlainMessageKind::User
+                            && ChatWidget::message_lines_to_full_text(&plain.state().lines).trim()
+                                == tail_user
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
+        let assistant_markdowns: Vec<String> = chat
+            .history_cells
+            .iter()
+            .filter_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::AssistantMarkdownCell>()
+                    .map(|assistant| assistant.markdown().to_string())
+            })
+            .collect();
+
+        assert_eq!(user_count, 1, "tail user prompt should not duplicate");
+        assert!(assistant_markdowns.iter().any(|text| text == later_answer));
+    }
+
+    #[test]
+    fn replay_snapshot_suffix_anchor_handles_repeated_short_answers() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        reset_history(chat);
+
+        let make_plain = |id: u64, role: PlainMessageRole, kind: PlainMessageKind, text: &str| {
+            PlainMessageState {
+                id: HistoryId(id),
+                role,
+                kind,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: text.to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                }],
+                metadata: None,
+            }
+        };
+        let later_answer = "Only this new answer should be appended.";
+        let snapshot = HistorySnapshot {
+            records: vec![
+                HistoryRecord::PlainMessage(make_plain(
+                    1,
+                    PlainMessageRole::User,
+                    PlainMessageKind::User,
+                    "first prompt",
+                )),
+                HistoryRecord::PlainMessage(make_plain(
+                    2,
+                    PlainMessageRole::Assistant,
+                    PlainMessageKind::Assistant,
+                    "OK",
+                )),
+                HistoryRecord::PlainMessage(make_plain(
+                    3,
+                    PlainMessageRole::User,
+                    PlainMessageKind::User,
+                    "second prompt",
+                )),
+                HistoryRecord::PlainMessage(make_plain(
+                    4,
+                    PlainMessageRole::Assistant,
+                    PlainMessageKind::Assistant,
+                    "OK",
+                )),
+            ],
+            next_id: 5,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![
+                OrderKeySnapshot {
+                    req: 1,
+                    out: 0,
+                    seq: 0,
+                },
+                OrderKeySnapshot {
+                    req: 1,
+                    out: 1,
+                    seq: 0,
+                },
+                OrderKeySnapshot {
+                    req: 2,
+                    out: 0,
+                    seq: 0,
+                },
+                OrderKeySnapshot {
+                    req: 2,
+                    out: 1,
+                    seq: 0,
+                },
+            ],
+            order_debug: Vec::new(),
+        };
+
+        let replay_items = vec![
+            ChatWidget::auto_drive_make_user_message("first prompt".to_string())
+                .expect("first user"),
+            ChatWidget::auto_drive_make_assistant_message("OK".to_string()).expect("first ok"),
+            ChatWidget::auto_drive_make_user_message("second prompt".to_string())
+                .expect("second user"),
+            ChatWidget::auto_drive_make_assistant_message("OK".to_string()).expect("second ok"),
+            ChatWidget::auto_drive_make_user_message("third prompt".to_string())
+                .expect("third user"),
+            ChatWidget::auto_drive_make_assistant_message(later_answer.to_string())
+                .expect("later answer"),
+        ];
+
+        chat.handle_code_event(Event {
+            id: "replay".to_string(),
+            event_seq: 0,
+            order: None,
+            msg: EventMsg::ReplayHistory(code_core::protocol::ReplayHistoryEvent {
+                items: replay_items,
+                history_snapshot: Some(serde_json::to_value(snapshot).expect("snapshot value")),
+            }),
+        });
+
+        let assistant_markdowns: Vec<String> = chat
+            .history_cells
+            .iter()
+            .filter_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::AssistantMarkdownCell>()
+                    .map(|assistant| assistant.markdown().to_string())
+            })
+            .collect();
+
+        assert_eq!(
+            assistant_markdowns
+                .iter()
+                .filter(|text| text.as_str() == "OK")
+                .count(),
+            0,
+            "plain snapshot OK answers should not be replayed as extra markdown cells"
+        );
+        let third_prompt_count = chat
+            .history_cells
+            .iter()
+            .filter(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::PlainHistoryCell>()
+                    .map(|plain| {
+                        plain.state().kind == PlainMessageKind::User
+                            && ChatWidget::message_lines_to_full_text(&plain.state().lines).trim()
+                                == "third prompt"
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
+
+        assert_eq!(
+            third_prompt_count, 1,
+            "suffix anchor should resume after the second OK and keep the next user prompt"
+        );
+        assert!(assistant_markdowns.iter().any(|text| text == later_answer));
     }
 
 
