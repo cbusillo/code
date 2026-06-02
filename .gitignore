@@ -102,6 +102,7 @@ actions-runner/
 .github/workflows/.cache/
 
 # caches
+/cache/
 .cache/
 __pycache__/
 .mypy_cache/
