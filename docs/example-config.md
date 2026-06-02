@@ -31,6 +31,7 @@ model_provider = "openai"
 # Uncomment to force values.
 # model_context_window = 128000       # tokens; default: auto for model
 # model_auto_compact_token_limit = 0  # disable/override auto; default: model family specific
+# context_mode = "disabled"          # GPT-5.4: avoid default 1m context cost
 # tool_output_token_limit = 10000  # tokens stored per tool output
 
 ################################################################################

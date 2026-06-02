@@ -21,6 +21,8 @@ Field recap: `name` (slug/alias), `command` (absolute paths ok), `args*` (RO/RW 
 ### Built-in defaults
 If no `[[agents]]` are configured, Every Code advertises built-in agent/model selectors (gated by env `CODE_ENABLE_CLOUD_AGENT_MODEL` for cloud variants): `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `qwen3-coder-plus`, `cloud-gpt-5.1-codex-max`. Built-ins strip any user `--model/-m` flags to avoid conflicts and inject their own when the target CLI supports model flags.
 
+`code-gpt-5.4` is the GPT selector to reach for when correctness or very large context matters. In Every Code, GPT-5.4 defaults to the expensive 1m-token context path (`context_mode = "auto"`) so long histories and broad repository sweeps can survive. Suggest it only when preserving that context is worth the added cost; use `context_mode = "disabled"` to keep GPT-5.4 on its standard context window.
+
 Tip: `antigravity` uses Google's Antigravity CLI (`agy`) as the Google/Gemini-family agent path. Gemini/Google intent can resolve to `antigravity`, but AGY uses its configured model rather than a per-run Gemini Pro/Flash flag. Consumer Gemini CLI is no longer a built-in default; configure it manually only when you intentionally rely on enterprise/API-key Gemini CLI access.
 
 ## Subagents (`[[subagents.commands]]`)

@@ -476,6 +476,8 @@ Sub-agents are orchestrated helper workflows you can trigger with slash commands
 
 By default (when no `[[agents]]` are configured) Code advertises these agent/model selectors for multi-agent runs: `code-gpt-5.5`, `code-gpt-5.4`, `code-gpt-5.4-mini`, `claude-opus-4.8`, `antigravity`, `claude-sonnet-4.6`, `claude-haiku-4.5`, and `qwen3-coder-plus`. The cloud counterpart, `cloud-gpt-5.1-codex-max`, only appears when `CODE_ENABLE_CLOUD_AGENT_MODEL=1` is set. You can override the list by defining `[[agents]]` entries or by specifying `agents = [ … ]` on a given `[[subagents.commands]]` entry. Consumer Gemini CLI is not a built-in default; add a custom `[[agents]]` block only when you intentionally rely on enterprise/API-key Gemini CLI access. Legacy Gemini-style agent selectors are treated as Google-family intent and resolve to `antigravity`, which still uses AGY's configured model.
 
+`code-gpt-5.4` is the GPT selector for tasks where correctness or very large context matters. In Every Code, GPT-5.4 defaults to the more expensive 1m-token context path (`context_mode = "auto"`) so preserving a large history, sweeping a broad repository, or recovering from a context-window failure works without extra setup. Use it when that context is worth the added cost; set `context_mode = "disabled"` to keep GPT-5.4 on its standard context window.
+
 ```toml
 [[subagents.commands]]
 name = "context"
@@ -914,6 +916,8 @@ show_raw_agent_reasoning = true  # defaults to false
 The size of the context window for the model, in tokens.
 
 In general, Code knows the context window for the most common OpenAI models, but if you are using a new model with an old version of the Code CLI, then you can use `model_context_window` to tell Code what value to use to determine how much context is left during a conversation.
+
+For GPT-5.4, prefer `context_mode` over a manual `model_context_window` override. `context_mode = "auto"` is the default and expands GPT-5.4 to the 1m context path; `context_mode = "1m"` forces that same extended mode explicitly. Use `context_mode = "disabled"` for normal-cost GPT-5.4 sessions that should stay on the standard context window.
 
 ## model_max_output_tokens
 

@@ -123,7 +123,7 @@ const AGENT_MODEL_SPECS: &[AgentModelSpec] = &[
         read_only_args: CODE_GPT5_READ_ONLY,
         write_args: CODE_GPT5_WRITE,
         model_args: &["--model", "gpt-5.4"],
-        description: "Highest-capacity GPT option for tricky reasoning; use when correctness matters most.",
+        description: "Highest-capacity GPT option for tricky reasoning and large-context work. In Every Code, GPT-5.4 defaults to the expensive 1m context path, so use when correctness or history preservation is worth the added cost.",
         enabled_by_default: true,
         aliases: &[
             "gpt-5.4",
