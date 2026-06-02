@@ -466,6 +466,9 @@ impl AutoReviewRunStore {
                 || run.status == AutoReviewRunStatus::Superseded
                 || run.finding_count > 0
                 || !run.finding_digests.is_empty()
+                || run.error_class.is_some()
+                || run.error_summary.is_some()
+                || run.cancel_reason.is_some()
             {
                 continue;
             }
@@ -1059,7 +1062,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn supersede_by_fingerprint_omits_runs_with_findings() {
+    fn supersede_by_fingerprint_omits_runs_with_findings_and_errors() {
         let code_home = TempDir::new().unwrap();
         let repo = TempDir::new().unwrap();
         set_code_home(code_home.path());
@@ -1068,6 +1071,7 @@ mod tests {
         let new_id = Uuid::new_v4();
         let clean_id = Uuid::new_v4();
         let finding_id = Uuid::new_v4();
+        let failed_id = Uuid::new_v4();
 
         let mut clean = AutoReviewRun::new(clean_id, AutoReviewRunSource::Tui, 1);
         clean.diff_fingerprint = Some("diff:abc".to_string());
@@ -1079,6 +1083,13 @@ mod tests {
         finding.finding_count = 1;
         finding.mark_status(AutoReviewRunStatus::Completed, 4);
         store.upsert(finding).unwrap();
+
+        let mut failed = AutoReviewRun::new(failed_id, AutoReviewRunSource::Tui, 5);
+        failed.diff_fingerprint = Some("diff:abc".to_string());
+        failed.error_class = Some("exec".to_string());
+        failed.error_summary = Some("agent failed".to_string());
+        failed.mark_status(AutoReviewRunStatus::Failed, 6);
+        store.upsert(failed).unwrap();
 
         let changed = store
             .mark_superseded_by_fingerprint("diff:abc", new_id, 10)
@@ -1093,6 +1104,11 @@ mod tests {
         let finding = loaded.get(finding_id).unwrap();
         assert_eq!(finding.status, AutoReviewRunStatus::Completed);
         assert_eq!(finding.superseded_by, None);
+
+        let failed = loaded.get(failed_id).unwrap();
+        assert_eq!(failed.status, AutoReviewRunStatus::Failed);
+        assert_eq!(failed.superseded_by, None);
+        assert_eq!(failed.error_summary.as_deref(), Some("agent failed"));
     }
 
     #[test]
