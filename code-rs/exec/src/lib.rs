@@ -42,6 +42,13 @@ use code_core::protocol::Op;
 use code_core::protocol::ReviewOutputEvent;
 use code_core::protocol::ReviewRequest;
 use code_core::protocol::TaskCompleteEvent;
+use code_core::review_store::{
+    AutoReviewFreshness,
+    AutoReviewRun,
+    AutoReviewRunSource,
+    AutoReviewRunStatus,
+    AutoReviewRunStore,
+};
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
 use code_protocol::protocol::SessionSource;
@@ -55,12 +62,14 @@ use code_git_tooling::CreateGhostCommitOptions;
 use code_git_tooling::create_ghost_commit;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::collections::HashMap;
 use std::backtrace::Backtrace;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Once;
+use std::time::{SystemTime, UNIX_EPOCH};
 use supports_color::Stream;
 use tokio::time::{Duration, Instant};
 use tracing::debug;
@@ -99,6 +108,7 @@ use code_core::timeboxed_exec_guidance::{
 /// How long exec waits after task completion before sending Shutdown when Auto Review
 /// may be about to start. Guarded so sub-agents are not delayed.
 const AUTO_REVIEW_SHUTDOWN_GRACE_MS: u64 = 1_500;
+const AUTO_REVIEW_STALE_SECS: u64 = 5 * 60;
 const REVIEW_SCOPE_MAX_LISTED_PATHS: usize = 120;
 const REVIEW_SCOPE_EXCLUDED_PREFIXES: [&str; 5] = [
     "codex-rs/",
@@ -1700,16 +1710,19 @@ struct AutoReviewCompletion {
 struct AutoReviewTracker {
     running: HashSet<String>,
     processed: HashSet<String>,
+    run_ids: HashMap<String, uuid::Uuid>,
     git_root: PathBuf,
 }
 
 impl AutoReviewTracker {
     fn new(cwd: &Path) -> Self {
         let git_root = get_git_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+        reconcile_auto_review_store_after_restart(&git_root);
 
         Self {
             running: HashSet::new(),
             processed: HashSet::new(),
+            run_ids: HashMap::new(),
             git_root,
         }
     }
@@ -1723,6 +1736,15 @@ impl AutoReviewTracker {
             }
 
             let status = agent.status.to_ascii_lowercase();
+            let run_id = if let Some(run_id) = self.run_ids.get(&agent.id).copied() {
+                run_id
+            } else {
+                let run_id = find_existing_auto_review_run_id(&self.git_root, &agent.id)
+                    .unwrap_or_else(uuid::Uuid::new_v4);
+                self.run_ids.insert(agent.id.clone(), run_id);
+                run_id
+            };
+            self.record_agent_status(run_id, agent, status.as_str());
             if status == "pending" || status == "running" {
                 self.running.insert(agent.id.clone());
                 continue;
@@ -1759,9 +1781,169 @@ impl AutoReviewTracker {
         completions
     }
 
+    fn record_agent_status(
+        &self,
+        run_id: uuid::Uuid,
+        agent: &code_core::protocol::AgentInfo,
+        status: &str,
+    ) {
+        let now = unix_now_secs();
+        let mut store = match AutoReviewRunStore::open(&self.git_root) {
+            Ok(store) => store,
+            Err(err) => {
+                tracing::warn!(?err, run_id = %run_id, "failed to open exec auto-review run store");
+                return;
+            }
+        };
+
+        let durable_status = match status {
+            "completed" => AutoReviewRunStatus::Completed,
+            "failed" => AutoReviewRunStatus::Failed,
+            "cancelled" => AutoReviewRunStatus::Cancelled,
+            "running" => AutoReviewRunStatus::Reviewing,
+            _ => AutoReviewRunStatus::Pending,
+        };
+
+        let mut run = store
+            .get(run_id)
+            .cloned()
+            .unwrap_or_else(|| AutoReviewRun::new(run_id, AutoReviewRunSource::Exec, now));
+        run.source = AutoReviewRunSource::Exec;
+        run.agent_id = Some(agent.id.clone());
+        run.batch_id = agent.batch_id.clone().or_else(|| run.batch_id.clone());
+        run.branch = agent.batch_id.clone().or_else(|| run.branch.clone());
+        run.snapshot_commit = agent.worktree_base.clone().or_else(|| run.snapshot_commit.clone());
+        run.owner_session_id = agent
+            .owner_session_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .or(run.owner_session_id);
+        run.model = agent.model.clone().or_else(|| run.model.clone());
+        run.token_count = agent.token_count.or(run.token_count);
+        run.freshness = if durable_status.is_terminal() {
+            AutoReviewFreshness::Current
+        } else if agent
+            .seconds_since_last_activity
+            .is_some_and(|seconds| seconds >= AUTO_REVIEW_STALE_SECS)
+        {
+            AutoReviewFreshness::Inactive
+        } else {
+            AutoReviewFreshness::Current
+        };
+        run.mark_status(durable_status, now);
+        if !durable_status.is_terminal() || agent.last_activity_at.is_some() {
+            run.mark_activity(now);
+        }
+        if let Some(error) = agent.error.as_deref() {
+            run.error_summary = Some(summarize_auto_review_error(error));
+        }
+        if durable_status.is_terminal()
+            && let Some(raw_result) = agent.result.as_deref()
+        {
+            let summary = parse_auto_review_summary(raw_result);
+            if summary.has_findings {
+                run.finding_count = summary.findings.max(1);
+            }
+            run.summary_digest = summary
+                .summary
+                .as_deref()
+                .map(|summary| summarize_auto_review_text(summary, 240))
+                .or(run.summary_digest);
+        }
+
+        if let Err(err) = store.upsert(run) {
+            tracing::warn!(?err, run_id = %run_id, "failed to persist exec auto-review run");
+            return;
+        }
+
+        if durable_status == AutoReviewRunStatus::Completed
+            && let Some(output) = parse_auto_review_output(agent.result.as_deref())
+        {
+            match AutoReviewRunStore::open(&self.git_root) {
+                Ok(mut store) => {
+                    if let Err(err) = store.write_output(run_id, &output) {
+                        tracing::warn!(?err, run_id = %run_id, "failed to persist exec auto-review output");
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(?err, run_id = %run_id, "failed to open exec auto-review store for output");
+                }
+            }
+        }
+    }
+
     fn is_running(&self) -> bool {
         !self.running.is_empty()
     }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn reconcile_auto_review_store_after_restart(git_root: &Path) {
+    let now = unix_now_secs();
+    match AutoReviewRunStore::open(git_root) {
+        Ok(mut store) => {
+            if let Err(err) = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), now) {
+                tracing::warn!(?err, "failed to reconcile exec auto-review run store after restart");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?err, "failed to open exec auto-review run store for restart reconciliation");
+        }
+    }
+}
+
+fn find_existing_auto_review_run_id(git_root: &Path, agent_id: &str) -> Option<uuid::Uuid> {
+    let store = AutoReviewRunStore::open(git_root).ok()?;
+    store
+        .runs()
+        .filter(|run| run.agent_id.as_deref() == Some(agent_id))
+        .max_by(|left, right| {
+            let left_in_flight = left.status.is_in_flight();
+            let right_in_flight = right.status.is_in_flight();
+            left_in_flight
+                .cmp(&right_in_flight)
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        })
+        .map(|run| run.run_id)
+}
+
+fn summarize_auto_review_error(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return "Auto review failed before producing findings.".to_string();
+    }
+    trimmed
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Auto review failed before producing findings.")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn summarize_auto_review_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let mut chars = trimmed.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return out;
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 fn emit_auto_review_completion(completion: &AutoReviewCompletion) {
@@ -1883,6 +2065,104 @@ fn parse_auto_review_summary(raw: &str) -> AutoReviewSummary {
         findings: 0,
         summary: Some(trimmed.to_string()),
     }
+}
+
+fn parse_auto_review_output(raw: Option<&str>) -> Option<ReviewOutputEvent> {
+    #[derive(serde::Deserialize)]
+    struct MultiRunReview {
+        #[serde(flatten)]
+        latest: ReviewOutputEvent,
+        #[serde(default)]
+        runs: Vec<ReviewOutputEvent>,
+    }
+
+    let text = raw?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(text) {
+        return wrapper.runs.last().cloned().or(Some(wrapper.latest));
+    }
+    if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(text) {
+        return Some(output);
+    }
+    if let Some(output) = extract_review_output_from_mixed_text(text) {
+        return Some(output);
+    }
+    if let Some(start) = text.find("```")
+        && let Some((body, _)) = text[start + 3..].split_once("```")
+    {
+        let candidate = body.trim_start_matches("json").trim();
+        if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
+            return Some(output);
+        }
+    }
+    None
+}
+
+fn extract_review_output_from_mixed_text(text: &str) -> Option<ReviewOutputEvent> {
+    #[derive(serde::Deserialize)]
+    struct MultiRunReview {
+        #[serde(flatten)]
+        latest: ReviewOutputEvent,
+        #[serde(default)]
+        runs: Vec<ReviewOutputEvent>,
+    }
+
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut object_start = None;
+    let mut best_match: Option<ReviewOutputEvent> = None;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if brace_depth == 0 {
+                    object_start = Some(idx);
+                }
+                brace_depth = brace_depth.saturating_add(1);
+            }
+            '}' => {
+                if brace_depth == 0 {
+                    continue;
+                }
+                brace_depth -= 1;
+                if brace_depth == 0
+                    && let Some(start) = object_start.take()
+                {
+                    let candidate = &text[start..=idx];
+                    if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(candidate) {
+                        best_match = wrapper.runs.last().cloned().or(Some(wrapper.latest));
+                        continue;
+                    }
+                    if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
+                        best_match = Some(output);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    best_match
 }
 
 fn summary_from_runs(outputs: &[ReviewOutputEvent]) -> AutoReviewSummary {

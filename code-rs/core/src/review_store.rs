@@ -14,6 +14,8 @@ const RUNS_FILENAME: &str = "runs.json";
 const OUTPUTS_DIR: &str = "outputs";
 const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MAX_RUNS: usize = 500;
+const MAX_FINDING_DIGESTS: usize = 25;
+const MAX_FINDING_DIGEST_TITLE_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +137,8 @@ pub struct AutoReviewRun {
     pub finding_count: usize,
     #[serde(default)]
     pub finding_digests: Vec<AutoReviewFindingDigest>,
+    #[serde(default)]
+    pub omitted_finding_digest_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,6 +187,7 @@ impl AutoReviewRun {
             token_count: None,
             finding_count: 0,
             finding_digests: Vec::new(),
+            omitted_finding_digest_count: 0,
             summary_digest: None,
             superseded_by: None,
             cancel_reason: None,
@@ -349,6 +354,10 @@ impl AutoReviewRunStore {
         run.output_path = Some(output_path.clone());
         run.finding_count = output.findings.len();
         run.finding_digests = finding_digests(output);
+        run.omitted_finding_digest_count = output
+            .findings
+            .len()
+            .saturating_sub(run.finding_digests.len());
         run.summary_digest = summarize(&output.overall_explanation, 240);
         self.save()?;
         Ok(output_path)
@@ -447,11 +456,12 @@ fn finding_digests(output: &ReviewOutputEvent) -> Vec<AutoReviewFindingDigest> {
     output
         .findings
         .iter()
+        .take(MAX_FINDING_DIGESTS)
         .enumerate()
         .map(|(idx, finding)| AutoReviewFindingDigest {
             finding_id: format!("f{}", idx + 1),
             priority: finding.priority,
-            title: finding.title.clone(),
+            title: summarize(&finding.title, MAX_FINDING_DIGEST_TITLE_CHARS).unwrap_or_default(),
             path: Some(finding.code_location.absolute_file_path.clone()),
             line_start: Some(finding.code_location.line_range.start),
             line_end: Some(finding.code_location.line_range.end),
