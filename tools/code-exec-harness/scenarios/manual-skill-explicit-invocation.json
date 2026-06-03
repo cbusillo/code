@@ -3,8 +3,8 @@
   "model": "gpt-5.1-codex",
   "prompt": "Use $manual-skill and reply with exactly: ok",
   "files": {
-    ".codex/skills/implicit/SKILL.md": "---\nname: implicit-skill\ndescription: Implicit skill\n---\nUse the implicit skill.\n",
-    ".codex/skills/manual/SKILL.md": "---\nname: manual-skill\ndescription: Manual skill\npolicy:\n  allow_implicit_invocation: false\n---\nMANUAL_SKILL_BODY_MARKER\n",
+    ".code/skills/implicit/SKILL.md": "---\nname: implicit-skill\ndescription: Implicit skill\n---\nUse the implicit skill.\n",
+    ".code/skills/manual/SKILL.md": "---\nname: manual-skill\ndescription: Manual skill\npolicy:\n  allow_implicit_invocation: false\n---\nMANUAL_SKILL_BODY_MARKER\n",
     "README.md": "# Manual skill invocation fixture\n"
   },
   "responses_api": {

@@ -10,20 +10,20 @@ from pathlib import Path
 _NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
-def get_codex_home() -> Path:
-    """Return CODEX_HOME if set, else ~/.codex."""
-    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+def get_code_home() -> Path:
+    """Return CODE_HOME, falling back to CODEX_HOME or ~/.code."""
+    return Path(os.environ.get("CODE_HOME", os.environ.get("CODEX_HOME", "~/.code"))).expanduser()
 
 
 def get_plans_dir() -> Path:
-    return get_codex_home() / "plans"
+    return get_code_home() / "plans"
 
 
 def validate_plan_name(name: str) -> None:
     if not name or not _NAME_RE.match(name):
         raise ValueError(
             "Invalid plan name. Use short, lower-case, hyphen-delimited names "
-            "(e.g., codex-rate-limit-overview)."
+            "(e.g., code-rate-limit-overview)."
         )
 
 

@@ -86,7 +86,7 @@ def import_iterm2() -> Any:
             Advice(
                 summary="The helper needs the iTerm2 Python SDK to list and capture sessions.",
                 action="Advise the user to run this script through uv so PEP 723 dependencies are installed automatically.",
-                install="uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py list",
+                install="uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py list",
             ),
         ) from exc
     return iterm2
@@ -103,7 +103,7 @@ def import_quartz() -> tuple[Any, int, int]:
             Advice(
                 summary="Window-id screenshots need pyobjc Quartz bindings.",
                 action="Advise the user to run this script through uv so PEP 723 dependencies are installed automatically.",
-                install="uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py windows",
+                install="uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py windows",
             ),
         ) from exc
     return CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
@@ -224,7 +224,7 @@ async def run_with_iterm2(callback: Callable[[Any], Awaitable[T]]) -> T:
             f"iTerm2 SDK request failed: {exc}",
             Advice(
                 summary="The helper could not connect to iTerm2 through the Python SDK.",
-                action="Advise the user to ensure iTerm2 is running and enable iTerm2's Python API/Scripting support, then retry with uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py list.",
+                action="Advise the user to ensure iTerm2 is running and enable iTerm2's Python API/Scripting support, then retry with uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py list.",
             ),
         ) from exc
 
@@ -307,7 +307,7 @@ def command_screenshot(args: argparse.Namespace) -> int:
             Advice(
                 summary="The helper captures windows, not x/y rectangles by default.",
                 action="Advise the user to run the windows command, choose the intended iTerm2 window id, then rerun screenshot with --window-id.",
-                install="uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py windows",
+                install="uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py windows",
             ),
         )
     output_dir = Path(args.output_dir) if args.output_dir else default_capture_dir()

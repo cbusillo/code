@@ -171,14 +171,14 @@ The helper is read-only by default and supports these operations:
 
 - List iTerm2 windows, tabs, and sessions with stable identifiers and enough
   metadata to choose the intended Every Code session:
-  `uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py list`.
+  `uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py list`.
 - Capture one selected session's visible terminal contents.
-  `uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py text
+  `uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py text
 <session_id>`.
 - List visible iTerm2 macOS windows for screenshot window ids:
-  `uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py windows`.
+  `uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py windows`.
 - Capture one targeted macOS window:
-  `uv run .codex/skills/test-tui/scripts/iterm2_tui_visibility.py screenshot
+  `uv run .code/skills/test-tui/scripts/iterm2_tui_visibility.py screenshot
 <session_id> --window-id <window_id>`.
 - Label every capture with the source window/tab/session so closeout can say
   exactly what was inspected.

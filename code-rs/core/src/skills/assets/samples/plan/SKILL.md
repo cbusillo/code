@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Generate a plan for how an agent should accomplish a complex coding task. Use when a user asks for a plan, and optionally when they want to save, find, read, update, or delete plan files in $CODEX_HOME/plans (default ~/.codex/plans).
+description: Generate a plan for how an agent should accomplish a complex coding task. Use when a user asks for a plan, and optionally when they want to save, find, read, update, or delete plan files in $CODE_HOME/plans (default ~/.code/plans).
 metadata:
   short-description: Generate a plan for a complex task
 resources:
@@ -28,7 +28,7 @@ commands:
     purpose: List plan summaries.
 workflow_defaults:
   - name: save_location
-    value: $CODEX_HOME/plans or ~/.codex/plans
+    value: $CODE_HOME/plans or ~/.code/plans
     description: Keep plan files outside repository code.
 ---
 
@@ -44,7 +44,7 @@ This skill can also be used to draft codebase or system overviews.
 
 ## Core rules
 
-- Resolve the plans directory as `$CODEX_HOME/plans` or `~/.codex/plans` when `CODEX_HOME` is not set.
+- Resolve the plans directory as `$CODE_HOME/plans` or `~/.code/plans` when `CODE_HOME` is not set. Legacy `$CODEX_HOME` is still honored when `CODE_HOME` is unset.
 - Create the plans directory if it does not exist.
 - Never write to the repo; only read files to understand context.
 - Require frontmatter with **only** `name` and `description` (single-line values) for on-disk plans.

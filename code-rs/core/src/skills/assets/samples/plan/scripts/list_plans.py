@@ -10,7 +10,7 @@ from plan_utils import get_plans_dir, parse_frontmatter
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="List plan summaries from $CODEX_HOME/plans.")
+    parser = argparse.ArgumentParser(description="List plan summaries from $CODE_HOME/plans.")
     parser.add_argument("--query", help="Case-insensitive substring to filter name/description.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     args = parser.parse_args()
