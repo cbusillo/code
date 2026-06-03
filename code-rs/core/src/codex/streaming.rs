@@ -6,6 +6,7 @@ use super::exec::{
     maybe_run_with_user_profile,
 };
 use super::session::{
+    ActiveSessionWorktreeDecision,
     BackgroundExecState,
     FollowUpTurnAction,
     QueuedUserInput,
@@ -641,7 +642,7 @@ pub(super) async fn submission_loop(
 
                 // abort any current running session and clone its state
                 let old_session = sess.take();
-                let state = if let Some(sess_arc) = old_session.as_ref() {
+                let mut state = if let Some(sess_arc) = old_session.as_ref() {
                     sess_arc.mark_shutting_down();
                     sess_arc.notify_wait_interrupted(WaitInterruptReason::SessionAborted);
                     sess_arc.abort();
@@ -728,14 +729,24 @@ pub(super) async fn submission_loop(
                 let active_session_warning = active_session_registration
                     .as_ref()
                     .and_then(|registration| {
-                        crate::active_sessions::active_session_warning(&registration.conflicts)
+                        crate::active_sessions::active_session_warning(
+                            &config.code_home,
+                            &registration.conflicts,
+                        )
                     });
                 let active_session_model_notice = active_session_registration
                     .as_ref()
                     .and_then(|registration| {
-                        crate::active_sessions::active_session_model_notice(
+                        crate::active_sessions::active_session_conflict_notice(
+                            &config.code_home,
                             &registration.conflicts,
                         )
+                        .map(|notice| crate::active_sessions::ActiveSessionModelNotice {
+                            fingerprint: notice.fingerprint,
+                            message: notice.message,
+                            checkout_root: notice.checkout_root,
+                            suggested_worktree_path: notice.suggested_worktree_path,
+                        })
                     });
                 let active_session_guard =
                     active_session_registration.map(|registration| registration.guard);
@@ -819,6 +830,13 @@ pub(super) async fn submission_loop(
                     crate::skills::command_policy::SkillCommandPolicyRuntime::from_skills(
                         &session_skills,
                     );
+                if let Some(notice) = active_session_model_notice.as_ref() {
+                    state.active_session_write_gate_state.reset_for_pending(
+                        notice.fingerprint.clone(),
+                        notice.checkout_root.clone(),
+                        notice.suggested_worktree_path.clone(),
+                    );
+                }
                 let mut new_session = Arc::new(Session {
                     id: session_id,
                     client,
@@ -1581,6 +1599,7 @@ fn active_session_model_notice_for_request(
         }
         Ok(None) => {
             sess.active_session_notice_clear();
+            sess.active_session_write_gate_clear();
             None
         }
         Err(err) => {
@@ -4973,6 +4992,7 @@ async fn handle_function_call(
         }
         "update_plan" => handle_update_plan(sess, &ctx, arguments).await,
         "request_user_input" => handle_request_user_input(sess, &ctx, arguments).await,
+        "declare_worktree_decision" => handle_declare_worktree_decision(sess, &ctx, arguments).await,
         // agent tool
         "agent" => handle_agent_tool(sess, &ctx, arguments).await,
         // unified browser tool
@@ -5138,6 +5158,133 @@ async fn handle_request_user_input(
         call_id: ctx.call_id.clone(),
         output: FunctionCallOutputPayload {
             body: code_protocol::models::FunctionCallOutputBody::Text(content),
+            success: Some(true),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct DeclareWorktreeDecisionArgs {
+    decision: String,
+    path: Option<PathBuf>,
+    reason: Option<String>,
+}
+
+async fn handle_declare_worktree_decision(
+    sess: &Session,
+    ctx: &ToolCallCtx,
+    arguments: String,
+) -> ResponseInputItem {
+    let args: DeclareWorktreeDecisionArgs = match serde_json::from_str(&arguments) {
+        Ok(args) => args,
+        Err(err) => {
+            return ResponseInputItem::FunctionCallOutput {
+                call_id: ctx.call_id.clone(),
+                output: FunctionCallOutputPayload {
+                    body: code_protocol::models::FunctionCallOutputBody::Text(format!(
+                        "invalid declare_worktree_decision arguments: {err}"
+                    )),
+                    success: Some(false),
+                },
+            };
+        }
+    };
+
+    let Some(notice) = active_session_write_gate_notice(sess) else {
+        sess.active_session_write_gate_clear();
+        return ResponseInputItem::FunctionCallOutput {
+            call_id: ctx.call_id.clone(),
+            output: FunctionCallOutputPayload {
+                body: code_protocol::models::FunctionCallOutputBody::Text(
+                    "No concurrent checkout write session is currently active; no worktree decision is required."
+                        .to_string(),
+                ),
+                success: Some(true),
+            },
+        };
+    };
+
+    let checkout_root = normalize_for_containment(&notice.checkout_root)
+        .unwrap_or_else(|| notice.checkout_root.clone());
+    let decision = match args.decision.as_str() {
+        "use_worktree" => {
+            let selected = args.path.unwrap_or_else(|| notice.suggested_worktree_path.clone());
+            let selected_abs = if selected.is_absolute() {
+                selected
+            } else {
+                sess.get_cwd().join(selected)
+            };
+            let selected_norm = normalize_for_containment(&selected_abs).unwrap_or(selected_abs);
+            if path_within(&selected_norm, &checkout_root) {
+                return ResponseInputItem::FunctionCallOutput {
+                    call_id: ctx.call_id.clone(),
+                    output: FunctionCallOutputPayload {
+                        body: code_protocol::models::FunctionCallOutputBody::Text(format!(
+                            "declare_worktree_decision rejected: use_worktree path {} is still inside the conflicted checkout {}. Use an isolated worktree such as {}.",
+                            selected_norm.display(),
+                            checkout_root.display(),
+                            notice.suggested_worktree_path.display()
+                        )),
+                        success: Some(false),
+                    },
+                };
+            }
+            ActiveSessionWorktreeDecision::UseWorktree {
+                fingerprint: notice.fingerprint.clone(),
+                checkout_root: notice.checkout_root.clone(),
+                selected_worktree_path: selected_norm,
+            }
+        }
+        "stay_here" => {
+            let reason = args.reason.unwrap_or_default().trim().to_string();
+            if reason.len() < 8 {
+                return ResponseInputItem::FunctionCallOutput {
+                    call_id: ctx.call_id.clone(),
+                    output: FunctionCallOutputPayload {
+                        body: code_protocol::models::FunctionCallOutputBody::Text(
+                            "declare_worktree_decision rejected: stay_here requires a concrete reason."
+                                .to_string(),
+                        ),
+                        success: Some(false),
+                    },
+                };
+            }
+            ActiveSessionWorktreeDecision::StayHere {
+                fingerprint: notice.fingerprint.clone(),
+                checkout_root: notice.checkout_root.clone(),
+                reason,
+            }
+        }
+        other => {
+            return ResponseInputItem::FunctionCallOutput {
+                call_id: ctx.call_id.clone(),
+                output: FunctionCallOutputPayload {
+                    body: code_protocol::models::FunctionCallOutputBody::Text(format!(
+                        "declare_worktree_decision rejected: unknown decision {other:?}; use use_worktree or stay_here."
+                    )),
+                    success: Some(false),
+                },
+            };
+        }
+    };
+
+    let summary = match &decision {
+        ActiveSessionWorktreeDecision::UseWorktree { selected_worktree_path, .. } => {
+            format!("WORKTREE DECISION recorded: use isolated worktree {}.", selected_worktree_path.display())
+        }
+        ActiveSessionWorktreeDecision::StayHere { reason, .. } => {
+            format!("WORKTREE DECISION recorded: stay in checkout because {reason}.")
+        }
+        ActiveSessionWorktreeDecision::Unset | ActiveSessionWorktreeDecision::AwaitingDecision { .. } => {
+            "WORKTREE DECISION not recorded.".to_string()
+        }
+    };
+    sess.set_active_session_worktree_decision(decision);
+
+    ResponseInputItem::FunctionCallOutput {
+        call_id: ctx.call_id.clone(),
+        output: FunctionCallOutputPayload {
+            body: code_protocol::models::FunctionCallOutputBody::Text(summary),
             success: Some(true),
         },
     }
@@ -9960,6 +10107,289 @@ async fn command_guard_output(
     }
 }
 
+fn active_session_write_gate_notice(
+    sess: &Session,
+) -> Option<crate::active_sessions::ActiveSessionModelNotice> {
+    if !matches!(
+        sess.sandbox_policy,
+        SandboxPolicy::WorkspaceWrite { .. } | SandboxPolicy::DangerFullAccess
+    ) {
+        return None;
+    }
+
+    match crate::active_sessions::active_session_model_notice_for_current(
+        sess.client.code_home(),
+        &sess.cwd,
+        sess.session_uuid(),
+    ) {
+        Ok(Some(notice)) => Some(notice),
+        Ok(None) => sess.active_session_model_notice.clone(),
+        Err(err) => {
+            warn!("failed to refresh active session write gate notice: {err}");
+            sess.active_session_model_notice.clone()
+        }
+    }
+}
+
+fn active_session_write_gate_message(
+    notice: &crate::active_sessions::ActiveSessionModelNotice,
+    operation: &str,
+) -> String {
+    format!(
+        "Blocked {operation} because another write-capable Every Code session is active in this checkout. Call `declare_worktree_decision` before editing: use `{{\"decision\":\"use_worktree\",\"path\":\"{suggested}\"}}` after creating/switching to that isolated worktree, or use `{{\"decision\":\"stay_here\",\"reason\":\"<concrete reason>\"}}` if this checkout must be edited. Linked worktrees do not automatically carry checkout-local setup such as .env files, virtualenvs, node_modules, local secrets, or generated files, so staying can be valid when that setup is required.",
+        suggested = notice.suggested_worktree_path.display(),
+    )
+}
+
+fn active_session_write_decision_allows(
+    decision: &ActiveSessionWorktreeDecision,
+    notice: &crate::active_sessions::ActiveSessionModelNotice,
+    cwd: &Path,
+) -> bool {
+    match decision {
+        ActiveSessionWorktreeDecision::StayHere { fingerprint, .. } => fingerprint == &notice.fingerprint,
+        ActiveSessionWorktreeDecision::UseWorktree {
+            fingerprint,
+            selected_worktree_path,
+            ..
+        } => {
+            if fingerprint != &notice.fingerprint {
+                return false;
+            }
+            let Some(cwd) = normalize_for_containment(cwd) else {
+                return false;
+            };
+            let selected = normalize_for_containment(selected_worktree_path)
+                .unwrap_or_else(|| selected_worktree_path.clone());
+            path_within(&cwd, &selected)
+        }
+        ActiveSessionWorktreeDecision::Unset
+        | ActiveSessionWorktreeDecision::AwaitingDecision { .. } => false,
+    }
+}
+
+fn active_session_apply_patch_decision_allows(
+    decision: &ActiveSessionWorktreeDecision,
+    notice: &crate::active_sessions::ActiveSessionModelNotice,
+    action: &ApplyPatchAction,
+) -> bool {
+    match decision {
+        ActiveSessionWorktreeDecision::StayHere { fingerprint, .. } => fingerprint == &notice.fingerprint,
+        ActiveSessionWorktreeDecision::UseWorktree {
+            fingerprint,
+            selected_worktree_path,
+            ..
+        } => {
+            if fingerprint != &notice.fingerprint {
+                return false;
+            }
+            let Some(cwd) = normalize_for_containment(&action.cwd) else {
+                return false;
+            };
+            let selected = normalize_for_containment(selected_worktree_path)
+                .unwrap_or_else(|| selected_worktree_path.clone());
+            if !path_within(&cwd, &selected) {
+                return false;
+            }
+
+            let Some(checkout_root) = normalize_for_containment(&notice.checkout_root) else {
+                return false;
+            };
+            !action.changes().keys().any(|path| {
+                normalize_for_containment(path)
+                    .as_ref()
+                    .is_some_and(|path| path_within(path, &checkout_root))
+            })
+        }
+        ActiveSessionWorktreeDecision::Unset
+        | ActiveSessionWorktreeDecision::AwaitingDecision { .. } => false,
+    }
+}
+
+fn active_session_gate_for_cwd(
+    notice: &crate::active_sessions::ActiveSessionModelNotice,
+    cwd: &Path,
+    operation: &str,
+) -> Option<String> {
+    let cwd = normalize_for_containment(cwd)?;
+    let checkout_root = normalize_for_containment(&notice.checkout_root)?;
+    if path_within(&cwd, &checkout_root) {
+        Some(active_session_write_gate_message(notice, operation))
+    } else {
+        None
+    }
+}
+
+fn active_session_gate_for_apply_patch(
+    notice: &crate::active_sessions::ActiveSessionModelNotice,
+    action: &ApplyPatchAction,
+) -> Option<String> {
+    let checkout_root = normalize_for_containment(&notice.checkout_root)?;
+    if normalize_for_containment(&action.cwd)
+        .as_ref()
+        .is_some_and(|cwd| path_within(cwd, &checkout_root))
+    {
+        return Some(active_session_write_gate_message(notice, "apply_patch"));
+    }
+
+    for path in action.changes().keys() {
+        if normalize_for_containment(path)
+            .as_ref()
+            .is_some_and(|path| path_within(path, &checkout_root))
+        {
+            return Some(active_session_write_gate_message(notice, "apply_patch"));
+        }
+    }
+
+    None
+}
+
+fn shell_script_is_likely_write(script: &str) -> bool {
+    let trimmed = script.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if script_contains_cat_write(trimmed) || script_contains_python_write(trimmed) {
+        return true;
+    }
+
+    if trimmed.contains('>') && !trimmed.contains("2>") {
+        return true;
+    }
+
+    if trimmed.contains("| tee ") || trimmed.starts_with("tee ") || trimmed.contains(" tee -a ") {
+        return true;
+    }
+
+    let normalized = trimmed.replace(['\n', ';', '&', '|'], " ");
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let token = tokens[idx].trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | '\'' | '"'));
+        if token.is_empty() || token.contains('=') && !token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if matches!(token, "env" | "sudo" | "command" | "time" | "nohup" | "nice") {
+            idx += 1;
+            continue;
+        }
+        let command = token.rsplit('/').next().unwrap_or(token);
+        if command == "git" {
+            let mut git_idx = idx + 1;
+            while git_idx < tokens.len() {
+                let arg = tokens[git_idx].trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | '\'' | '"'));
+                if matches!(arg, "-C" | "--git-dir" | "--work-tree" | "-c") {
+                    git_idx += 2;
+                    continue;
+                }
+                if arg.starts_with("--git-dir=") || arg.starts_with("--work-tree=") || arg.starts_with("-c") || arg.starts_with('-') {
+                    git_idx += 1;
+                    continue;
+                }
+                return matches!(
+                    arg,
+                    "add"
+                        | "am"
+                        | "apply"
+                        | "branch"
+                        | "checkout"
+                        | "cherry-pick"
+                        | "clean"
+                        | "commit"
+                        | "merge"
+                        | "mv"
+                        | "pull"
+                        | "push"
+                        | "rebase"
+                        | "reset"
+                        | "restore"
+                        | "revert"
+                        | "rm"
+                        | "stash"
+                        | "switch"
+                );
+            }
+            return false;
+        }
+
+        return command_is_obvious_write(command, tokens.get(idx + 1).copied());
+    }
+    false
+}
+
+fn command_is_obvious_write(command: &str, first_arg: Option<&str>) -> bool {
+    match command {
+        "apply_patch" | "touch" | "rm" | "mv" | "cp" | "mkdir" | "install" | "tee"
+        | "rustfmt" | "prettier" | "black" | "gofmt" => true,
+        "sed" => first_arg.is_some_and(|arg| arg == "-i" || arg.starts_with("-i")),
+        "perl" => first_arg.is_some_and(|arg| arg.contains('i')),
+        "ruff" => first_arg.is_some_and(|arg| matches!(arg, "format" | "check")),
+        "npm" | "pnpm" | "yarn" | "bun" => first_arg.is_some_and(|arg| {
+            matches!(
+                arg,
+                "add" | "install" | "i" | "remove" | "rm" | "update" | "upgrade"
+            )
+        }),
+        "cargo" => first_arg.is_some_and(|arg| matches!(arg, "fmt" | "fix")),
+        "go" => first_arg.is_some_and(|arg| matches!(arg, "fmt" | "mod" | "work" | "get")),
+        _ => false,
+    }
+}
+
+fn argv_command_is_obvious_write(argv: &[String]) -> bool {
+    let mut idx = 0usize;
+    while idx < argv.len() {
+        let token = argv[idx].trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | '\'' | '"'));
+        if token.is_empty() || token.contains('=') && !token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if matches!(token, "env" | "sudo" | "command" | "time" | "nohup" | "nice") {
+            idx += 1;
+            continue;
+        }
+        let command = token.rsplit('/').next().unwrap_or(token);
+        if command == "git" {
+            return false;
+        }
+        return command_is_obvious_write(command, argv.get(idx + 1).map(String::as_str));
+    }
+    false
+}
+
+fn argv_contains_direct_redirection(argv: &[String]) -> bool {
+    argv.iter().any(|token| {
+        let trimmed = token.trim_start();
+        (trimmed.starts_with('>') || trimmed.contains(" >") || trimmed.contains(" >>"))
+            && !trimmed.starts_with("2>")
+            && !trimmed.contains(" 2>")
+    })
+}
+
+fn argv_is_likely_write(argv: &[String]) -> bool {
+    if let Some((_, script)) = extract_shell_script(argv) {
+        if shell_script_is_likely_write(&script) {
+            return true;
+        }
+    }
+
+    if let Some(analysis) = analyze_command(argv) {
+        return analysis.disposition == DryRunDisposition::Mutating;
+    }
+
+    argv_contains_direct_redirection(argv) || argv_command_is_obvious_write(argv)
+}
+
+fn exec_params_is_likely_write(params: &ExecParams) -> bool {
+    params
+        .shell_script
+        .as_ref()
+        .is_some_and(|script| shell_script_is_likely_write(&script.command))
+        || argv_is_likely_write(&params.command)
+}
+
 async fn handle_container_exec_with_params(
     params: ExecParams,
     sess: &Session,
@@ -10600,6 +11030,24 @@ async fn handle_container_exec_with_params(
                 }
             }
 
+            if let Some(notice) = active_session_write_gate_notice(sess) {
+                if let Some(guidance) = active_session_gate_for_apply_patch(&notice, &action) {
+                    let decision = sess.active_session_worktree_decision();
+                    if !active_session_apply_patch_decision_allows(&decision, &notice, &action) {
+                        sess.active_session_write_gate_set_pending(&notice);
+                        return command_guard_output(
+                            sess,
+                            &sub_id,
+                            call_id,
+                            attempt_req,
+                            output_index,
+                            guidance,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             let changes = convert_apply_patch_to_protocol(&action);
             turn_diff_tracker.on_patch_begin(&changes);
 
@@ -10750,6 +11198,26 @@ async fn handle_container_exec_with_params(
             trace!("Failed to parse shell command, {error:?}");
         }
         MaybeApplyPatchVerified::NotApplyPatch => {}
+    }
+
+    if exec_params_is_likely_write(&params) {
+        if let Some(notice) = active_session_write_gate_notice(sess) {
+            if let Some(guidance) = active_session_gate_for_cwd(&notice, &params.cwd, "write command") {
+                let decision = sess.active_session_worktree_decision();
+                if !active_session_write_decision_allows(&decision, &notice, &params.cwd) {
+                    sess.active_session_write_gate_set_pending(&notice);
+                    return command_guard_output(
+                        sess,
+                        &sub_id,
+                        call_id,
+                        attempt_req,
+                        output_index,
+                        guidance,
+                    )
+                    .await;
+                }
+            }
+        }
     }
 
     let safety = {
@@ -13601,6 +14069,13 @@ fn normalize_absolute(path: &Path) -> Option<PathBuf> {
     }
 }
 
+fn normalize_for_containment(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return normalize_absolute(&canonical);
+    }
+    normalize_absolute(path)
+}
+
 fn path_within(path: &Path, base: &Path) -> bool {
     path.starts_with(base)
 }
@@ -13879,7 +14354,17 @@ fn guidance_for_redundant_cd(suggestion: &RedundantCdSuggestion) -> String {
 #[cfg(test)]
 mod command_guard_detection_tests {
     use super::*;
+    use crate::active_sessions::ActiveSessionModelNotice;
     use std::path::PathBuf;
+
+    fn notice() -> ActiveSessionModelNotice {
+        ActiveSessionModelNotice {
+            fingerprint: "fp-1".to_string(),
+            message: "notice".to_string(),
+            checkout_root: PathBuf::from("/repo"),
+            suggested_worktree_path: PathBuf::from("/worktrees/repo/task"),
+        }
+    }
 
     #[test]
     fn detects_shell_redundant_cd() {
@@ -13977,6 +14462,86 @@ mod command_guard_detection_tests {
         ];
 
         assert!(detect_cat_write(&argv).is_none());
+    }
+
+    #[test]
+    fn active_session_write_classifier_allows_read_only_commands() {
+        for argv in [
+            vec!["cargo".to_string(), "test".to_string()],
+            vec!["npm".to_string(), "test".to_string()],
+            vec!["git".to_string(), "status".to_string()],
+            vec!["bash".to_string(), "-lc".to_string(), "git status --short".to_string()],
+        ] {
+            assert!(!argv_is_likely_write(&argv), "{argv:?} should be read-only");
+        }
+    }
+
+    #[test]
+    fn active_session_write_classifier_flags_obvious_writes() {
+        for argv in [
+            vec!["cargo".to_string(), "fmt".to_string()],
+            vec!["npm".to_string(), "install".to_string()],
+            vec!["bash".to_string(), "-lc".to_string(), "echo hi > README.md".to_string()],
+            vec!["bash".to_string(), "-lc".to_string(), "echo changed > decision.txt".to_string()],
+            vec!["bash".to_string(), "-lc".to_string(), "git add README.md".to_string()],
+        ] {
+            assert!(argv_is_likely_write(&argv), "{argv:?} should be treated as a write");
+        }
+    }
+
+    #[test]
+    fn active_session_write_classifier_checks_deferred_shell_script() {
+        let params = ExecParams {
+            command: vec!["echo changed > decision.txt".to_string()],
+            shell_script: Some(crate::exec::DeferredShellScript {
+                command: "echo changed > decision.txt".to_string(),
+                use_login_shell: true,
+            }),
+            cwd: PathBuf::from("/repo"),
+            timeout_ms: None,
+            env: Default::default(),
+            with_escalated_permissions: None,
+            justification: None,
+        };
+
+        assert!(exec_params_is_likely_write(&params));
+    }
+
+    #[test]
+    fn active_session_decision_allows_stay_here_with_same_fingerprint() {
+        let notice = notice();
+        let decision = ActiveSessionWorktreeDecision::StayHere {
+            fingerprint: notice.fingerprint.clone(),
+            checkout_root: notice.checkout_root.clone(),
+            reason: "repo-local environment is required".to_string(),
+        };
+
+        assert!(active_session_write_decision_allows(
+            &decision,
+            &notice,
+            Path::new("/repo")
+        ));
+    }
+
+    #[test]
+    fn active_session_decision_requires_use_worktree_cwd() {
+        let notice = notice();
+        let decision = ActiveSessionWorktreeDecision::UseWorktree {
+            fingerprint: notice.fingerprint.clone(),
+            checkout_root: notice.checkout_root.clone(),
+            selected_worktree_path: notice.suggested_worktree_path.clone(),
+        };
+
+        assert!(active_session_write_decision_allows(
+            &decision,
+            &notice,
+            Path::new("/worktrees/repo/task/src")
+        ));
+        assert!(!active_session_write_decision_allows(
+            &decision,
+            &notice,
+            Path::new("/repo/src")
+        ));
     }
 
     #[test]

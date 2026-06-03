@@ -793,6 +793,51 @@ fn create_request_user_input_tool() -> OpenAiTool {
     })
 }
 
+fn create_declare_worktree_decision_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "decision".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Either use_worktree to move edits to an isolated worktree, or stay_here to intentionally edit this checkout.".to_string(),
+            ),
+            allowed_values: Some(vec!["use_worktree".to_string(), "stay_here".to_string()]),
+        },
+    );
+    properties.insert(
+        "path".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "For use_worktree, the selected worktree root path, preferably the suggested canonical path."
+                    .to_string(),
+            ),
+            allowed_values: None,
+        },
+    );
+    properties.insert(
+        "reason".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "For stay_here, a concrete reason this checkout should be edited instead of an isolated worktree."
+                    .to_string(),
+            ),
+            allowed_values: None,
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "declare_worktree_decision".to_string(),
+        description: "Record the required decision before editing a checkout that already has another write-capable Every Code session."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["decision".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_search_tool_bm25_tool() -> OpenAiTool {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -1248,6 +1293,7 @@ pub fn get_openai_tools(
     }
 
     tools.push(create_request_user_input_tool());
+    tools.push(create_declare_worktree_decision_tool());
     if config.search_tool {
         tools.push(create_search_tool_bm25_tool());
     }

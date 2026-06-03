@@ -52,6 +52,14 @@ pub struct ActiveSessionRegistration {
     pub conflicts: Vec<ActiveSessionRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSessionConflictNotice {
+    pub fingerprint: String,
+    pub message: String,
+    pub checkout_root: PathBuf,
+    pub suggested_worktree_path: PathBuf,
+}
+
 impl Drop for ActiveSessionGuard {
     fn drop(&mut self) {
         if let Err(err) = fs::remove_file(&self.path) {
@@ -117,26 +125,36 @@ pub fn register_if_write_capable(
     }))
 }
 
-pub fn active_session_warning(conflicts: &[ActiveSessionRecord]) -> Option<String> {
+pub fn active_session_warning(
+    code_home: &Path,
+    conflicts: &[ActiveSessionRecord],
+) -> Option<String> {
     let first = conflicts.first()?;
     let detail = format_session_detail(first);
     let root = first.checkout_root.display();
+    let suggested_path = suggested_worktree_path(code_home, first);
+    let suggested = suggested_path.display();
     if conflicts.len() == 1 {
         Some(format!(
-            "Another write-capable Every Code session is active in this checkout ({detail}) at {root}. Concurrent edits can conflict; Every Code will warn the model to prefer isolated work and avoid touching unrelated changes."
+            "Another write-capable Every Code session is active in this checkout ({detail}) at {root}. Concurrent edits can conflict. Read-only exploration is okay, but before editing files Every Code will require a visible choice to use an isolated worktree such as {suggested} or stay in this checkout with a reason."
         ))
     } else {
         Some(format!(
-            "{} other write-capable Every Code sessions are active in this checkout, including {detail}, at {root}. Concurrent edits can conflict; Every Code will warn the model to prefer isolated work and avoid touching unrelated changes.",
+            "{} other write-capable Every Code sessions are active in this checkout, including {detail}, at {root}. Concurrent edits can conflict. Read-only exploration is okay, but before editing files Every Code will require a visible choice to use an isolated worktree such as {suggested} or stay in this checkout with a reason.",
             conflicts.len()
         ))
     }
 }
 
-pub fn active_session_model_notice(conflicts: &[ActiveSessionRecord]) -> Option<String> {
+pub fn active_session_conflict_notice(
+    code_home: &Path,
+    conflicts: &[ActiveSessionRecord],
+) -> Option<ActiveSessionConflictNotice> {
     let first = conflicts.first()?;
     let detail = format_session_detail(first);
     let root = first.checkout_root.display();
+    let suggested = suggested_worktree_path(code_home, first);
+    let suggested_display = suggested.display();
     let subject = if conflicts.len() == 1 {
         "Another write-capable Every Code session is active in this checkout".to_string()
     } else {
@@ -146,9 +164,20 @@ pub fn active_session_model_notice(conflicts: &[ActiveSessionRecord]) -> Option<
         )
     };
 
-    Some(format!(
-        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Before editing files, either create/switch to an isolated git worktree for implementation work, or explicitly state why you are staying in this checkout. If you stay in this checkout, re-read target files immediately before editing and keep edits tightly scoped. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
-    ))
+    let message = format!(
+        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Read-only exploration is okay. Before editing files, call `declare_worktree_decision` to record a visible `WORKTREE DECISION`: either create/switch to the isolated worktree {suggested_display} and declare `use_worktree`, or declare `stay_here` with the concrete reason you are staying in this checkout. Linked worktrees do not automatically carry checkout-local setup such as .env files, virtualenvs, node_modules, local secrets, or generated files, so staying can be valid when that setup is required. If you stay, re-read target files immediately before editing and keep edits tightly scoped to this task. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
+    );
+    let fingerprint = conflicts
+        .iter()
+        .map(ActiveSessionRecord::fingerprint_component)
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(ActiveSessionConflictNotice {
+        fingerprint,
+        message,
+        checkout_root: first.checkout_root.clone(),
+        suggested_worktree_path: suggested,
+    })
 }
 
 pub fn active_session_model_notice_for_current(
@@ -169,14 +198,11 @@ pub fn active_session_model_notice_for_current(
         .filter(|candidate| candidate.mode == ActiveSessionMode::WriteCapable)
         .collect::<Vec<_>>();
     conflicts.sort_by_key(|record| (record.pid, record.session_id));
-    let fingerprint = conflicts
-        .iter()
-        .map(ActiveSessionRecord::fingerprint_component)
-        .collect::<Vec<_>>()
-        .join(",");
-    Ok(active_session_model_notice(&conflicts).map(|message| ActiveSessionModelNotice {
-        fingerprint,
-        message,
+    Ok(active_session_conflict_notice(code_home, &conflicts).map(|notice| ActiveSessionModelNotice {
+        fingerprint: notice.fingerprint,
+        message: notice.message,
+        checkout_root: notice.checkout_root,
+        suggested_worktree_path: notice.suggested_worktree_path,
     }))
 }
 
@@ -184,6 +210,51 @@ pub fn active_session_model_notice_for_current(
 pub struct ActiveSessionModelNotice {
     pub fingerprint: String,
     pub message: String,
+    pub checkout_root: PathBuf,
+    pub suggested_worktree_path: PathBuf,
+}
+
+pub fn suggested_worktree_path(code_home: &Path, record: &ActiveSessionRecord) -> PathBuf {
+    let repo_name = record
+        .checkout_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_path_component)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "repo".to_string());
+    let task = record
+        .branch
+        .as_deref()
+        .map(sanitize_path_component)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("session-{}", short_session_id(record.session_id)));
+    code_home.join("worktrees").join(repo_name).join(task)
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_dash = false;
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() { ch } else { '-' };
+        if mapped == '-' {
+            if last_was_dash {
+                continue;
+            }
+            last_was_dash = true;
+        } else {
+            last_was_dash = false;
+        }
+        result.push(mapped.to_ascii_lowercase());
+    }
+    result.trim_matches('-').to_string()
+}
+
+fn short_session_id(session_id: Uuid) -> String {
+    session_id
+        .to_string()
+        .chars()
+        .take(8)
+        .collect::<String>()
 }
 
 fn is_write_capable(sandbox_policy: &SandboxPolicy) -> bool {
@@ -347,7 +418,9 @@ mod tests {
 
         assert_eq!(second.conflicts.len(), 1);
         assert_eq!(second.conflicts[0].source, SessionSource::Cli);
-        assert!(active_session_warning(&second.conflicts).unwrap().contains("write-capable"));
+        let warning = active_session_warning(home.path(), &second.conflicts).unwrap();
+        assert!(warning.contains("write-capable"));
+        assert!(warning.contains("worktrees"));
     }
 
     #[test]
@@ -379,9 +452,15 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let notice = active_session_model_notice(&second.conflicts).unwrap();
+        let notice = active_session_conflict_notice(home.path(), &second.conflicts)
+            .unwrap()
+            .message;
         assert!(notice.contains("CONCURRENT CHECKOUT SESSION DETECTED"));
-        assert!(notice.contains("separate git worktree"));
+        assert!(notice.contains("WORKTREE DECISION"));
+        assert!(notice.contains("worktrees"));
+        assert!(notice.contains(".env"));
+        assert!(notice.contains("virtualenvs"));
+        assert!(notice.contains("node_modules"));
         assert!(notice.contains("re-read target files"));
         assert!(notice.contains("Do not revert, overwrite, stage"));
         assert!(notice.contains(repo.path().canonicalize().unwrap().to_string_lossy().as_ref()));
@@ -390,6 +469,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(refreshed.message, notice);
+        assert_eq!(
+            refreshed.suggested_worktree_path,
+            suggested_worktree_path(home.path(), &second.conflicts[0])
+        );
         assert!(refreshed.fingerprint.contains(&second.conflicts[0].session_id.to_string()));
     }
 
