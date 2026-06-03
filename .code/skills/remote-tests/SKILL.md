@@ -9,7 +9,7 @@ commands:
   - name: list-devboxes
     source: external
     example_argv: ["applied_devbox", "ls"]
-    purpose: List available devboxes before selecting one with code or codex in the name.
+    purpose: List available devboxes before selecting one with code in the name.
   - name: connect-devbox
     source: external
     example_argv: ["ssh", "<devbox_name>"]
@@ -19,7 +19,7 @@ workflow_defaults:
     value: CODEX_TEST_REMOTE_ENV
     description: Set when integration tests should use a remote executor.
   - name: remote_checkout
-    value: ~/code/codex
+    value: ~/code/code
     description: Reuse the devbox checkout and keep SHA and modified files in sync.
 ---
 
@@ -33,9 +33,9 @@ Docker container is built and initialized via ./scripts/test-remote-env.sh
 Currently running remote tests is only supported on Linux, so you need to use a
 devbox to run them.
 
-You can list devboxes via `applied_devbox ls`, pick the one with `code` or
-`codex` in the name.
+You can list devboxes via `applied_devbox ls`, pick the one with `code` in the
+name.
 Connect to devbox via `ssh <devbox_name>`.
-Reuse the same checkout in `~/code/codex`. Reset files if needed. Multiple
+Reuse the same checkout in `~/code/code`. Reset files if needed. Multiple
 checkouts take longer to build and take up more space.
 Check whether the SHA and modified files are in sync between remote and local.

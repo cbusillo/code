@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create or overwrite a plan markdown file in $CODEX_HOME/plans."""
+"""Create or overwrite a plan markdown file in $CODE_HOME/plans."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def read_body(args: argparse.Namespace) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Create a plan file under $CODEX_HOME/plans or ~/.codex/plans."
+        description="Create a plan file under $CODE_HOME/plans or ~/.code/plans."
     )
     parser.add_argument("--name", required=True, help="Plan name (lower-case, hyphen-delimited).")
     parser.add_argument("--description", required=True, help="Short plan description.")

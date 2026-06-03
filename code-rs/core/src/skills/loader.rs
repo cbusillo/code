@@ -159,8 +159,9 @@ enum SkillFrontmatterCommandPolicyPreferredKind {
 
 const SKILLS_FILENAME: &str = "SKILL.md";
 const SKILLS_DIR_NAME: &str = "skills";
+const CODE_DIR_NAME: &str = ".code";
 const AGENTS_DIR_NAME: &str = ".agents";
-const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
+const LEGACY_REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
 const ADMIN_SKILLS_ROOT: &str = "/etc/codex/skills";
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
@@ -339,10 +340,11 @@ fn dedupe_skill_roots_by_path(roots: &mut Vec<SkillRoot>) {
 fn skill_roots(config: &Config) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
+    roots.extend(repo_skills_roots_for_config_dir(&config.cwd, CODE_DIR_NAME));
     roots.extend(repo_skills_roots_for_config_dir(&config.cwd, AGENTS_DIR_NAME));
     roots.extend(repo_skills_roots_for_config_dir(
         &config.cwd,
-        REPO_ROOT_CONFIG_DIR_NAME,
+        LEGACY_REPO_ROOT_CONFIG_DIR_NAME,
     ));
 
     if let Some(home_root) = home_agents_skills_root() {
@@ -1020,6 +1022,7 @@ mod tests {
     use std::ffi::OsString;
     use std::process::Command;
 
+    const CODE_DIR_NAME: &str = ".code";
     const AGENTS_DIR_NAME: &str = ".agents";
 
     struct EnvVarGuard {
@@ -1909,7 +1912,39 @@ commands:
     }
 
     #[test]
-    fn loads_skills_from_agents_dir_without_codex_dir() {
+    fn loads_skills_from_code_dir_without_legacy_codex_dir() {
+        let code_home = tempfile::tempdir().expect("tempdir");
+        let repo_dir = tempfile::tempdir().expect("tempdir");
+        mark_as_git_repo(repo_dir.path());
+
+        let skill_path = write_skill_at(
+            &repo_dir.path().join(CODE_DIR_NAME).join(SKILLS_DIR_NAME),
+            "code",
+            "code-skill",
+            "from code",
+        );
+        let cfg = make_config_for_cwd(code_home.path(), repo_dir.path());
+
+        let outcome = load_skills(&cfg);
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert!(
+            outcome.skills.iter().any(|skill| {
+                skill.name == "code-skill"
+                    && skill.description == "from code"
+                    && skill.path == normalized(&skill_path)
+                    && skill.scope == SkillScope::Repo
+            }),
+            "expected repo .code skill in outcome: {:?}",
+            outcome.skills
+        );
+    }
+
+    #[test]
+    fn loads_skills_from_agents_dir_without_legacy_codex_dir() {
         let code_home = tempfile::tempdir().expect("tempdir");
         let repo_dir = tempfile::tempdir().expect("tempdir");
         mark_as_git_repo(repo_dir.path());
@@ -2129,7 +2164,7 @@ commands:
 
     #[test]
     #[serial_test::serial]
-    fn prefers_repo_agents_over_user_and_legacy_for_duplicate_name() {
+    fn prefers_repo_code_over_agents_user_and_legacy_for_duplicate_name() {
         let home_dir = tempfile::tempdir().expect("tempdir");
         let _home_guard = set_env_var("HOME", home_dir.path());
         let code_home = tempfile::tempdir().expect("tempdir");
@@ -2139,6 +2174,12 @@ commands:
         let nested_dir = repo_dir.path().join("nested/inner");
         fs::create_dir_all(&nested_dir).expect("create nested dir");
 
+        let repo_code_path = write_skill_at(
+            &repo_dir.path().join(CODE_DIR_NAME).join(SKILLS_DIR_NAME),
+            "dup",
+            "collision-skill",
+            "from repo code",
+        );
         let repo_agents_path = write_skill_at(
             &repo_dir.path().join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
             "dup",
@@ -2148,7 +2189,7 @@ commands:
         write_skill_at(
             &repo_dir
                 .path()
-                .join(REPO_ROOT_CONFIG_DIR_NAME)
+                .join(LEGACY_REPO_ROOT_CONFIG_DIR_NAME)
                 .join(SKILLS_DIR_NAME),
             "dup",
             "collision-skill",
@@ -2182,9 +2223,10 @@ commands:
             .filter(|skill| skill.name == "collision-skill")
             .collect();
         assert_eq!(matching.len(), 1, "expected one deduped collision skill");
-        assert_eq!(matching[0].description, "from repo agents");
+        assert_eq!(matching[0].description, "from repo code");
         assert_eq!(matching[0].scope, SkillScope::Repo);
-        assert_eq!(matching[0].path, normalized(&repo_agents_path));
+        assert_eq!(matching[0].path, normalized(&repo_code_path));
+        assert_ne!(matching[0].path, normalized(&repo_agents_path));
     }
 
     #[test]

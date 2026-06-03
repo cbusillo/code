@@ -29,8 +29,10 @@ default.
 ## Where skills live
 
 - Discovery roots (highest precedence first):
-  - Repo: `.agents/skills/**/SKILL.md` from the current working directory up to
+  - Repo: `.code/skills/**/SKILL.md` from the current working directory up to
     the repo root.
+  - Repo agents: `.agents/skills/**/SKILL.md` from the current working
+    directory up to the repo root.
   - Repo (legacy): `.codex/skills/**/SKILL.md` from the current working
     directory up to the repo root.
   - User agents: `$HOME/.agents/skills/**/SKILL.md`.
