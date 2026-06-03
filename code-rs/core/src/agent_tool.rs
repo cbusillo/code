@@ -475,7 +475,7 @@ const MAX_AGENT_PROGRESS_ENTRIES: usize = 96;
 const MAX_AGENT_PROGRESS_LINE_BYTES: usize = 2048;
 const MAX_AGENT_RESULT_BYTES: usize = 64 * 1024;
 const MAX_TRACKED_TERMINAL_AGENTS: usize = 512;
-const DEFAULT_CONTEXT_FILE_BUDGET_TOKENS: u64 = 100_000;
+const DEFAULT_CONTEXT_FILE_BUDGET_TOKENS: u64 = 16_000;
 const MAX_CONTEXT_FILE_BUDGET_TOKENS: u64 = 900_000;
 const CONTEXT_FILE_TOKEN_BYTES_ESTIMATE: u64 = 4;
 const AGENT_PROMPT_STDIN_THRESHOLD_BYTES: usize = 32 * 1024;
@@ -1893,7 +1893,7 @@ fn build_context_files_prompt(
         let byte_limit = context_budget_byte_limit(remaining_budget);
         if byte_len > byte_limit {
             return Err(format!(
-                "context file {} is {} bytes, above the remaining budget of {} estimated tokens ({} bytes max). Set context_budget_tokens high enough to launch this agent intentionally.",
+                "context file {} is {} bytes, above the remaining budget of {} estimated tokens ({} bytes max). context_files inline file contents into the agent prompt; set context_budget_tokens explicitly for intentional large-context launches, or use files for lightweight path hints. For strict one-shot rollout/model evaluation, prefer `code llm request --message-file`.",
                 canonical.display(),
                 byte_len,
                 remaining_budget,
@@ -1918,7 +1918,7 @@ fn build_context_files_prompt(
         total_tokens = total_tokens.saturating_add(estimated_tokens);
         if total_tokens > budget {
             return Err(format!(
-                "context_files estimated {total_tokens} tokens, above budget {budget}. Set context_budget_tokens high enough to launch this agent intentionally."
+                "context_files estimated {total_tokens} tokens, above budget {budget}. context_files inline file contents into the agent prompt; set context_budget_tokens explicitly for intentional large-context launches, or use files for lightweight path hints. For strict one-shot rollout/model evaluation, prefer `code llm request --message-file`."
             ));
         }
         entries.push((
@@ -3344,7 +3344,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 allowed_values: None,
             }),
             description: Some(
-                "Optional array of text file paths whose contents should be snapshotted and inlined into the spawned agent's initial prompt. Use sparingly for curated large context.".to_string(),
+                "Optional array of text file paths whose contents should be snapshotted and inlined into the spawned agent's initial prompt. Use sparingly for curated context; prefer files for path hints and code llm request --message-file for strict rollout/model evaluation.".to_string(),
             ),
         },
     );
@@ -3352,7 +3352,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
         "context_budget_tokens".to_string(),
         JsonSchema::Number {
             description: Some(
-                "Approximate token budget for inlined context_files. Defaults to 100000 and caps at 900000; set explicitly for expensive large-context launches.".to_string(),
+                "Approximate token budget for inlined context_files. Defaults to 16000 and caps at 900000; set explicitly for expensive large-context launches.".to_string(),
             ),
         },
     );
@@ -4033,6 +4033,47 @@ mod tests {
         .expect_err("budget should fail");
 
         assert!(err.contains("above the remaining budget"));
+    }
+
+    #[test]
+    fn context_files_default_budget_requires_explicit_large_launch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("rollout.txt"),
+            "x".repeat(((super::DEFAULT_CONTEXT_FILE_BUDGET_TOKENS + 1) * 4) as usize),
+        )
+        .expect("write context file");
+
+        let err = build_context_files_prompt(&["rollout.txt".to_string()], None, tmp.path())
+            .expect_err("implicit budget should fail for large context files");
+
+        assert!(err.contains("context_files inline file contents"));
+        assert!(err.contains("context_budget_tokens explicitly"));
+        assert!(err.contains("code llm request --message-file"));
+    }
+
+    #[test]
+    fn context_files_explicit_budget_allows_large_launch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("rollout.txt"),
+            "x".repeat(((super::DEFAULT_CONTEXT_FILE_BUDGET_TOKENS + 1) * 4) as usize),
+        )
+        .expect("write context file");
+
+        let prompt = build_context_files_prompt(
+            &["rollout.txt".to_string()],
+            Some(super::DEFAULT_CONTEXT_FILE_BUDGET_TOKENS + 1),
+            tmp.path(),
+        )
+        .expect("explicit budget should allow large context files")
+        .expect("prompt present");
+
+        assert_eq!(prompt.included_files, 1);
+        assert_eq!(
+            prompt.budget_tokens,
+            super::DEFAULT_CONTEXT_FILE_BUDGET_TOKENS + 1
+        );
     }
 
     #[test]
