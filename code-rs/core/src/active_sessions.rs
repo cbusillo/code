@@ -381,7 +381,7 @@ mod tests {
 
         let notice = active_session_model_notice(&second.conflicts).unwrap();
         assert!(notice.contains("CONCURRENT CHECKOUT SESSION DETECTED"));
-        assert!(notice.contains("separate git worktree"));
+        assert!(notice.contains("isolated git worktree"));
         assert!(notice.contains("re-read target files"));
         assert!(notice.contains("Do not revert, overwrite, stage"));
         assert!(notice.contains(repo.path().canonicalize().unwrap().to_string_lossy().as_ref()));
