@@ -172,6 +172,7 @@ pub(super) struct State {
     pub(super) last_turn_completed_at: Option<Instant>,
     pub(super) last_turn_prompt_counts: Option<TurnPromptCounts>,
     pub(super) active_session_notice_state: ActiveSessionNoticeState,
+    pub(super) active_session_write_gate_state: ActiveSessionWriteGateState,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -207,6 +208,72 @@ pub(super) struct ActiveSessionNoticeEmission {
     pub(super) fingerprint: String,
     pub(super) context_generation: u64,
     pub(super) submission_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ActiveSessionWriteGateState {
+    pub(super) decision: ActiveSessionWorktreeDecision,
+}
+
+impl ActiveSessionWriteGateState {
+    pub(super) fn reset_for_pending(
+        &mut self,
+        fingerprint: String,
+        checkout_root: PathBuf,
+        suggested_worktree_path: PathBuf,
+    ) {
+        if self.decision.fingerprint() == Some(fingerprint.as_str()) {
+            return;
+        }
+        self.decision = ActiveSessionWorktreeDecision::AwaitingDecision {
+            fingerprint,
+            checkout_root,
+            suggested_worktree_path,
+        };
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.decision = ActiveSessionWorktreeDecision::Unset;
+    }
+}
+
+impl Default for ActiveSessionWriteGateState {
+    fn default() -> Self {
+        Self {
+            decision: ActiveSessionWorktreeDecision::Unset,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ActiveSessionWorktreeDecision {
+    Unset,
+    AwaitingDecision {
+        fingerprint: String,
+        checkout_root: PathBuf,
+        suggested_worktree_path: PathBuf,
+    },
+    UseWorktree {
+        fingerprint: String,
+        checkout_root: PathBuf,
+        selected_worktree_path: PathBuf,
+    },
+    StayHere {
+        fingerprint: String,
+        checkout_root: PathBuf,
+        reason: String,
+    },
+}
+
+impl ActiveSessionWorktreeDecision {
+    pub(super) fn fingerprint(&self) -> Option<&str> {
+        match self {
+            Self::Unset => None,
+            Self::AwaitingDecision { fingerprint, .. }
+            | Self::UseWorktree { fingerprint, .. }
+            | Self::StayHere { fingerprint, .. } => Some(fingerprint),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -369,6 +436,7 @@ mod tests {
     use super::is_connectivity_error;
     use super::{
         ActiveSessionNoticeState,
+        ActiveSessionWorktreeDecision,
         ApprovedCommandMatchKind,
         ApprovedCommandPattern,
         FollowUpTurnAction,
@@ -378,6 +446,7 @@ mod tests {
     };
     use crate::error::CodexErr;
     use code_protocol::models::{ContentItem, ResponseInputItem};
+    use std::path::PathBuf;
 
     fn developer_input(text: &str) -> ResponseInputItem {
         ResponseInputItem::Message {
@@ -484,6 +553,11 @@ mod tests {
         assert!(state
             .active_session_notice_state
             .should_emit("pid-1", "turn-1"));
+        state.active_session_write_gate_state.reset_for_pending(
+            "pid-1".to_string(),
+            PathBuf::from("/repo"),
+            PathBuf::from("/worktrees/repo/task"),
+        );
 
         let mut cloned = state.partial_clone();
 
@@ -493,6 +567,14 @@ mod tests {
         assert!(cloned
             .active_session_notice_state
             .should_emit("pid-1", "turn-2"));
+        assert_eq!(
+            cloned.active_session_write_gate_state.decision,
+            ActiveSessionWorktreeDecision::AwaitingDecision {
+                fingerprint: "pid-1".to_string(),
+                checkout_root: PathBuf::from("/repo"),
+                suggested_worktree_path: PathBuf::from("/worktrees/repo/task"),
+            }
+        );
     }
 }
 
@@ -530,7 +612,7 @@ pub(crate) struct Session {
     pub(super) base_instructions: Option<String>,
     pub(super) user_instructions: Option<String>,
     pub(super) demo_developer_message: Option<String>,
-    pub(super) active_session_model_notice: Option<String>,
+    pub(super) active_session_model_notice: Option<crate::active_sessions::ActiveSessionModelNotice>,
     pub(super) compact_prompt_override: Option<String>,
     pub(super) approval_policy: AskForApproval,
     pub(super) sandbox_policy: SandboxPolicy,
@@ -1201,6 +1283,49 @@ impl Session {
             .clear();
     }
 
+    pub(super) fn active_session_write_gate_set_pending(
+        &self,
+        notice: &crate::active_sessions::ActiveSessionModelNotice,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .active_session_write_gate_state
+            .reset_for_pending(
+                notice.fingerprint.clone(),
+                notice.checkout_root.clone(),
+                notice.suggested_worktree_path.clone(),
+            );
+    }
+
+    pub(super) fn active_session_worktree_decision(&self) -> ActiveSessionWorktreeDecision {
+        self.state
+            .lock()
+            .unwrap()
+            .active_session_write_gate_state
+            .decision
+            .clone()
+    }
+
+    pub(super) fn set_active_session_worktree_decision(
+        &self,
+        decision: ActiveSessionWorktreeDecision,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .active_session_write_gate_state
+            .decision = decision;
+    }
+
+    pub(super) fn active_session_write_gate_clear(&self) {
+        self.state
+            .lock()
+            .unwrap()
+            .active_session_write_gate_state
+            .clear();
+    }
+
     pub fn remove_task(&self, sub_id: &str) {
         let mut state = self.state.lock().unwrap();
         if let Some(agent) = &state.current_task {
@@ -1442,7 +1567,10 @@ impl Session {
             base_instructions: self.base_instructions.clone(),
             user_instructions: self.user_instructions.clone(),
             demo_developer_message: self.demo_developer_message.clone(),
-            active_session_model_notice: self.active_session_model_notice.clone(),
+            active_session_model_notice: self
+                .active_session_model_notice
+                .as_ref()
+                .map(|notice| notice.message.clone()),
             compact_prompt_override: self.compact_prompt_override.clone(),
             approval_policy: self.approval_policy,
             sandbox_policy: self.sandbox_policy.clone(),
@@ -2746,6 +2874,7 @@ impl State {
             last_environment_snapshot: self.last_environment_snapshot.clone(),
             context_stream_ids: self.context_stream_ids.clone(),
             active_session_notice_state: self.active_session_notice_state.clone(),
+            active_session_write_gate_state: self.active_session_write_gate_state.clone(),
             ..Default::default()
         }
     }
