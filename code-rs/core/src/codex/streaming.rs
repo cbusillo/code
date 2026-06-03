@@ -10123,7 +10123,11 @@ fn active_session_write_gate_notice(
         sess.session_uuid(),
     ) {
         Ok(Some(notice)) => Some(notice),
-        Ok(None) => sess.active_session_model_notice.clone(),
+        Ok(None) => {
+            sess.active_session_notice_clear();
+            sess.active_session_write_gate_clear();
+            None
+        }
         Err(err) => {
             warn!("failed to refresh active session write gate notice: {err}");
             sess.active_session_model_notice.clone()
@@ -10192,13 +10196,10 @@ fn active_session_apply_patch_decision_allows(
                 return false;
             }
 
-            let Some(checkout_root) = normalize_for_containment(&notice.checkout_root) else {
-                return false;
-            };
-            !action.changes().keys().any(|path| {
+            action.changes().keys().all(|path| {
                 normalize_for_containment(path)
                     .as_ref()
-                    .is_some_and(|path| path_within(path, &checkout_root))
+                    .is_some_and(|path| path_within(path, &selected))
             })
         }
         ActiveSessionWorktreeDecision::Unset
@@ -14145,7 +14146,19 @@ fn python_code_writes_files(code: &str) -> bool {
 }
 
 fn contains_python_write_keywords(lower: &str) -> bool {
-    const KEYWORDS: &[&str] = &["write_text(", "write_bytes(", ".write_text(", ".write_bytes("];
+    const KEYWORDS: &[&str] = &[
+        "write_text(",
+        "write_bytes(",
+        ".write_text(",
+        ".write_bytes(",
+    ];
+    if (lower.contains("open(") || lower.contains(".open("))
+        && ["'w'", "\"w\"", "'a'", "\"a\"", "'x'", "\"x\"", "'w+", "\"w+", "'a+", "\"a+"]
+            .iter()
+            .any(|mode| lower.contains(mode))
+    {
+        return true;
+    }
     KEYWORDS.iter().any(|needle| lower.contains(needle))
 }
 
@@ -14355,6 +14368,7 @@ fn guidance_for_redundant_cd(suggestion: &RedundantCdSuggestion) -> String {
 mod command_guard_detection_tests {
     use super::*;
     use crate::active_sessions::ActiveSessionModelNotice;
+    use code_apply_patch::maybe_parse_apply_patch_verified;
     use std::path::PathBuf;
 
     fn notice() -> ActiveSessionModelNotice {
@@ -14541,6 +14555,76 @@ mod command_guard_detection_tests {
             &decision,
             &notice,
             Path::new("/repo/src")
+        ));
+    }
+
+    #[test]
+    fn active_session_apply_patch_use_worktree_requires_targets_inside_selected_worktree() {
+        let notice = notice();
+        let decision = ActiveSessionWorktreeDecision::UseWorktree {
+            fingerprint: notice.fingerprint.clone(),
+            checkout_root: notice.checkout_root.clone(),
+            selected_worktree_path: notice.suggested_worktree_path.clone(),
+        };
+
+        let inside = ApplyPatchAction::new_add_for_test(
+            Path::new("/worktrees/repo/task/src/lib.rs"),
+            "inside".to_string(),
+        );
+        assert!(active_session_apply_patch_decision_allows(
+            &decision,
+            &notice,
+            &inside
+        ));
+
+        let conflicted_checkout = ApplyPatchAction::new_add_for_test(
+            Path::new("/repo/src/lib.rs"),
+            "outside".to_string(),
+        );
+        assert!(!active_session_apply_patch_decision_allows(
+            &decision,
+            &notice,
+            &conflicted_checkout
+        ));
+
+        let unrelated_path = ApplyPatchAction::new_add_for_test(
+            Path::new("/tmp/elsewhere/lib.rs"),
+            "outside".to_string(),
+        );
+        assert!(!active_session_apply_patch_decision_allows(
+            &decision,
+            &notice,
+            &unrelated_path
+        ));
+    }
+
+    #[test]
+    fn active_session_apply_patch_use_worktree_rejects_mixed_target_patch() {
+        let notice = notice();
+        let decision = ActiveSessionWorktreeDecision::UseWorktree {
+            fingerprint: notice.fingerprint.clone(),
+            checkout_root: notice.checkout_root.clone(),
+            selected_worktree_path: notice.suggested_worktree_path.clone(),
+        };
+        let patch = r#"*** Begin Patch
+*** Add File: src/inside.rs
++inside
+*** Add File: /repo/src/outside.rs
++outside
+*** End Patch
+"#;
+        let action = match maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &notice.suggested_worktree_path,
+        ) {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected parsed patch, got {other:?}"),
+        };
+
+        assert!(!active_session_apply_patch_decision_allows(
+            &decision,
+            &notice,
+            &action
         ));
     }
 
