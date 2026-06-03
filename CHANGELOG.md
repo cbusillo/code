@@ -7,6 +7,20 @@
 
 - (none)
 
+## [0.6.114] - 2026-06-03
+
+- TUI: keep resumed conversations from duplicating assistant answers or losing final replies after history snapshots. (4db78b88, 1b4a5147, 50a01082, 3eea89d2)
+- TUI: restore Auto Review notices and lost findings across restarts, including cancelled and superseded runs. (474b72ef, 4ef4ccdb, fc3a26fc, 4414d74a)
+- TUI: show Auto Review currentness and stale metadata state in the footer while ignoring stale completions safely. (e0654c69, 6089956f, a763fff9, a3f832bc)
+- Core: add durable Auto Review run storage, lifecycle updates, compact ledger exposure, and safer persistence. (c0e3ea2f, ef374bef, 3b13724f, 85941c26)
+- Core: deduplicate Auto Review runs by diff fingerprint and keep duplicate skips pending for follow-up handling. (557be8a9, b8326658, dae7ad3b)
+- Agents: preload context files, require explicit large context budgets, and deliver large prompts reliably to built-in agents. (75f8f240, 990fbfce, 8a4f7d16, 8f83cd63, 25c207b8, 65c88660)
+- Agents: isolate Antigravity launch caches and route general sessions to the preferred account more consistently. (4e251c7f, 861ad123)
+- Auth/Updates: clean up active stored accounts on logout and limit self-updates to normalized direct binary installs. (dbb8cb70, 9982a8d7, 3315399e, 71507c5b)
+- Core: preserve exec stream offsets around UTF-8 truncation and require a visible worktree choice for same-checkout sessions. (d0e31dae, e0e749da, d33ae52a)
+- Core: clean managed worktrees after sessions while preserving review coordination and recovering broken reusable Auto Review worktrees. (c60068a7, 573e7583, 86987f5f)
+- Skills/Release: move repo skills under Code home and keep npm wrapper compatibility while version ownership moves to VERSION. (6087e135, d96d16c9, 0877493a)
+
 ## [0.6.113] - 2026-05-31
 
 - Skills: normalize command resource paths before validation so declared helper scripts resolve consistently across relative and absolute metadata forms. (132dec53)
