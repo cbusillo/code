@@ -55,7 +55,7 @@ The orchestrator fans out agents, waits for results, and merges reasoning accord
 }
 ```
 
-Large `context_files` launches are intentionally expensive. The runtime only inlines regular UTF-8 text files inside the workspace, estimates the inlined context size, defaults to a conservative budget, and fails fast unless `context_budget_tokens` is high enough. Use `code-gpt-5.4` for very large curated context; it is the built-in GPT path intended for 1m-context work.
+Large `context_files` launches are intentionally expensive. The runtime only inlines regular UTF-8 text files inside the workspace, estimates the inlined context size, defaults to a conservative budget, and fails fast unless `context_budget_tokens` is high enough. Use `code-gpt-5.4` for very large curated context; it is the built-in GPT path intended for 1m-context work. For strict one-shot rollout/model evaluation, prefer `code llm request --message-file` so the call stays out of agent mode.
 
 When you ask the Every Code agent to "ask agents" or gather dissent, it should prefer a small, diverse batch when the task benefits from multiple viewpoints and budget allows. A typical diverse batch includes GPT, Claude, and `antigravity` for the Google/Gemini-family perspective. Narrow mechanical work can use fewer agents; if an obvious family is skipped, the agent should briefly say why.
 
