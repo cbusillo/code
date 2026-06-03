@@ -2337,6 +2337,7 @@ pub(crate) struct ChatWidget<'a> {
     auto_review_status: Option<AutoReviewStatus>,
     auto_review_notice: Option<AutoReviewNotice>,
     deferred_auto_review_notice_lines: Option<Vec<String>>,
+    restart_lost_auto_review_notice_lines: Option<Vec<String>>,
     last_auto_review_failure: Option<AutoReviewFailureRecord>,
     auto_review_baseline: Option<GhostCommit>,
     auto_review_reviewed_marker: Option<GhostCommit>,
@@ -7617,6 +7618,7 @@ impl ChatWidget<'_> {
             auto_review_status: None,
             auto_review_notice: None,
             deferred_auto_review_notice_lines: None,
+            restart_lost_auto_review_notice_lines: None,
             last_auto_review_failure: None,
             auto_review_baseline: None,
             auto_review_reviewed_marker: None,
@@ -8012,6 +8014,7 @@ impl ChatWidget<'_> {
             auto_review_status: None,
             auto_review_notice: None,
             deferred_auto_review_notice_lines: None,
+            restart_lost_auto_review_notice_lines: None,
             last_auto_review_failure: None,
             auto_review_baseline: None,
             auto_review_reviewed_marker: None,
@@ -14165,6 +14168,7 @@ impl ChatWidget<'_> {
 
         running_tools::rehydrate(self);
         self.rehydrate_system_order_cache(&preserved_system_entries);
+        self.restore_pending_lost_auto_review_notice_after_snapshot_restore();
 
         self.bottom_pane
             .set_has_chat_history(!self.history_cells.is_empty());
@@ -33255,6 +33259,75 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn restart_reconciliation_notice_survives_resume_snapshot_restore() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        run.agent_id = Some("agent-lost".to_string());
+        run.changed_path_count = 1;
+        run.listed_paths = vec![PathBuf::from("code-rs/tui/src/chatwidget.rs")];
+        run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.mark_status(AutoReviewRunStatus::Reviewing, 2);
+        run.mark_activity(2);
+        AutoReviewRunStore::open(cwd.path())
+            .expect("open store")
+            .upsert(run)
+            .expect("insert run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.reconcile_auto_review_store_after_restart();
+
+        let snapshot = HistorySnapshot {
+            records: vec![HistoryRecord::PlainMessage(PlainMessageState {
+                id: HistoryId(1),
+                role: PlainMessageRole::Assistant,
+                kind: PlainMessageKind::Assistant,
+                header: None,
+                lines: vec![MessageLine {
+                    kind: MessageLineKind::Paragraph,
+                    spans: vec![InlineSpan {
+                        text: "restored assistant history".to_string(),
+                        tone: TextTone::Default,
+                        emphasis: TextEmphasis::default(),
+                        entity: None,
+                    }],
+                }],
+                metadata: None,
+            })],
+            next_id: 2,
+            exec_call_lookup: HashMap::new(),
+            tool_call_lookup: HashMap::new(),
+            stream_lookup: HashMap::new(),
+            order: vec![OrderKeySnapshot { req: 1, out: 0, seq: 0 }],
+            order_debug: Vec::new(),
+        };
+        chat.restore_history_snapshot(&snapshot);
+
+        assert!(chat.auto_review_notice.is_some());
+        let notice_text = chat
+            .history_cells
+            .iter()
+            .flat_map(|cell| cell.display_lines_trimmed())
+            .flat_map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(notice_text.contains("restored assistant history"));
+        assert!(notice_text.contains("Auto Review: lost after restart"));
+        assert!(notice_text.contains("code-rs/tui/src/chatwidget.rs"));
+        assert!(notice_text.contains("abcdef12"));
+    }
+
+    #[test]
     fn restart_reconciliation_keeps_existing_lost_notice_visible() {
         let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let code_home = tempfile::tempdir().expect("code home");
@@ -33342,6 +33415,8 @@ use code_core::protocol::OrderMeta;
             .join("\n");
         assert!(notice_text.contains("Auto Review: 2 runs lost after restart"));
         assert!(notice_text.contains("Latest scope:"));
+        assert!(notice_text.contains("code-rs/core/src/review_store.rs"));
+        assert!(!notice_text.contains("Latest scope: 1 changed path: code-rs/tui/src/chatwidget.rs"));
     }
 
     #[test]
@@ -42437,10 +42512,14 @@ impl ChatWidget<'_> {
     }
 
     fn restore_lost_auto_review_notice_after_restart(&mut self, store: &AutoReviewRunStore) {
-        let run_sort_time = |run: &AutoReviewRun| {
-            run.completed_at.or(run.last_activity_at).unwrap_or(run.updated_at)
+        let run_sort_time = |run: &AutoReviewRun| run.completed_at.unwrap_or(run.updated_at);
+        let lost_run_sort_time = |run: &AutoReviewRun| {
+            run.last_activity_at.or(run.started_at).unwrap_or(run.created_at)
         };
-        let Some(latest_run) = store.runs().max_by_key(|run| run_sort_time(run)) else {
+        let Some(latest_run) = store
+            .runs()
+            .max_by_key(|run| (run_sort_time(run), lost_run_sort_time(run), run.run_id))
+        else {
             return;
         };
         if latest_run.status != AutoReviewRunStatus::Lost
@@ -42468,7 +42547,17 @@ impl ChatWidget<'_> {
         if lost_count == 0 {
             return;
         }
-        let run = latest_run;
+        let Some(run) = store
+            .runs()
+            .filter(|run| {
+                run.status == AutoReviewRunStatus::Lost
+                    && run.cancel_reason.as_deref() == Some("agent_missing_after_restart")
+                    && latest_non_lost_time.is_none_or(|time| run_sort_time(run) >= time)
+            })
+            .max_by_key(|run| (lost_run_sort_time(run), run.run_id))
+        else {
+            return;
+        };
 
         let changed = if run.changed_path_count == 1 {
             "1 changed path".to_string()
@@ -42525,7 +42614,15 @@ impl ChatWidget<'_> {
             AutoReviewPhase::Reviewing,
             Some("lost after restart".to_string()),
         );
-        self.insert_auto_review_notice_lines(lines);
+        self.restart_lost_auto_review_notice_lines = Some(lines);
+        self.restore_pending_lost_auto_review_notice_after_snapshot_restore();
+    }
+
+    fn restore_pending_lost_auto_review_notice_after_snapshot_restore(&mut self) {
+        if let Some(lines) = self.restart_lost_auto_review_notice_lines.clone() {
+            self.auto_review_notice = None;
+            self.insert_auto_review_notice_lines(lines);
+        }
     }
 
     fn mark_auto_review_run_lost(
