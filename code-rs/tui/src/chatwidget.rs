@@ -33193,6 +33193,149 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn restart_reconciliation_surfaces_lost_auto_review_notice() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1);
+        run.agent_id = Some("agent-lost".to_string());
+        run.changed_path_count = 1;
+        run.listed_paths = vec![PathBuf::from("code-rs/tui/src/chatwidget.rs")];
+        run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.mark_status(AutoReviewRunStatus::Reviewing, 2);
+        run.mark_activity(2);
+        AutoReviewRunStore::open(cwd.path())
+            .expect("open store")
+            .upsert(run)
+            .expect("insert run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.reconcile_auto_review_store_after_restart();
+
+        let loaded = AutoReviewRunStore::open(cwd.path()).expect("reload store");
+        let run = loaded.get(run_id).expect("run loaded");
+        assert_eq!(run.status, AutoReviewRunStatus::Lost);
+        assert_eq!(run.cancel_reason.as_deref(), Some("agent_missing_after_restart"));
+        assert!(chat.auto_review_notice.is_some());
+        assert!(
+            chat.auto_review_status
+                .as_ref()
+                .is_some_and(|state| state.status == AutoReviewIndicatorStatus::Failed)
+        );
+
+        let notice_text = chat
+            .history_cells
+            .iter()
+            .flat_map(|cell| cell.display_lines_trimmed())
+            .flat_map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(notice_text.contains("Auto Review: lost after restart"));
+        assert!(notice_text.contains("code-rs/tui/src/chatwidget.rs"));
+        assert!(notice_text.contains("abcdef12"));
+    }
+
+    #[test]
+    fn restart_reconciliation_keeps_existing_lost_notice_visible() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        run.agent_id = Some("agent-lost".to_string());
+        run.changed_path_count = 1;
+        run.listed_paths = vec![PathBuf::from("code-rs/tui/src/chatwidget.rs")];
+        run.mark_status(AutoReviewRunStatus::Lost, 2);
+        run.freshness = AutoReviewFreshness::Lost;
+        run.cancel_reason = Some("agent_missing_after_restart".to_string());
+        AutoReviewRunStore::open(cwd.path())
+            .expect("open store")
+            .upsert(run)
+            .expect("insert run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.reconcile_auto_review_store_after_restart();
+
+        assert!(chat.auto_review_notice.is_some());
+        assert!(
+            chat.auto_review_status
+                .as_ref()
+                .is_some_and(|state| state.status == AutoReviewIndicatorStatus::Failed)
+        );
+
+        let notice_text = chat
+            .history_cells
+            .iter()
+            .flat_map(|cell| cell.display_lines_trimmed())
+            .flat_map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(notice_text.contains("Auto Review: lost after restart"));
+    }
+
+    #[test]
+    fn restart_reconciliation_counts_multiple_lost_auto_reviews() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let mut first = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        first.agent_id = Some("agent-lost-1".to_string());
+        first.changed_path_count = 1;
+        first.listed_paths = vec![PathBuf::from("code-rs/tui/src/chatwidget.rs")];
+        first.mark_status(AutoReviewRunStatus::Reviewing, 2);
+        first.mark_activity(2);
+        let mut second = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        second.agent_id = Some("agent-lost-2".to_string());
+        second.changed_path_count = 1;
+        second.listed_paths = vec![PathBuf::from("code-rs/core/src/review_store.rs")];
+        second.mark_status(AutoReviewRunStatus::Reviewing, 3);
+        second.mark_activity(3);
+        let mut store = AutoReviewRunStore::open(cwd.path()).expect("open store");
+        store.upsert(first).expect("insert first run");
+        store.upsert(second).expect("insert second run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.reconcile_auto_review_store_after_restart();
+
+        let notice_text = chat
+            .history_cells
+            .iter()
+            .flat_map(|cell| cell.display_lines_trimmed())
+            .flat_map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(notice_text.contains("Auto Review: 2 runs lost after restart"));
+        assert!(notice_text.contains("Latest scope:"));
+    }
+
+    #[test]
     fn auto_review_prompt_budget_uses_half_context_window() {
         assert_eq!(auto_review_prompt_token_budget("o3", None), Some(100_000));
         assert_eq!(
@@ -42015,18 +42158,115 @@ impl ChatWidget<'_> {
         }
     }
 
-    fn reconcile_auto_review_store_after_restart(&self) {
+    fn reconcile_auto_review_store_after_restart(&mut self) {
         let now = unix_now_secs();
         match AutoReviewRunStore::open(&self.config.cwd) {
             Ok(mut store) => {
-                if let Err(err) = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), now) {
-                    tracing::warn!(?err, "failed to reconcile auto-review run store after restart");
+                match store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), now) {
+                    Ok(_) => {
+                        self.restore_lost_auto_review_notice_after_restart(&store);
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, "failed to reconcile auto-review run store after restart");
+                    }
                 }
             }
             Err(err) => {
                 tracing::warn!(?err, "failed to open auto-review run store for restart reconciliation");
             }
         }
+    }
+
+    fn restore_lost_auto_review_notice_after_restart(&mut self, store: &AutoReviewRunStore) {
+        let run_sort_time = |run: &AutoReviewRun| {
+            run.completed_at.or(run.last_activity_at).unwrap_or(run.updated_at)
+        };
+        let Some(latest_run) = store.runs().max_by_key(|run| run_sort_time(run)) else {
+            return;
+        };
+        if latest_run.status != AutoReviewRunStatus::Lost
+            || latest_run.cancel_reason.as_deref() != Some("agent_missing_after_restart")
+        {
+            return;
+        }
+
+        let latest_non_lost_time = store
+            .runs()
+            .filter(|run| {
+                run.status != AutoReviewRunStatus::Lost
+                    || run.cancel_reason.as_deref() != Some("agent_missing_after_restart")
+            })
+            .map(run_sort_time)
+            .max();
+        let lost_count = store
+            .runs()
+            .filter(|run| {
+                run.status == AutoReviewRunStatus::Lost
+                    && run.cancel_reason.as_deref() == Some("agent_missing_after_restart")
+                    && latest_non_lost_time.is_none_or(|time| run_sort_time(run) >= time)
+            })
+            .count();
+        if lost_count == 0 {
+            return;
+        }
+        let run = latest_run;
+
+        let changed = if run.changed_path_count == 1 {
+            "1 changed path".to_string()
+        } else {
+            format!("{} changed paths", run.changed_path_count)
+        };
+        let scope = if run.listed_paths.is_empty() {
+            changed
+        } else {
+            let paths = run
+                .listed_paths
+                .iter()
+                .take(3)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let omitted = run.listed_paths.len().saturating_sub(3) + run.omitted_path_count;
+            if omitted > 0 {
+                format!("{changed}: {paths}, +{omitted} more")
+            } else {
+                format!("{changed}: {paths}")
+            }
+        };
+
+        let snapshot = run
+            .snapshot_commit
+            .as_deref()
+            .map(|commit| commit.chars().take(8).collect::<String>())
+            .filter(|commit| !commit.is_empty());
+        let mut lines = if lost_count == 1 {
+            vec!["Auto Review: lost after restart. [Ctrl+A] Show".to_string()]
+        } else {
+            vec![format!("Auto Review: {lost_count} runs lost after restart. [Ctrl+A] Show")]
+        };
+        let lost_subject = if lost_count == 1 {
+            "The in-flight local review agent was"
+        } else {
+            "In-flight local review agents were"
+        };
+        lines.push(format!(
+            "{lost_subject} not found after restart; rerun review before relying on this change."
+        ));
+        if !scope.trim().is_empty() {
+            let scope_label = if lost_count == 1 { "Scope" } else { "Latest scope" };
+            lines.push(format!("{scope_label}: {scope}"));
+        }
+        if let Some(snapshot) = snapshot {
+            lines.push(format!("Snapshot: {snapshot}"));
+        }
+
+        self.set_auto_review_indicator_with_detail(
+            AutoReviewIndicatorStatus::Failed,
+            None,
+            AutoReviewPhase::Reviewing,
+            Some("lost after restart".to_string()),
+        );
+        self.insert_auto_review_notice_lines(lines);
     }
 
     fn mark_auto_review_run_lost(
