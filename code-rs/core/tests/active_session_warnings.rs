@@ -196,7 +196,7 @@ async fn concurrent_checkout_notice_in_model_request_requires_visible_worktree_c
 
     let text = message_text(&input[notice_index]);
     assert!(text.contains("WORKTREE DECISION"));
-    assert!(text.contains("either create/switch to the isolated worktree"));
+    assert!(text.contains("either create/switch to the isolated git worktree"));
     assert!(text.contains("declare_worktree_decision"));
     assert!(text.contains("declare `stay_here` with the concrete reason"));
     assert!(text.contains(".env"));
