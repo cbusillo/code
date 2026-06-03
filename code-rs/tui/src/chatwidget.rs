@@ -1433,6 +1433,7 @@ struct AutoReviewStoreCompletion<'a> {
     run_id: Uuid,
     branch: &'a str,
     worktree_path: &'a std::path::Path,
+    terminal_status: AgentStatus,
     has_findings: bool,
     findings: usize,
     summary: Option<&'a str>,
@@ -1441,6 +1442,14 @@ struct AutoReviewStoreCompletion<'a> {
     snapshot: Option<&'a str>,
     owner_session_id: Option<Uuid>,
     output: Option<&'a ReviewOutputEvent>,
+}
+
+#[derive(Clone)]
+struct AutoReviewAgentPayload {
+    has_findings: bool,
+    findings: usize,
+    summary: Option<String>,
+    output: Option<ReviewOutputEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -35321,6 +35330,192 @@ use code_core::protocol::OrderMeta;
         );
     }
 
+    #[test]
+    fn cancelled_auto_review_preserves_progress_findings_in_ledger() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let run_id = uuid::Uuid::new_v4();
+        let mut store = AutoReviewRunStore::open(cwd.path()).expect("open store");
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .expect("seed run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let mut agent = completed_auto_review_agent(
+            "agent-1",
+            "auto-review-branch",
+            None,
+            Some("ghost123"),
+        );
+        agent.status = "cancelled".to_string();
+        agent.result = None;
+        agent.error = Some("Cancelled by user".to_string());
+        agent.last_progress = Some(auto_review_agent_result_json());
+
+        chat.observe_auto_review_status(&[agent]);
+
+        let loaded = AutoReviewRunStore::open(cwd.path()).expect("reload store");
+        let run = loaded.get(run_id).expect("run loaded");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+        assert_eq!(run.cancel_reason.as_deref(), Some("agent_cancelled"));
+        assert_eq!(run.finding_count, 1);
+        assert_eq!(run.summary_digest.as_deref(), Some("needs work"));
+        assert!(run.output_path.is_some(), "structured progress output should be persisted");
+        assert!(history_contains_text(chat, "Auto Review: cancelled"));
+        assert!(!history_contains_text(chat, "completed with no findings"));
+    }
+
+    #[test]
+    fn cancelled_auto_review_prefers_progress_findings_over_plain_result() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let run_id = uuid::Uuid::new_v4();
+        AutoReviewRunStore::open(cwd.path())
+            .expect("open store")
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .expect("seed run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let mut agent = completed_auto_review_agent(
+            "agent-1",
+            "auto-review-branch",
+            None,
+            Some("ghost123"),
+        );
+        agent.status = "cancelled".to_string();
+        agent.result = Some("Cancelled by user".to_string());
+        agent.error = Some("Cancelled by user".to_string());
+        agent.last_progress = Some(auto_review_agent_result_json());
+
+        chat.observe_auto_review_status(&[agent]);
+
+        let loaded = AutoReviewRunStore::open(cwd.path()).expect("reload store");
+        let run = loaded.get(run_id).expect("run loaded");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+        assert_eq!(run.finding_count, 1);
+        assert_eq!(run.summary_digest.as_deref(), Some("needs work"));
+        assert!(run.output_path.is_some());
+    }
+
+    #[test]
+    fn superseded_cancelled_auto_review_archives_findings_before_error() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let session_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(uuid::Uuid::new_v4());
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/current-wt"),
+            branch: "auto-review-current".to_string(),
+            agent_id: Some("agent-current".to_string()),
+            snapshot: Some("snap-current".to_string()),
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let mut agent = completed_auto_review_agent(
+            "agent-stale",
+            "auto-review-stale",
+            Some(session_id),
+            Some("snap-stale"),
+        );
+        agent.status = "cancelled".to_string();
+        agent.error = Some("Cancelled by user".to_string());
+
+        chat.observe_auto_review_status(&[agent]);
+
+        assert!(history_contains_text(chat, "Auto Review: superseded result archived"));
+        assert!(history_contains_text(chat, "1 issue(s) found"));
+        assert!(history_contains_text(chat, "needs work"));
+        assert!(!history_contains_text(chat, "Review failed during"));
+    }
+
+    #[test]
+    fn cancelled_auto_review_without_result_is_not_clean_completed() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let run_id = uuid::Uuid::new_v4();
+        AutoReviewRunStore::open(cwd.path())
+            .expect("open store")
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .expect("seed run");
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::from("/tmp/wt"),
+            branch: "auto-review-branch".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            snapshot: Some("ghost123".to_string()),
+            owner_session_id: None,
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let mut agent = completed_auto_review_agent(
+            "agent-1",
+            "auto-review-branch",
+            None,
+            Some("ghost123"),
+        );
+        agent.status = "cancelled".to_string();
+        agent.result = None;
+        agent.error = Some("Cancelled by user".to_string());
+        agent.last_progress = None;
+
+        chat.observe_auto_review_status(&[agent]);
+
+        let loaded = AutoReviewRunStore::open(cwd.path()).expect("reload store");
+        let run = loaded.get(run_id).expect("run loaded");
+        assert_eq!(run.status, AutoReviewRunStatus::Cancelled);
+        assert_eq!(run.finding_count, 0);
+        assert!(run.summary_digest.is_none());
+        assert!(history_contains_text(chat, "Auto Review: cancelled"));
+        assert!(!history_contains_text(chat, "completed with no findings"));
+    }
+
     fn auto_review_agent_result_json() -> String {
         r#"{
             "findings":[{"title":"bug","body":"details","confidence_score":0.5,"priority":1,"code_location":{"absolute_file_path":"src/lib.rs","line_range":{"start":1,"end":1}}}],
@@ -41695,6 +41890,7 @@ impl ChatWidget<'_> {
                             run_id,
                             branch: agent.batch_id.as_deref().unwrap_or_default(),
                             worktree_path: Path::new(""),
+                            terminal_status: AgentStatus::Completed,
                             has_findings: false,
                             findings: 0,
                             summary: Some("Auto review skipped: another auto review is already running."),
@@ -41805,8 +42001,12 @@ impl ChatWidget<'_> {
                 (worktree_path, branch, None)
             };
 
-            let (has_findings, findings, summary) = Self::parse_agent_review_result(agent.result.as_deref());
-            let output = Self::parse_agent_review_output(agent.result.as_deref());
+            let review_payload = Self::agent_review_payload_for_status(agent, status);
+            let (has_findings, findings, summary) = review_payload
+                .as_ref()
+                .map(|payload| (payload.has_findings, payload.findings, payload.summary.clone()))
+                .unwrap_or((false, 0, None));
+            let output = review_payload.as_ref().and_then(|payload| payload.output.as_ref());
             let owner_session_id = agent
                 .owner_session_id
                 .as_deref()
@@ -41844,6 +42044,7 @@ impl ChatWidget<'_> {
                     run_id,
                     branch: &branch,
                     worktree_path: &worktree_path,
+                    terminal_status: status,
                     has_findings,
                     findings,
                     summary: summary.as_deref(),
@@ -41851,10 +42052,10 @@ impl ChatWidget<'_> {
                     agent_id: Some(agent.id.as_str()),
                     snapshot: snapshot.as_deref(),
                     owner_session_id,
-                    output: output.as_ref(),
+                    output,
                 });
             }
-            self.on_background_review_finished(
+            self.on_background_review_finished_with_status(
                 worktree_path,
                 branch,
                 has_findings,
@@ -41864,12 +42065,70 @@ impl ChatWidget<'_> {
                 Some(agent.id.clone()),
                 snapshot,
                 owner_session_id,
+                status,
             );
         }
     }
 
     /// Parse the auto-review agent result to derive findings count and a concise summary.
     /// Tries to deserialize `ReviewOutputEvent` JSON (direct or fenced). Falls back to heuristics.
+    fn agent_review_payload_for_status(
+        agent: &code_core::protocol::AgentInfo,
+        status: AgentStatus,
+    ) -> Option<AutoReviewAgentPayload> {
+        let result_payload = agent
+            .result
+            .as_deref()
+            .and_then(Self::agent_review_payload_from_text);
+        if status != AgentStatus::Cancelled {
+            return result_payload;
+        }
+
+        let progress_payload = agent
+            .last_progress
+            .as_deref()
+            .and_then(Self::agent_review_payload_from_text);
+        match (result_payload, progress_payload) {
+            (Some(result), Some(progress)) => {
+                if Self::agent_review_payload_score(&progress) > Self::agent_review_payload_score(&result) {
+                    Some(progress)
+                } else {
+                    Some(result)
+                }
+            }
+            (Some(result), None) => Some(result),
+            (None, Some(progress)) => Some(progress),
+            (None, None) => None,
+        }
+    }
+
+    fn agent_review_payload_from_text(text: &str) -> Option<AutoReviewAgentPayload> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let (has_findings, findings, summary) = Self::parse_agent_review_result(Some(text));
+        let output = Self::parse_agent_review_output(Some(text));
+        Some(AutoReviewAgentPayload {
+            has_findings,
+            findings,
+            summary,
+            output,
+        })
+    }
+
+    fn agent_review_payload_score(payload: &AutoReviewAgentPayload) -> u8 {
+        if payload.output.is_some() {
+            return 3;
+        }
+        if payload.has_findings || payload.findings > 0 {
+            return 2;
+        }
+        if payload.summary.as_deref().is_some_and(|summary| !summary.trim().is_empty()) {
+            return 1;
+        }
+        0
+    }
+
     fn parse_agent_review_result(raw: Option<&str>) -> (bool, usize, Option<String>) {
         const MAX_AUTO_REVIEW_FALLBACK_SUMMARY_CHARS: usize = 280;
 
@@ -42399,6 +42658,14 @@ impl ChatWidget<'_> {
                 && run.cancel_reason.as_deref() == Some("duplicate_auto_review_scope")
             {
                 run.mark_status(AutoReviewRunStatus::Skipped, now);
+            } else if completion.terminal_status == AgentStatus::Cancelled {
+                run.cancel_reason = Some("agent_cancelled".to_string());
+                if let Some(error) = completion.error {
+                    let classification = Self::classify_auto_review_error(error);
+                    run.error_class = Some(classification.failure_class.to_string());
+                    run.error_summary = Some(Self::summarize_auto_review_error(error));
+                }
+                run.mark_status(AutoReviewRunStatus::Cancelled, now);
             } else if let Some(error) = completion.error {
                 let classification = Self::classify_auto_review_error(error);
                 run.error_class = Some(classification.failure_class.to_string());
@@ -42937,6 +43204,20 @@ impl ChatWidget<'_> {
         Vec::new()
     }
 
+    fn auto_review_cancelled_notice_lines(
+        summary: Option<&str>,
+        worktree_path: &std::path::Path,
+    ) -> Vec<String> {
+        let mut lines = vec!["Auto Review: cancelled. [Ctrl+A] Show".to_string()];
+        if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
+            lines.push(summary.to_string());
+        }
+        if !worktree_path.as_os_str().is_empty() {
+            lines.push(format!("Worktree: {}", worktree_path.display()));
+        }
+        lines
+    }
+
     fn auto_review_failure_notice_lines(
         classification: AutoReviewFailureClassification,
         summarized_error: &str,
@@ -43166,20 +43447,17 @@ impl ChatWidget<'_> {
             release_background_lock(&None);
         }
 
-        if let Some(error) = error {
+        if has_findings {
+            self.append_auto_review_historical_notice_lines(vec![
+                Self::auto_review_superseded_notice_line(snapshot, summary, findings.max(1)),
+            ]);
+        } else if let Some(error) = error {
             let summarized_error = Self::summarize_auto_review_error(error);
             let classification = Self::classify_auto_review_error(error);
             self.append_auto_review_historical_notice_lines(vec![format!(
                 "Auto Review: superseded result archived. Review failed during {}. {} [Ctrl+A] Show",
                 classification.phase, summarized_error
             )]);
-            return;
-        }
-
-        if has_findings {
-            self.append_auto_review_historical_notice_lines(vec![
-                Self::auto_review_superseded_notice_line(snapshot, summary, findings.max(1)),
-            ]);
         } else {
             tracing::debug!(
                 branch,
@@ -43254,6 +43532,7 @@ impl ChatWidget<'_> {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     pub(crate) fn on_background_review_finished(
         &mut self,
         worktree_path: std::path::PathBuf,
@@ -43269,7 +43548,7 @@ impl ChatWidget<'_> {
         let run_id = self
             .background_review_run_id
             .unwrap_or_else(Uuid::new_v4);
-        self.on_background_review_finished_for_run(
+        self.on_background_review_finished_for_run_with_status(
             run_id,
             worktree_path,
             branch,
@@ -43280,6 +43559,7 @@ impl ChatWidget<'_> {
             agent_id,
             snapshot,
             owner_session_id,
+            AgentStatus::Completed,
         );
     }
 
@@ -43295,6 +43575,66 @@ impl ChatWidget<'_> {
         agent_id: Option<String>,
         snapshot: Option<String>,
         owner_session_id: Option<Uuid>,
+    ) {
+        self.on_background_review_finished_for_run_with_status(
+            run_id,
+            worktree_path,
+            branch,
+            has_findings,
+            findings,
+            summary,
+            error,
+            agent_id,
+            snapshot,
+            owner_session_id,
+            AgentStatus::Completed,
+        );
+    }
+
+    fn on_background_review_finished_with_status(
+        &mut self,
+        worktree_path: std::path::PathBuf,
+        branch: String,
+        has_findings: bool,
+        findings: usize,
+        summary: Option<String>,
+        error: Option<String>,
+        agent_id: Option<String>,
+        snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
+        terminal_status: AgentStatus,
+    ) {
+        let run_id = self
+            .background_review_run_id
+            .unwrap_or_else(Uuid::new_v4);
+        self.on_background_review_finished_for_run_with_status(
+            run_id,
+            worktree_path,
+            branch,
+            has_findings,
+            findings,
+            summary,
+            error,
+            agent_id,
+            snapshot,
+            owner_session_id,
+            terminal_status,
+        );
+    }
+
+    fn on_background_review_finished_for_run_with_status(
+        &mut self,
+        run_id: Uuid,
+        worktree_path: std::path::PathBuf,
+        branch: String,
+        has_findings: bool,
+        findings: usize,
+        summary: Option<String>,
+        error: Option<String>,
+        agent_id: Option<String>,
+        snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
+        terminal_status: AgentStatus,
     ) {
         let foreground_active = self.foreground_activity_running_excluding_auto_review();
         let effective_findings = if has_findings {
@@ -43397,11 +43737,13 @@ impl ChatWidget<'_> {
         } else {
             resolved_worktree_path.display().to_string()
         };
-        let errored = error.is_some();
+        let cancelled = terminal_status == AgentStatus::Cancelled;
+        let errored = error.is_some() || cancelled;
         self.record_auto_review_completion_in_store(AutoReviewStoreCompletion {
             run_id,
             branch: &resolved_branch,
             worktree_path: &resolved_worktree_path,
+            terminal_status,
             has_findings,
             findings: effective_findings,
             summary: summary.as_deref(),
@@ -43420,7 +43762,23 @@ impl ChatWidget<'_> {
             )
         });
         let mut error_retryable = false;
-        let (indicator_status, developer_note, enqueue_post_turn_note, notice_lines) = if let Some(err) = error {
+        let (indicator_status, developer_note, enqueue_post_turn_note, notice_lines) = if cancelled {
+            self.last_auto_review_failure = None;
+            let summary_text = summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| error.as_deref().map(str::trim).filter(|value| !value.is_empty()));
+            let summary_line = summary_text.unwrap_or("No review result was captured before cancellation.");
+            (
+                AutoReviewIndicatorStatus::Failed,
+                Some(format!(
+                    "[developer] Background auto-review was cancelled.\n\nThis auto-review ran in an isolated git worktree and did not modify your current workspace. It is not a clean review result.\n\nWorktree: '{worktree_label}'\nWorktree path: {worktree_path_label}\n{snapshot_note}\n{agent_note}\nSummary: {summary_line}"
+                )),
+                false,
+                Self::auto_review_cancelled_notice_lines(summary_text, &resolved_worktree_path),
+            )
+        } else if let Some(err) = error {
             let summarized_error = Self::summarize_auto_review_error(&err);
             let classification = Self::classify_auto_review_error(&err);
             error_retryable = classification.retryable;
