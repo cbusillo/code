@@ -19,6 +19,7 @@ use ratatui::text::Line;
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
 static TEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
@@ -37,6 +38,8 @@ pub struct ChatWidgetHarness {
     chat: ChatWidget<'static>,
     events: Receiver<AppEvent>,
     helper_seq: u64,
+    _code_home: TempDir,
+    _cwd: TempDir,
 }
 
 // Use a deterministic Auto Drive placeholder so VT100 snapshots stay stable.
@@ -82,10 +85,16 @@ impl ChatWidgetHarness {
             std::env::set_var("CODE_TUI_TEST_MODE", "1");
         }
 
+        let code_home = TempDir::new().expect("temp code home");
+        let cwd = TempDir::new().expect("temp cwd");
+
         let cfg = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
-            ConfigOverrides::default(),
-            std::env::temp_dir(),
+            ConfigOverrides {
+                cwd: Some(cwd.path().to_path_buf()),
+                ..ConfigOverrides::default()
+            },
+            code_home.path().to_path_buf(),
         )
         .expect("config");
 
@@ -114,6 +123,8 @@ impl ChatWidgetHarness {
             chat,
             events: rx,
             helper_seq: 0,
+            _code_home: code_home,
+            _cwd: cwd,
         };
         harness.chat.auto_state.elapsed_override = Some(Duration::from_secs(1));
         harness
