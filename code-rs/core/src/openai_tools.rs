@@ -1605,6 +1605,15 @@ mod tests {
         }
     }
 
+    fn function_tool_named<'a>(tools: &'a [OpenAiTool], expected_name: &str) -> &'a OpenAiTool {
+        tools
+            .iter()
+            .find(|tool| {
+                matches!(tool, OpenAiTool::Function(ResponsesApiTool { name, .. }) if name == expected_name)
+            })
+            .unwrap_or_else(|| panic!("expected {expected_name} tool present"))
+    }
+
     #[test]
     fn test_get_openai_tools() {
         let model_family = find_family_for_model("codex-mini-latest")
@@ -1628,6 +1637,7 @@ mod tests {
                 "local_shell",
                 "update_plan",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -1794,6 +1804,7 @@ mod tests {
                 "local_shell",
                 "update_plan",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -1827,6 +1838,7 @@ mod tests {
                 "shell",
                 "update_plan",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -1859,6 +1871,7 @@ mod tests {
             &[
                 "shell_command",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -1930,6 +1943,7 @@ mod tests {
             &[
                 "shell",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -1942,7 +1956,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[9],
+            *function_tool_named(&tools, "test_server/do_something_cool"),
             OpenAiTool::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -2055,6 +2069,7 @@ mod tests {
                 "shell",
                 "image_view",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -2067,7 +2082,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[10],
+            *function_tool_named(&tools, "test_server/do_something_cool"),
             OpenAiTool::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -2182,6 +2197,7 @@ mod tests {
                 "shell",
                 "image_view",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -2194,7 +2210,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[10],
+            *function_tool_named(&tools, "dash/search"),
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -2258,6 +2274,7 @@ mod tests {
             &[
                 "shell",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -2335,6 +2352,7 @@ mod tests {
             &[
                 "shell",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -2346,7 +2364,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[9],
+            *function_tool_named(&tools, "dash/tags"),
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -2410,6 +2428,7 @@ mod tests {
             &[
                 "shell",
                 "request_user_input",
+                "declare_worktree_decision",
                 "browser",
                 "agent",
                 "wait",
@@ -2421,7 +2440,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[9],
+            *function_tool_named(&tools, "dash/value"),
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {
