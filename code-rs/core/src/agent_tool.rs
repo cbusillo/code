@@ -2693,12 +2693,19 @@ async fn execute_model_with_permissions(
         let program = resolve_program_path(use_current_exe, &command_for_spawn)?;
         let args = final_args.clone();
         let prompt_stdin_for_child = prompt_stdin.clone();
+        let launch_cwd = agent_launch_cwd(family, working_dir.clone(), orig_home.as_deref());
+        if family == "antigravity" && let Err(err) = std::fs::create_dir_all(&launch_cwd) {
+            return Err(format!(
+                "Failed to create agent launch directory {}: {err}",
+                launch_cwd.display()
+            ));
+        }
 
         let child_result: std::io::Result<tokio::process::Child> = crate::spawn::spawn_child_async(
             program.clone(),
             args.clone(),
             Some(program.to_string_lossy().as_ref()),
-            working_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))),
+            launch_cwd,
             &SandboxPolicy::DangerFullAccess,
             if prompt_stdin_for_child.is_some() {
                 StdioPolicy::RedirectForShellToolWithPipedStdin
@@ -2724,10 +2731,15 @@ async fn execute_model_with_permissions(
         // launch the npm shim on Windows (issue #497).
         let program = resolve_program_path(use_current_exe, &command_for_spawn)?;
         let mut cmd = Command::new(program);
-
-        if let Some(dir) = working_dir.clone() {
-            cmd.current_dir(dir);
+        let launch_cwd = agent_launch_cwd(family, working_dir.clone(), orig_home.as_deref());
+        if family == "antigravity" && let Err(err) = std::fs::create_dir_all(&launch_cwd) {
+            return Err(format!(
+                "Failed to create agent launch directory {}: {err}",
+                launch_cwd.display()
+            ));
         }
+
+        cmd.current_dir(launch_cwd);
 
         cmd.args(final_args.clone());
         if prompt_stdin.is_some() {
@@ -2914,6 +2926,28 @@ fn maybe_set_gemini_config_dir(env: &mut HashMap<String, String>, orig_home: Opt
             host_gem_cfg.to_string_lossy().to_string(),
         );
     }
+}
+
+fn antigravity_launch_dir(orig_home: Option<&str>) -> PathBuf {
+    crate::config::find_code_home()
+        .or_else(|_| {
+            orig_home
+                .map(|home| PathBuf::from(home).join(".code"))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"))
+        })
+        .unwrap_or_else(|_| std::env::temp_dir().join("code"))
+        .join("agent-cache")
+        .join("antigravity")
+}
+
+fn agent_launch_cwd(family: &str, working_dir: Option<PathBuf>, orig_home: Option<&str>) -> PathBuf {
+    if family == "antigravity" {
+        return antigravity_launch_dir(orig_home);
+    }
+
+    working_dir.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    })
 }
 
 pub(crate) fn should_use_current_exe_for_agent(
@@ -4890,6 +4924,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn antigravity_runs_from_private_launch_dir() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _reset_code_home = EnvReset::capture("CODE_HOME");
+        let _reset_home = EnvReset::capture("HOME");
+
+        let dir = tempdir().expect("tempdir");
+        let code_home = dir.path().join("code-home");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&code_home).expect("create code home");
+        std::fs::create_dir_all(&home).expect("create home");
+
+        unsafe {
+            std::env::set_var("CODE_HOME", &code_home);
+            std::env::set_var("HOME", &home);
+        }
+
+        let agy = script_path(dir.path(), "agy");
+        write_cwd_and_argv_script(&agy);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        let cfg = AgentConfig {
+            name: "antigravity".to_string(),
+            command: agy.display().to_string(),
+            args: Vec::new(),
+            read_only: true,
+            enabled: true,
+            description: None,
+            env: None,
+            args_read_only: None,
+            args_write: None,
+            instructions: None,
+        };
+
+        let output = execute_model_with_permissions(
+            "agent-test",
+            "antigravity",
+            "hello from agy",
+            true,
+            Some(workspace.clone()),
+            Some(cfg),
+            ReasoningEffort::Low,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("execute antigravity agent");
+
+        let expected_cwd = code_home
+            .join("agent-cache")
+            .join("antigravity")
+            .canonicalize()
+            .expect("canonical launch dir");
+        let expected_cwd_line = format!("cwd={}", expected_cwd.display());
+        let expected_args_line = format!(
+            "args=--add-dir|{}|-p|hello from agy",
+            workspace.to_str().expect("workspace path utf-8")
+        );
+        let mut lines = output.lines();
+        assert_eq!(lines.next(), Some(expected_cwd_line.as_str()));
+        assert_eq!(lines.next(), Some(expected_args_line.as_str()));
+    }
+
+    #[tokio::test]
     async fn gemini_selector_uses_antigravity_cli() {
         let _lock = env_lock().lock().expect("env lock");
         let _reset_path = EnvReset::capture("PATH");
@@ -5054,6 +5153,24 @@ mod tests {
     fn write_argv_script(path: &Path) {
         let script = "#!/bin/sh\nprintf '%s' \"$1\"\nshift\nfor arg in \"$@\"; do\n  printf '|%s' \"$arg\"\ndone\nprintf '\\n'\nexit 0\n";
         std::fs::write(path, script).expect("write argv script");
+        let mut perms = std::fs::metadata(path)
+            .expect("script metadata")
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn write_cwd_and_argv_script(path: &Path) {
+        let script = "@echo off\r\nsetlocal enabledelayedexpansion\r\necho cwd=%CD%\r\nset out=\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nif defined out (set out=!out!|%~1) else (set out=%~1)\r\nshift\r\ngoto loop\r\n:done\r\necho args=%out%\r\nexit /b 0\r\n";
+        std::fs::write(path, script).expect("write cwd argv cmd");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn write_cwd_and_argv_script(path: &Path) {
+        let script = "#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'args=%s' \"$1\"\nshift\nfor arg in \"$@\"; do\n  printf '|%s' \"$arg\"\ndone\nprintf '\\n'\nexit 0\n";
+        std::fs::write(path, script).expect("write cwd argv script");
         let mut perms = std::fs::metadata(path)
             .expect("script metadata")
             .permissions();
