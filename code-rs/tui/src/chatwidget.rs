@@ -34219,6 +34219,7 @@ use code_core::protocol::OrderMeta;
         let run_id = uuid::Uuid::new_v4();
         chat.session_id = Some(session_id);
         chat.background_review_run_id = Some(run_id);
+        chat.auto_review_reviewed_marker = None;
         chat.background_review = Some(BackgroundReviewState {
             worktree_path: PathBuf::new(),
             branch: String::new(),
@@ -35266,7 +35267,7 @@ use code_core::protocol::OrderMeta;
         chat.background_review = Some(BackgroundReviewState {
             worktree_path: PathBuf::from("/tmp/wt"),
             branch: "auto-review-branch".to_string(),
-            agent_id: None,
+            agent_id: Some("agent-1".to_string()),
             snapshot: Some("ghost123".to_string()),
             owner_session_id: None,
             base: None,
@@ -35296,7 +35297,7 @@ use code_core::protocol::OrderMeta;
             seconds_since_last_activity: None,
             source_kind: Some(AgentSourceKind::AutoReview),
             owner_session_id: None,
-            worktree_base: None,
+            worktree_base: Some("ghost123".to_string()),
         };
 
         chat.observe_auto_review_status(&[agent]);

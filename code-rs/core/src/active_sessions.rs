@@ -165,7 +165,7 @@ pub fn active_session_conflict_notice(
     };
 
     let message = format!(
-        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Read-only exploration is okay. Before editing files, call `declare_worktree_decision` to record a visible `WORKTREE DECISION`: either create/switch to the isolated worktree {suggested_display} and declare `use_worktree`, or declare `stay_here` with the concrete reason you are staying in this checkout. Linked worktrees do not automatically carry checkout-local setup such as .env files, virtualenvs, node_modules, local secrets, or generated files, so staying can be valid when that setup is required. If you stay, re-read target files immediately before editing and keep edits tightly scoped to this task. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
+        "CONCURRENT CHECKOUT SESSION DETECTED: {subject}, including {detail}, at {root}. Treat this checkout as concurrently edited. Read-only exploration is okay. Before editing files, call `declare_worktree_decision` to record a visible `WORKTREE DECISION`: either create/switch to the isolated git worktree {suggested_display} and declare `use_worktree`, or declare `stay_here` with the concrete reason you are staying in this checkout. Linked worktrees do not automatically carry checkout-local setup such as .env files, virtualenvs, node_modules, local secrets, or generated files, so staying can be valid when that setup is required. If you stay, re-read target files immediately before editing and keep edits tightly scoped to this task. Do not revert, overwrite, stage, or spend turns cataloging unrelated working-tree changes unless the user explicitly asks. Mention concurrent edits only when they affect the requested task."
     );
     let fingerprint = conflicts
         .iter()
@@ -457,6 +457,7 @@ mod tests {
             .message;
         assert!(notice.contains("CONCURRENT CHECKOUT SESSION DETECTED"));
         assert!(notice.contains("WORKTREE DECISION"));
+        assert!(notice.contains("isolated git worktree"));
         assert!(notice.contains("worktrees"));
         assert!(notice.contains(".env"));
         assert!(notice.contains("virtualenvs"));

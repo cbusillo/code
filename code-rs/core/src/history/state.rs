@@ -2599,6 +2599,17 @@ mod tests {
     }
 
     #[test]
+    fn exec_stream_partial_prune_keeps_utf8_boundary() {
+        let mut chunks = vec![ExecStreamChunk { offset: 0, content: "a😀b".to_string() }];
+
+        prune_exec_stream(&mut chunks, 2);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].offset, 5);
+        assert_eq!(chunks[0].content, "b");
+    }
+
+    #[test]
     fn exec_stream_overlap_truncates_on_utf8_boundary() {
         let mut chunks = vec![ExecStreamChunk { offset: 0, content: "abcé".to_string() }];
 
@@ -2648,6 +2659,46 @@ mod tests {
         assert_eq!(exec_record.stdout_chunks.len(), 1);
         assert_eq!(exec_record.stdout_chunks[0].offset, 0);
         assert_eq!(exec_record.stdout_chunks[0].content, "abcz");
+    }
+
+    #[test]
+    fn exec_stream_update_overlap_truncates_on_four_byte_utf8_boundary() {
+        let mut state = HistoryState::new();
+        let inserted_id = match state.apply_domain_event(HistoryDomainEvent::StartExec {
+            index: state.records.len(),
+            call_id: Some("call-utf8-overlap-four-byte".into()),
+            command: vec!["printf".into(), "a😀b".into()],
+            parsed: Vec::new(),
+            action: ExecAction::Run,
+            started_at: SystemTime::UNIX_EPOCH,
+            working_dir: None,
+            env: Vec::new(),
+            tags: Vec::new(),
+        }) {
+            HistoryMutation::Inserted { id, .. } => id,
+            other => panic!("unexpected mutation: {other:?}"),
+        };
+
+        let exec_index = state.index_of(inserted_id).expect("exec index present");
+        state.apply_domain_event(HistoryDomainEvent::UpdateExecStream {
+            index: exec_index,
+            stdout_chunk: Some(ExecStreamChunk { offset: 0, content: "a😀b".to_string() }),
+            stderr_chunk: None,
+        });
+        state.apply_domain_event(HistoryDomainEvent::UpdateExecStream {
+            index: exec_index,
+            stdout_chunk: Some(ExecStreamChunk { offset: 3, content: "z".to_string() }),
+            stderr_chunk: None,
+        });
+
+        let exec_record = match state.record(inserted_id).expect("exec record") {
+            HistoryRecord::Exec(record) => record,
+            other => panic!("expected exec record, got {other:?}"),
+        };
+
+        assert_eq!(exec_record.stdout_chunks.len(), 1);
+        assert_eq!(exec_record.stdout_chunks[0].offset, 0);
+        assert_eq!(exec_record.stdout_chunks[0].content, "az");
     }
 
     #[test]
