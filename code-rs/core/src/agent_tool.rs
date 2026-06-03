@@ -489,6 +489,8 @@ const AGENT_PROMPT_ARGV_THRESHOLD_BYTES: usize = {
         AGENT_PROMPT_STDIN_THRESHOLD_BYTES
     }
 };
+
+const CONTEXT_FILE_BUDGET_GUIDANCE: &str = "context_budget_tokens must be a non-negative integer token budget. context_files inline file contents into the agent prompt; set context_budget_tokens explicitly for intentional large-context launches, or use files for lightweight path hints. For strict one-shot rollout/model evaluation, prefer `code llm request --message-file`.";
 const MAX_STATUS_TERMINAL_AGENTS: usize = 128;
 const DEFAULT_AGENT_PROVIDER_MAX_RETRIES: usize = 2;
 const AGENT_PROVIDER_RETRY_BASE_DELAY: StdDuration = StdDuration::from_secs(2);
@@ -1893,7 +1895,7 @@ fn build_context_files_prompt(
         let byte_limit = context_budget_byte_limit(remaining_budget);
         if byte_len > byte_limit {
             return Err(format!(
-                "context file {} is {} bytes, above the remaining budget of {} estimated tokens ({} bytes max). context_files inline file contents into the agent prompt; set context_budget_tokens explicitly for intentional large-context launches, or use files for lightweight path hints. For strict one-shot rollout/model evaluation, prefer `code llm request --message-file`.",
+                "context file {} is {} bytes, above the remaining budget of {} estimated tokens ({} bytes max). {CONTEXT_FILE_BUDGET_GUIDANCE}",
                 canonical.display(),
                 byte_len,
                 remaining_budget,
@@ -1918,7 +1920,7 @@ fn build_context_files_prompt(
         total_tokens = total_tokens.saturating_add(estimated_tokens);
         if total_tokens > budget {
             return Err(format!(
-                "context_files estimated {total_tokens} tokens, above budget {budget}. context_files inline file contents into the agent prompt; set context_budget_tokens explicitly for intentional large-context launches, or use files for lightweight path hints. For strict one-shot rollout/model evaluation, prefer `code llm request --message-file`."
+                "context_files estimated {total_tokens} tokens, above budget {budget}. {CONTEXT_FILE_BUDGET_GUIDANCE}"
             ));
         }
         entries.push((
@@ -3352,7 +3354,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
         "context_budget_tokens".to_string(),
         JsonSchema::Number {
             description: Some(
-                "Approximate token budget for inlined context_files. Defaults to 16000 and caps at 900000; set explicitly for expensive large-context launches.".to_string(),
+                "Approximate integer-valued token budget for inlined context_files. Defaults to 16000 and caps at 900000; set explicitly for expensive large-context launches.".to_string(),
             ),
         },
     );
@@ -3756,11 +3758,11 @@ where
                 return Ok(Some(float_value as u64));
             }
             Err(de::Error::custom(format!(
-                "expected context_budget_tokens to be a non-negative integer, got {number}"
+                "expected context_budget_tokens to be a non-negative integer, got {number}. {CONTEXT_FILE_BUDGET_GUIDANCE}"
             )))
         }
         other => Err(de::Error::custom(format!(
-            "expected context_budget_tokens to be a number, got {other}"
+            "expected context_budget_tokens to be an integer token budget, got {other}. {CONTEXT_FILE_BUDGET_GUIDANCE}"
         ))),
     }
 }
@@ -3768,6 +3770,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::Agent;
+    use super::AgentCreateOptions;
     use super::AgentManager;
     use super::AgentProviderFailureClass;
     use super::AgentRetryMetadata;
@@ -4102,6 +4105,45 @@ mod tests {
         .expect_err("oversized budget should fail");
 
         assert!(err.contains("exceeds the maximum"));
+    }
+
+    #[test]
+    fn context_budget_schema_documents_integer_valued_number() {
+        let tool = create_agent_tool(&[]);
+        let function = match tool {
+            OpenAiTool::Function(function) => function,
+            _ => panic!("agent tool should be a function"),
+        };
+        let JsonSchema::Object { properties, .. } = function.parameters else {
+            panic!("agent tool should have object parameters");
+        };
+        let create_schema = properties.get("create").expect("create schema");
+        let JsonSchema::Object { properties: create_properties, .. } = create_schema else {
+            panic!("create schema should be an object");
+        };
+        let budget_schema = create_properties
+            .get("context_budget_tokens")
+            .expect("context_budget_tokens schema");
+
+        let JsonSchema::Number { description } = budget_schema else {
+            panic!("context_budget_tokens should be a number schema");
+        };
+        let description = description.as_deref().expect("budget description");
+        assert!(description.contains("integer-valued token budget"));
+    }
+
+    #[test]
+    fn context_budget_parse_error_includes_guidance() {
+        let err = serde_json::from_value::<AgentCreateOptions>(serde_json::json!({
+            "task": "review rollout",
+            "context_budget_tokens": 12.5,
+        }))
+        .expect_err("fractional budget should be rejected");
+        let err = err.to_string();
+
+        assert!(err.contains("non-negative integer"));
+        assert!(err.contains("context_files inline file contents"));
+        assert!(err.contains("code llm request --message-file"));
     }
 
     #[test]

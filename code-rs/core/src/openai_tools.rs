@@ -416,7 +416,7 @@ pub enum JsonSchema {
         #[serde(skip_serializing_if = "Option::is_none", rename = "enum")]
         allowed_values: Option<Vec<String>>,
     },
-    /// MCP schema allows "number" | "integer" for Number
+    /// MCP schema allows "number" | "integer" for Number.
     #[serde(alias = "integer")]
     Number {
         #[serde(skip_serializing_if = "Option::is_none")]
