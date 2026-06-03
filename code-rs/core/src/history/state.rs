@@ -2611,6 +2611,46 @@ mod tests {
     }
 
     #[test]
+    fn exec_stream_update_overlap_truncates_on_utf8_boundary() {
+        let mut state = HistoryState::new();
+        let inserted_id = match state.apply_domain_event(HistoryDomainEvent::StartExec {
+            index: state.records.len(),
+            call_id: Some("call-utf8-overlap".into()),
+            command: vec!["printf".into(), "abcé".into()],
+            parsed: Vec::new(),
+            action: ExecAction::Run,
+            started_at: SystemTime::UNIX_EPOCH,
+            working_dir: None,
+            env: Vec::new(),
+            tags: Vec::new(),
+        }) {
+            HistoryMutation::Inserted { id, .. } => id,
+            other => panic!("unexpected mutation: {other:?}"),
+        };
+
+        let exec_index = state.index_of(inserted_id).expect("exec index present");
+        state.apply_domain_event(HistoryDomainEvent::UpdateExecStream {
+            index: exec_index,
+            stdout_chunk: Some(ExecStreamChunk { offset: 0, content: "abcé".to_string() }),
+            stderr_chunk: None,
+        });
+        state.apply_domain_event(HistoryDomainEvent::UpdateExecStream {
+            index: exec_index,
+            stdout_chunk: Some(ExecStreamChunk { offset: 4, content: "z".to_string() }),
+            stderr_chunk: None,
+        });
+
+        let exec_record = match state.record(inserted_id).expect("exec record") {
+            HistoryRecord::Exec(record) => record,
+            other => panic!("expected exec record, got {other:?}"),
+        };
+
+        assert_eq!(exec_record.stdout_chunks.len(), 1);
+        assert_eq!(exec_record.stdout_chunks[0].offset, 0);
+        assert_eq!(exec_record.stdout_chunks[0].content, "abcz");
+    }
+
+    #[test]
     fn finalize_assistant_updates_existing_records() {
         let mut state = HistoryState::new();
 
