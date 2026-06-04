@@ -2624,12 +2624,14 @@ struct ResponseCompletedUsage {
 
 impl From<ResponseCompletedUsage> for TokenUsage {
     fn from(val: ResponseCompletedUsage) -> Self {
+        let input_tokens_details = val.input_tokens_details;
         TokenUsage {
             input_tokens: val.input_tokens,
-            cached_input_tokens: val
-                .input_tokens_details
+            cached_input_tokens: input_tokens_details
+                .as_ref()
                 .map(|d| d.cached_tokens)
                 .unwrap_or(0),
+            cached_input_tokens_reported: input_tokens_details.is_some(),
             output_tokens: val.output_tokens,
             reasoning_output_tokens: val
                 .output_tokens_details
@@ -3364,6 +3366,33 @@ mod tests {
             end_turn: None,
             phase: None,
         }
+    }
+
+    #[test]
+    fn response_completed_usage_marks_cached_input_telemetry_availability() {
+        let without_details: TokenUsage = ResponseCompletedUsage {
+            input_tokens: 100,
+            input_tokens_details: None,
+            output_tokens: 10,
+            output_tokens_details: None,
+            total_tokens: 110,
+        }
+        .into();
+        assert_eq!(without_details.cached_input_tokens, 0);
+        assert!(!without_details.cached_input_tokens_reported);
+        assert_eq!(without_details.cache_hit_rate(), None);
+
+        let with_details: TokenUsage = ResponseCompletedUsage {
+            input_tokens: 100,
+            input_tokens_details: Some(ResponseCompletedInputTokensDetails { cached_tokens: 0 }),
+            output_tokens: 10,
+            output_tokens_details: None,
+            total_tokens: 110,
+        }
+        .into();
+        assert_eq!(with_details.cached_input_tokens, 0);
+        assert!(with_details.cached_input_tokens_reported);
+        assert_eq!(with_details.cache_hit_rate(), Some(0));
     }
 
     #[test]

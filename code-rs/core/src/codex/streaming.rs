@@ -1573,6 +1573,14 @@ fn build_auto_review_ledger_message(cwd: &Path) -> Option<String> {
     }
 }
 
+fn current_turn_insert_at(
+    input: &[ResponseItem],
+    initial_user_item: Option<&ResponseItem>,
+) -> Option<usize> {
+    let initial_user_item = initial_user_item?;
+    input.iter().rposition(|item| item == initial_user_item)
+}
+
 fn active_session_model_notice_for_request(
     sess: &Session,
     submission_id: &str,
@@ -3146,9 +3154,13 @@ async fn run_turn(
         if let Some(auto_review_ledger) = auto_review_ledger_message.clone() {
             prepend_developer_messages.push(auto_review_ledger);
         }
-
         let mut prompt = Prompt {
             input: attempt_input.clone(),
+            volatile_context_insert_at: current_turn_insert_at(
+                &attempt_input,
+                initial_user_item.as_ref(),
+            ),
+            volatile_context_items: sess.assemble_timeline_prompt_items().unwrap_or_default(),
             store: !sess.disable_response_storage,
             user_instructions: tc.user_instructions.clone(),
             environment_context: Some(EnvironmentContext::new(
@@ -3702,6 +3714,45 @@ fn extract_mcp_tool_selection_from_history(history: &[ResponseItem]) -> Option<V
     }
 
     active_selected_tools
+}
+
+#[cfg(test)]
+mod current_turn_split_tests {
+    use super::current_turn_insert_at;
+    use code_protocol::models::ContentItem;
+    use code_protocol::models::ResponseItem;
+
+    fn message(role: &str, text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: role.to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    #[test]
+    fn current_turn_insert_at_uses_latest_matching_user_item() {
+        let history = message("user", "old stable turn");
+        let current = message("user", "live current turn");
+        let repeated = current.clone();
+        let tool_tail = message("assistant", "tool call after current turn");
+
+        let input = vec![history, current.clone(), repeated.clone(), tool_tail];
+
+        assert_eq!(current_turn_insert_at(&input, Some(&repeated)), Some(2));
+    }
+
+    #[test]
+    fn current_turn_insert_at_is_none_without_marker() {
+        let history = message("user", "old stable turn");
+        let input = vec![history];
+
+        assert_eq!(current_turn_insert_at(&input, None), None);
+    }
 }
 
 #[cfg(test)]
@@ -14893,6 +14944,7 @@ mod cleanup_tests {
         let usage = TokenUsage {
             input_tokens: 40_000,
             cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
             output_tokens: 260_000,
             reasoning_output_tokens: 250_000,
             total_tokens: 300_000,
@@ -15393,6 +15445,7 @@ mod tests {
             Some(&TokenUsage {
                 input_tokens: 20_000,
                 cached_input_tokens: 0,
+                cached_input_tokens_reported: false,
                 output_tokens: 80_000,
                 reasoning_output_tokens: 10_000,
                 total_tokens: 110_000,

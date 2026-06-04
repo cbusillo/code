@@ -732,7 +732,7 @@ struct LedgerDiagnostics {
     prompt_token_estimate: u64,
     prompt_runs: usize,
     high_burn_runs: usize,
-    longest_elapsed_secs: Option<u64>,
+    longest_elapsed_bucket: Option<&'static str>,
 }
 
 fn build_ledger_diagnostics<'a, I>(runs: I, now: u64) -> Option<String>
@@ -777,12 +777,13 @@ where
             diagnostics.high_burn_runs += 1;
         }
         if let Some(elapsed_secs) = elapsed_secs {
-            diagnostics.longest_elapsed_secs = Some(
-                diagnostics
-                    .longest_elapsed_secs
-                    .unwrap_or(0)
-                    .max(elapsed_secs),
-            );
+            let bucket = duration_bucket(elapsed_secs);
+            diagnostics.longest_elapsed_bucket = Some(match diagnostics.longest_elapsed_bucket {
+                Some(existing) if duration_bucket_rank(existing) >= duration_bucket_rank(bucket) => {
+                    existing
+                }
+                _ => bucket,
+            });
         }
     }
 
@@ -809,10 +810,35 @@ where
     if diagnostics.high_burn_runs > 0 {
         line.push_str(&format!(" high_burn={}", diagnostics.high_burn_runs));
     }
-    if let Some(longest_elapsed_secs) = diagnostics.longest_elapsed_secs {
-        line.push_str(&format!(" longest_elapsed={}s", longest_elapsed_secs));
+    if let Some(longest_elapsed_bucket) = diagnostics.longest_elapsed_bucket {
+        line.push_str(&format!(" longest_elapsed={longest_elapsed_bucket}"));
     }
     Some(line)
+}
+
+fn duration_bucket(seconds: u64) -> &'static str {
+    match seconds {
+        0..=59 => "lt1m",
+        60..=299 => "lt5m",
+        300..=899 => "lt15m",
+        900..=1799 => "lt30m",
+        1800..=3599 => "lt1h",
+        3600..=7199 => "lt2h",
+        _ => "gte2h",
+    }
+}
+
+fn duration_bucket_rank(bucket: &str) -> u8 {
+    match bucket {
+        "lt1m" => 0,
+        "lt5m" => 1,
+        "lt15m" => 2,
+        "lt30m" => 3,
+        "lt1h" => 4,
+        "lt2h" => 5,
+        "gte2h" => 6,
+        _ => 0,
+    }
 }
 
 fn run_is_recent_for_diagnostics(run: &AutoReviewRun, now: u64) -> bool {
@@ -875,11 +901,20 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
         .unwrap_or("unknown");
     let branch = run.branch.as_deref().or(run.batch_id.as_deref()).unwrap_or("unknown");
     let mut line = format!(
-        "run id={} status={:?} freshness={:?} source={:?} branch={} snapshot={} age={}s",
-        run.run_id, run.status, run.freshness, run.source, branch, snapshot, age_secs
+        "run id={} status={:?} freshness={:?} source={:?} branch={} snapshot={} age={}",
+        run.run_id,
+        run.status,
+        run.freshness,
+        run.source,
+        branch,
+        snapshot,
+        duration_bucket(age_secs)
     );
     if let Some(activity_age_secs) = activity_age_secs {
-        line.push_str(&format!(" last_activity={}s", activity_age_secs));
+        line.push_str(&format!(
+            " last_activity={}",
+            duration_bucket(activity_age_secs)
+        ));
     }
     if let Some(agent_id) = run.agent_id.as_deref().and_then(short_agent_id) {
         line.push_str(&format!(" agent={agent_id}"));
@@ -899,7 +934,7 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
         line.push_str(&format!(" tokens={}t", token_count));
     }
     if let Some(elapsed_secs) = run_elapsed_secs(run, now) {
-        line.push_str(&format!(" elapsed={}s", elapsed_secs));
+        line.push_str(&format!(" elapsed={}", duration_bucket(elapsed_secs)));
     }
     if run.finding_count > 0 {
         line.push_str(&format!(" findings={}", run.finding_count));
@@ -1388,13 +1423,13 @@ mod tests {
         assert!(ledger.contains("<auto_review_ledger"));
         assert!(ledger.contains(&run_id.to_string()));
         assert!(ledger.contains("status=Reviewing"));
-        assert!(ledger.contains("last_activity=40s"));
+        assert!(ledger.contains("last_activity=lt1m"));
         assert!(ledger.contains("snapshot=abcdef123456"));
         assert!(ledger.contains("model=gpt-5.4-mini"));
         assert!(ledger.contains("reasoning=medium"));
         assert!(ledger.contains("prompt_estimate=42000t"));
         assert!(ledger.contains("tokens=84000t"));
-        assert!(ledger.contains("elapsed=40s"));
+        assert!(ledger.contains("elapsed=lt1m"));
     }
 
     #[test]
@@ -1428,7 +1463,7 @@ mod tests {
         assert!(ledger.contains("prompt_estimate=54000t"));
         assert!(ledger.contains("prompt_runs=2"));
         assert!(ledger.contains("high_burn=2"));
-        assert!(ledger.contains("longest_elapsed=40s"));
+        assert!(ledger.contains("longest_elapsed=lt1m"));
     }
 
     #[test]

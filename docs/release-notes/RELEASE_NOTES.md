@@ -1,16 +1,17 @@
-## Every Code v0.6.115
+## Every Code v0.6.116
 
-This release makes concurrent checkout edits safer when multiple Every Code sessions are active.
+This release reduces prompt-cache churn so repeated Every Code turns are less likely to burn through rate limits, and adds a visible cache signal for dogfooding.
 
 ### Changes
 
-- Every Code now requires an explicit visible worktree decision before editing a checkout that already has another write-capable session.
-- The concurrent-write gate is stricter about invalid or missing decisions, keeping risky write operations blocked until the agent records how it will proceed.
+- Stable prompt content now stays ahead of volatile context such as CTX_UI timelines, environment snapshots, and Auto Review ledger details, helping providers reuse cached input across turns.
+- The TUI footer now shows prompt-cache hit rate when the provider reports cached input token telemetry, including a token-weighted rolling average for recent turns.
+- App-server protocol schemas now expose whether cached input token telemetry was reported, so missing cache data is not confused with a real 0% cache hit.
 
 ### Install
 
 ```bash
-gh release download v0.6.115 --repo cbusillo/code
+gh release download v0.6.116 --repo cbusillo/code
 ```
 
-Compare: https://github.com/cbusillo/code/compare/v0.6.114...v0.6.115
+Compare: https://github.com/cbusillo/code/compare/v0.6.115...v0.6.116

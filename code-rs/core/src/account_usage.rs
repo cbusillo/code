@@ -860,6 +860,7 @@ mod tests {
         TokenUsage {
             input_tokens: 120,
             cached_input_tokens: 20,
+            cached_input_tokens_reported: true,
             output_tokens: 80,
             reasoning_output_tokens: 10,
             total_tokens: 210,
