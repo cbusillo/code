@@ -2575,6 +2575,15 @@ impl ChatComposer {
                     Span::styled("Failed", icon_style),
                 ]
             }
+            AutoReviewIndicatorStatus::Unavailable => {
+                let icon_style = Style::default().fg(crate::colors::text_dim());
+                vec![
+                    Span::styled("Auto Review: ", label_style),
+                    Span::styled("•", icon_style),
+                    Span::from(" "),
+                    Span::styled("Unavailable", icon_style),
+                ]
+            }
         };
 
         if let Some(detail) = status.detail.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -3546,6 +3555,37 @@ mod tests {
 
         assert!(line.contains("Auto Review: • Reviewing"), "line: {line}");
         assert!(line.contains("(25m, stale, snap abcdef1)"), "line: {line}");
+    }
+
+    #[test]
+    fn auto_review_footer_shows_lost_restart_as_unavailable() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_tx = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, app_tx, true, false);
+
+        composer.set_auto_review_status(Some(AutoReviewFooterStatus {
+            status: AutoReviewIndicatorStatus::Unavailable,
+            findings: None,
+            phase: AutoReviewPhase::Reviewing,
+            detail: Some("lost after restart".to_string()),
+        }));
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+        let mut buf = Buffer::empty(area);
+        composer.render_footer(area, &mut buf);
+
+        let line: String = (0..area.width)
+            .map(|x| buf[(area.x + x, area.y)].symbol().to_string())
+            .collect();
+
+        assert!(line.contains("Auto Review: • Unavailable"), "line: {line}");
+        assert!(line.contains("(lost after restart)"), "line: {line}");
+        assert!(!line.contains("Failed"), "line: {line}");
     }
 
     #[test]

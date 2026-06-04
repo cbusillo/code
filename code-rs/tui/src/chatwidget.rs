@@ -1464,6 +1464,7 @@ pub(crate) enum AutoReviewIndicatorStatus {
     Clean,
     Fixed,
     Failed,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33238,7 +33239,7 @@ use code_core::protocol::OrderMeta;
         assert!(
             chat.auto_review_status
                 .as_ref()
-                .is_some_and(|state| state.status == AutoReviewIndicatorStatus::Failed)
+                .is_some_and(|state| state.status == AutoReviewIndicatorStatus::Unavailable)
         );
 
         let notice_text = chat
@@ -33355,7 +33356,7 @@ use code_core::protocol::OrderMeta;
         assert!(
             chat.auto_review_status
                 .as_ref()
-                .is_some_and(|state| state.status == AutoReviewIndicatorStatus::Failed)
+                .is_some_and(|state| state.status == AutoReviewIndicatorStatus::Unavailable)
         );
 
         let notice_text = chat
@@ -35053,6 +35054,45 @@ use code_core::protocol::OrderMeta;
                 .auto_review_status()
                 .and_then(|status| status.detail),
             Some("snap abcdef1".to_string())
+        );
+    }
+
+    #[test]
+    fn background_review_started_replaces_unavailable_restart_status() {
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let run_id = uuid::Uuid::new_v4();
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(run_id);
+        chat.set_auto_review_indicator_with_detail(
+            AutoReviewIndicatorStatus::Unavailable,
+            None,
+            AutoReviewPhase::Reviewing,
+            Some("lost after restart".to_string()),
+        );
+
+        chat.on_background_review_started_for_run(
+            run_id,
+            PathBuf::from("/tmp/wt"),
+            "auto-review-branch".to_string(),
+            Some("agent-123".to_string()),
+            Some("abcdef123456".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            chat.auto_review_status.as_ref().map(|status| status.status),
+            Some(AutoReviewIndicatorStatus::Running)
+        );
+        assert_eq!(
+            chat.bottom_pane.auto_review_status().map(|status| status.status),
+            Some(AutoReviewIndicatorStatus::Running)
+        );
+        assert_ne!(
+            chat.bottom_pane
+                .auto_review_status()
+                .and_then(|status| status.detail),
+            Some("lost after restart".to_string())
         );
     }
 
@@ -42610,7 +42650,7 @@ impl ChatWidget<'_> {
         }
 
         self.set_auto_review_indicator_with_detail(
-            AutoReviewIndicatorStatus::Failed,
+            AutoReviewIndicatorStatus::Unavailable,
             None,
             AutoReviewPhase::Reviewing,
             Some("lost after restart".to_string()),
@@ -43603,7 +43643,10 @@ impl ChatWidget<'_> {
         );
         let detail = auto_review_running_detail(self.background_review.as_ref(), None, None);
         if let Some(status) = self.auto_review_status.clone() {
-            if status.status == AutoReviewIndicatorStatus::Running {
+            if matches!(
+                status.status,
+                AutoReviewIndicatorStatus::Running | AutoReviewIndicatorStatus::Unavailable
+            ) {
                 self.set_auto_review_indicator_with_detail(
                     AutoReviewIndicatorStatus::Running,
                     status.findings,
