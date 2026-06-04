@@ -195,7 +195,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           TRUSTED_ACTORS: cbusillo github-actions[bot] launchplane[bot]
           HOSTED_RUNS_ON: '["macos-14"]'
-          SELF_HOSTED_RUNS_ON: '["self-hosted","macOS","ARM64","chris-mac-release"]'
+          SELF_HOSTED_RUNS_ON: '["self-hosted","macOS","ARM64","chris-mac","code-release"]'
           RELEASE_BUILD_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true }}
         run: |
           set -euo pipefail
@@ -248,14 +248,14 @@ jobs:
           runner_name="$(jq -r '
             .runners[]
             | select(.status == "online" and (.busy | not))
-            | select([.labels[].name] | index("self-hosted") and index("macOS") and index("ARM64") and index("chris-mac-release"))
+            | select([.labels[].name] | index("self-hosted") and index("macOS") and index("ARM64") and index("chris-mac") and index("code-release"))
             | .name
           ' <<< "$runners_json" | head -n 1)"
 
           if [[ -n "$runner_name" ]]; then
             select_runner true "$SELF_HOSTED_RUNS_ON" "self-hosted macOS runner online: ${runner_name}"
           else
-            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: no idle chris-mac-release runner online"
+            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: no idle chris-mac code-release runner online"
           fi
 
   plan-release-build-matrix:
@@ -361,7 +361,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cache_root="$HOME/.cache/every-code/release-targets"
+          cache_root="$HOME/.cache/every-code/release-targets/${{ matrix.target }}"
           mkdir -p "$cache_root"
           echo "CARGO_TARGET_DIR=$cache_root" >> "$GITHUB_ENV"
           echo "Using persistent macOS release target cache: $cache_root"

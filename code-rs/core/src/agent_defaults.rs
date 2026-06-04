@@ -505,7 +505,7 @@ fn model_guide_intro(active_agents: &[String]) -> String {
     let frontline_str = present_frontline.join(", ");
 
     format!(
-        "Preferred agent models: use {frontline_str} for challenging coding/agentic work. For explicit multi-agent or dissent requests, prefer diverse model families when useful and budget allows; include `antigravity` for Google/Gemini-family perspective."
+        "Preferred agent models: use {frontline_str} for challenging coding/agentic work. For explicit multi-agent or dissent requests, prefer diverse model families when useful and budget allows. For multi-agent release/workflow, infrastructure, security, or product-risk work, proactively include `antigravity` for Google/Gemini-family perspective unless there is a clear reason to skip it."
     )
 }
 
@@ -724,7 +724,9 @@ mod tests {
             "antigravity".to_string(),
         ]);
 
-        assert!(guide.contains("include `antigravity` for Google/Gemini-family perspective"));
+        assert!(guide.contains("proactively include `antigravity` for Google/Gemini-family perspective"));
+        assert!(guide.contains("release/workflow, infrastructure, security, or product-risk"));
+        assert!(guide.contains("unless there is a clear reason to skip it"));
         assert!(guide.contains("AGY uses its configured model"));
         assert!(guide.contains("not per-run Gemini Pro/Flash flags"));
     }

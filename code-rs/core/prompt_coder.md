@@ -62,7 +62,7 @@ agent {
     "files": ["services/api", "services/api/src", "services/api/Cargo.toml"],
     "context_files": [".code/context/large-context-bundle.txt"], // Optional: inline workspace text file contents into the subagent's initial prompt; use only when the extra context is worth the cost.
     "context_budget_tokens": 700000, // Required for very large context_files; defaults conservatively.
-    "models": ["code-gpt-5.4","claude-sonnet-4.6","antigravity"], // Agent/model selector slugs; external CLI selectors use that tool's configured model.
+    "models": ["code-gpt-5.4","claude-sonnet-4.6","antigravity"], // Agent/model selector slugs; include diverse families for multi-agent, release/workflow, infrastructure, security, or product-risk work when useful.
     "output": "Middleware + passing tests + README snippet",
     "write": true // Allow changes - will launch every agent in a separate worktree
   }
