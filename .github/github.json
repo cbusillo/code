@@ -87,7 +87,12 @@
     "intent": {
       "kind": "version-file",
       "file": "VERSION",
-      "workflow": "Release Intent"
+      "workflow": "Release Intent",
+      "dryRunDispatch": {
+        "input": "release_build_dry_run",
+        "defaultScope": "macos",
+        "description": "Manually builds release binaries without publishing; the default macOS scope exercises the self-hosted macOS runner fallback and cache path."
+      }
     },
     "metadataFiles": [
       "VERSION",
