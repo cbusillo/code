@@ -7,6 +7,11 @@
 
 - (none)
 
+## [0.6.115] - 2026-06-04
+
+- Core: require a visible worktree decision before editing a checkout that already has another write-capable session. (cc95a22e)
+- Core: harden the concurrent-write gate so invalid or missing decisions keep write operations blocked. (a7aa6f29)
+
 ## [0.6.114] - 2026-06-03
 
 - TUI: keep resumed conversations from duplicating assistant answers or losing final replies after history snapshots. (4db78b88, 1b4a5147, 50a01082, 3eea89d2)

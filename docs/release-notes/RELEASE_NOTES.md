@@ -1,18 +1,16 @@
-## Every Code v0.6.114
+## Every Code v0.6.115
 
-This release focuses on stronger Auto Review durability, cleaner resumed sessions, and more predictable agent/release operations.
+This release makes concurrent checkout edits safer when multiple Every Code sessions are active.
 
 ### Changes
 
-- Auto Review runs now persist more reliably, surface currentness and stale state in the TUI, recover lost or cancelled findings after restart, and deduplicate repeated reviews by diff fingerprint.
-- Resumed conversations avoid duplicate assistant replay and preserve final answers after history snapshots, while exec stream history handles UTF-8 truncation more safely.
-- Agent launches support preloaded context files with explicit large-context budgets, more reliable large prompt delivery, isolated Antigravity launch caches, and preferred-account routing.
-- Logout, self-update, managed worktree cleanup, and release staging are tightened so local operations behave more predictably for users and release operators.
+- Every Code now requires an explicit visible worktree decision before editing a checkout that already has another write-capable session.
+- The concurrent-write gate is stricter about invalid or missing decisions, keeping risky write operations blocked until the agent records how it will proceed.
 
 ### Install
 
 ```bash
-gh release download v0.6.114 --repo cbusillo/code
+gh release download v0.6.115 --repo cbusillo/code
 ```
 
-Compare: https://github.com/cbusillo/code/compare/v0.6.113...v0.6.114
+Compare: https://github.com/cbusillo/code/compare/v0.6.114...v0.6.115
