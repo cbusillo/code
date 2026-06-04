@@ -20,6 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
   id-token: write
   issues: write
@@ -159,9 +160,80 @@ jobs:
         shell: bash
         run: scripts/check-release-notes-version.sh --version "${{ needs.determine-version.outputs.version }}"
 
+  detect-macos-release-runner:
+    name: Detect self-hosted macOS release runner
+    needs: [determine-version, validate-release-metadata]
+    if: needs.determine-version.outputs.release_intent == 'true'
+    runs-on: [self-hosted, Linux, X64, chris-testing]
+    outputs:
+      use_self_hosted: ${{ steps.select.outputs.use_self_hosted }}
+      runs_on: ${{ steps.select.outputs.runs_on }}
+      reason: ${{ steps.select.outputs.reason }}
+    steps:
+      - name: Select macOS runner
+        id: select
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          TRUSTED_ACTORS: cbusillo github-actions[bot] launchplane[bot]
+          HOSTED_RUNS_ON: '["macos-14"]'
+          SELF_HOSTED_RUNS_ON: '["self-hosted","macOS","ARM64","chris-mac-release"]'
+        run: |
+          set -euo pipefail
+
+          select_runner() {
+            local use_self_hosted="$1"
+            local runs_on="$2"
+            local reason="$3"
+            {
+              printf 'use_self_hosted=%s\n' "$use_self_hosted"
+              printf 'runs_on=%s\n' "$runs_on"
+              printf 'reason=%s\n' "$reason"
+            } >> "$GITHUB_OUTPUT"
+            printf 'macOS release runner: %s\n' "$reason"
+          }
+
+          # Actor alone is not a safe self-hosted-runner signal: comments or
+          # labels from a trusted actor can still target untrusted PR code. This
+          # runner is eligible only for trusted main-branch push code.
+          if [[ "${GITHUB_EVENT_NAME}" != "push" || "${GITHUB_REF}" != "refs/heads/main" || "${GITHUB_REPOSITORY}" != "cbusillo/code" ]]; then
+            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: not a trusted main push"
+            exit 0
+          fi
+
+          actor_trusted=false
+          for trusted_actor in $TRUSTED_ACTORS; do
+            if [[ "$GITHUB_ACTOR" == "$trusted_actor" ]]; then
+              actor_trusted=true
+              break
+            fi
+          done
+          if [[ "$actor_trusted" != true ]]; then
+            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: untrusted workflow actor"
+            exit 0
+          fi
+
+          if ! runners_json="$(gh api --method GET "/repos/${GITHUB_REPOSITORY}/actions/runners" -f per_page=100)"; then
+            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: runner query failed"
+            exit 0
+          fi
+
+          runner_name="$(jq -r '
+            .runners[]
+            | select(.status == "online" and (.busy | not))
+            | select([.labels[].name] | index("self-hosted") and index("macOS") and index("ARM64") and index("chris-mac-release"))
+            | .name
+          ' <<< "$runners_json" | head -n 1)"
+
+          if [[ -n "$runner_name" ]]; then
+            select_runner true "$SELF_HOSTED_RUNS_ON" "self-hosted macOS runner online: ${runner_name}"
+          else
+            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: no idle chris-mac-release runner online"
+          fi
+
   build-binaries:
     name: Build ${{ matrix.target }}
-    needs: [determine-version, validate-release-metadata]
+    needs: [determine-version, validate-release-metadata, detect-macos-release-runner]
     if: needs.determine-version.outputs.release_intent == 'true'
     runs-on: ${{ fromJson(matrix.runs_on) }}
     env:
@@ -181,12 +253,12 @@ jobs:
             artifact: code-aarch64-unknown-linux-musl
           # GNU variants omitted to reduce asset duplication.
           # macOS builds
-          - os: macos-14
-            runs_on: '["macos-14"]'
+          - os: macos-release
+            runs_on: ${{ needs.detect-macos-release-runner.outputs.runs_on }}
             target: x86_64-apple-darwin
             artifact: code-x86_64-apple-darwin
-          - os: macos-14
-            runs_on: '["macos-14"]'
+          - os: macos-release
+            runs_on: ${{ needs.detect-macos-release-runner.outputs.runs_on }}
             target: aarch64-apple-darwin
             artifact: code-aarch64-apple-darwin
           # Windows build
@@ -220,6 +292,16 @@ jobs:
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
+
+      - name: Use persistent self-hosted macOS target cache
+        if: startsWith(matrix.os, 'macos-') && needs.detect-macos-release-runner.outputs.use_self_hosted == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_root="$HOME/.cache/every-code/release-targets"
+          mkdir -p "$cache_root"
+          echo "CARGO_TARGET_DIR=$cache_root" >> "$GITHUB_ENV"
+          echo "Using persistent macOS release target cache: $cache_root"
 
       # Keep target/ across runs so Cargo can no-op when code hasn't changed
       - id: rust_cache
@@ -369,7 +451,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          exe="code-rs/target/${{ matrix.target }}/release/code"
+          target_root="${CARGO_TARGET_DIR:-code-rs/target}"
+          exe="$target_root/${{ matrix.target }}/release/code"
           "$exe" --version
           "$exe" completion bash > /dev/null
 
@@ -388,11 +471,12 @@ jobs:
       - name: Prepare artifacts
         shell: bash
         run: |
+          target_root="${CARGO_TARGET_DIR:-code-rs/target}"
           mkdir -p artifacts
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             cp code-rs/target/${{ matrix.target }}/release/code.exe artifacts/${{ matrix.artifact }}
           else
-            cp code-rs/target/${{ matrix.target }}/release/code artifacts/${{ matrix.artifact }}
+            cp "$target_root/${{ matrix.target }}/release/code" artifacts/${{ matrix.artifact }}
           fi
 
       - name: Compress artifacts (Windows)
@@ -424,6 +508,21 @@ jobs:
           fi
           "${SUDO[@]}" apt-get update -qq
           "${SUDO[@]}" apt-get install -y zstd
+
+      - name: Install zstd (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v zstd >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v brew >/dev/null 2>&1; then
+            brew install zstd
+            exit 0
+          fi
+          echo "zstd is required for macOS release artifacts, but Homebrew is unavailable." >&2
+          exit 1
 
       - name: Compress artifacts (Linux dual-format)
         if: runner.os == 'Linux'
@@ -468,7 +567,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cargo-timings-${{ matrix.target }}
-          path: code-rs/target/cargo-timings/*.html
+          path: ${{ env.CARGO_TARGET_DIR || 'code-rs/target' }}/cargo-timings/*.html
           if-no-files-found: ignore
           compression-level: 0
 
