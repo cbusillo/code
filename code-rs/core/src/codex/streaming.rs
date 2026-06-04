@@ -12481,7 +12481,7 @@ async fn send_agent_status_update(sess: &Session) {
                 result: agent.result,
                 error: agent.error,
                 elapsed_ms,
-                token_count: None,
+                token_count: agent.token_count,
                 last_activity_at: matches!(status, AgentStatus::Pending | AgentStatus::Running)
                     .then(|| agent.last_activity.to_rfc3339()),
                 seconds_since_last_activity: matches!(
