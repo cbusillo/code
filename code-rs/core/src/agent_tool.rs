@@ -379,6 +379,8 @@ pub struct Agent {
     pub status: AgentStatus,
     pub result: Option<String>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
     #[serde(default)]
     pub retry: AgentRetryMetadata,
     pub created_at: DateTime<Utc>,
@@ -424,6 +426,23 @@ impl Default for AgentRetryMetadata {
             max_retries: DEFAULT_AGENT_PROVIDER_MAX_RETRIES as u32,
             last_retryable_error: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentExecutionOutput {
+    output: String,
+    token_count: Option<u64>,
+}
+
+impl AgentExecutionOutput {
+    fn new(output: String, token_count: Option<u64>) -> Self {
+        Self { output, token_count }
+    }
+
+    fn from_child_output(output: String, stderr: &str) -> Self {
+        let token_count = extract_agent_token_count(&output).or_else(|| extract_agent_token_count(stderr));
+        Self::new(output, token_count)
     }
 }
 
@@ -645,7 +664,7 @@ fn agent_info_for_status(agent: &Agent, now: DateTime<Utc>) -> AgentInfo {
         result: agent.result.clone(),
         error: agent.error.clone(),
         elapsed_ms,
-        token_count: None,
+        token_count: agent.token_count,
         last_activity_at: match agent.status {
             AgentStatus::Pending | AgentStatus::Running => Some(agent.last_activity.to_rfc3339()),
             _ => None,
@@ -1353,6 +1372,7 @@ impl AgentManager {
             status: AgentStatus::Pending,
             result: None,
             error: None,
+            token_count: None,
             retry,
             created_at: Utc::now(),
             started_at: None,
@@ -1575,6 +1595,16 @@ impl AgentManager {
     }
 
     pub async fn update_agent_result(&mut self, agent_id: &str, result: Result<String, String>) {
+        self.update_agent_result_with_token_count(agent_id, result, None)
+            .await;
+    }
+
+    pub async fn update_agent_result_with_token_count(
+        &mut self,
+        agent_id: &str,
+        result: Result<String, String>,
+        token_count: Option<u64>,
+    ) {
         let debug_enabled = self.debug_log_root.is_some();
         let mut updated = false;
 
@@ -1602,10 +1632,12 @@ impl AgentManager {
                 Ok(output) => {
                     agent.result = Some(output);
                     agent.status = AgentStatus::Completed;
+                    agent.token_count = token_count.or(agent.token_count);
                 }
                 Err(error) => {
                     agent.error = Some(error);
                     agent.status = AgentStatus::Failed;
+                    agent.token_count = token_count.or(agent.token_count);
                 }
             }
             agent.completed_at = Some(Utc::now());
@@ -2143,31 +2175,39 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
                                     Err(gating_error_message(spec))
                                 } else {
                                     execute_agent_provider_with_retries(&agent_id, &model, || {
-                                        execute_cloud_built_in_streaming(
-                                            &agent_id,
-                                            &full_prompt,
-                                            Some(worktree_path.clone()),
-                                            config.clone(),
-                                            spec.slug,
-                                        )
+                                        async {
+                                            execute_cloud_built_in_streaming(
+                                                &agent_id,
+                                                &full_prompt,
+                                                Some(worktree_path.clone()),
+                                                config.clone(),
+                                                spec.slug,
+                                            )
+                                            .await
+                                            .map(|output| AgentExecutionOutput::from_child_output(output, ""))
+                                        }
                                     })
                                     .await
                                 }
                             } else {
                                 execute_agent_provider_with_retries(&agent_id, &model, || {
-                                    execute_cloud_built_in_streaming(
-                                        &agent_id,
-                                        &full_prompt,
-                                        Some(worktree_path.clone()),
-                                        config.clone(),
-                                        model.as_str(),
-                                    )
+                                    async {
+                                        execute_cloud_built_in_streaming(
+                                            &agent_id,
+                                            &full_prompt,
+                                            Some(worktree_path.clone()),
+                                            config.clone(),
+                                            model.as_str(),
+                                        )
+                                        .await
+                                        .map(|output| AgentExecutionOutput::from_child_output(output, ""))
+                                    }
                                 })
                                 .await
                             }
                         } else {
                             execute_agent_provider_with_retries(&agent_id, &model, || {
-                                execute_model_with_permissions(
+                                execute_model_with_permissions_detailed(
                                     &agent_id,
                                     &model,
                                     &full_prompt,
@@ -2205,31 +2245,39 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
                     Err(gating_error_message(spec))
                 } else {
                     execute_agent_provider_with_retries(&agent_id, &model, || {
-                        execute_cloud_built_in_streaming(
-                            &agent_id,
-                            &full_prompt,
-                            None,
-                            config.clone(),
-                            spec.slug,
-                        )
+                        async {
+                            execute_cloud_built_in_streaming(
+                                &agent_id,
+                                &full_prompt,
+                                None,
+                                config.clone(),
+                                spec.slug,
+                            )
+                            .await
+                            .map(|output| AgentExecutionOutput::from_child_output(output, ""))
+                        }
                     })
                     .await
                 }
             } else {
                 execute_agent_provider_with_retries(&agent_id, &model, || {
-                    execute_cloud_built_in_streaming(
-                        &agent_id,
-                        &full_prompt,
-                        None,
-                        config.clone(),
-                        model.as_str(),
-                    )
+                    async {
+                        execute_cloud_built_in_streaming(
+                            &agent_id,
+                            &full_prompt,
+                            None,
+                            config.clone(),
+                            model.as_str(),
+                        )
+                        .await
+                        .map(|output| AgentExecutionOutput::from_child_output(output, ""))
+                    }
                 })
                 .await
             }
         } else {
             execute_agent_provider_with_retries(&agent_id, &model, || {
-                execute_model_with_permissions(
+                execute_model_with_permissions_detailed(
                     &agent_id,
                     &model,
                     &full_prompt,
@@ -2247,19 +2295,28 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
     };
 
     // Update result; if a review-output JSON was produced, prefer its contents.
-    let final_result = prefer_json_result(review_output_json_path_capture.as_ref(), result);
+    let final_result = prefer_json_result_detailed(review_output_json_path_capture.as_ref(), result);
     let mut manager = AGENT_MANAGER.write().await;
-    manager.update_agent_result(&agent_id, final_result).await;
+    match final_result {
+        Ok(output) => {
+            manager
+                .update_agent_result_with_token_count(&agent_id, Ok(output.output), output.token_count)
+                .await;
+        }
+        Err(error) => {
+            manager.update_agent_result(&agent_id, Err(error)).await;
+        }
+    }
 }
 
 async fn execute_agent_provider_with_retries<F, Fut>(
     agent_id: &str,
     model: &str,
     mut run: F,
-) -> Result<String, String>
+) -> Result<AgentExecutionOutput, String>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<String, String>>,
+    Fut: std::future::Future<Output = Result<AgentExecutionOutput, String>>,
 {
     let mut retry_count = 0usize;
     let mut last_retryable_error: Option<String> = None;
@@ -2341,17 +2398,62 @@ where
     }
 }
 
+#[cfg(test)]
 fn prefer_json_result(path: Option<&PathBuf>, fallback: Result<String, String>) -> Result<String, String> {
+    prefer_json_result_detailed(
+        path,
+        fallback.map(|output| AgentExecutionOutput::new(output, None)),
+    )
+    .map(|output| output.output)
+}
+
+fn prefer_json_result_detailed(
+    path: Option<&PathBuf>,
+    fallback: Result<AgentExecutionOutput, String>,
+) -> Result<AgentExecutionOutput, String> {
     if let Some(p) = path {
         let json = std::fs::read_to_string(p).ok();
         if let Err(err) = std::fs::remove_file(p) {
             tracing::debug!("failed to clean review output file {}: {err}", p.display());
         }
         if let Some(json) = json {
-            return Ok(json);
+            let token_count = fallback
+                .as_ref()
+                .ok()
+                .and_then(|output| output.token_count)
+                .or_else(|| fallback.as_ref().err().and_then(|error| extract_agent_token_count(error)));
+            return Ok(AgentExecutionOutput::new(
+                json,
+                token_count,
+            ));
         }
     }
     fallback
+}
+
+fn extract_agent_token_count(output: &str) -> Option<u64> {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| extract_tokens_used_from_line(line))
+}
+
+fn extract_tokens_used_from_line(line: &str) -> Option<u64> {
+    let marker = "tokens used:";
+    let lower = line.to_ascii_lowercase();
+    let marker_start = lower.find(marker)?;
+    let after_marker = &line[marker_start + marker.len()..];
+    let digits = after_marker
+        .chars()
+        .skip_while(|ch| ch.is_whitespace())
+        .take_while(|ch| ch.is_ascii_digit() || *ch == ',')
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u64>().ok()
+    }
 }
 
 fn remove_review_output_json(path: Option<&PathBuf>) {
@@ -2378,6 +2480,34 @@ async fn execute_model_with_permissions(
     source_kind: Option<AgentSourceKind>,
     log_tag: Option<&str>,
 ) -> Result<String, String> {
+    execute_model_with_permissions_detailed(
+        agent_id,
+        model,
+        prompt,
+        read_only,
+        working_dir,
+        config,
+        reasoning_effort,
+        review_output_json_path,
+        source_kind,
+        log_tag,
+    )
+    .await
+    .map(|output| output.output)
+}
+
+async fn execute_model_with_permissions_detailed(
+    agent_id: &str,
+    model: &str,
+    prompt: &str,
+    read_only: bool,
+    working_dir: Option<PathBuf>,
+    config: Option<AgentConfig>,
+    reasoning_effort: code_protocol::config_types::ReasoningEffort,
+    review_output_json_path: Option<&PathBuf>,
+    source_kind: Option<AgentSourceKind>,
+    log_tag: Option<&str>,
+) -> Result<AgentExecutionOutput, String> {
     remove_review_output_json(review_output_json_path);
 
     let spec_opt = agent_model_spec(model)
@@ -2773,7 +2903,7 @@ async fn execute_model_with_permissions(
     let (status, stdout_buf, stderr_buf) = output;
 
     if status.success() {
-        Ok(stdout_buf)
+        Ok(AgentExecutionOutput::from_child_output(stdout_buf, &stderr_buf))
     } else {
         let stderr = stderr_buf.trim();
         let stdout = stdout_buf.trim();
@@ -3772,6 +3902,7 @@ mod tests {
     use super::Agent;
     use super::AgentCreateOptions;
     use super::AgentManager;
+    use super::AgentExecutionOutput;
     use super::AgentProviderFailureClass;
     use super::AgentRetryMetadata;
     use super::AgentStatus;
@@ -3785,9 +3916,11 @@ mod tests {
     use super::maybe_set_gemini_config_dir;
     use super::execute_model_with_permissions;
     use super::execute_agent_provider_with_retries;
+    use super::extract_agent_token_count;
     use super::resolve_program_path;
     use super::should_use_current_exe_for_agent;
     use super::prefer_json_result;
+    use super::prefer_json_result_detailed;
     use super::remove_review_output_json;
     use super::current_code_binary_path;
     use super::agent_retry_delay;
@@ -3892,6 +4025,84 @@ mod tests {
     }
 
     #[test]
+    fn extracts_tokens_used_from_agent_output() {
+        let output = "[2026-06-04T00:24:57] codex\n\nOK\n[2026-06-04T00:24:57] tokens used: 25,915\n";
+        assert_eq!(extract_agent_token_count(output), Some(25_915));
+        assert_eq!(
+            extract_agent_token_count("cumulative tokens used: 5,000, session tokens used: 1,200"),
+            Some(5_000)
+        );
+        assert_eq!(extract_agent_token_count("tokens used: nope"), None);
+        assert_eq!(extract_agent_token_count("no usage here"), None);
+    }
+
+    #[test]
+    fn agent_execution_output_prefers_stdout_token_count() {
+        let output = AgentExecutionOutput::from_child_output(
+            "answer\ntokens used: 25,915\n".to_string(),
+            "tokens used: 0\n",
+        );
+        assert_eq!(output.token_count, Some(25_915));
+    }
+
+    #[test]
+    fn prefer_json_result_preserves_token_count_from_failed_fallback() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        let payload = "{\"findings\":[],\"overall_explanation\":\"ok\"}";
+        std::fs::write(&path, payload).unwrap();
+
+        let res = prefer_json_result_detailed(
+            Some(&path),
+            Err("Command failed: review error\ntokens used: 25,915".to_string()),
+        )
+        .expect("sidecar should win");
+        assert_eq!(res.output, payload);
+        assert_eq!(res.token_count, Some(25_915));
+    }
+
+    #[tokio::test]
+    async fn update_agent_result_persists_token_count_for_status() {
+        let mut manager = AgentManager::new();
+        let session_id = Uuid::new_v4();
+        let agent_id = manager
+            .create_agent_with_options(
+                "code-gpt-5.5".to_string(),
+                Some("Token Test".to_string()),
+                "prompt".to_string(),
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                true,
+                None,
+                None,
+                session_id,
+                None,
+                None,
+                None,
+                None,
+                ReasoningEffort::Low,
+            )
+            .await;
+
+        manager
+            .update_agent_result_with_token_count(&agent_id, Ok("done".to_string()), Some(25_915))
+            .await;
+
+        let agent = manager.get_agent(&agent_id).expect("agent retained");
+        assert_eq!(agent.token_count, Some(25_915));
+
+        let visible = manager.status_visible_agents_for_session(session_id);
+        let info = visible
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .expect("agent visible");
+        assert_eq!(info.token_count, Some(25_915));
+    }
+
+    #[test]
     fn remove_review_output_json_clears_stale_output() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("out.json");
@@ -3941,6 +4152,7 @@ mod tests {
             status,
             result: None,
             error: None,
+            token_count: None,
             retry: AgentRetryMetadata {
                 original_model: "code-gpt-5.5".to_string(),
                 final_model: "code-gpt-5.5".to_string(),
@@ -4444,6 +4656,7 @@ mod tests {
                 status: AgentStatus::Completed,
                 result: Some("ok".to_string()),
                 error: None,
+                token_count: None,
                 retry: AgentRetryMetadata {
                     original_model: "code-gpt-5.5".to_string(),
                     final_model: "code-gpt-5.5".to_string(),
@@ -5366,6 +5579,7 @@ exit 0
                     status: AgentStatus::Completed,
                     result: Some("result".repeat(1024)),
                     error: None,
+                    token_count: None,
                     retry: AgentRetryMetadata {
                         original_model: "code-gpt-5.5".to_string(),
                         final_model: "code-gpt-5.5".to_string(),
@@ -5424,6 +5638,7 @@ exit 0
                 status: AgentStatus::Completed,
                 result: Some("result".repeat(32 * 1024)),
                 error: None,
+                token_count: None,
                 retry: AgentRetryMetadata {
                     original_model: "code-gpt-5.5".to_string(),
                     final_model: "code-gpt-5.5".to_string(),
@@ -5501,6 +5716,7 @@ exit 0
                     status: AgentStatus::Completed,
                     result: Some("ok".to_string()),
                     error: None,
+                    token_count: None,
                     retry: AgentRetryMetadata {
                         original_model: "code-gpt-5.5".to_string(),
                         final_model: "code-gpt-5.5".to_string(),
@@ -5650,13 +5866,15 @@ exit 0
                 if attempt == 0 {
                     Err("API Error: Overloaded".to_string())
                 } else {
-                    Ok("ok".to_string())
+                    Ok(AgentExecutionOutput::new("ok".to_string(), Some(123)))
                 }
             }
         })
         .await;
 
-        assert_eq!(result.as_deref(), Ok("ok"));
+        let output = result.expect("retry should eventually succeed");
+        assert_eq!(output.output, "ok");
+        assert_eq!(output.token_count, Some(123));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
 
         let manager = {
@@ -5694,7 +5912,7 @@ exit 0
         .await;
 
         assert_eq!(
-            result.as_ref().map(String::as_str).map_err(String::as_str),
+            result.as_ref().map(|output| output.output.as_str()).map_err(String::as_str),
             Err("Agent 'claude' could not be found.")
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
