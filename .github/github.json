@@ -94,6 +94,13 @@
       "CHANGELOG.md",
       "docs/release-notes/RELEASE_NOTES.md"
     ],
+    "runnerPolicy": {
+      "macosRelease": {
+        "preferredLabels": ["self-hosted", "macOS", "ARM64", "chris-mac-release"],
+        "trustedSource": "Only trusted push events to cbusillo/code main are eligible for the self-hosted macOS release runner; other events fall back to GitHub-hosted macos-14.",
+        "fallback": "macos-14"
+      }
+    },
     "batchingPolicy": "Prefer batching small dogfood fixes after a fix train settles instead of cutting one release per PR.",
     "cutImmediatelyWhen": [
       "dogfood-blocking regression",
