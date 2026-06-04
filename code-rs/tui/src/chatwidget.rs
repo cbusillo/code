@@ -38668,7 +38668,7 @@ use code_core::protocol::OrderMeta;
 
     #[test]
     fn auto_handle_decision_launches_cli_agents_and_review() {
-        let mut harness = ChatWidgetHarness::new();
+        let mut harness = ChatWidgetHarness::new_in_git_repo();
         let chat = harness.chat();
 
         chat.auto_state.set_phase(AutoRunPhase::Active);
