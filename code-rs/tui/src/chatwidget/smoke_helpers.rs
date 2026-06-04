@@ -73,6 +73,14 @@ impl AutoContinueModeFixture {
 
 impl ChatWidgetHarness {
     pub fn new() -> Self {
+        Self::new_with_git_repo(false)
+    }
+
+    pub fn new_in_git_repo() -> Self {
+        Self::new_with_git_repo(true)
+    }
+
+    fn new_with_git_repo(init_git: bool) -> Self {
         // Stabilize time-of-day dependent greeting so VT100 snapshots remain deterministic.
         // Safe: tests run single-threaded by design.
         unsafe { std::env::set_var("CODEX_TUI_FAKE_HOUR", "12"); }
@@ -87,12 +95,14 @@ impl ChatWidgetHarness {
 
         let code_home = TempDir::new().expect("temp code home");
         let cwd = TempDir::new().expect("temp cwd");
-        std::process::Command::new("git")
-            .arg("init")
-            .arg("--quiet")
-            .current_dir(cwd.path())
-            .status()
-            .expect("git init temp cwd");
+        if init_git {
+            std::process::Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .current_dir(cwd.path())
+                .status()
+                .expect("git init temp cwd");
+        }
 
         let cfg = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
