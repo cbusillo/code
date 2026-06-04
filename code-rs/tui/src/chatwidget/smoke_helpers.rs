@@ -87,6 +87,12 @@ impl ChatWidgetHarness {
 
         let code_home = TempDir::new().expect("temp code home");
         let cwd = TempDir::new().expect("temp cwd");
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(cwd.path())
+            .status()
+            .expect("git init temp cwd");
 
         let cfg = Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
