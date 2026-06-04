@@ -323,7 +323,7 @@ jobs:
         (needs.determine-version.outputs.release_intent == 'true' && needs.validate-release-metadata.result == 'success') ||
         (github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true)
       )
-    runs-on: ${{ fromJson(matrix.runs_on) }}
+    runs-on: ${{ matrix.runs_on }}
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
       RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
