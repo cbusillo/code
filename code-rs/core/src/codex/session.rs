@@ -1950,11 +1950,7 @@ impl Session {
             extra
         };
 
-        // Concatenate timeline items (baseline + limited deltas) ahead of history
         let mut result = Vec::new();
-        if let Some(mut timeline_items) = self.assemble_from_timeline() {
-            result.append(&mut timeline_items);
-        }
         result.extend(filtered_history);
         result.extend(filtered_extra);
 
@@ -2175,7 +2171,7 @@ impl Session {
     }
 
     /// Assemble environment context items from the timeline for prompt input.
-    fn assemble_from_timeline(&self) -> Option<Vec<ResponseItem>> {
+    pub(super) fn assemble_timeline_prompt_items(&self) -> Option<Vec<ResponseItem>> {
         if !self.env_ctx_v2 {
             return None;
         }

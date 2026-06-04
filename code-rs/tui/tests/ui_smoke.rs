@@ -566,6 +566,7 @@ fn assistant_stream_finalize_transitions_to_message() {
         token_usage: Some(TokenUsage {
             input_tokens: 3,
             cached_input_tokens: 1,
+            cached_input_tokens_reported: true,
             output_tokens: 4,
             reasoning_output_tokens: 0,
             total_tokens: 8,

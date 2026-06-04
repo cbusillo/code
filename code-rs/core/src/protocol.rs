@@ -1093,6 +1093,8 @@ pub struct ContextLedgerEvent {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens_reported: bool,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
     pub total_tokens: u64,
@@ -1105,6 +1107,14 @@ impl TokenUsage {
 
     pub fn cached_input(&self) -> u64 {
         self.cached_input_tokens
+    }
+
+    pub fn cache_hit_rate(&self) -> Option<u8> {
+        if !self.cached_input_tokens_reported || self.input_tokens == 0 {
+            return None;
+        }
+
+        Some(cache_percent(self.cached_input_tokens, self.input_tokens))
     }
 
     pub fn non_cached_input(&self) -> u64 {
@@ -1143,10 +1153,22 @@ impl TokenUsage {
     pub fn add_assign(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
+        self.cached_input_tokens_reported =
+            self.cached_input_tokens_reported || other.cached_input_tokens_reported;
         self.output_tokens += other.output_tokens;
         self.reasoning_output_tokens += other.reasoning_output_tokens;
         self.total_tokens += other.total_tokens;
     }
+}
+
+fn cache_percent(cached_input_tokens: u64, input_tokens: u64) -> u8 {
+    if input_tokens == 0 {
+        return 0;
+    }
+
+    ((cached_input_tokens.min(input_tokens) as f32 / input_tokens as f32) * 100.0)
+        .clamp(0.0, 100.0)
+        .round() as u8
 }
 
 /// Includes prompts, tools and space to call compact.
@@ -1739,6 +1761,59 @@ pub struct BrowserSnapshotEvent {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn token_usage_cache_hit_rate_distinguishes_missing_from_zero() {
+        let missing = TokenUsage {
+            input_tokens: 1_000,
+            cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1_000,
+        };
+        assert_eq!(missing.cache_hit_rate(), None);
+
+        let reported_zero = TokenUsage {
+            cached_input_tokens_reported: true,
+            ..missing
+        };
+        assert_eq!(reported_zero.cache_hit_rate(), Some(0));
+    }
+
+    #[test]
+    fn token_usage_defaults_cache_telemetry_availability_for_old_json() {
+        let usage: TokenUsage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 1_000,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 1_000
+        }))
+        .unwrap();
+
+        assert!(!usage.cached_input_tokens_reported);
+        assert_eq!(usage.cache_hit_rate(), None);
+    }
+
+    #[test]
+    fn token_usage_cache_hit_rate_rounds_and_clamps() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            cached_input_tokens: 667,
+            cached_input_tokens_reported: true,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1_000,
+        };
+        assert_eq!(usage.cache_hit_rate(), Some(67));
+
+        let clamped = TokenUsage {
+            cached_input_tokens: 1_200,
+            ..usage
+        };
+        assert_eq!(clamped.cache_hit_rate(), Some(100));
+    }
 
     /// Serialize Event to verify that its JSON representation has the expected
     /// amount of nesting.

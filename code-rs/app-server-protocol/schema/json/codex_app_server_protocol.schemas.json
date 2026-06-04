@@ -9807,6 +9807,10 @@
           "format": "int64",
           "type": "integer"
         },
+        "cached_input_tokens_reported": {
+          "default": false,
+          "type": "boolean"
+        },
         "input_tokens": {
           "format": "int64",
           "type": "integer"

@@ -1256,6 +1256,8 @@ pub struct TokenUsage {
     pub input_tokens: i64,
     #[ts(type = "number")]
     pub cached_input_tokens: i64,
+    #[serde(default)]
+    pub cached_input_tokens_reported: bool,
     #[ts(type = "number")]
     pub output_tokens: i64,
     #[ts(type = "number")]
@@ -1409,6 +1411,14 @@ impl TokenUsage {
         self.cached_input_tokens.max(0)
     }
 
+    pub fn cache_hit_rate(&self) -> Option<u8> {
+        if !self.cached_input_tokens_reported || self.input_tokens <= 0 {
+            return None;
+        }
+
+        Some(cache_percent(self.cached_input(), self.input_tokens))
+    }
+
     pub fn non_cached_input(&self) -> i64 {
         (self.input_tokens - self.cached_input()).max(0)
     }
@@ -1449,10 +1459,22 @@ impl TokenUsage {
     pub fn add_assign(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
+        self.cached_input_tokens_reported =
+            self.cached_input_tokens_reported || other.cached_input_tokens_reported;
         self.output_tokens += other.output_tokens;
         self.reasoning_output_tokens += other.reasoning_output_tokens;
         self.total_tokens += other.total_tokens;
     }
+}
+
+fn cache_percent(cached_input_tokens: i64, input_tokens: i64) -> u8 {
+    if input_tokens <= 0 {
+        return 0;
+    }
+
+    ((cached_input_tokens.clamp(0, input_tokens) as f64 / input_tokens as f64) * 100.0)
+        .clamp(0.0, 100.0)
+        .round() as u8
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -2841,6 +2863,59 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn token_usage_cache_hit_rate_distinguishes_missing_from_zero() {
+        let missing = TokenUsage {
+            input_tokens: 1_000,
+            cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1_000,
+        };
+        assert_eq!(missing.cache_hit_rate(), None);
+
+        let reported_zero = TokenUsage {
+            cached_input_tokens_reported: true,
+            ..missing
+        };
+        assert_eq!(reported_zero.cache_hit_rate(), Some(0));
+    }
+
+    #[test]
+    fn token_usage_defaults_cache_telemetry_availability_for_old_json() {
+        let usage: TokenUsage = serde_json::from_value(json!({
+            "input_tokens": 1_000,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 1_000
+        }))
+        .unwrap();
+
+        assert!(!usage.cached_input_tokens_reported);
+        assert_eq!(usage.cache_hit_rate(), None);
+    }
+
+    #[test]
+    fn token_usage_cache_hit_rate_rounds_and_clamps() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            cached_input_tokens: 667,
+            cached_input_tokens_reported: true,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1_000,
+        };
+        assert_eq!(usage.cache_hit_rate(), Some(67));
+
+        let clamped = TokenUsage {
+            cached_input_tokens: 1_200,
+            ..usage
+        };
+        assert_eq!(clamped.cache_hit_rate(), Some(100));
+    }
 
     #[test]
     fn external_sandbox_reports_full_access_flags() {

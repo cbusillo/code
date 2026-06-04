@@ -53,6 +53,13 @@ pub struct Prompt {
     /// Conversation context input items.
     pub input: Vec<ResponseItem>,
 
+    /// Insertion point for request-only context within `input`. Items before
+    /// this index are stable history; items at and after it are the live turn.
+    pub volatile_context_insert_at: Option<usize>,
+
+    /// Request-only context items to render at `volatile_context_insert_at`.
+    pub volatile_context_items: Vec<ResponseItem>,
+
     /// Whether to store response on server side (disable_response_storage = !store).
     pub store: bool,
 
@@ -104,6 +111,8 @@ impl Default for Prompt {
     fn default() -> Self {
         Self {
             input: Vec::new(),
+            volatile_context_insert_at: None,
+            volatile_context_items: Vec::new(),
             store: false,
             user_instructions: None,
             environment_context: None,
@@ -174,9 +183,15 @@ impl Prompt {
     }
 
     pub(crate) fn get_formatted_input_with_ledger(&self) -> (Vec<ResponseItem>, ContextLedger) {
-        let mut input_with_instructions =
-            Vec::with_capacity(self.input.len() + self.status_items.len() + 3);
+        let mut input_with_instructions = Vec::with_capacity(
+            self.input.len() + self.volatile_context_items.len() + self.status_items.len() + 3,
+        );
         let mut ledger = ContextLedger::default();
+        let mut seen_tool_outputs = std::collections::HashSet::new();
+        let volatile_context_insert_at = self
+            .volatile_context_insert_at
+            .unwrap_or(self.input.len())
+            .min(self.input.len());
         if self.include_additional_instructions {
             let developer_text = self.additional_instructions().into_owned();
             ledger.push(
@@ -191,26 +206,30 @@ impl Prompt {
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text: developer_text }], end_turn: None, phase: None});
-            for message in &self.prepend_developer_messages {
-                let trimmed = message.trim();
-                if trimmed.is_empty() {
-                    continue;
+            if let Some(ui) = self.get_formatted_user_instructions() {
+                let has_user_instructions = self.input.iter().any(|item| {
+                    matches!(item, ResponseItem::Message { role, content, .. }
+                        if role == "user" && UserInstructions::is_user_instructions(content))
+                });
+                if !has_user_instructions {
+                    add_response_item_to_ledger(&mut ledger, &ui);
+                    input_with_instructions.push(ui);
                 }
-                ledger.push(
-                    classify_prepend_developer_message(trimmed),
-                    ContextPersistence::RequestOnly,
-                    "prepended developer message",
-                    1,
-                    trimmed.len(),
-                    duplicate_key_for_prepend_developer_message(trimmed),
-                );
-                input_with_instructions.push(ResponseItem::Message {
-                    id: None,
-                    role: "developer".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: trimmed.to_string(),
-                    }], end_turn: None, phase: None});
             }
+        }
+        add_input_items_to_prompt(
+            &mut input_with_instructions,
+            &mut ledger,
+            &mut seen_tool_outputs,
+            self.input[..volatile_context_insert_at].iter(),
+        );
+        add_input_items_to_prompt(
+            &mut input_with_instructions,
+            &mut ledger,
+            &mut seen_tool_outputs,
+            self.volatile_context_items.iter(),
+        );
+        if self.include_additional_instructions {
             if let Some(ec) = self.get_formatted_environment_context() {
                 let has_environment_context = self.input.iter().any(|item| {
                     matches!(item, ResponseItem::Message { role, content, .. }
@@ -234,36 +253,33 @@ impl Prompt {
                         content: vec![ContentItem::InputText { text: ec }], end_turn: None, phase: None});
                 }
             }
-            if let Some(ui) = self.get_formatted_user_instructions() {
-                let has_user_instructions = self.input.iter().any(|item| {
-                    matches!(item, ResponseItem::Message { role, content, .. }
-                        if role == "user" && UserInstructions::is_user_instructions(content))
-                });
-                if !has_user_instructions {
-                    add_response_item_to_ledger(&mut ledger, &ui);
-                    input_with_instructions.push(ui);
+            for message in &self.prepend_developer_messages {
+                let trimmed = message.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
+                ledger.push(
+                    classify_prepend_developer_message(trimmed),
+                    ContextPersistence::RequestOnly,
+                    "prepended developer message",
+                    1,
+                    trimmed.len(),
+                    duplicate_key_for_prepend_developer_message(trimmed),
+                );
+                input_with_instructions.push(ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: trimmed.to_string(),
+                    }], end_turn: None, phase: None});
             }
         }
-        // Deduplicate function call outputs before adding to input
-        let mut seen_call_ids = std::collections::HashSet::new();
-        for item in &self.input {
-            match item {
-                ResponseItem::FunctionCallOutput { call_id, .. } => {
-                    if !seen_call_ids.insert(call_id.clone()) {
-                        // Skip duplicate function call output
-                        tracing::debug!(
-                            "Filtering duplicate FunctionCallOutput with call_id: {} from input",
-                            call_id
-                        );
-                        continue;
-                    }
-                }
-                _ => {}
-            }
-            add_response_item_to_ledger(&mut ledger, item);
-            input_with_instructions.push(item.clone());
-        }
+        add_input_items_to_prompt(
+            &mut input_with_instructions,
+            &mut ledger,
+            &mut seen_tool_outputs,
+            self.input[volatile_context_insert_at..].iter(),
+        );
 
         // Add status items at the end so they're fresh for each request
         for item in &self.status_items {
@@ -347,6 +363,28 @@ impl Prompt {
             text: ui.to_string(),
         }
         .into()
+    }
+}
+
+fn add_input_items_to_prompt<'a, I>(
+    input_with_instructions: &mut Vec<ResponseItem>,
+    ledger: &mut ContextLedger,
+    seen_tool_outputs: &mut std::collections::HashSet<String>,
+    items: I,
+) where
+    I: IntoIterator<Item = &'a ResponseItem>,
+{
+    // Deduplicate function call outputs before adding to input.
+    for item in items {
+        if classify_input_item(item) == ContextSourceKind::ToolOutput
+            && let Some(duplicate_key) = duplicate_key_for_input_item(item)
+            && !seen_tool_outputs.insert(duplicate_key.clone())
+        {
+            tracing::debug!("Filtering duplicate tool output from input: {duplicate_key}");
+            continue;
+        }
+        add_response_item_to_ledger(ledger, item);
+        input_with_instructions.push(item.clone());
     }
 }
 
@@ -999,6 +1037,309 @@ mod tests {
     }
 
     #[test]
+    fn stable_project_instructions_precede_volatile_context() {
+        let prompt = Prompt {
+            user_instructions: Some(
+                "project guidance\n\n## Skills\n### Available skills\n- demo: Demo skill".to_string(),
+            ),
+            prepend_developer_messages: vec![
+                "<auto_review_ledger schema_version=\"1\">fresh run state</auto_review_ledger>"
+                    .to_string(),
+            ],
+            environment_context: Some(EnvironmentContext::new(
+                Some("/workspace/project".into()),
+                None,
+                None,
+                None,
+            )),
+            include_additional_instructions: true,
+            ..Prompt::default()
+        };
+
+        let (formatted, ledger) = prompt.get_formatted_input_with_ledger();
+
+        let item_kinds = formatted
+            .iter()
+            .map(classify_input_item)
+            .collect::<Vec<_>>();
+        let user_instructions_pos = item_kinds
+            .iter()
+            .position(|kind| {
+                matches!(
+                    kind,
+                    ContextSourceKind::UserInstructions | ContextSourceKind::SkillsManifest
+                )
+            })
+            .expect("stable user/project instructions item");
+        let volatile_developer_pos = formatted
+            .iter()
+            .position(|item| match item {
+                ResponseItem::Message { content, .. } => content.iter().any(|content| {
+                    matches!(content,
+                        ContentItem::InputText { text } if text.contains("<auto_review_ledger")
+                    )
+                }),
+                _ => false,
+            })
+            .expect("prepended auto-review developer item");
+        let environment_pos = item_kinds
+            .iter()
+            .position(|kind| *kind == ContextSourceKind::EnvironmentContext)
+            .expect("environment context item");
+
+        assert!(
+            user_instructions_pos < volatile_developer_pos,
+            "stable project instructions should precede volatile prepended developer context"
+        );
+        assert!(
+            user_instructions_pos < environment_pos,
+            "stable project instructions should precede generated environment context"
+        );
+
+        let ledger_kinds = ledger
+            .entries()
+            .iter()
+            .map(|entry| entry.source)
+            .collect::<Vec<_>>();
+        let skills_pos = ledger_kinds
+            .iter()
+            .position(|kind| *kind == ContextSourceKind::SkillsManifest)
+            .expect("skills manifest ledger entry");
+        let auto_review_pos = ledger_kinds
+            .iter()
+            .position(|kind| *kind == ContextSourceKind::AutoReviewLedger)
+            .expect("auto review ledger entry");
+
+        assert!(
+            skills_pos < auto_review_pos,
+            "stable skills manifest should precede volatile auto-review ledger"
+        );
+    }
+
+    #[test]
+    fn volatile_context_does_not_break_static_prefix() {
+        fn formatted_text(prompt: &Prompt) -> String {
+            prompt
+                .get_formatted_input()
+                .iter()
+                .map(|item| match item {
+                    ResponseItem::Message { role, content, .. } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|content| match content {
+                                ContentItem::InputText { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!("{role}:{text}")
+                    }
+                    _ => format!("{item:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        }
+
+        fn prompt_with(ledger: &str, cwd: &str) -> Prompt {
+            Prompt {
+                user_instructions: Some(
+                    "project guidance\n\n## Skills\n### Available skills\n- demo: Demo skill".to_string(),
+                ),
+                prepend_developer_messages: vec![format!(
+                    "<auto_review_ledger schema_version=\"1\">{ledger}</auto_review_ledger>"
+                )],
+                environment_context: Some(EnvironmentContext::new(
+                    Some(cwd.into()),
+                    None,
+                    None,
+                    None,
+                )),
+                include_additional_instructions: true,
+                ..Prompt::default()
+            }
+        }
+
+        let first = formatted_text(&prompt_with(
+            "first volatile state",
+            "/Users/me/.code/working/code/branches/feature-one",
+        ));
+        let second = formatted_text(&prompt_with(
+            "second volatile state",
+            "/Users/me/.code/working/code/branches/feature-two",
+        ));
+        let common_prefix_len = first
+            .bytes()
+            .zip(second.bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let static_marker_end = first
+            .find("### Available skills")
+            .expect("skills marker")
+            + "### Available skills".len();
+
+        assert!(
+            common_prefix_len >= static_marker_end,
+            "volatile context should not appear before the static AGENTS/skills prefix"
+        );
+    }
+
+    #[test]
+    fn managed_worktree_subdirectories_do_not_break_static_prefix() {
+        fn rendered_user_instructions(prompt: &Prompt) -> String {
+            prompt
+                .get_formatted_input()
+                .iter()
+                .find_map(|item| match item {
+                    ResponseItem::Message { content, .. } => content.iter().find_map(|content| {
+                        match content {
+                            ContentItem::InputText { text }
+                                if text.starts_with("# AGENTS.md instructions for ") =>
+                            {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        }
+                    }),
+                    _ => None,
+                })
+                .expect("user instructions")
+        }
+
+        fn prompt_with(cwd: &str) -> Prompt {
+            Prompt {
+                user_instructions: Some(
+                    "project guidance\n\n## Skills\n### Available skills\n- demo: Demo skill".to_string(),
+                ),
+                environment_context: Some(EnvironmentContext::new(
+                    Some(cwd.into()),
+                    None,
+                    None,
+                    None,
+                )),
+                include_additional_instructions: true,
+                ..Prompt::default()
+            }
+        }
+
+        let first = rendered_user_instructions(&prompt_with(
+            "/Users/me/.code/working/code/branches/feature-one/code-rs/core",
+        ));
+        let second = rendered_user_instructions(&prompt_with(
+            "/Users/me/.code/working/code/branches/feature-two/code-rs/core",
+        ));
+
+        assert_eq!(first, second);
+        assert!(first.starts_with(
+            "# AGENTS.md instructions for /.code/working/code/branches/<branch>/code-rs/core"
+        ));
+    }
+
+    #[test]
+    fn volatile_context_sits_between_history_and_current_turn() {
+        fn formatted_text(prompt: &Prompt) -> String {
+            prompt
+                .get_formatted_input()
+                .iter()
+                .map(|item| match item {
+                    ResponseItem::Message { role, content, .. } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|content| match content {
+                                ContentItem::InputText { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!("{role}:{text}")
+                    }
+                    _ => format!("{item:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        }
+
+        let prompt = Prompt {
+            input: vec![
+                message("user", "old stable user turn"),
+                message("user", "live current turn"),
+            ],
+            volatile_context_insert_at: Some(1),
+            user_instructions: Some(
+                "project guidance\n\n## Skills\n### Available skills\n- demo: Demo skill".to_string(),
+            ),
+            prepend_developer_messages: vec![
+                "<auto_review_ledger schema_version=\"1\">fresh run state</auto_review_ledger>"
+                    .to_string(),
+            ],
+            environment_context: Some(EnvironmentContext::new(
+                Some("/workspace/project".into()),
+                None,
+                None,
+                None,
+            )),
+            include_additional_instructions: true,
+            ..Prompt::default()
+        };
+
+        let rendered = formatted_text(&prompt);
+        let skills_pos = rendered.find("### Available skills").expect("skills");
+        let history_pos = rendered
+            .find("old stable user turn")
+            .expect("stable history");
+        let ledger_pos = rendered.find("<auto_review_ledger").expect("ledger");
+        let env_pos = rendered.find("<environment_context>").expect("environment");
+        let current_pos = rendered.find("live current turn").expect("current turn");
+
+        assert!(skills_pos < history_pos);
+        assert!(history_pos < env_pos);
+        assert!(env_pos < ledger_pos);
+        assert!(ledger_pos < current_pos);
+    }
+
+    #[test]
+    fn volatile_context_items_sit_between_history_and_current_turn() {
+        let prompt = Prompt {
+            input: vec![
+                message("user", "old stable user turn"),
+                message("user", "live current turn"),
+            ],
+            volatile_context_insert_at: Some(1),
+            volatile_context_items: vec![message("user", "timeline env delta")],
+            include_additional_instructions: false,
+            ..Prompt::default()
+        };
+
+        let rendered = prompt
+            .get_formatted_input()
+            .iter()
+            .map(|item| match item {
+                ResponseItem::Message { role, content, .. } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|content| match content {
+                            ContentItem::InputText { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("{role}:{text}")
+                }
+                _ => format!("{item:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        let history_pos = rendered
+            .find("old stable user turn")
+            .expect("stable history");
+        let timeline_pos = rendered.find("timeline env delta").expect("timeline");
+        let current_pos = rendered.find("live current turn").expect("current turn");
+
+        assert!(history_pos < timeline_pos);
+        assert!(timeline_pos < current_pos);
+    }
+
+    #[test]
     fn replace_image_payloads_for_spark_model_rewrites_images() {
         let mut input = vec![
             ResponseItem::Message {
@@ -1193,10 +1534,13 @@ mod tests {
     }
 
     #[test]
-    fn prepend_developer_messages_precedes_environment_context() {
+    fn volatile_context_follows_history_and_precedes_current_turn() {
         use std::path::PathBuf;
 
         let mut prompt = Prompt::default();
+        prompt.input.push(message("user", "stable history"));
+        prompt.input.push(message("user", "current turn"));
+        prompt.volatile_context_insert_at = Some(1);
         prompt.environment_context = Some(EnvironmentContext::new(
             Some(PathBuf::from("/workspace")),
             None,
@@ -1209,34 +1553,73 @@ mod tests {
             .push(coordinator_text.to_string());
 
         let formatted = prompt.get_formatted_input();
-        assert!(formatted.len() >= 3);
-
-        let second = &formatted[1];
-        match second {
-            ResponseItem::Message { role, content, .. } => {
-                assert_eq!(role, "developer");
-                match content.first() {
-                    Some(ContentItem::InputText { text }) => {
-                        assert_eq!(text, coordinator_text);
-                    }
-                    other => panic!("unexpected content: {other:?}"),
+        let rendered = formatted
+            .iter()
+            .map(|item| match item {
+                ResponseItem::Message { role, content, .. } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|content| match content {
+                            ContentItem::InputText { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("{role}:{text}")
                 }
-            }
-            other => panic!("unexpected second item: {other:?}"),
-        }
+                _ => format!("{item:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
 
-        let third = &formatted[2];
-        match third {
-            ResponseItem::Message { role, content, .. } => {
-                assert_eq!(role, "user");
-                let text = match content.first() {
-                    Some(ContentItem::InputText { text }) => text,
-                    other => panic!("unexpected environment content: {other:?}"),
-                };
-                assert!(text.contains("<environment_context>"));
-            }
-            other => panic!("unexpected third item: {other:?}"),
-        }
+        let history_pos = rendered.find("stable history").expect("history");
+        let env_pos = rendered.find("<environment_context>").expect("environment");
+        let coordinator_pos = rendered.find(coordinator_text).expect("developer context");
+        let current_pos = rendered.find("current turn").expect("current turn");
+
+        assert!(history_pos < env_pos);
+        assert!(env_pos < coordinator_pos);
+        assert!(coordinator_pos < current_pos);
+    }
+
+    #[test]
+    fn duplicate_tool_outputs_are_filtered_across_prompt_split() {
+        let prompt = Prompt {
+            input: vec![ResponseItem::CustomToolCallOutput {
+                call_id: "call-1".to_string(),
+                name: None,
+                output: code_protocol::models::FunctionCallOutputPayload::from_text(
+                    "first".to_string(),
+                ),
+            }],
+            volatile_context_insert_at: Some(1),
+            status_items: vec![ResponseItem::CustomToolCallOutput {
+                call_id: "call-status".to_string(),
+                name: None,
+                output: code_protocol::models::FunctionCallOutputPayload::from_text(
+                    "status output is not part of split dedupe".to_string(),
+                ),
+            }],
+            ..Prompt::default()
+        };
+        let mut prompt_with_duplicate = prompt.clone();
+        prompt_with_duplicate.input.push(ResponseItem::CustomToolCallOutput {
+            call_id: "call-1".to_string(),
+            name: None,
+            output: code_protocol::models::FunctionCallOutputPayload::from_text(
+                "duplicate".to_string(),
+            ),
+        });
+
+        let formatted = prompt_with_duplicate.get_formatted_input();
+        let matching_outputs = formatted
+            .iter()
+            .filter(|item| {
+                matches!(item, ResponseItem::CustomToolCallOutput { call_id, .. } if call_id == "call-1")
+            })
+            .count();
+
+        assert_eq!(matching_outputs, 1);
     }
 
     #[test]

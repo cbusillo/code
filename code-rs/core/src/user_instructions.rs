@@ -27,7 +27,7 @@ impl UserInstructions {
 
 impl From<UserInstructions> for ResponseItem {
     fn from(ui: UserInstructions) -> Self {
-        let directory = ui.directory;
+        let directory = cache_stable_directory_label(&ui.directory);
         let contents = ui.text;
         ResponseItem::Message {
             id: None,
@@ -38,6 +38,25 @@ impl From<UserInstructions> for ResponseItem {
                 ),
             }], end_turn: None, phase: None}
     }
+}
+
+fn cache_stable_directory_label(directory: &str) -> String {
+    let marker = "/.code/working/";
+    let Some(marker_index) = directory.find(marker) else {
+        return directory.to_string();
+    };
+    let after_marker = &directory[marker_index + marker.len()..];
+    let Some((repo_name, branch_path)) = after_marker.split_once("/branches/") else {
+        return directory.to_string();
+    };
+    let Some(branch_name) = branch_path.split('/').next() else {
+        return directory.to_string();
+    };
+    if repo_name.is_empty() || branch_name.is_empty() {
+        return directory.to_string();
+    }
+    let suffix = branch_path.strip_prefix(branch_name).unwrap_or_default();
+    format!("{marker}{repo_name}/branches/<branch>{suffix}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +118,29 @@ mod tests {
             text,
             "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
         );
+    }
+
+    #[test]
+    fn managed_worktree_directory_label_is_cache_stable() {
+        let first = cache_stable_directory_label(
+            "/Users/me/.code/working/code/branches/feature-one/code-rs/core",
+        );
+        let second = cache_stable_directory_label(
+            "/Users/me/.code/working/code/branches/feature-two/code-rs/core",
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(first, "/.code/working/code/branches/<branch>/code-rs/core");
+        assert_eq!(
+            cache_stable_directory_label("/Users/me/.code/working/code/branches/feature-one"),
+            "/.code/working/code/branches/<branch>"
+        );
+    }
+
+    #[test]
+    fn ordinary_directory_label_is_preserved() {
+        let directory = "/Users/me/Developer/code";
+        assert_eq!(cache_stable_directory_label(directory), directory);
     }
 
     #[test]

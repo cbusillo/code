@@ -7,6 +7,11 @@
 
 - (none)
 
+## [0.6.116] - 2026-06-04
+
+- Core: keep volatile context after the stable prompt prefix so repeated turns can reuse provider prompt cache and reduce rate-limit pressure.
+- TUI: show prompt-cache hit rate in the footer when providers report cached input token telemetry.
+
 ## [0.6.115] - 2026-06-04
 
 - Core: require a visible worktree decision before editing a checkout that already has another write-capable session. (cc95a22e)

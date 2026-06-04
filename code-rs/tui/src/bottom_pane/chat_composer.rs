@@ -34,6 +34,7 @@ use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::clipboard_paste::try_decode_base64_image_to_temp_png;
 use code_file_search::FileMatch;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -45,6 +46,7 @@ use std::time::Instant;
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+const PROMPT_CACHE_ROLLING_SAMPLE_LIMIT: usize = 20;
 
 struct PostPasteSpaceGuard {
     expires_at: Instant,
@@ -102,6 +104,53 @@ struct TokenUsageInfo {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PromptCacheSample {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PromptCacheStats {
+    samples: VecDeque<PromptCacheSample>,
+}
+
+impl PromptCacheStats {
+    fn record(&mut self, usage: &TokenUsage) {
+        if usage.cache_hit_rate().is_none() {
+            return;
+        }
+
+        if self.samples.len() == PROMPT_CACHE_ROLLING_SAMPLE_LIMIT {
+            self.samples.pop_front();
+        }
+
+        self.samples.push_back(PromptCacheSample {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens.min(usage.input_tokens),
+        });
+    }
+
+    fn last_percent(&self) -> Option<u8> {
+        self.samples
+            .back()
+            .map(|sample| cache_percent(sample.cached_input_tokens, sample.input_tokens))
+    }
+
+    fn rolling_percent(&self) -> Option<u8> {
+        let input_tokens: u64 = self.samples.iter().map(|sample| sample.input_tokens).sum();
+        if input_tokens == 0 {
+            return None;
+        }
+        let cached_input_tokens: u64 = self
+            .samples
+            .iter()
+            .map(|sample| sample.cached_input_tokens)
+            .sum();
+        Some(cache_percent(cached_input_tokens, input_tokens))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutoReviewPhase {
     Reviewing,
     Resolving,
@@ -134,6 +183,19 @@ fn format_with_thousands(n: u64) -> String {
         count += 1;
     }
     out.chars().rev().collect()
+}
+
+fn cache_percent(cached_input_tokens: u64, input_tokens: u64) -> u8 {
+    TokenUsage {
+        input_tokens,
+        cached_input_tokens,
+        cached_input_tokens_reported: true,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 0,
+    }
+    .cache_hit_rate()
+    .unwrap_or(0)
 }
 
 fn context_window_footer_label(
@@ -173,6 +235,7 @@ pub(crate) struct ChatComposer {
     file_popup_origin: Option<FilePopupOrigin>,
     pending_pastes: Vec<(String, String)>,
     token_usage_info: Option<TokenUsageInfo>,
+    prompt_cache_stats: PromptCacheStats,
     has_focus: bool,
     has_chat_history: bool,
     /// Tracks whether the user has typed or pasted any content since startup.
@@ -252,6 +315,7 @@ impl ChatComposer {
             file_popup_origin: None,
             pending_pastes: Vec::new(),
             token_usage_info: None,
+            prompt_cache_stats: PromptCacheStats::default(),
             has_focus: has_input_focus,
             has_chat_history: false,
             typed_anything: false,
@@ -679,6 +743,8 @@ impl ChatComposer {
         model_context_window: Option<u64>,
         context_mode: Option<ContextMode>,
     ) {
+        self.prompt_cache_stats.record(&last_token_usage);
+
         let initial_prompt_tokens = self
             .token_usage_info
             .as_ref()
@@ -2331,6 +2397,24 @@ impl ChatComposer {
         spans
     }
 
+    fn prompt_cache_spans(&self, label_style: Style) -> Vec<Span<'static>> {
+        let Some(last_percent) = self.prompt_cache_stats.last_percent() else {
+            return Vec::new();
+        };
+        let Some(rolling_percent) = self.prompt_cache_stats.rolling_percent() else {
+            return Vec::new();
+        };
+
+        vec![
+            Span::from("cache ").style(label_style),
+            Span::from(format!("{last_percent}%")).style(label_style.add_modifier(Modifier::BOLD)),
+            Span::from(" last").style(label_style),
+            Span::from(" / ").style(label_style),
+            Span::from(format!("{rolling_percent}%")).style(label_style.add_modifier(Modifier::BOLD)),
+            Span::from(" avg").style(label_style),
+        ]
+    }
+
     pub(crate) fn token_usage_spans_compact(&self, label_style: Style) -> Vec<Span<'static>> {
         let mut spans: Vec<Span<'static>> = Vec::new();
         if let Some(token_usage_info) = &self.token_usage_info {
@@ -2713,6 +2797,15 @@ impl ChatComposer {
                 let mut include_tokens = !token_spans_full.is_empty() || !token_spans_compact.is_empty();
                 let mut token_use_compact = false;
 
+                // Prompt cache hit rate (priority 5). This is intentionally
+                // separate from the token section so tight terminals drop it
+                // before hiding the core token/context signal.
+                let cache_spans: Vec<Span<'static>> = self.prompt_cache_spans(label_style);
+                let cache_present = !cache_spans.is_empty();
+                if cache_present {
+                    right_sections.push((5, cache_spans, true));
+                }
+
                 // Editor hint (priority 4) — only when not auto-drive and not showing quit hint
                 let editor_spans: Vec<Span<'static>> = if !self.auto_drive_active && !self.ctrl_c_quit_hint {
                     vec![
@@ -2756,6 +2849,7 @@ impl ChatComposer {
                 let mut include_left_misc = true;
                 let mut include_ctrl_c = ctrl_c_present;
                 let mut include_editor = editor_present;
+                let mut include_cache = cache_present;
                 let mut include_right_other = true; // covers priority 7 sections
 
                 // helper closures to rebuild assembled spans based on current flags
@@ -2826,6 +2920,7 @@ impl ChatComposer {
                     use_compact_tokens: bool,
                     include_auto_review_agent_hint: bool,
                     include_editor: bool,
+                    include_cache: bool,
                     include_right_other: bool,
                 | -> (Vec<Span<'static>>, usize) {
                     let mut assembled: Vec<Span<'static>> = Vec::new();
@@ -2836,6 +2931,7 @@ impl ChatComposer {
                             1 => include_tokens && *included,
                             3 => include_auto_review_agent_hint && *included,
                             4 => include_editor && *included,
+                            5 => include_cache && *included,
                             7 => include_right_other && *included,
                             _ => *included,
                         };
@@ -2885,6 +2981,7 @@ impl ChatComposer {
                         token_use_compact,
                         include_auto_review_agent_hint,
                         include_editor,
+                        include_cache,
                         include_right_other,
                     );
 
@@ -2921,7 +3018,7 @@ impl ChatComposer {
                         continue;
                     }
 
-                    // Removal order: 7 (right other) -> 6 (left misc) -> 5 (Ctrl+A hint)
+                    // Removal order: 7 (right other) -> 6 (left misc) -> 5 (cache / Ctrl+A hint)
                     // -> 4 (editor) -> 3 (auto review status) -> 2 (Ctrl+C) -> 1 (tokens)
                     match removal_stage {
                         0 => {
@@ -2931,6 +3028,7 @@ impl ChatComposer {
                             include_left_misc = false;
                         }
                         2 => {
+                            include_cache = false;
                             include_auto_review_agent_hint = false;
                         }
                         3 => {
@@ -3459,6 +3557,7 @@ mod tests {
         let token_usage = TokenUsage {
             input_tokens: 13_290,
             cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
             output_tokens: 0,
             reasoning_output_tokens: 0,
             total_tokens: 13_290,
@@ -3488,6 +3587,105 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_stats_uses_token_weighted_rolling_average() {
+        let mut stats = PromptCacheStats::default();
+
+        stats.record(&TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 50,
+            cached_input_tokens_reported: true,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 100,
+        });
+        stats.record(&TokenUsage {
+            input_tokens: 300,
+            cached_input_tokens: 300,
+            cached_input_tokens_reported: true,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 300,
+        });
+
+        assert_eq!(stats.last_percent(), Some(100));
+        assert_eq!(stats.rolling_percent(), Some(88));
+    }
+
+    #[test]
+    fn footer_hides_cache_stats_until_cached_tokens_are_observed() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_tx = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, app_tx, true, false);
+
+        let token_usage = TokenUsage {
+            input_tokens: 13_290,
+            cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 13_290,
+        };
+        composer.set_token_usage(token_usage.clone(), token_usage, None, None);
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 96,
+            height: 1,
+        };
+        let mut buf = Buffer::empty(area);
+        composer.render_footer(area, &mut buf);
+
+        let line: String = (0..area.width)
+            .map(|x| buf[(area.x + x, area.y)].symbol().to_string())
+            .collect();
+
+        assert!(line.contains("13,290 tokens"));
+        assert!(!line.contains("cache"), "line: {line}");
+    }
+
+    #[test]
+    fn footer_shows_prompt_cache_last_and_weighted_average() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
+        let app_tx = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, app_tx, true, false);
+
+        let first_usage = TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 50,
+            cached_input_tokens_reported: true,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 100,
+        };
+        let second_usage = TokenUsage {
+            input_tokens: 300,
+            cached_input_tokens: 300,
+            cached_input_tokens_reported: true,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 300,
+        };
+        composer.set_token_usage(first_usage.clone(), first_usage, None, None);
+        composer.set_token_usage(second_usage.clone(), second_usage, None, None);
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 96,
+            height: 1,
+        };
+        let mut buf = Buffer::empty(area);
+        composer.render_footer(area, &mut buf);
+
+        let line: String = (0..area.width)
+            .map(|x| buf[(area.x + x, area.y)].symbol().to_string())
+            .collect();
+
+        assert!(line.contains("cache 100% last / 88% avg"), "line: {line}");
+    }
+
+    #[test]
     fn footer_shows_1m_auto_suffix_when_auto_context_is_active() {
         let (tx, _rx) = std::sync::mpsc::channel::<AppEvent>();
         let app_tx = AppEventSender::new(tx);
@@ -3496,6 +3694,7 @@ mod tests {
         let token_usage = TokenUsage {
             input_tokens: 13_290,
             cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
             output_tokens: 0,
             reasoning_output_tokens: 0,
             total_tokens: 13_290,
@@ -3532,6 +3731,7 @@ mod tests {
         let token_usage = TokenUsage {
             input_tokens: 13_290,
             cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
             output_tokens: 0,
             reasoning_output_tokens: 0,
             total_tokens: 13_290,
@@ -3569,6 +3769,7 @@ mod tests {
         let token_usage = TokenUsage {
             input_tokens: 13_290,
             cached_input_tokens: 0,
+            cached_input_tokens_reported: false,
             output_tokens: 0,
             reasoning_output_tokens: 0,
             total_tokens: 13_290,

@@ -4210,6 +4210,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("bundle.txt");
         std::fs::write(&file, "alpha beta gamma").expect("write context file");
+        std::fs::create_dir(tmp.path().join("src")).expect("create src dir");
+        std::fs::write(
+            tmp.path().join("src/main.rs"),
+            "DO_NOT_INLINE_FILE_HINT_SENTINEL",
+        )
+        .expect("write hinted file");
 
         let files = vec!["src/main.rs".to_string()];
         let context_files = vec!["bundle.txt".to_string()];
@@ -4226,6 +4232,7 @@ mod tests {
         .expect("prompt built");
 
         assert!(prompt.contains("Files to consider: src/main.rs"));
+        assert!(!prompt.contains("DO_NOT_INLINE_FILE_HINT_SENTINEL"));
         assert!(prompt.contains("<context_file"));
         assert!(prompt.contains("alpha beta gamma"));
         let summary = summary.expect("summary present");
