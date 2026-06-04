@@ -14,6 +14,19 @@ on:
       - '**/*.test.ts'
       - 'test/**'
       - '*.md'
+  workflow_dispatch:
+    inputs:
+      release_build_dry_run:
+        description: Build release binaries without publishing a release.
+        required: false
+        type: boolean
+        default: false
+      release_build_scope:
+        description: Targets to build during a release build dry run.
+        required: false
+        type: choice
+        options: [macos, all]
+        default: macos
 
 concurrency:
   group: release-${{ github.ref }}
@@ -163,7 +176,12 @@ jobs:
   detect-macos-release-runner:
     name: Detect self-hosted macOS release runner
     needs: [determine-version, validate-release-metadata]
-    if: needs.determine-version.outputs.release_intent == 'true'
+    if: |
+      always() && !cancelled() &&
+      (
+        (needs.determine-version.outputs.release_intent == 'true' && needs.validate-release-metadata.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true)
+      )
     runs-on: [self-hosted, Linux, X64, chris-testing]
     outputs:
       use_self_hosted: ${{ steps.select.outputs.use_self_hosted }}
@@ -178,6 +196,7 @@ jobs:
           TRUSTED_ACTORS: cbusillo github-actions[bot] launchplane[bot]
           HOSTED_RUNS_ON: '["macos-14"]'
           SELF_HOSTED_RUNS_ON: '["self-hosted","macOS","ARM64","chris-mac-release"]'
+          RELEASE_BUILD_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true }}
         run: |
           set -euo pipefail
 
@@ -195,9 +214,17 @@ jobs:
 
           # Actor alone is not a safe self-hosted-runner signal: comments or
           # labels from a trusted actor can still target untrusted PR code. This
-          # runner is eligible only for trusted main-branch push code.
-          if [[ "${GITHUB_EVENT_NAME}" != "push" || "${GITHUB_REF}" != "refs/heads/main" || "${GITHUB_REPOSITORY}" != "cbusillo/code" ]]; then
-            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: not a trusted main push"
+          # runner is eligible only for trusted main-branch code: real release
+          # pushes, or maintainer-dispatched dry runs on main.
+          trusted_main_code=false
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" && "${GITHUB_REPOSITORY}" == "cbusillo/code" ]]; then
+            trusted_main_code=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${RELEASE_BUILD_DRY_RUN}" == "true" && "${GITHUB_REF}" == "refs/heads/main" && "${GITHUB_REPOSITORY}" == "cbusillo/code" ]]; then
+            trusted_main_code=true
+          fi
+
+          if [[ "$trusted_main_code" != true ]]; then
+            select_runner false "$HOSTED_RUNS_ON" "hosted fallback: not trusted main code"
             exit 0
           fi
 
@@ -231,41 +258,77 @@ jobs:
             select_runner false "$HOSTED_RUNS_ON" "hosted fallback: no idle chris-mac-release runner online"
           fi
 
+  plan-release-build-matrix:
+    name: Plan release build matrix
+    needs: [determine-version, validate-release-metadata, detect-macos-release-runner]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-macos-release-runner.result == 'success' &&
+      (
+        (needs.determine-version.outputs.release_intent == 'true' && needs.validate-release-metadata.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true)
+      )
+    runs-on: [self-hosted, Linux, X64, chris-testing]
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Select release build targets
+        id: matrix
+        shell: bash
+        env:
+          MACOS_RUNS_ON: ${{ needs.detect-macos-release-runner.outputs.runs_on }}
+          RELEASE_BUILD_SCOPE: ${{ inputs.release_build_scope || 'all' }}
+          RELEASE_BUILD_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true }}
+        run: |
+          set -euo pipefail
+
+          macos_matrix="$(jq -cn --argjson runs_on "$MACOS_RUNS_ON" '{include: [
+            {os: "macos-release", runs_on: $runs_on, target: "x86_64-apple-darwin", artifact: "code-x86_64-apple-darwin"},
+            {os: "macos-release", runs_on: $runs_on, target: "aarch64-apple-darwin", artifact: "code-aarch64-apple-darwin"}
+          ]}')"
+
+          if [[ "$RELEASE_BUILD_DRY_RUN" == "true" && "$RELEASE_BUILD_SCOPE" == "macos" ]]; then
+            matrix="$macos_matrix"
+          else
+            matrix="$(jq -cn --argjson macos_runs_on "$MACOS_RUNS_ON" '{include: [
+              {os: "ubuntu-24.04", runs_on: ["ubuntu-24.04"], target: "x86_64-unknown-linux-musl", artifact: "code-x86_64-unknown-linux-musl"},
+              {os: "ubuntu-24.04-arm", runs_on: ["ubuntu-24.04-arm"], target: "aarch64-unknown-linux-musl", artifact: "code-aarch64-unknown-linux-musl"},
+              {os: "macos-release", runs_on: $macos_runs_on, target: "x86_64-apple-darwin", artifact: "code-x86_64-apple-darwin"},
+              {os: "macos-release", runs_on: $macos_runs_on, target: "aarch64-apple-darwin", artifact: "code-aarch64-apple-darwin"},
+              {os: "windows-latest", runs_on: ["windows-latest"], target: "x86_64-pc-windows-msvc", artifact: "code-x86_64-pc-windows-msvc.exe"}
+            ]}')"
+          fi
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Release build matrix: $matrix"
+
+          if [[ "$RELEASE_BUILD_DRY_RUN" == "true" ]]; then
+            {
+              echo "### Release build dry run"
+              echo
+              echo "Scope: ${RELEASE_BUILD_SCOPE}"
+              echo
+              echo "This run builds release binaries and uploads workflow artifacts only. It does not tag or publish a GitHub Release."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build-binaries:
     name: Build ${{ matrix.target }}
-    needs: [determine-version, validate-release-metadata, detect-macos-release-runner]
-    if: needs.determine-version.outputs.release_intent == 'true'
+    needs: [determine-version, validate-release-metadata, detect-macos-release-runner, plan-release-build-matrix]
+    if: |
+      always() && !cancelled() &&
+      needs.plan-release-build-matrix.result == 'success' &&
+      needs.detect-macos-release-runner.result == 'success' &&
+      (
+        (needs.determine-version.outputs.release_intent == 'true' && needs.validate-release-metadata.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_build_dry_run == true)
+      )
     runs-on: ${{ fromJson(matrix.runs_on) }}
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
       RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
     strategy:
-      matrix:
-        include:
-          # Linux builds
-          - os: ubuntu-24.04
-            runs_on: '["ubuntu-24.04"]'
-            target: x86_64-unknown-linux-musl
-            artifact: code-x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            runs_on: '["ubuntu-24.04-arm"]'
-            target: aarch64-unknown-linux-musl
-            artifact: code-aarch64-unknown-linux-musl
-          # GNU variants omitted to reduce asset duplication.
-          # macOS builds
-          - os: macos-release
-            runs_on: ${{ needs.detect-macos-release-runner.outputs.runs_on }}
-            target: x86_64-apple-darwin
-            artifact: code-x86_64-apple-darwin
-          - os: macos-release
-            runs_on: ${{ needs.detect-macos-release-runner.outputs.runs_on }}
-            target: aarch64-apple-darwin
-            artifact: code-aarch64-apple-darwin
-          # Windows build
-          - os: windows-latest
-            runs_on: '["windows-latest"]'
-            target: x86_64-pc-windows-msvc
-            artifact: code-x86_64-pc-windows-msvc.exe
+      matrix: ${{ fromJson(needs.plan-release-build-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout code
@@ -575,7 +638,15 @@ jobs:
     name: Publish GitHub Release
     needs: [determine-version, validate-release-metadata, build-binaries, preflight-tests]
     runs-on: [self-hosted, Linux, X64, chris-testing]
-    if: "always() && needs.determine-version.outputs.release_intent == 'true' && !cancelled() && !failure() && !contains(github.event.head_commit.message, '[skip ci]')"
+    if: |
+      always() && !cancelled() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.determine-version.outputs.release_intent == 'true' &&
+      needs.validate-release-metadata.result == 'success' &&
+      needs.build-binaries.result == 'success' &&
+      needs.preflight-tests.result == 'success' &&
+      !contains(github.event.head_commit.message, '[skip ci]')
     timeout-minutes: 30
 
     steps:
