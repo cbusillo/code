@@ -3452,7 +3452,7 @@ pub fn create_agent_tool(allowed_models: &[String]) -> OpenAiTool {
                 },
             }),
                 description: Some(
-                    "Optional array of agent/model selector slugs. For explicit multi-agent/dissent requests, prefer diverse families when useful and budget allows (for example ['code-gpt-5.5','claude-sonnet-4.6','antigravity']). Use `antigravity` for Google/Gemini-family perspective; AGY uses its configured model rather than per-run Gemini Pro/Flash selection. If you skip an obvious family, briefly explain why.".to_string(),
+                    "Optional array of agent/model selector slugs. For explicit multi-agent or dissent requests, prefer diverse families when useful and budget allows (for example ['code-gpt-5.5','claude-sonnet-4.6','antigravity']). For multi-agent release/workflow, infrastructure, security, or product-risk work, proactively use `antigravity` for Google/Gemini-family perspective unless there is a clear reason to skip it; AGY uses its configured model rather than per-run Gemini Pro/Flash selection. If you skip an obvious family, briefly explain why.".to_string(),
                 ),
         },
     );
@@ -5833,7 +5833,9 @@ exit 0
         };
         let description = description.as_deref().expect("models description");
         assert!(description.contains("diverse families"));
-        assert!(description.contains("Use `antigravity` for Google/Gemini-family perspective"));
+        assert!(description.contains("proactively use `antigravity` for Google/Gemini-family perspective"));
+        assert!(description.contains("release/workflow, infrastructure, security, or product-risk"));
+        assert!(description.contains("unless there is a clear reason to skip it"));
         assert!(description.contains("AGY uses its configured model"));
 
         let JsonSchema::String { allowed_values, .. } = items.as_ref() else {
