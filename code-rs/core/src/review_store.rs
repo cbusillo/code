@@ -22,6 +22,10 @@ const DEFAULT_LEDGER_MAX_RUNS: usize = 5;
 const LEDGER_RECENT_ACTIONABLE_SECS: u64 = 24 * 60 * 60;
 const LEDGER_IN_FLIGHT_ACTIVITY_SECS: u64 = 60 * 60;
 const LEDGER_MAX_FINDINGS_PER_RUN: usize = 3;
+const LEDGER_DIAGNOSTIC_RECENT_SECS: u64 = 24 * 60 * 60;
+const LEDGER_HIGH_TOKEN_COUNT: u64 = 20_000;
+const LEDGER_HIGH_PROMPT_ESTIMATE: u64 = 20_000;
+const LEDGER_LONG_ELAPSED_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -653,11 +657,14 @@ where
     I: IntoIterator<Item = &'a AutoReviewRun>,
 {
     let max_bytes = options.max_bytes.max(64);
-    let mut selected = runs
-        .into_iter()
+    let all_runs = runs.into_iter().collect::<Vec<_>>();
+    let mut selected = all_runs
+        .iter()
+        .copied()
         .filter(|run| run_is_ledger_actionable(run, options.now))
         .collect::<Vec<_>>();
-    if selected.is_empty() {
+    let diagnostics = build_ledger_diagnostics(all_runs.iter().copied(), options.now);
+    if selected.is_empty() && diagnostics.is_none() {
         return None;
     }
 
@@ -675,6 +682,9 @@ where
         "<auto_review_ledger schema_version=\"1\" max_bytes=\"{max_bytes}\">"
     ));
     lines.push("Auto Review state for this repo. Details are not included in this request; treat run ids as stable references for future detail lookup.".to_string());
+    if let Some(diagnostics) = diagnostics {
+        lines.push(diagnostics);
+    }
     for run in selected {
         append_ledger_run(&mut lines, run, options.now);
     }
@@ -710,6 +720,134 @@ fn run_is_ledger_actionable(run: &AutoReviewRun, now: u64) -> bool {
     }
     let reference_time = run.completed_at.or(run.last_activity_at).unwrap_or(run.updated_at);
     now.saturating_sub(reference_time) <= LEDGER_RECENT_ACTIONABLE_SECS
+}
+
+#[derive(Default)]
+struct LedgerDiagnostics {
+    recent_runs: usize,
+    in_flight_runs: usize,
+    terminal_runs: usize,
+    token_count: u64,
+    token_runs: usize,
+    prompt_token_estimate: u64,
+    prompt_runs: usize,
+    high_burn_runs: usize,
+    longest_elapsed_secs: Option<u64>,
+}
+
+fn build_ledger_diagnostics<'a, I>(runs: I, now: u64) -> Option<String>
+where
+    I: IntoIterator<Item = &'a AutoReviewRun>,
+{
+    let mut diagnostics = LedgerDiagnostics::default();
+
+    for run in runs {
+        if !run_is_recent_for_diagnostics(run, now) {
+            continue;
+        }
+
+        // Only summarize fields that the durable run store already has. Actual
+        // provider tokens appear once the agent status path persists them;
+        // prompt estimates and elapsed time are available earlier.
+        let has_cost_signal = run.token_count.is_some() || run.prompt_token_estimate.is_some();
+        let elapsed_secs = run_elapsed_secs(run, now);
+        let has_timing_signal = run_has_long_elapsed_signal(run, elapsed_secs);
+        let high_burn = run_has_high_burn_signal(run, elapsed_secs);
+        if !has_cost_signal && !has_timing_signal && !high_burn {
+            continue;
+        }
+
+        diagnostics.recent_runs += 1;
+        if run.status.is_in_flight() {
+            diagnostics.in_flight_runs += 1;
+        } else {
+            diagnostics.terminal_runs += 1;
+        }
+        if let Some(token_count) = run.token_count {
+            diagnostics.token_count = diagnostics.token_count.saturating_add(token_count);
+            diagnostics.token_runs += 1;
+        }
+        if let Some(prompt_token_estimate) = run.prompt_token_estimate {
+            diagnostics.prompt_token_estimate = diagnostics
+                .prompt_token_estimate
+                .saturating_add(prompt_token_estimate);
+            diagnostics.prompt_runs += 1;
+        }
+        if high_burn {
+            diagnostics.high_burn_runs += 1;
+        }
+        if let Some(elapsed_secs) = elapsed_secs {
+            diagnostics.longest_elapsed_secs = Some(
+                diagnostics
+                    .longest_elapsed_secs
+                    .unwrap_or(0)
+                    .max(elapsed_secs),
+            );
+        }
+    }
+
+    if diagnostics.recent_runs == 0 {
+        return None;
+    }
+
+    let mut line = format!(
+        "diagnostics recent_runs={} in_flight={} terminal={}",
+        diagnostics.recent_runs, diagnostics.in_flight_runs, diagnostics.terminal_runs
+    );
+    if diagnostics.token_runs > 0 {
+        line.push_str(&format!(
+            " tokens={}t token_runs={}",
+            diagnostics.token_count, diagnostics.token_runs
+        ));
+    }
+    if diagnostics.prompt_runs > 0 {
+        line.push_str(&format!(
+            " prompt_estimate={}t prompt_runs={}",
+            diagnostics.prompt_token_estimate, diagnostics.prompt_runs
+        ));
+    }
+    if diagnostics.high_burn_runs > 0 {
+        line.push_str(&format!(" high_burn={}", diagnostics.high_burn_runs));
+    }
+    if let Some(longest_elapsed_secs) = diagnostics.longest_elapsed_secs {
+        line.push_str(&format!(" longest_elapsed={}s", longest_elapsed_secs));
+    }
+    Some(line)
+}
+
+fn run_is_recent_for_diagnostics(run: &AutoReviewRun, now: u64) -> bool {
+    let reference_time = run
+        .completed_at
+        .or(run.last_activity_at)
+        .unwrap_or(run.updated_at);
+    now.saturating_sub(reference_time) <= LEDGER_DIAGNOSTIC_RECENT_SECS
+}
+
+fn run_elapsed_secs(run: &AutoReviewRun, now: u64) -> Option<u64> {
+    let start = run.started_at.or(run.last_activity_at).or(Some(run.created_at))?;
+    let end = run
+        .completed_at
+        .or_else(|| run.status.is_in_flight().then_some(now))
+        .unwrap_or(run.updated_at);
+    Some(end.saturating_sub(start))
+}
+
+fn run_has_high_burn_signal(run: &AutoReviewRun, elapsed_secs: Option<u64>) -> bool {
+    run.token_count
+        .is_some_and(|token_count| token_count >= LEDGER_HIGH_TOKEN_COUNT)
+        || run
+            .prompt_token_estimate
+            .is_some_and(|estimate| estimate >= LEDGER_HIGH_PROMPT_ESTIMATE)
+        || run_has_long_elapsed_signal(run, elapsed_secs)
+}
+
+fn run_has_long_elapsed_signal(run: &AutoReviewRun, elapsed_secs: Option<u64>) -> bool {
+    elapsed_secs.is_some_and(|elapsed| elapsed >= LEDGER_LONG_ELAPSED_SECS)
+        && (!run.status.is_in_flight()
+            || matches!(
+                run.freshness,
+                AutoReviewFreshness::Current | AutoReviewFreshness::LongRunning
+            ))
 }
 
 fn ledger_priority(run: &AutoReviewRun) -> u8 {
@@ -759,6 +897,9 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
     }
     if let Some(token_count) = run.token_count {
         line.push_str(&format!(" tokens={}t", token_count));
+    }
+    if let Some(elapsed_secs) = run_elapsed_secs(run, now) {
+        line.push_str(&format!(" elapsed={}s", elapsed_secs));
     }
     if run.finding_count > 0 {
         line.push_str(&format!(" findings={}", run.finding_count));
@@ -1253,6 +1394,86 @@ mod tests {
         assert!(ledger.contains("reasoning=medium"));
         assert!(ledger.contains("prompt_estimate=42000t"));
         assert!(ledger.contains("tokens=84000t"));
+        assert!(ledger.contains("elapsed=40s"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_includes_recent_burn_diagnostics() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut high_token_run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 10);
+        high_token_run.mark_activity(20);
+        high_token_run.prompt_token_estimate = Some(12_000);
+        high_token_run.token_count = Some(25_915);
+        high_token_run.mark_status(AutoReviewRunStatus::Completed, 40);
+
+        let mut high_prompt_run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 50);
+        high_prompt_run.mark_activity(60);
+        high_prompt_run.prompt_token_estimate = Some(42_000);
+        high_prompt_run.mark_status(AutoReviewRunStatus::Reviewing, 70);
+        high_prompt_run.freshness = AutoReviewFreshness::Current;
+
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(high_token_run).unwrap();
+        store.upsert(high_prompt_run).unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(100)).expect("ledger");
+        assert!(ledger.contains("diagnostics recent_runs=2"));
+        assert!(ledger.contains("in_flight=1"));
+        assert!(ledger.contains("terminal=1"));
+        assert!(ledger.contains("tokens=25915t"));
+        assert!(ledger.contains("token_runs=1"));
+        assert!(ledger.contains("prompt_estimate=54000t"));
+        assert!(ledger.contains("prompt_runs=2"));
+        assert!(ledger.contains("high_burn=2"));
+        assert!(ledger.contains("longest_elapsed=40s"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_can_include_diagnostics_without_listing_clean_run() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 10);
+        run.prompt_token_estimate = Some(35_000);
+        run.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(30)).expect("ledger");
+        assert!(ledger.contains("diagnostics recent_runs=1"));
+        assert!(ledger.contains("prompt_estimate=35000t"));
+        assert!(ledger.contains("high_burn=1"));
+        assert!(!ledger.contains(&format!("run id={run_id}")));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_diagnostics_for_old_or_signal_free_runs() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut old = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 1);
+        old.prompt_token_estimate = Some(50_000);
+        old.token_count = Some(75_000);
+        old.mark_status(AutoReviewRunStatus::Completed, 2);
+
+        let mut signal_free = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 100);
+        signal_free.mark_status(AutoReviewRunStatus::Completed, 101);
+
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(old).unwrap();
+        store.upsert(signal_free).unwrap();
+
+        assert!(
+            store
+                .compact_ledger(ledger_options(LEDGER_DIAGNOSTIC_RECENT_SECS + 20))
+                .is_none()
+        );
     }
 
     #[test]
