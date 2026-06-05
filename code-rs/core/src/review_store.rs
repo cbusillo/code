@@ -169,6 +169,8 @@ pub struct AutoReviewRun {
     pub prompt_token_estimate: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_token_estimate: Option<u64>,
     #[serde(default)]
     pub finding_count: usize,
     #[serde(default)]
@@ -221,6 +223,7 @@ impl AutoReviewRun {
             reasoning_effort: None,
             prompt_token_estimate: None,
             token_count: None,
+            saved_token_estimate: None,
             finding_count: 0,
             finding_digests: Vec::new(),
             omitted_finding_digest_count: 0,
@@ -269,6 +272,8 @@ pub struct AutoReviewDuplicateMatch {
     pub branch: Option<String>,
     pub finding_count: usize,
     pub summary_digest: Option<String>,
+    pub token_count: Option<u64>,
+    pub prompt_token_estimate: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -481,6 +486,8 @@ impl AutoReviewRunStore {
                 branch: run.branch.clone().or_else(|| run.batch_id.clone()),
                 finding_count: run.finding_count,
                 summary_digest: run.summary_digest.clone(),
+                token_count: run.token_count,
+                prompt_token_estimate: run.prompt_token_estimate,
             })
     }
 
@@ -518,6 +525,27 @@ impl AutoReviewRunStore {
             self.save()?;
         }
         Ok(changed)
+    }
+
+    pub fn mark_skipped_duplicate(
+        &mut self,
+        run_id: Uuid,
+        duplicate_run_id: Uuid,
+        diff_fingerprint: Option<&str>,
+        saved_token_estimate: Option<u64>,
+        now: u64,
+    ) -> io::Result<()> {
+        if let Some(run) = self.get_mut(run_id) {
+            if let Some(diff_fingerprint) = diff_fingerprint.and_then(non_empty_str) {
+                run.diff_fingerprint = Some(diff_fingerprint.to_string());
+            }
+            run.saved_token_estimate = saved_token_estimate;
+            run.freshness = AutoReviewFreshness::Superseded;
+            run.superseded_by = Some(duplicate_run_id);
+            run.cancel_reason = Some("duplicate_auto_review_scope".to_string());
+            run.mark_status(AutoReviewRunStatus::Skipped, now);
+        }
+        self.save()
     }
 
     pub fn write_output(&mut self, run_id: Uuid, output: &ReviewOutputEvent) -> io::Result<PathBuf> {
@@ -694,9 +722,9 @@ where
     let mut selected = all_runs
         .iter()
         .copied()
-        .filter(|run| run_is_ledger_actionable(run, options.now))
+        .filter(|run| run_is_ledger_actionable(run, &options))
         .collect::<Vec<_>>();
-    let diagnostics = build_ledger_diagnostics(all_runs.iter().copied(), options.now);
+    let diagnostics = build_ledger_diagnostics(all_runs.iter().copied(), &options);
     if selected.is_empty() && diagnostics.is_none() {
         return None;
     }
@@ -714,7 +742,7 @@ where
     lines.push(format!(
         "<auto_review_ledger schema_version=\"1\" max_bytes=\"{max_bytes}\">"
     ));
-    lines.push("Auto Review state for this repo. Details are not included in this request; treat run ids as stable references for future detail lookup. Freshness describes run recency; target describes whether findings match the active checkout.".to_string());
+    lines.push("Auto Review state for this repo. Listed runs are active or target-applicable by default; diagnostics may include stale/detached history that is not an instruction to re-review or fix. Treat run ids as stable references for future detail lookup. Freshness describes run recency; target describes whether findings match the active checkout.".to_string());
     if let Some(diagnostics) = diagnostics {
         lines.push(diagnostics);
     }
@@ -767,7 +795,8 @@ pub fn auto_review_target_applicability(
     AutoReviewTargetApplicability::Unknown
 }
 
-fn run_is_ledger_actionable(run: &AutoReviewRun, now: u64) -> bool {
+fn run_is_ledger_actionable(run: &AutoReviewRun, options: &AutoReviewLedgerOptions) -> bool {
+    let now = options.now;
     if run.status.is_in_flight() {
         let reference_time = run.last_activity_at.unwrap_or(run.updated_at);
         return now.saturating_sub(reference_time) <= LEDGER_IN_FLIGHT_ACTIVITY_SECS
@@ -782,14 +811,42 @@ fn run_is_ledger_actionable(run: &AutoReviewRun, now: u64) -> bool {
     let has_error_detail = run.error_summary.is_some() || run.error_class.is_some();
     let terminal_actionable = run.finding_count > 0
         || !run.finding_digests.is_empty()
-        || has_error_detail
-        || (matches!(run.status, AutoReviewRunStatus::Failed | AutoReviewRunStatus::Cancelled)
-            && has_error_detail);
+        || has_error_detail;
     if !terminal_actionable {
+        return false;
+    }
+    if run_has_known_stale_target(run, options) {
         return false;
     }
     let reference_time = run.completed_at.or(run.last_activity_at).unwrap_or(run.updated_at);
     now.saturating_sub(reference_time) <= LEDGER_RECENT_ACTIONABLE_SECS
+}
+
+fn run_target_applicability(
+    run: &AutoReviewRun,
+    options: &AutoReviewLedgerOptions,
+) -> AutoReviewTargetApplicability {
+    auto_review_target_applicability(
+        run,
+        options.active_branch.as_deref(),
+        options.active_head.as_deref(),
+    )
+}
+
+fn target_is_known_stale(target: AutoReviewTargetApplicability) -> bool {
+    matches!(
+        target,
+        AutoReviewTargetApplicability::OlderSnapshot
+            | AutoReviewTargetApplicability::DetachedReviewWorktree
+    )
+}
+
+fn run_has_known_stale_target(run: &AutoReviewRun, options: &AutoReviewLedgerOptions) -> bool {
+    !run.status.is_in_flight() && target_is_known_stale(run_target_applicability(run, options))
+}
+
+fn run_has_findings(run: &AutoReviewRun) -> bool {
+    run.finding_count > 0 || !run.finding_digests.is_empty()
 }
 
 #[derive(Default)]
@@ -801,15 +858,19 @@ struct LedgerDiagnostics {
     token_runs: usize,
     prompt_token_estimate: u64,
     prompt_runs: usize,
+    saved_token_estimate: u64,
+    saved_runs: usize,
     high_burn_runs: usize,
+    suppressed_stale_runs: usize,
     longest_elapsed_bucket: Option<&'static str>,
 }
 
-fn build_ledger_diagnostics<'a, I>(runs: I, now: u64) -> Option<String>
+fn build_ledger_diagnostics<'a, I>(runs: I, options: &AutoReviewLedgerOptions) -> Option<String>
 where
     I: IntoIterator<Item = &'a AutoReviewRun>,
 {
     let mut diagnostics = LedgerDiagnostics::default();
+    let now = options.now;
 
     for run in runs {
         if !run_is_recent_for_diagnostics(run, now) {
@@ -819,11 +880,24 @@ where
         // Only summarize fields that the durable run store already has. Actual
         // provider tokens appear once the agent status path persists them;
         // prompt estimates and elapsed time are available earlier.
-        let has_cost_signal = run.token_count.is_some() || run.prompt_token_estimate.is_some();
+        let target = run_target_applicability(run, options);
+        let suppresses_stale_findings =
+            !run.status.is_in_flight() && target_is_known_stale(target) && run_has_findings(run);
+        if suppresses_stale_findings {
+            diagnostics.suppressed_stale_runs += 1;
+        }
+        let has_saved_signal = run.saved_token_estimate.is_some();
+        let has_cost_signal = run.token_count.is_some()
+            || run.prompt_token_estimate.is_some()
+            || has_saved_signal;
         let elapsed_secs = run_elapsed_secs(run, now);
         let has_timing_signal = run_has_long_elapsed_signal(run, elapsed_secs);
         let high_burn = run_has_high_burn_signal(run, elapsed_secs);
-        if !has_cost_signal && !has_timing_signal && !high_burn {
+        if !has_cost_signal
+            && !has_timing_signal
+            && !high_burn
+            && !suppresses_stale_findings
+        {
             continue;
         }
 
@@ -842,6 +916,12 @@ where
                 .prompt_token_estimate
                 .saturating_add(prompt_token_estimate);
             diagnostics.prompt_runs += 1;
+        }
+        if let Some(saved_token_estimate) = run.saved_token_estimate {
+            diagnostics.saved_token_estimate = diagnostics
+                .saved_token_estimate
+                .saturating_add(saved_token_estimate);
+            diagnostics.saved_runs += 1;
         }
         if high_burn {
             diagnostics.high_burn_runs += 1;
@@ -879,6 +959,18 @@ where
     }
     if diagnostics.high_burn_runs > 0 {
         line.push_str(&format!(" high_burn={}", diagnostics.high_burn_runs));
+    }
+    if diagnostics.suppressed_stale_runs > 0 {
+        line.push_str(&format!(
+            " suppressed_stale={}",
+            diagnostics.suppressed_stale_runs
+        ));
+    }
+    if diagnostics.saved_runs > 0 {
+        line.push_str(&format!(
+            " saved_estimate={}t saved_runs={}",
+            diagnostics.saved_token_estimate, diagnostics.saved_runs
+        ));
     }
     if let Some(longest_elapsed_bucket) = diagnostics.longest_elapsed_bucket {
         line.push_str(&format!(" longest_elapsed={longest_elapsed_bucket}"));
@@ -971,11 +1063,7 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, options: &Aut
         .and_then(short_sha)
         .unwrap_or("unknown");
     let branch = run.branch.as_deref().or(run.batch_id.as_deref()).unwrap_or("unknown");
-    let target = auto_review_target_applicability(
-        run,
-        options.active_branch.as_deref(),
-        options.active_head.as_deref(),
-    );
+    let target = run_target_applicability(run, options);
     let mut line = format!(
         "run id={} status={:?} freshness={:?} target={} source={:?} branch={} snapshot={} age={}",
         run.run_id,
@@ -1009,6 +1097,9 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, options: &Aut
     }
     if let Some(token_count) = run.token_count {
         line.push_str(&format!(" tokens={}t", token_count));
+    }
+    if let Some(saved_token_estimate) = run.saved_token_estimate {
+        line.push_str(&format!(" saved_estimate={}t", saved_token_estimate));
     }
     if let Some(elapsed_secs) = run_elapsed_secs(run, now) {
         line.push_str(&format!(" elapsed={}", duration_bucket(elapsed_secs)));
@@ -1588,7 +1679,8 @@ mod tests {
             )
             .expect("ledger");
 
-        assert!(ledger.contains("target=older_snapshot"));
+        assert!(ledger.contains("suppressed_stale=1"));
+        assert!(!ledger.contains("target=older_snapshot"));
         assert!(!ledger.contains("target=matching_head"));
     }
 
@@ -1625,9 +1717,136 @@ mod tests {
             )
             .expect("ledger");
 
-        assert!(ledger.contains("target=detached_review_worktree"));
-        assert!(ledger.contains("target=older_snapshot"));
+        assert!(ledger.contains("suppressed_stale=2"));
+        assert!(!ledger.contains("target=detached_review_worktree"));
+        assert!(!ledger.contains("target=older_snapshot"));
         assert!(ledger.contains("Freshness describes run recency"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_suppresses_known_stale_terminal_findings() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let detached_id = Uuid::new_v4();
+        let mut detached = AutoReviewRun::new(detached_id, AutoReviewRunSource::Tui, 10);
+        detached.branch = Some("auto-review".to_string());
+        detached.snapshot_commit = Some("1111111111111111".to_string());
+        detached.token_count = Some(42_000);
+        detached.finding_count = 1;
+        detached.finding_digests = vec![finding_digest(1)];
+        detached.mark_status(AutoReviewRunStatus::Completed, 20);
+
+        let older_id = Uuid::new_v4();
+        let mut older = AutoReviewRun::new(older_id, AutoReviewRunSource::Tui, 30);
+        older.branch = Some("feature".to_string());
+        older.snapshot_commit = Some("2222222222222222".to_string());
+        older.finding_count = 1;
+        older.finding_digests = vec![finding_digest(2)];
+        older.mark_status(AutoReviewRunStatus::Completed, 40);
+
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(detached).unwrap();
+        store.upsert(older).unwrap();
+
+        let ledger = store
+            .compact_ledger(
+                ledger_options(50).with_active_target(
+                    Some("feature".to_string()),
+                    Some("3333333333333333".to_string()),
+                ),
+            )
+            .expect("ledger");
+
+        assert!(ledger.contains("suppressed_stale=2"));
+        assert!(ledger.contains("tokens=42000t"));
+        assert!(!ledger.contains(&format!("run id={detached_id}")));
+        assert!(!ledger.contains(&format!("run id={older_id}")));
+        assert!(!ledger.contains("finding id=f1"));
+        assert!(!ledger.contains("finding id=f2"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_keeps_matching_head_findings_actionable() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 10);
+        run.branch = Some("feature".to_string());
+        run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.finding_count = 1;
+        run.finding_digests = vec![finding_digest(1)];
+        run.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store
+            .compact_ledger(
+                ledger_options(30).with_active_target(
+                    Some("feature".to_string()),
+                    Some("abcdef1234567890".to_string()),
+                ),
+            )
+            .expect("ledger");
+
+        assert!(ledger.contains(&format!("run id={run_id}")));
+        assert!(ledger.contains("target=matching_head"));
+        assert!(ledger.contains("finding id=f1"));
+        assert!(!ledger.contains("suppressed_stale"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_reports_saved_token_estimates_for_skipped_duplicates() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let duplicate_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 10);
+        run.prompt_token_estimate = Some(8_000);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+        store
+            .mark_skipped_duplicate(run_id, duplicate_id, Some("diff:abc"), Some(84_000), 20)
+            .unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(30)).expect("ledger");
+
+        assert!(ledger.contains("saved_estimate=84000t"));
+        assert!(ledger.contains("saved_runs=1"));
+        assert!(!ledger.contains(&format!("run id={run_id}")));
+    }
+
+    #[test]
+    #[serial]
+    fn superseded_clean_duplicate_does_not_report_saved_tokens() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let clean_id = Uuid::new_v4();
+        let fresh_id = Uuid::new_v4();
+        let mut clean = AutoReviewRun::new(clean_id, AutoReviewRunSource::Tui, 10);
+        clean.diff_fingerprint = Some("diff:abc".to_string());
+        clean.prompt_token_estimate = Some(42_000);
+        clean.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut fresh = AutoReviewRun::new(fresh_id, AutoReviewRunSource::Tui, 30);
+        fresh.diff_fingerprint = Some("diff:abc".to_string());
+        fresh.mark_status(AutoReviewRunStatus::Reviewing, 40);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(clean).unwrap();
+        store.upsert(fresh).unwrap();
+
+        store.mark_superseded_by_fingerprint("diff:abc", fresh_id, 50).unwrap();
+        let ledger = store.compact_ledger(ledger_options(60)).expect("ledger");
+
+        assert!(ledger.contains("prompt_estimate=42000t"));
+        assert!(!ledger.contains("saved_estimate="));
+        assert!(!ledger.contains("saved_runs="));
+        assert_eq!(store.get(clean_id).unwrap().saved_token_estimate, None);
     }
 
     #[test]

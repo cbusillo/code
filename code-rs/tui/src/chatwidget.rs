@@ -1773,19 +1773,17 @@ fn mark_auto_review_run_skipped_duplicate(
     run_id: Uuid,
     duplicate_run_id: Uuid,
     diff_fingerprint: Option<&str>,
+    saved_token_estimate: Option<u64>,
 ) -> std::io::Result<()> {
     let now = unix_now_secs();
     let mut store = AutoReviewRunStore::open(cwd)?;
-    if let Some(run) = store.get_mut(run_id) {
-        if let Some(diff_fingerprint) = diff_fingerprint {
-            run.diff_fingerprint = Some(diff_fingerprint.to_string());
-        }
-        run.freshness = AutoReviewFreshness::Superseded;
-        run.superseded_by = Some(duplicate_run_id);
-        run.cancel_reason = Some("duplicate_auto_review_scope".to_string());
-        run.mark_status(AutoReviewRunStatus::Skipped, now);
-    }
-    store.save()
+    store.mark_skipped_duplicate(
+        run_id,
+        duplicate_run_id,
+        diff_fingerprint,
+        saved_token_estimate,
+        now,
+    )
 }
 
 fn supersede_clean_duplicate_auto_reviews(
@@ -32119,17 +32117,18 @@ async fn run_background_review(
         if let Some(diff_fingerprint) = review_scope.diff_fingerprint.as_deref()
             && let Some(duplicate) = find_duplicate_auto_review_run(&config.cwd, diff_fingerprint, run_id)
         {
-            if let Err(err) = mark_auto_review_run_skipped_duplicate(
-                &config.cwd,
-                run_id,
-                duplicate.run_id,
-                Some(diff_fingerprint),
-            ) {
-                tracing::warn!(?err, run_id = %run_id, "failed to mark duplicate auto-review run skipped");
-            }
-
+            let saved_token_estimate = duplicate.token_count.or(duplicate.prompt_token_estimate);
             match duplicate.disposition {
                 AutoReviewDuplicateDisposition::Adopt => {
+                    if let Err(err) = mark_auto_review_run_skipped_duplicate(
+                        &config.cwd,
+                        run_id,
+                        duplicate.run_id,
+                        Some(diff_fingerprint),
+                        saved_token_estimate,
+                    ) {
+                        tracing::warn!(?err, run_id = %run_id, "failed to mark duplicate auto-review run skipped");
+                    }
                     app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
                         run_id,
                         worktree_path: duplicate.worktree_path.unwrap_or_default(),
@@ -32150,6 +32149,15 @@ async fn run_background_review(
                     ));
                 }
                 AutoReviewDuplicateDisposition::ReuseTerminal => {
+                    if let Err(err) = mark_auto_review_run_skipped_duplicate(
+                        &config.cwd,
+                        run_id,
+                        duplicate.run_id,
+                        Some(diff_fingerprint),
+                        saved_token_estimate,
+                    ) {
+                        tracing::warn!(?err, run_id = %run_id, "failed to mark duplicate auto-review run skipped");
+                    }
                     app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
                         run_id,
                         worktree_path: duplicate.worktree_path.unwrap_or_default(),
