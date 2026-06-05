@@ -33207,6 +33207,69 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
+    fn auto_review_completion_preserves_launch_head_after_checkout_moves() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let repo = tempdir().expect("temp repo");
+        let repo_path = repo.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(repo_path)
+                .args(args)
+                .status()
+                .expect("git command");
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+        let git_output = |args: &[&str]| -> String {
+            let output = Command::new("git")
+                .current_dir(repo_path)
+                .args(args)
+                .output()
+                .expect("git command");
+            assert!(output.status.success(), "git command failed: {args:?}");
+            String::from_utf8(output.stdout).expect("utf8 stdout").trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "auto@review.test"]);
+        git(&["config", "user.name", "Auto Review"]);
+        std::fs::write(repo_path.join("README.md"), "hello").expect("write README");
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "init"]);
+        let launch_head = git_output(&["rev-parse", "HEAD"]);
+
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        chat.config.cwd = repo_path.to_path_buf();
+        let run_id = uuid::Uuid::new_v4();
+        let owner_session_id = uuid::Uuid::new_v4();
+        chat.record_auto_review_launch_in_store(run_id, owner_session_id, None);
+
+        std::fs::write(repo_path.join("README.md"), "hello again").expect("update README");
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "advance"]);
+        let completion_head = git_output(&["rev-parse", "HEAD"]);
+        assert_ne!(launch_head, completion_head);
+
+        chat.record_auto_review_completion_in_store(AutoReviewStoreCompletion {
+            run_id,
+            branch: "auto-review",
+            worktree_path: std::path::Path::new("/tmp/wt"),
+            terminal_status: AgentStatus::Completed,
+            has_findings: true,
+            findings: 1,
+            summary: Some("needs work"),
+            error: None,
+            agent_id: Some("agent-1"),
+            snapshot: None,
+            owner_session_id: Some(owner_session_id),
+            output: None,
+        });
+
+        let loaded = AutoReviewRunStore::open(repo_path).expect("reload store");
+        let run = loaded.get(run_id).expect("run loaded");
+        assert_eq!(run.head_at_launch.as_deref(), Some(launch_head.as_str()));
+    }
+
+    #[test]
     fn restart_reconciliation_surfaces_lost_auto_review_notice() {
         let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
         let code_home = tempfile::tempdir().expect("code home");
@@ -34362,7 +34425,8 @@ use code_core::protocol::OrderMeta;
         assert!(notice_present, "actionable findings should render a visible auto-review notice");
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
-        assert!(note.contains("Merge the worktree 'auto-review-branch'"));
+        assert!(note.contains("Treat this as a detached proposal"));
+        assert!(note.contains("re-validate the findings against the current workspace"));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 
@@ -34438,8 +34502,8 @@ use code_core::protocol::OrderMeta;
             "idle auto-review findings should remain cached for local diagnostics"
         );
         assert!(
-            history_contains_text(chat, "Auto Review: 1 issue(s) found. needs work Merge /tmp/wt to apply fixes."),
-            "visible notice should include the concise merge hint"
+            history_contains_text(chat, "Detached proposal at /tmp/wt; re-validate against current HEAD before merging."),
+            "visible notice should avoid direct merge guidance for detached auto-review worktrees"
         );
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
@@ -35270,9 +35334,12 @@ use code_core::protocol::OrderMeta;
 
         assert!(chat.pending_agent_notes.is_empty());
         assert!(chat.pending_dispatched_user_messages.is_empty());
-        assert!(!history_contains_text(chat, "Merge /tmp/wt to apply fixes."));
+        assert!(!history_contains_text(
+            chat,
+            "Detached proposal at /tmp/wt; re-validate against current HEAD before merging."
+        ));
         let note = expect_post_turn_developer_input(&mut code_op_rx);
-        assert!(note.contains("Merge the worktree 'auto-review-branch'"));
+        assert!(note.contains("Treat this as a detached proposal"));
         assert!(chat.bottom_pane.is_task_running());
         assert!(chat.deferred_auto_review_notice_lines.is_some());
         let developer_seen = chat.history_cells.iter().any(|cell| {
@@ -35292,7 +35359,7 @@ use code_core::protocol::OrderMeta;
         chat.active_task_ids.clear();
         chat.maybe_hide_spinner();
 
-        assert!(history_contains_text(chat, "Merge /tmp/wt to apply fixes."));
+        assert!(history_contains_text(chat, "Detached proposal at /tmp/wt; re-validate against current HEAD before merging."));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 
@@ -35347,7 +35414,7 @@ use code_core::protocol::OrderMeta;
             "idle observe path should not auto-start a hidden follow-up turn"
         );
         assert!(history_contains_text(chat, "Auto Review: 1 issue(s) found"));
-        assert!(history_contains_text(chat, "Merge /tmp/wt to apply fixes."));
+        assert!(history_contains_text(chat, "Detached proposal at /tmp/wt; re-validate against current HEAD before merging."));
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
         assert!(
@@ -35704,7 +35771,10 @@ use code_core::protocol::OrderMeta;
         assert!(history_contains_text(chat, "Auto Review: superseded result archived"));
         assert!(history_contains_text(chat, "1 issue(s) found"));
         assert!(history_contains_text(chat, "snap-stale"));
-        assert!(!history_contains_text(chat, "Merge /tmp/current-wt to apply fixes."));
+        assert!(!history_contains_text(
+            chat,
+            "Detached proposal at /tmp/current-wt; re-validate against current HEAD before merging."
+        ));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 
@@ -36085,9 +36155,13 @@ use code_core::protocol::OrderMeta;
         assert!(chat.background_review.is_none());
         assert!(chat.processed_auto_review_agents.contains_key("agent-current"));
         assert!(history_contains_text(chat, "Auto Review: 1 issue(s) found"));
-        assert!(history_contains_text(chat, "Merge /tmp/current-wt to apply fixes."));
+        assert!(history_contains_text(
+            chat,
+            "Detached proposal at /tmp/current-wt; re-validate against current HEAD before merging."
+        ));
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
+        assert!(note.contains("Treat this as a detached proposal"));
     }
 
     #[test]
@@ -36209,7 +36283,10 @@ use code_core::protocol::OrderMeta;
         assert!(history_contains_text(chat, "Auto Review: superseded result archived"));
         assert!(history_contains_text(chat, "1 issue(s) found"));
         assert!(history_contains_text(chat, "stale findings"));
-        assert!(!history_contains_text(chat, "Merge /tmp/stale-wt to apply fixes."));
+        assert!(!history_contains_text(
+            chat,
+            "Detached proposal at /tmp/stale-wt; re-validate against current HEAD before merging."
+        ));
         assert_no_code_ops_pending(&mut code_op_rx);
     }
 
@@ -36382,7 +36459,7 @@ use code_core::protocol::OrderMeta;
         let chat = harness.chat();
 
         chat.deferred_auto_review_notice_lines = Some(vec![
-            "Auto Review: 1 issue(s) found. summary Merge /tmp/wt to apply fixes. [Ctrl+A] Show"
+            "Auto Review: 1 issue(s) found. summary Detached proposal at /tmp/wt; re-validate against current HEAD before merging. [Ctrl+A] Show"
                 .to_string(),
         ]);
         chat.bottom_pane.set_task_running(false);
@@ -36392,7 +36469,7 @@ use code_core::protocol::OrderMeta;
 
         assert!(history_contains_text(
             chat,
-            "Auto Review: 1 issue(s) found. summary Merge /tmp/wt to apply fixes."
+            "Auto Review: 1 issue(s) found. summary Detached proposal at /tmp/wt; re-validate against current HEAD before merging."
         ));
         assert!(chat.deferred_auto_review_notice_lines.is_none());
     }
@@ -36446,7 +36523,10 @@ use code_core::protocol::OrderMeta;
             pending_before_review,
             "background review completion should not start a hidden turn"
         );
-        assert!(history_contains_text(chat, "Auto Review: 1 issue(s) found. summary Merge /tmp/wt to apply fixes."));
+        assert!(history_contains_text(
+            chat,
+            "Auto Review: 1 issue(s) found. summary Detached proposal at /tmp/wt; re-validate against current HEAD before merging."
+        ));
         let note = expect_post_turn_developer_input(&mut code_op_rx);
         assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
         assert!(!chat.is_task_running(), "background review should not hold task-running state");
@@ -41661,6 +41741,18 @@ impl ChatWidget<'_> {
         .map(PathBuf::from)
     }
 
+    fn auto_review_current_head(&self) -> Option<String> {
+        self.run_git_command(["rev-parse", "HEAD"], |stdout| {
+            let head = stdout.lines().next().unwrap_or("").trim();
+            if head.is_empty() {
+                Err("auto review HEAD unavailable".to_string())
+            } else {
+                Ok(head.to_string())
+            }
+        })
+        .ok()
+    }
+
     fn auto_review_baseline_path(&self) -> Option<PathBuf> {
         let git_root = self.auto_review_git_root()?;
         match auto_review_baseline_path_for_repo(&git_root) {
@@ -42686,10 +42778,12 @@ impl ChatWidget<'_> {
         owner_session_id: Uuid,
         base_snapshot: Option<&GhostCommit>,
     ) {
+        let head_at_launch = self.auto_review_current_head();
         self.update_auto_review_store(run_id, |run, now| {
             run.source = AutoReviewRunSource::Tui;
             run.owner_session_id = Some(owner_session_id);
             run.base_commit = base_snapshot.map(|base| base.id().to_string());
+            run.head_at_launch = run.head_at_launch.clone().or(head_at_launch.clone());
             run.model = Some(self.config.auto_review_model.clone());
             run.reasoning_effort = Some(self.config.auto_review_model_reasoning_effort.to_string());
             run.freshness = AutoReviewFreshness::Current;
@@ -42707,6 +42801,7 @@ impl ChatWidget<'_> {
         snapshot: Option<&str>,
         owner_session_id: Option<Uuid>,
     ) {
+        let head_at_launch = self.auto_review_current_head();
         self.update_auto_review_store(run_id, |run, now| {
             run.source = AutoReviewRunSource::Tui;
             if let Some(owner_session_id) = owner_session_id {
@@ -42719,6 +42814,7 @@ impl ChatWidget<'_> {
                 run.worktree_path = Some(worktree_path.to_path_buf());
             }
             run.snapshot_commit = snapshot.map(str::to_string).or_else(|| run.snapshot_commit.clone());
+            run.head_at_launch = run.head_at_launch.clone().or(head_at_launch.clone());
             run.model = Some(self.config.auto_review_model.clone());
             run.reasoning_effort = Some(self.config.auto_review_model_reasoning_effort.to_string());
             run.freshness = AutoReviewFreshness::Current;
@@ -43306,10 +43402,21 @@ impl ChatWidget<'_> {
         }
         if has_path {
             line.push(' ');
-            line.push_str(&format!("Merge {path_text} to apply fixes."));
+            if Self::is_detached_auto_review_branch(branch) {
+                line.push_str(&format!(
+                    "Detached proposal at {path_text}; re-validate against current HEAD before merging."
+                ));
+            } else {
+                line.push_str(&format!("Merge {path_text} to apply fixes."));
+            }
         }
         line.push_str(" [Ctrl+A] Show");
         line
+    }
+
+    fn is_detached_auto_review_branch(branch: &str) -> bool {
+        let branch = branch.trim();
+        branch == "auto-review" || branch.starts_with("auto-review-")
     }
 
     fn auto_review_superseded_notice_line(
@@ -43952,8 +44059,17 @@ impl ChatWidget<'_> {
             )
         } else if has_findings {
             self.last_auto_review_failure = None;
+            let next_step = if Self::is_detached_auto_review_branch(&worktree_label) {
+                format!(
+                    "Next: Treat this as a detached proposal. Re-validate the findings against the current workspace before merging '{worktree_label}' or cherry-picking selectively. If the current HEAD already fixes the issue, do not merge this worktree."
+                )
+            } else {
+                format!(
+                    "Next: Decide if the findings are genuine. If yes, Merge the worktree '{worktree_label}' to apply the changes (or cherry-pick selectively). If not, do not merge."
+                )
+            };
             let mut note = format!(
-                "[developer] {}\n\nBackground auto-review completed and reported {effective_findings} issue(s).\n\nA separate LLM ran /review (and may have run auto-resolve) in an isolated git worktree. Any proposed fixes live only in that worktree until you merge them.\n\nNext: Decide if the findings are genuine. If yes, Merge the worktree '{worktree_label}' to apply the changes (or cherry-pick selectively). If not, do not merge.\n\nWorktree path: {worktree_path_label}\n{snapshot_note}\n{agent_note}",
+                "[developer] {}\n\nBackground auto-review completed and reported {effective_findings} issue(s).\n\nA separate LLM ran /review (and may have run auto-resolve) in an isolated git worktree. Any proposed fixes live only in that worktree until you merge them.\n\n{next_step}\n\nWorktree path: {worktree_path_label}\n{snapshot_note}\n{agent_note}",
                 notice_line.as_deref().unwrap_or("Background auto-review found issues."),
             );
             if let Some(summary_note) = summary_note {

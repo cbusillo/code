@@ -1563,14 +1563,33 @@ fn build_auto_review_ledger_message(cwd: &Path) -> Option<String> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let active_branch = git_output_sync(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .filter(|branch| branch != "HEAD");
+    let active_head = git_output_sync(cwd, &["rev-parse", "HEAD"]);
     match AutoReviewRunStore::open_existing(cwd) {
-        Ok(Some(store)) => store.compact_ledger(AutoReviewLedgerOptions::new(now)),
+        Ok(Some(store)) => store.compact_ledger(
+            AutoReviewLedgerOptions::new(now).with_active_target(active_branch, active_head),
+        ),
         Ok(None) => None,
         Err(err) => {
             tracing::warn!(?err, "failed to open auto-review run store for request ledger");
             None
         }
     }
+}
+
+fn git_output_sync(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 fn current_turn_insert_at(
