@@ -43,11 +43,11 @@ use code_core::protocol::ReviewOutputEvent;
 use code_core::protocol::ReviewRequest;
 use code_core::protocol::TaskCompleteEvent;
 use code_core::review_store::{
-    AutoReviewFreshness,
     AutoReviewRun,
     AutoReviewRunSource,
     AutoReviewRunStatus,
     AutoReviewRunStore,
+    auto_review_freshness_for_agent_status,
 };
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
@@ -1820,16 +1820,13 @@ impl AutoReviewTracker {
             .or(run.owner_session_id);
         run.model = agent.model.clone().or_else(|| run.model.clone());
         run.token_count = agent.token_count.or(run.token_count);
-        run.freshness = if durable_status.is_terminal() {
-            AutoReviewFreshness::Current
-        } else if agent
-            .seconds_since_last_activity
-            .is_some_and(|seconds| seconds >= AUTO_REVIEW_STALE_SECS)
-        {
-            AutoReviewFreshness::Inactive
-        } else {
-            AutoReviewFreshness::Current
-        };
+        let elapsed_secs = Some(now.saturating_sub(run.started_at.unwrap_or(run.created_at)));
+        run.freshness = auto_review_freshness_for_agent_status(
+            durable_status.is_terminal(),
+            elapsed_secs,
+            agent.seconds_since_last_activity,
+            AUTO_REVIEW_STALE_SECS,
+        );
         run.mark_status(durable_status, now);
         if !durable_status.is_terminal() || agent.last_activity_at.is_some() {
             run.mark_activity(now);
