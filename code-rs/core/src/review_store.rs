@@ -526,6 +526,21 @@ impl AutoReviewRunStore {
         diff_fingerprint: &str,
         excluded_run_id: Option<Uuid>,
     ) -> Option<AutoReviewDuplicateMatch> {
+        self.find_duplicate_by_fingerprint_excluding_with_target(
+            diff_fingerprint,
+            excluded_run_id,
+            None,
+            None,
+        )
+    }
+
+    pub fn find_duplicate_by_fingerprint_excluding_with_target(
+        &self,
+        diff_fingerprint: &str,
+        excluded_run_id: Option<Uuid>,
+        active_branch: Option<&str>,
+        active_head: Option<&str>,
+    ) -> Option<AutoReviewDuplicateMatch> {
         let fingerprint = diff_fingerprint.trim();
         if fingerprint.is_empty() {
             return None;
@@ -543,6 +558,7 @@ impl AutoReviewRunStore {
                         | AutoReviewRunStatus::Superseded
                 )
             })
+            .filter(|run| duplicate_target_is_reusable(run, active_branch, active_head))
             .max_by(|left, right| {
                 duplicate_priority(left)
                     .cmp(&duplicate_priority(right))
@@ -892,6 +908,40 @@ fn duplicate_disposition(run: &AutoReviewRun) -> AutoReviewDuplicateDisposition 
     } else {
         AutoReviewDuplicateDisposition::SupersedeTerminal
     }
+}
+
+fn duplicate_target_is_reusable(
+    run: &AutoReviewRun,
+    active_branch: Option<&str>,
+    active_head: Option<&str>,
+) -> bool {
+    if active_head.and_then(non_empty_str).is_none() {
+        return true;
+    }
+
+    !target_is_known_stale(auto_review_target_applicability(
+        run,
+        active_branch,
+        active_head,
+    ))
+}
+
+pub fn auto_review_freshness_for_agent_status(
+    is_terminal: bool,
+    elapsed_secs: Option<u64>,
+    seconds_since_last_activity: Option<u64>,
+    stale_secs: u64,
+) -> AutoReviewFreshness {
+    if is_terminal {
+        return AutoReviewFreshness::Current;
+    }
+    if seconds_since_last_activity.is_some_and(|seconds| seconds >= stale_secs) {
+        return AutoReviewFreshness::Inactive;
+    }
+    if elapsed_secs.is_some_and(|elapsed| elapsed >= LEDGER_LONG_ELAPSED_SECS) {
+        return AutoReviewFreshness::LongRunning;
+    }
+    AutoReviewFreshness::Current
 }
 
 pub fn auto_review_dir(scope: &Path) -> io::Result<PathBuf> {
@@ -1522,6 +1572,8 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    const AUTO_REVIEW_TEST_STALE_SECS: u64 = 5 * 60;
+
     fn set_code_home(path: &Path) {
         // SAFETY: tests run serially and isolate CODE_HOME within a temp dir per test.
         unsafe { std::env::set_var("CODE_HOME", path); }
@@ -1881,6 +1933,127 @@ mod tests {
 
     #[test]
     #[serial]
+    fn duplicate_lookup_ignores_stale_terminal_target_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let stale_id = Uuid::new_v4();
+        let mut stale = AutoReviewRun::new(stale_id, AutoReviewRunSource::Tui, 1);
+        stale.diff_fingerprint = Some("diff:abc".to_string());
+        stale.branch = Some("auto-review".to_string());
+        stale.snapshot_commit = Some("aaaaaaaaaaaaaaaa".to_string());
+        stale.finding_count = 1;
+        stale.mark_status(AutoReviewRunStatus::Completed, 2);
+        store.upsert(stale).unwrap();
+
+        assert!(
+            store
+                .find_duplicate_by_fingerprint_excluding_with_target(
+                    "diff:abc",
+                    None,
+                    Some("feature"),
+                    Some("bbbbbbbbbbbbbbbb"),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .find_duplicate_by_fingerprint("diff:abc")
+                .expect("fallback duplicate")
+                .run_id,
+            stale_id
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_reuses_matching_head_terminal_target_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1);
+        run.diff_fingerprint = Some("diff:abc".to_string());
+        run.branch = Some("feature".to_string());
+        run.head_at_launch = Some("bbbbbbbbbbbbbbbb".to_string());
+        run.finding_count = 1;
+        run.mark_status(AutoReviewRunStatus::Completed, 2);
+        store.upsert(run).unwrap();
+
+        let duplicate = store
+            .find_duplicate_by_fingerprint_excluding_with_target(
+                "diff:abc",
+                None,
+                Some("feature"),
+                Some("bbbbbbbbbbbbbbbb"),
+            )
+            .expect("duplicate");
+        assert_eq!(duplicate.run_id, run_id);
+        assert_eq!(
+            duplicate.disposition,
+            AutoReviewDuplicateDisposition::ReuseTerminal
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_does_not_adopt_snapshotting_fingerprint_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1);
+        run.diff_fingerprint = Some("diff:abc".to_string());
+        run.mark_status(AutoReviewRunStatus::Snapshotting, 2);
+        store.upsert(run).unwrap();
+
+        let duplicate = store
+            .find_duplicate_by_fingerprint("diff:abc")
+            .expect("duplicate");
+        assert_eq!(duplicate.run_id, run_id);
+        assert_eq!(
+            duplicate.disposition,
+            AutoReviewDuplicateDisposition::SupersedeTerminal
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn duplicate_lookup_ignores_stale_in_flight_target_match() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1);
+        run.diff_fingerprint = Some("diff:abc".to_string());
+        run.branch = Some("auto-review".to_string());
+        run.snapshot_commit = Some("aaaaaaaaaaaaaaaa".to_string());
+        run.agent_id = Some("agent-live".to_string());
+        run.mark_status(AutoReviewRunStatus::Reviewing, 2);
+        store.upsert(run).unwrap();
+
+        assert!(
+            store
+                .find_duplicate_by_fingerprint_excluding_with_target(
+                    "diff:abc",
+                    None,
+                    Some("feature"),
+                    Some("bbbbbbbbbbbbbbbb"),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[serial]
     fn supersede_by_fingerprint_omits_runs_with_findings_and_errors() {
         let code_home = TempDir::new().unwrap();
         let repo = TempDir::new().unwrap();
@@ -2010,6 +2183,45 @@ mod tests {
         assert!(loaded.get(oldest).is_none());
         assert!(loaded.get(middle).is_some());
         assert!(loaded.get(newest).is_some());
+    }
+
+    #[test]
+    fn auto_review_freshness_classifier_marks_healthy_long_running_reviews() {
+        assert_eq!(
+            auto_review_freshness_for_agent_status(
+                false,
+                Some(LEDGER_LONG_ELAPSED_SECS),
+                Some(AUTO_REVIEW_TEST_STALE_SECS - 1),
+                AUTO_REVIEW_TEST_STALE_SECS,
+            ),
+            AutoReviewFreshness::LongRunning
+        );
+    }
+
+    #[test]
+    fn auto_review_freshness_classifier_prefers_inactive_over_long_running() {
+        assert_eq!(
+            auto_review_freshness_for_agent_status(
+                false,
+                Some(LEDGER_LONG_ELAPSED_SECS + 60),
+                Some(AUTO_REVIEW_TEST_STALE_SECS),
+                AUTO_REVIEW_TEST_STALE_SECS,
+            ),
+            AutoReviewFreshness::Inactive
+        );
+    }
+
+    #[test]
+    fn auto_review_freshness_classifier_keeps_terminal_current() {
+        assert_eq!(
+            auto_review_freshness_for_agent_status(
+                true,
+                Some(LEDGER_LONG_ELAPSED_SECS + 60),
+                Some(AUTO_REVIEW_TEST_STALE_SECS),
+                AUTO_REVIEW_TEST_STALE_SECS,
+            ),
+            AutoReviewFreshness::Current
+        );
     }
 
     #[test]

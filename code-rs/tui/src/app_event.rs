@@ -488,6 +488,15 @@ pub(crate) enum AppEvent {
         snapshot: Option<String>,
         owner_session_id: Option<Uuid>,
     },
+    BackgroundReviewAdopted {
+        local_run_id: Uuid,
+        adopted_run_id: Uuid,
+        worktree_path: PathBuf,
+        branch: String,
+        agent_id: Option<String>,
+        snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
+    },
     BackgroundReviewFinished {
         run_id: Uuid,
         worktree_path: PathBuf,

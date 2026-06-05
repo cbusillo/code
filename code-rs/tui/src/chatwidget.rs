@@ -208,6 +208,7 @@ use code_core::review_store::{
     AutoReviewRunSource,
     AutoReviewRunStatus,
     AutoReviewRunStore,
+    auto_review_freshness_for_agent_status,
 };
 use code_core::review_coord::{bump_snapshot_epoch_for, try_acquire_lock, ReviewGuard};
 use code_core::ConversationManager;
@@ -1686,7 +1687,7 @@ impl AutoReviewScopeMetadata {
     }
 }
 
-fn auto_review_diff_fingerprint(parent_id: Option<&str>, paths: &[String], diff_text: &str) -> Option<String> {
+fn auto_review_diff_fingerprint(paths: &[String], diff_text: &str) -> Option<String> {
     let normalized_diff = diff_text.trim();
     if normalized_diff.is_empty() {
         return None;
@@ -1701,9 +1702,7 @@ fn auto_review_diff_fingerprint(parent_id: Option<&str>, paths: &[String], diff_
     normalized_paths.dedup();
 
     let mut hasher = Sha256::new();
-    hasher.update(b"auto-review-diff-v2\0");
-    hasher.update(parent_id.unwrap_or_default().as_bytes());
-    hasher.update(b"\0");
+    hasher.update(b"auto-review-diff-v3\0");
     for path in normalized_paths {
         hasher.update(path.as_bytes());
         hasher.update(b"\0");
@@ -1765,7 +1764,29 @@ fn find_duplicate_auto_review_run(
     current_run_id: Uuid,
 ) -> Option<code_core::review_store::AutoReviewDuplicateMatch> {
     let store = AutoReviewRunStore::open_existing(cwd).ok().flatten()?;
-    store.find_duplicate_by_fingerprint_excluding(diff_fingerprint, Some(current_run_id))
+    let (active_branch, active_head) = auto_review_active_git_target(cwd);
+    store.find_duplicate_by_fingerprint_excluding_with_target(
+        diff_fingerprint,
+        Some(current_run_id),
+        active_branch.as_deref(),
+        active_head.as_deref(),
+    )
+}
+
+fn auto_review_active_git_target(cwd: &Path) -> (Option<String>, Option<String>) {
+    let branch = git_stdout_line(cwd, ["branch", "--show-current"]);
+    let head = git_stdout_line(cwd, ["rev-parse", "HEAD"]);
+    (branch, head)
+}
+
+fn git_stdout_line<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
+    let output = Command::new("git").current_dir(cwd).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout);
+    let value = value.lines().next().unwrap_or("").trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn mark_auto_review_run_skipped_duplicate(
@@ -32096,11 +32117,7 @@ async fn run_background_review(
                 Ok(AutoReviewScopeMetadata {
                     scope_note,
                     diff_excerpt,
-                    diff_fingerprint: auto_review_diff_fingerprint(
-                        (!parent_id.is_empty()).then_some(parent_id.as_str()),
-                        &paths,
-                        &diff_text,
-                    ),
+                    diff_fingerprint: auto_review_diff_fingerprint(&paths, &diff_text),
                     changed_path_count: paths.len(),
                     listed_paths,
                     omitted_path_count,
@@ -32120,6 +32137,11 @@ async fn run_background_review(
             let saved_token_estimate = duplicate.token_count.or(duplicate.prompt_token_estimate);
             match duplicate.disposition {
                 AutoReviewDuplicateDisposition::Adopt => {
+                    let adopted_worktree_path = duplicate.worktree_path.unwrap_or_default();
+                    let adopted_branch = duplicate.branch.unwrap_or_default();
+                    let adopted_agent_id = duplicate.agent_id;
+                    let adopted_snapshot = duplicate.snapshot_commit;
+                    let adopted_owner_session_id = duplicate.owner_session_id;
                     if let Err(err) = mark_auto_review_run_skipped_duplicate(
                         &config.cwd,
                         run_id,
@@ -32129,17 +32151,14 @@ async fn run_background_review(
                     ) {
                         tracing::warn!(?err, run_id = %run_id, "failed to mark duplicate auto-review run skipped");
                     }
-                    app_event_tx_clone.send(AppEvent::BackgroundReviewFinished {
-                        run_id,
-                        worktree_path: duplicate.worktree_path.unwrap_or_default(),
-                        branch: duplicate.branch.unwrap_or_default(),
-                        has_findings: false,
-                        findings: 0,
-                        summary: Some("Auto review skipped: equivalent review is already running.".to_string()),
-                        error: None,
-                        agent_id: None,
-                        snapshot: None,
-                        owner_session_id: Some(owner_session_id),
+                    app_event_tx_clone.send(AppEvent::BackgroundReviewAdopted {
+                        local_run_id: run_id,
+                        adopted_run_id: duplicate.run_id,
+                        worktree_path: adopted_worktree_path,
+                        branch: adopted_branch,
+                        agent_id: adopted_agent_id,
+                        snapshot: adopted_snapshot,
+                        owner_session_id: adopted_owner_session_id.or(Some(owner_session_id)),
                     });
                     return Ok::<(PathBuf, String, String, String), String>((
                         PathBuf::new(),
@@ -33121,13 +33140,11 @@ use code_core::protocol::OrderMeta;
     #[test]
     fn auto_review_diff_fingerprint_is_stable_for_equivalent_paths() {
         let first = auto_review_diff_fingerprint(
-            Some("base"),
             &["src/lib.rs".to_string(), "./src/main.rs".to_string()],
             "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
         )
         .expect("fingerprint");
         let second = auto_review_diff_fingerprint(
-            Some("base"),
             &["src/main.rs".to_string(), "src/lib.rs".to_string()],
             "\n diff --git a/src/lib.rs b/src/lib.rs\n+line\n\n",
         )
@@ -33137,17 +33154,15 @@ use code_core::protocol::OrderMeta;
     }
 
     #[test]
-    fn auto_review_diff_fingerprint_changes_with_base() {
+    fn auto_review_diff_fingerprint_changes_with_effective_diff() {
         let first = auto_review_diff_fingerprint(
-            Some("base-a"),
             &["src/lib.rs".to_string()],
             "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
         )
         .expect("fingerprint");
         let second = auto_review_diff_fingerprint(
-            Some("base-b"),
             &["src/lib.rs".to_string()],
-            "diff --git a/src/lib.rs b/src/lib.rs\n+line\n",
+            "diff --git a/src/lib.rs b/src/lib.rs\n+other\n",
         )
         .expect("fingerprint");
 
@@ -34323,6 +34338,145 @@ use code_core::protocol::OrderMeta;
                 .map(|pending| pending.base.id()),
             Some("base-before-review")
         );
+    }
+
+    #[test]
+    fn adopted_background_review_completion_is_surfaced() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let local_run_id = uuid::Uuid::new_v4();
+        let adopted_run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(local_run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        chat.on_background_review_adopted(
+            local_run_id,
+            adopted_run_id,
+            PathBuf::from("/tmp/adopted-review"),
+            "auto-review-adopted".to_string(),
+            Some("agent-adopted".to_string()),
+            Some("snap-adopted".to_string()),
+            Some(session_id),
+        );
+
+        assert_eq!(chat.background_review_run_id, Some(adopted_run_id));
+        assert_eq!(
+            chat.processed_auto_review_agents
+                .get("agent-adopted")
+                .and_then(|processed| processed.replayable_run_id),
+            None
+        );
+        let state = chat
+            .background_review
+            .as_ref()
+            .expect("adopted review should stay active");
+        assert_eq!(state.agent_id.as_deref(), Some("agent-adopted"));
+        assert_eq!(state.snapshot.as_deref(), Some("snap-adopted"));
+
+        chat.on_background_review_finished_for_run(
+            adopted_run_id,
+            PathBuf::from("/tmp/adopted-review"),
+            "auto-review-adopted".to_string(),
+            true,
+            1,
+            Some("needs work".to_string()),
+            None,
+            Some("agent-adopted".to_string()),
+            Some("snap-adopted".to_string()),
+            Some(session_id),
+        );
+
+        assert!(chat.background_review.is_none());
+        assert!(history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        let note = expect_post_turn_developer_input(&mut code_op_rx);
+        assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
+        let loaded = AutoReviewRunStore::open(cwd.path()).expect("reload store");
+        let run = loaded.get(adopted_run_id).expect("adopted run loaded");
+        assert_eq!(run.status, AutoReviewRunStatus::Completed);
+        assert_eq!(run.finding_count, 1);
+    }
+
+    #[test]
+    fn adopted_background_review_retargets_replayable_terminal_status() {
+        let _stub_lock = AUTO_STUB_LOCK.lock().unwrap();
+        let code_home = tempfile::tempdir().expect("code home");
+        // SAFETY: guarded by AUTO_STUB_LOCK so tests in this module do not race CODE_HOME.
+        unsafe { std::env::set_var("CODE_HOME", code_home.path()); }
+        let cwd = tempfile::tempdir().expect("repo cwd");
+        let mut harness = ChatWidgetHarness::new();
+        let chat = harness.chat();
+        let mut code_op_rx = replace_code_op_channel(chat);
+        let session_id = uuid::Uuid::new_v4();
+        let local_run_id = uuid::Uuid::new_v4();
+        let adopted_run_id = uuid::Uuid::new_v4();
+        chat.session_id = Some(session_id);
+        chat.config.cwd = cwd.path().to_path_buf();
+        chat.config.tui.auto_review_enabled = true;
+        chat.background_review_run_id = Some(local_run_id);
+        chat.background_review = Some(BackgroundReviewState {
+            worktree_path: PathBuf::new(),
+            branch: String::new(),
+            agent_id: None,
+            snapshot: None,
+            owner_session_id: Some(session_id),
+            base: None,
+            last_seen: Instant::now(),
+        });
+
+        let agent = completed_auto_review_agent(
+            "agent-adopted",
+            "auto-review-adopted",
+            Some(session_id),
+            Some("snap-adopted"),
+        );
+        chat.observe_auto_review_status(std::slice::from_ref(&agent));
+        assert_eq!(
+            chat.processed_auto_review_agents
+                .get("agent-adopted")
+                .and_then(|processed| processed.replayable_run_id),
+            Some(local_run_id)
+        );
+
+        chat.on_background_review_adopted(
+            local_run_id,
+            adopted_run_id,
+            PathBuf::from("/tmp/adopted-review"),
+            "auto-review-adopted".to_string(),
+            Some("agent-adopted".to_string()),
+            Some("snap-adopted".to_string()),
+            Some(session_id),
+        );
+        assert_eq!(
+            chat.processed_auto_review_agents
+                .get("agent-adopted")
+                .and_then(|processed| processed.replayable_run_id),
+            Some(adopted_run_id)
+        );
+
+        chat.observe_auto_review_status(&[agent]);
+
+        assert!(chat.background_review.is_none());
+        assert!(history_contains_text(chat, "Auto Review: 1 issue(s) found"));
+        let note = expect_post_turn_developer_input(&mut code_op_rx);
+        assert!(note.contains("Background auto-review completed and reported 1 issue(s)"));
     }
 
     #[test]
@@ -42851,16 +43005,13 @@ impl ChatWidget<'_> {
                 .or(run.owner_session_id);
             run.model = agent.model.clone().or_else(|| run.model.clone());
             run.token_count = agent.token_count.or(run.token_count);
-            run.freshness = if durable_status.is_terminal() {
-                AutoReviewFreshness::Current
-            } else if agent
-                .seconds_since_last_activity
-                .is_some_and(|seconds| seconds >= AUTO_REVIEW_STALE_SECS)
-            {
-                AutoReviewFreshness::Inactive
-            } else {
-                AutoReviewFreshness::Current
-            };
+            let elapsed_secs = Some(now.saturating_sub(run.started_at.unwrap_or(run.created_at)));
+            run.freshness = auto_review_freshness_for_agent_status(
+                durable_status.is_terminal(),
+                elapsed_secs,
+                agent.seconds_since_last_activity,
+                AUTO_REVIEW_STALE_SECS,
+            );
             run.mark_status(durable_status, now);
             if !durable_status.is_terminal() || agent.last_activity_at.is_some() {
                 run.mark_activity(now);
@@ -43785,6 +43936,59 @@ impl ChatWidget<'_> {
             self.bottom_pane.update_status_text(String::new());
             self.auto_review_notice = None;
         }
+        self.request_redraw();
+    }
+
+    pub(crate) fn on_background_review_adopted(
+        &mut self,
+        local_run_id: Uuid,
+        adopted_run_id: Uuid,
+        worktree_path: std::path::PathBuf,
+        branch: String,
+        agent_id: Option<String>,
+        snapshot: Option<String>,
+        owner_session_id: Option<Uuid>,
+    ) {
+        if let Err(reason) = background_review_run_matches(self.background_review_run_id, local_run_id) {
+            tracing::debug!(
+                reason,
+                local_run_id = %local_run_id,
+                adopted_run_id = %adopted_run_id,
+                expected_run_id = self.background_review_run_id.map(|id| id.to_string()).unwrap_or_default(),
+                "ignoring stale or cross-session auto-review adoption"
+            );
+            return;
+        }
+        self.background_review_run_id = Some(adopted_run_id);
+        if let Some(state) = self.background_review.as_mut() {
+            state.worktree_path = worktree_path.clone();
+            state.branch = branch.clone();
+            state.agent_id = agent_id.clone();
+            state.snapshot = snapshot.clone();
+            state.owner_session_id = owner_session_id;
+            state.last_seen = Instant::now();
+        }
+        if let Some(agent_id) = agent_id.as_deref()
+            && let Some(processed) = self.processed_auto_review_agents.get_mut(agent_id)
+            && processed.replayable_run_id == Some(local_run_id)
+        {
+            processed.replayable_run_id = Some(adopted_run_id);
+        }
+        self.record_auto_review_started_in_store(
+            adopted_run_id,
+            &worktree_path,
+            &branch,
+            agent_id.as_deref(),
+            snapshot.as_deref(),
+            owner_session_id,
+        );
+        let detail = auto_review_running_detail(self.background_review.as_ref(), None, None);
+        self.set_auto_review_indicator_with_detail(
+            AutoReviewIndicatorStatus::Running,
+            None,
+            AutoReviewPhase::Reviewing,
+            detail,
+        );
         self.request_redraw();
     }
 

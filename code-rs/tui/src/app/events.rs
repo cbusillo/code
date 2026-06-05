@@ -1859,6 +1859,19 @@ impl App<'_> {
                         );
                     }
                 }
+                AppEvent::BackgroundReviewAdopted { local_run_id, adopted_run_id, worktree_path, branch, agent_id, snapshot, owner_session_id } => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.on_background_review_adopted(
+                            local_run_id,
+                            adopted_run_id,
+                            worktree_path,
+                            branch,
+                            agent_id,
+                            snapshot,
+                            owner_session_id,
+                        );
+                    }
+                }
                 AppEvent::BackgroundReviewFinished { run_id, worktree_path, branch, has_findings, findings, summary, error, agent_id, snapshot, owner_session_id } => {
                     if let AppState::Chat { widget } = &mut self.app_state {
                         widget.on_background_review_finished_for_run(
