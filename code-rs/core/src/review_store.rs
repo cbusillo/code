@@ -1,4 +1,4 @@
-use crate::protocol::ReviewOutputEvent;
+use crate::protocol::{ReviewFinding, ReviewOutputEvent};
 use crate::review_coord::scoped_review_state_dir;
 use crate::review_coord::scoped_review_state_dir_path;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MAX_RUNS: usize = 500;
 const MAX_FINDING_DIGESTS: usize = 25;
 const MAX_FINDING_DIGEST_TITLE_CHARS: usize = 160;
+const AUTO_REVIEW_DETAIL_DEFAULT_MAX_BYTES: usize = 12_000;
+const AUTO_REVIEW_DETAIL_HARD_MAX_BYTES: usize = 64_000;
+const AUTO_REVIEW_DETAIL_MAX_FINDINGS: usize = 10;
 const DEFAULT_LEDGER_MAX_BYTES: usize = 2_400;
 const DEFAULT_LEDGER_MAX_RUNS: usize = 5;
 const LEDGER_RECENT_ACTIONABLE_SECS: u64 = 24 * 60 * 60;
@@ -276,6 +279,63 @@ pub struct AutoReviewDuplicateMatch {
     pub prompt_token_estimate: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AutoReviewDetailResponse {
+    pub run_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+    pub status: AutoReviewRunStatus,
+    pub source: AutoReviewRunSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_commit: Option<String>,
+    pub detail_kind: AutoReviewDetailKind,
+    pub finding_count: usize,
+    pub omitted_findings: usize,
+    pub content: String,
+    pub bytes: usize,
+    pub original_bytes: usize,
+    pub max_bytes: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidecar_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReviewDetailKind {
+    Run,
+    Finding,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReviewDetailErrorCode {
+    InvalidFindingId,
+    MissingFinding,
+    MissingRun,
+    MissingSidecar,
+    InvalidSidecar,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AutoReviewDetailError {
+    pub code: AutoReviewDetailErrorCode,
+    pub run_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for AutoReviewDetailError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for AutoReviewDetailError {}
+
 #[derive(Debug, Clone)]
 pub struct AutoReviewLedgerOptions {
     pub max_bytes: usize,
@@ -331,6 +391,21 @@ impl AutoReviewRunStore {
             return Ok(None);
         }
         Self::open_in_dir(root).map(Some)
+    }
+
+    pub fn open_existing_read_only(scope: &Path) -> io::Result<Option<Self>> {
+        let root = auto_review_dir_path(scope)?;
+        if !root.exists() {
+            return Ok(None);
+        }
+        let runs_path = root.join(RUNS_FILENAME);
+        let runs = read_runs_file(&runs_path)?;
+        Ok(Some(Self {
+            outputs_dir: root.join(OUTPUTS_DIR),
+            root,
+            runs_path,
+            runs,
+        }))
     }
 
     pub fn open_in_dir(root: PathBuf) -> io::Result<Self> {
@@ -583,9 +658,217 @@ impl AutoReviewRunStore {
         serde_json::from_str(&text).map_err(io::Error::other)
     }
 
+    pub fn read_detail(
+        &self,
+        run_id: Uuid,
+        finding_id: Option<&str>,
+        max_bytes: Option<usize>,
+    ) -> Result<AutoReviewDetailResponse, AutoReviewDetailError> {
+        let run = self.runs.get(&run_id).ok_or_else(|| AutoReviewDetailError {
+            code: AutoReviewDetailErrorCode::MissingRun,
+            run_id,
+            finding_id: finding_id.map(str::to_string),
+            message: format!("auto review run {run_id} was not found in the durable run ledger"),
+        })?;
+        let sidecar_path = run
+            .output_path
+            .clone()
+            .unwrap_or_else(|| self.output_path_for(run_id));
+        let text = fs::read_to_string(&sidecar_path).map_err(|err| AutoReviewDetailError {
+            code: if err.kind() == io::ErrorKind::NotFound {
+                AutoReviewDetailErrorCode::MissingSidecar
+            } else {
+                AutoReviewDetailErrorCode::InvalidSidecar
+            },
+            run_id,
+            finding_id: finding_id.map(str::to_string),
+            message: if err.kind() == io::ErrorKind::NotFound {
+                format!(
+                    "auto review detail sidecar for run {run_id} is not available at {}",
+                    sidecar_path.display()
+                )
+            } else {
+                format!(
+                    "failed to read auto review detail sidecar for run {run_id} at {}: {err}",
+                    sidecar_path.display()
+                )
+            },
+        })?;
+        let output = serde_json::from_str::<ReviewOutputEvent>(&text).map_err(|err| {
+            AutoReviewDetailError {
+                code: AutoReviewDetailErrorCode::InvalidSidecar,
+                run_id,
+                finding_id: finding_id.map(str::to_string),
+                message: format!(
+                    "failed to parse auto review detail sidecar for run {run_id} at {}: {err}",
+                    sidecar_path.display()
+                ),
+            }
+        })?;
+        let max_bytes = normalize_detail_max_bytes(max_bytes);
+        let detail_kind = if finding_id.is_some() {
+            AutoReviewDetailKind::Finding
+        } else {
+            AutoReviewDetailKind::Run
+        };
+        let content = match finding_id {
+            Some(finding_id) => {
+                let index = parse_finding_id(finding_id).ok_or_else(|| AutoReviewDetailError {
+                    code: AutoReviewDetailErrorCode::InvalidFindingId,
+                    run_id,
+                    finding_id: Some(finding_id.to_string()),
+                    message: format!(
+                        "invalid auto review finding id {finding_id:?}; expected a stable id like f1"
+                    ),
+                })?;
+                let finding = output.findings.get(index).ok_or_else(|| AutoReviewDetailError {
+                    code: AutoReviewDetailErrorCode::MissingFinding,
+                    run_id,
+                    finding_id: Some(finding_id.to_string()),
+                    message: format!(
+                        "auto review finding {finding_id} was not found for run {run_id}; this run has {} finding(s)",
+                        output.findings.len()
+                    ),
+                })?;
+                format_finding_detail(finding_id, finding)
+            }
+            None => format_run_detail(&output),
+        };
+        let original_bytes = content.len();
+        let (content, truncated) = truncate_detail_content(content, max_bytes);
+        let bytes = content.len();
+        let omitted_findings = match finding_id {
+            Some(_) => output.findings.len().saturating_sub(1),
+            None => output.findings.len().saturating_sub(AUTO_REVIEW_DETAIL_MAX_FINDINGS),
+        };
+        let findings_capped = finding_id.is_none() && omitted_findings > 0;
+        Ok(AutoReviewDetailResponse {
+            run_id,
+            finding_id: finding_id.map(str::to_string),
+            status: run.status,
+            source: run.source,
+            branch: run.branch.clone(),
+            snapshot_commit: run.snapshot_commit.clone(),
+            detail_kind,
+            finding_count: output.findings.len(),
+            omitted_findings,
+            content,
+            bytes,
+            original_bytes,
+            max_bytes,
+            truncated: truncated || findings_capped,
+            sidecar_path: Some(sidecar_path),
+        })
+    }
+
     pub fn compact_ledger(&self, options: AutoReviewLedgerOptions) -> Option<String> {
         compact_ledger_from_runs(self.runs.values(), options)
     }
+}
+
+pub fn default_auto_review_detail_max_bytes() -> usize {
+    AUTO_REVIEW_DETAIL_DEFAULT_MAX_BYTES
+}
+
+pub fn hard_auto_review_detail_max_bytes() -> usize {
+    AUTO_REVIEW_DETAIL_HARD_MAX_BYTES
+}
+
+fn normalize_detail_max_bytes(max_bytes: Option<usize>) -> usize {
+    max_bytes
+        .unwrap_or(AUTO_REVIEW_DETAIL_DEFAULT_MAX_BYTES)
+        .clamp(1, AUTO_REVIEW_DETAIL_HARD_MAX_BYTES)
+}
+
+fn parse_finding_id(finding_id: &str) -> Option<usize> {
+    let number = finding_id.strip_prefix('f')?.parse::<usize>().ok()?;
+    number.checked_sub(1)
+}
+
+fn format_run_detail(output: &ReviewOutputEvent) -> String {
+    let mut sections = Vec::new();
+    sections.push(format!(
+        "overall_correctness={} confidence={}",
+        output.overall_correctness, output.overall_confidence_score
+    ));
+    if !output.overall_explanation.trim().is_empty() {
+        sections.push(format!(
+            "overall_explanation:\n{}",
+            output.overall_explanation.trim()
+        ));
+    }
+    if output.findings.is_empty() {
+        sections.push("findings: none".to_string());
+    } else {
+        let mut findings = String::from("findings:");
+        for (idx, finding) in output
+            .findings
+            .iter()
+            .take(AUTO_REVIEW_DETAIL_MAX_FINDINGS)
+            .enumerate()
+        {
+            let finding_id = format!("f{}", idx + 1);
+            findings.push('\n');
+            findings.push_str(&format_finding_detail(&finding_id, finding));
+        }
+        if output.findings.len() > AUTO_REVIEW_DETAIL_MAX_FINDINGS {
+            findings.push_str(&format!(
+                "\n... omitted {} additional finding(s); request a specific finding_id for full detail",
+                output.findings.len() - AUTO_REVIEW_DETAIL_MAX_FINDINGS
+            ));
+        }
+        sections.push(findings);
+    }
+    sections.join("\n\n")
+}
+
+fn format_finding_detail(finding_id: &str, finding: &ReviewFinding) -> String {
+    format!(
+        "finding_id={finding_id} priority={} confidence={} location={}:{}-{}\ntitle: {}\nbody:\n{}",
+        finding.priority,
+        finding.confidence_score,
+        finding.code_location.absolute_file_path.display(),
+        finding.code_location.line_range.start,
+        finding.code_location.line_range.end,
+        finding.title.trim(),
+        finding.body.trim()
+    )
+}
+
+fn truncate_detail_content(content: String, max_bytes: usize) -> (String, bool) {
+    if content.len() <= max_bytes {
+        return (content, false);
+    }
+    let marker = "\n... truncated auto review detail ...\n";
+    if max_bytes <= marker.len() {
+        return (marker.chars().take(max_bytes).collect(), true);
+    }
+    let keep = max_bytes - marker.len();
+    let head_budget = keep / 2;
+    let tail_budget = keep - head_budget;
+    let head_end = floor_char_boundary(&content, head_budget);
+    let tail_start = ceil_char_boundary(&content, content.len().saturating_sub(tail_budget));
+    let mut truncated = String::new();
+    truncated.push_str(&content[..head_end]);
+    truncated.push_str(marker);
+    truncated.push_str(&content[tail_start..]);
+    (truncated, true)
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn duplicate_priority(run: &AutoReviewRun) -> u8 {
@@ -742,7 +1025,7 @@ where
     lines.push(format!(
         "<auto_review_ledger schema_version=\"1\" max_bytes=\"{max_bytes}\">"
     ));
-    lines.push("Auto Review state for this repo. Listed runs are active or target-applicable by default; diagnostics may include stale/detached history that is not an instruction to re-review or fix. Treat run ids as stable references for future detail lookup. Freshness describes run recency; target describes whether findings match the active checkout.".to_string());
+    lines.push("Auto Review state for this repo. Listed runs are active or target-applicable by default; diagnostics may include stale/detached history that is not an instruction to re-review or fix. Treat run ids as stable references for future detail lookup with the auto_review_detail tool. Freshness describes run recency; target describes whether findings match the active checkout.".to_string());
     if let Some(diagnostics) = diagnostics {
         lines.push(diagnostics);
     }
@@ -1262,6 +1545,22 @@ mod tests {
         }
     }
 
+    fn review_finding(idx: usize, body: &str) -> ReviewFinding {
+        ReviewFinding {
+            title: format!("finding title {idx}"),
+            body: body.to_string(),
+            confidence_score: 0.9,
+            priority: idx as i32,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: PathBuf::from(format!("/repo/src/file{idx}.rs")),
+                line_range: ReviewLineRange {
+                    start: idx as u32,
+                    end: idx as u32 + 1,
+                },
+            },
+        }
+    }
+
     fn finding_digest(idx: usize) -> AutoReviewFindingDigest {
         AutoReviewFindingDigest {
             finding_id: format!("f{idx}"),
@@ -1327,6 +1626,142 @@ mod tests {
         assert_eq!(run.finding_count, 1);
         assert_eq!(run.finding_digests[0].finding_id, "f1");
         assert_eq!(run.summary_digest.as_deref(), Some("summary"));
+    }
+
+    #[test]
+    #[serial]
+    fn detail_lookup_returns_bounded_run_detail() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1);
+        run.branch = Some("feature".to_string());
+        run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.mark_status(AutoReviewRunStatus::Completed, 2);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+        store.write_output(run_id, &review_output()).unwrap();
+
+        let detail = store.read_detail(run_id, None, Some(2_000)).unwrap();
+
+        assert_eq!(detail.run_id, run_id);
+        assert_eq!(detail.detail_kind, AutoReviewDetailKind::Run);
+        assert_eq!(detail.status, AutoReviewRunStatus::Completed);
+        assert_eq!(detail.branch.as_deref(), Some("feature"));
+        assert!(detail.content.contains("overall_correctness=incorrect"));
+        assert!(detail.content.contains("finding_id=f1"));
+        assert!(!detail.truncated);
+        assert!(detail.bytes <= detail.max_bytes);
+    }
+
+    #[test]
+    #[serial]
+    fn detail_lookup_returns_specific_finding_by_stable_id() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut output = review_output();
+        output.findings = vec![review_finding(1, "first body"), review_finding(2, "second body")];
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .unwrap();
+        store.write_output(run_id, &output).unwrap();
+
+        let detail = store.read_detail(run_id, Some("f2"), Some(2_000)).unwrap();
+
+        assert_eq!(detail.finding_id.as_deref(), Some("f2"));
+        assert_eq!(detail.detail_kind, AutoReviewDetailKind::Finding);
+        assert_eq!(detail.finding_count, 2);
+        assert_eq!(detail.omitted_findings, 1);
+        assert!(detail.content.contains("title: finding title 2"));
+        assert!(detail.content.contains("second body"));
+        assert!(!detail.content.contains("first body"));
+    }
+
+    #[test]
+    #[serial]
+    fn detail_lookup_truncates_long_content_with_metadata() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut output = review_output();
+        output.findings = vec![review_finding(1, &"x".repeat(4_000))];
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .unwrap();
+        store.write_output(run_id, &output).unwrap();
+
+        let detail = store.read_detail(run_id, Some("f1"), Some(300)).unwrap();
+
+        assert!(detail.truncated);
+        assert!(detail.content.contains("truncated auto review detail"));
+        assert!(detail.original_bytes > detail.bytes);
+        assert!(detail.bytes <= 300);
+    }
+
+    #[test]
+    #[serial]
+    fn detail_lookup_reports_missing_sidecar() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .unwrap();
+
+        let err = store.read_detail(run_id, None, None).unwrap_err();
+
+        assert_eq!(err.code, AutoReviewDetailErrorCode::MissingSidecar);
+        assert!(err.message.contains("sidecar"));
+    }
+
+    #[test]
+    #[serial]
+    fn detail_lookup_reports_missing_and_invalid_finding_ids() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 1))
+            .unwrap();
+        store.write_output(run_id, &review_output()).unwrap();
+
+        let invalid = store.read_detail(run_id, Some("finding-1"), None).unwrap_err();
+        assert_eq!(invalid.code, AutoReviewDetailErrorCode::InvalidFindingId);
+
+        let missing = store.read_detail(run_id, Some("f2"), None).unwrap_err();
+        assert_eq!(missing.code, AutoReviewDetailErrorCode::MissingFinding);
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_verbose_sidecar_detail() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let mut run = AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 10);
+        run.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+        let mut output = review_output();
+        output.findings = vec![review_finding(1, "VERY_VERBOSE_FINDING_BODY_SHOULD_STAY_LAZY")];
+        store.write_output(run_id, &output).unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(30)).expect("ledger");
+
+        assert!(ledger.contains(&run_id.to_string()));
+        assert!(!ledger.contains("VERY_VERBOSE_FINDING_BODY_SHOULD_STAY_LAZY"));
+        assert!(!ledger.contains("overall_correctness"));
     }
 
     #[test]
@@ -2036,6 +2471,24 @@ mod tests {
         assert!(store.is_none());
         assert!(!auto_review_dir_path(repo.path()).unwrap().exists());
         assert!(!code_home.path().join("state").join("review").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn open_existing_read_only_does_not_create_outputs_dir() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let root = auto_review_dir_path(repo.path()).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        write_runs_file(&root.join(RUNS_FILENAME), std::iter::empty()).unwrap();
+
+        let store = AutoReviewRunStore::open_existing_read_only(repo.path())
+            .unwrap()
+            .expect("store");
+
+        assert_eq!(store.root(), root.as_path());
+        assert!(!root.join(OUTPUTS_DIR).exists());
     }
 
     #[test]
