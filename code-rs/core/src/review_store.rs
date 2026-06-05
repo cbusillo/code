@@ -1187,6 +1187,12 @@ struct LedgerDiagnostics {
     recent_runs: usize,
     in_flight_runs: usize,
     terminal_runs: usize,
+    skipped_runs: usize,
+    duplicate_skipped_runs: usize,
+    superseded_runs: usize,
+    failed_runs: usize,
+    cancelled_runs: usize,
+    lost_runs: usize,
     token_count: u64,
     token_runs: usize,
     prompt_token_estimate: u64,
@@ -1219,6 +1225,18 @@ where
         if suppresses_stale_findings {
             diagnostics.suppressed_stale_runs += 1;
         }
+        let has_terminal_proof = run.error_summary.is_some()
+            || run.error_class.is_some()
+            || run.cancel_reason.is_some();
+        let is_skipped = run.status == AutoReviewRunStatus::Skipped;
+        let is_duplicate_skipped = is_skipped
+            && run.cancel_reason.as_deref() == Some("duplicate_auto_review_scope");
+        let is_superseded = run.status == AutoReviewRunStatus::Superseded;
+        let is_failed = run.status == AutoReviewRunStatus::Failed;
+        let is_cancelled = run.status == AutoReviewRunStatus::Cancelled;
+        let is_lost = run.status == AutoReviewRunStatus::Lost;
+        let is_proof_run = is_skipped || is_superseded;
+        let is_terminal_proof_run = has_terminal_proof && (is_failed || is_cancelled || is_lost);
         let has_saved_signal = run.saved_token_estimate.is_some();
         let has_cost_signal = run.token_count.is_some()
             || run.prompt_token_estimate.is_some()
@@ -1230,11 +1248,31 @@ where
             && !has_timing_signal
             && !high_burn
             && !suppresses_stale_findings
+            && !is_proof_run
+            && !is_terminal_proof_run
         {
             continue;
         }
 
         diagnostics.recent_runs += 1;
+        if is_skipped {
+            diagnostics.skipped_runs += 1;
+        }
+        if is_duplicate_skipped {
+            diagnostics.duplicate_skipped_runs += 1;
+        }
+        if is_superseded {
+            diagnostics.superseded_runs += 1;
+        }
+        if is_failed {
+            diagnostics.failed_runs += 1;
+        }
+        if is_cancelled {
+            diagnostics.cancelled_runs += 1;
+        }
+        if is_lost {
+            diagnostics.lost_runs += 1;
+        }
         if run.status.is_in_flight() {
             diagnostics.in_flight_runs += 1;
         } else {
@@ -1304,6 +1342,27 @@ where
             " saved_estimate={}t saved_runs={}",
             diagnostics.saved_token_estimate, diagnostics.saved_runs
         ));
+    }
+    if diagnostics.skipped_runs > 0 {
+        line.push_str(&format!(" skipped={}", diagnostics.skipped_runs));
+    }
+    if diagnostics.duplicate_skipped_runs > 0 {
+        line.push_str(&format!(
+            " duplicate_skipped={}",
+            diagnostics.duplicate_skipped_runs
+        ));
+    }
+    if diagnostics.superseded_runs > 0 {
+        line.push_str(&format!(" superseded={}", diagnostics.superseded_runs));
+    }
+    if diagnostics.failed_runs > 0 {
+        line.push_str(&format!(" failed={}", diagnostics.failed_runs));
+    }
+    if diagnostics.cancelled_runs > 0 {
+        line.push_str(&format!(" cancelled={}", diagnostics.cancelled_runs));
+    }
+    if diagnostics.lost_runs > 0 {
+        line.push_str(&format!(" lost={}", diagnostics.lost_runs));
     }
     if let Some(longest_elapsed_bucket) = diagnostics.longest_elapsed_bucket {
         line.push_str(&format!(" longest_elapsed={longest_elapsed_bucket}"));
@@ -2465,6 +2524,34 @@ mod tests {
 
         assert!(ledger.contains("saved_estimate=84000t"));
         assert!(ledger.contains("saved_runs=1"));
+        assert!(ledger.contains("skipped=1"));
+        assert!(ledger.contains("duplicate_skipped=1"));
+        assert!(!ledger.contains(&format!("run id={run_id}")));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_counts_skipped_duplicates_without_saved_tokens() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let run_id = Uuid::new_v4();
+        let duplicate_id = Uuid::new_v4();
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store
+            .upsert(AutoReviewRun::new(run_id, AutoReviewRunSource::Tui, 10))
+            .unwrap();
+        store
+            .mark_skipped_duplicate(run_id, duplicate_id, Some("diff:abc"), None, 20)
+            .unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(30)).expect("ledger");
+
+        assert!(ledger.contains("diagnostics recent_runs=1"));
+        assert!(ledger.contains("terminal=1"));
+        assert!(ledger.contains("skipped=1"));
+        assert!(ledger.contains("duplicate_skipped=1"));
+        assert!(!ledger.contains("saved_estimate="));
         assert!(!ledger.contains(&format!("run id={run_id}")));
     }
 
@@ -2491,9 +2578,108 @@ mod tests {
         let ledger = store.compact_ledger(ledger_options(60)).expect("ledger");
 
         assert!(ledger.contains("prompt_estimate=42000t"));
+        assert!(ledger.contains("superseded=1"));
         assert!(!ledger.contains("saved_estimate="));
         assert!(!ledger.contains("saved_runs="));
+        assert!(!ledger.contains(&format!("run id={clean_id}")));
         assert_eq!(store.get(clean_id).unwrap().saved_token_estimate, None);
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_omits_old_skipped_and_superseded_proof_runs() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let skipped_id = Uuid::new_v4();
+        let superseded_id = Uuid::new_v4();
+        let mut skipped = AutoReviewRun::new(skipped_id, AutoReviewRunSource::Tui, 1);
+        skipped.cancel_reason = Some("duplicate_auto_review_scope".to_string());
+        skipped.mark_status(AutoReviewRunStatus::Skipped, 2);
+        let mut superseded = AutoReviewRun::new(superseded_id, AutoReviewRunSource::Tui, 3);
+        superseded.mark_status(AutoReviewRunStatus::Superseded, 4);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(skipped).unwrap();
+        store.upsert(superseded).unwrap();
+
+        assert!(
+            store
+                .compact_ledger(ledger_options(LEDGER_DIAGNOSTIC_RECENT_SECS + 20))
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_combines_active_run_with_dedup_proof() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let skipped_id = Uuid::new_v4();
+        let active_id = Uuid::new_v4();
+        let duplicate_id = Uuid::new_v4();
+        let mut active = AutoReviewRun::new(active_id, AutoReviewRunSource::Tui, 30);
+        active.agent_id = Some("agent-active".to_string());
+        active.freshness = AutoReviewFreshness::Current;
+        active.mark_status(AutoReviewRunStatus::Reviewing, 40);
+        active.mark_activity(45);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(active).unwrap();
+        store
+            .upsert(AutoReviewRun::new(skipped_id, AutoReviewRunSource::Tui, 10))
+            .unwrap();
+        store
+            .mark_skipped_duplicate(skipped_id, duplicate_id, Some("diff:abc"), Some(84_000), 20)
+            .unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(60)).expect("ledger");
+
+        assert!(ledger.contains("diagnostics recent_runs=1"));
+        assert!(ledger.contains("skipped=1"));
+        assert!(ledger.contains("duplicate_skipped=1"));
+        assert!(ledger.contains("saved_estimate=84000t"));
+        assert!(ledger.contains(&format!("run id={active_id}")));
+        assert!(!ledger.contains(&format!("run id={skipped_id}")));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_counts_terminal_outcomes_without_listing_clean_runs() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+
+        let failed_id = Uuid::new_v4();
+        let cancelled_id = Uuid::new_v4();
+        let lost_id = Uuid::new_v4();
+
+        let mut failed = AutoReviewRun::new(failed_id, AutoReviewRunSource::Tui, 10);
+        failed.error_class = Some("context_window".to_string());
+        failed.error_summary = Some("context window exceeded".to_string());
+        failed.mark_status(AutoReviewRunStatus::Failed, 20);
+        store.upsert(failed).unwrap();
+
+        let mut cancelled = AutoReviewRun::new(cancelled_id, AutoReviewRunSource::Tui, 30);
+        cancelled.cancel_reason = Some("agent_cancelled".to_string());
+        cancelled.mark_status(AutoReviewRunStatus::Cancelled, 40);
+        store.upsert(cancelled).unwrap();
+
+        let mut lost = AutoReviewRun::new(lost_id, AutoReviewRunSource::Tui, 50);
+        lost.cancel_reason = Some("agent_missing_after_restart".to_string());
+        lost.mark_status(AutoReviewRunStatus::Lost, 60);
+        store.upsert(lost).unwrap();
+
+        let ledger = store.compact_ledger(ledger_options(70)).expect("ledger");
+
+        assert!(ledger.contains("diagnostics recent_runs=3"));
+        assert!(ledger.contains("terminal=3"));
+        assert!(ledger.contains("failed=1"));
+        assert!(ledger.contains("cancelled=1"));
+        assert!(ledger.contains("lost=1"));
+        assert!(ledger.contains(&format!("run id={failed_id}")));
+        assert!(!ledger.contains(&format!("run id={cancelled_id}")));
+        assert!(!ledger.contains(&format!("run id={lost_id}")));
     }
 
     #[test]
