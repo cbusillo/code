@@ -848,11 +848,11 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
                     } else {
                         match summary {
                             Some(ref text) if !text.is_empty() => eprintln!(
-                                "[developer] Auto-review found {findings_count} issue(s) on branch '{branch}'. Summary: {text}. Worktree: {}. Merge this worktree/branch to apply fixes.",
+                                "[developer] Auto-review found {findings_count} issue(s) on branch '{branch}'. Summary: {text}. Worktree: {}. Re-validate against current HEAD before merging fixes.",
                                 worktree.display()
                             ),
                             _ => eprintln!(
-                                "[developer] Auto-review found {findings_count} issue(s) on branch '{branch}'. Worktree: {}. Merge this worktree/branch to apply fixes.",
+                                "[developer] Auto-review found {findings_count} issue(s) on branch '{branch}'. Worktree: {}. Re-validate against current HEAD before merging fixes.",
                                 worktree.display()
                             ),
                         }
@@ -1965,7 +1965,7 @@ fn emit_auto_review_completion(completion: &AutoReviewCompletion) {
         let count = completion.summary.findings.max(1);
         if let Some(path) = completion.worktree_path.as_ref() {
             eprintln!(
-                "[auto-review] {branch}: {count} issue(s) found. Merge {} to apply fixes. Summary: {summary_text}",
+                "[auto-review] {branch}: {count} issue(s) found. Re-validate {} against current HEAD before merging fixes. Summary: {summary_text}",
                 path.display()
             );
         } else {

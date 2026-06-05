@@ -87,6 +87,25 @@ pub enum AutoReviewFreshness {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoReviewTargetApplicability {
+    MatchingHead,
+    OlderSnapshot,
+    DetachedReviewWorktree,
+    Unknown,
+}
+
+impl AutoReviewTargetApplicability {
+    fn as_ledger_value(self) -> &'static str {
+        match self {
+            AutoReviewTargetApplicability::MatchingHead => "matching_head",
+            AutoReviewTargetApplicability::OlderSnapshot => "older_snapshot",
+            AutoReviewTargetApplicability::DetachedReviewWorktree => "detached_review_worktree",
+            AutoReviewTargetApplicability::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoReviewFindingDigest {
     pub finding_id: String,
@@ -252,11 +271,13 @@ pub struct AutoReviewDuplicateMatch {
     pub summary_digest: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AutoReviewLedgerOptions {
     pub max_bytes: usize,
     pub max_runs: usize,
     pub now: u64,
+    pub active_branch: Option<String>,
+    pub active_head: Option<String>,
 }
 
 impl AutoReviewLedgerOptions {
@@ -265,7 +286,19 @@ impl AutoReviewLedgerOptions {
             max_bytes: DEFAULT_LEDGER_MAX_BYTES,
             max_runs: DEFAULT_LEDGER_MAX_RUNS,
             now,
+            active_branch: None,
+            active_head: None,
         }
+    }
+
+    pub fn with_active_target(
+        mut self,
+        active_branch: Option<String>,
+        active_head: Option<String>,
+    ) -> Self {
+        self.active_branch = active_branch.and_then(non_empty_string);
+        self.active_head = active_head.and_then(non_empty_string);
+        self
     }
 }
 
@@ -681,12 +714,12 @@ where
     lines.push(format!(
         "<auto_review_ledger schema_version=\"1\" max_bytes=\"{max_bytes}\">"
     ));
-    lines.push("Auto Review state for this repo. Details are not included in this request; treat run ids as stable references for future detail lookup.".to_string());
+    lines.push("Auto Review state for this repo. Details are not included in this request; treat run ids as stable references for future detail lookup. Freshness describes run recency; target describes whether findings match the active checkout.".to_string());
     if let Some(diagnostics) = diagnostics {
         lines.push(diagnostics);
     }
     for run in selected {
-        append_ledger_run(&mut lines, run, options.now);
+        append_ledger_run(&mut lines, run, &options);
     }
     lines.push("</auto_review_ledger>".to_string());
 
@@ -695,6 +728,43 @@ where
         truncate_ledger_to_bytes(&mut ledger, max_bytes);
     }
     Some(ledger)
+}
+
+pub fn auto_review_target_applicability(
+    run: &AutoReviewRun,
+    active_branch: Option<&str>,
+    active_head: Option<&str>,
+) -> AutoReviewTargetApplicability {
+    let active_head = active_head.and_then(non_empty_str);
+    let active_branch = active_branch.and_then(non_empty_str);
+    let snapshot = run.snapshot_commit.as_deref().and_then(non_empty_str);
+    let head_at_launch = run.head_at_launch.as_deref().and_then(non_empty_str);
+
+    if let (Some(snapshot), Some(active_head)) = (snapshot, active_head) {
+        if same_commit_prefix(snapshot, active_head) {
+            return AutoReviewTargetApplicability::MatchingHead;
+        }
+    }
+    if let (Some(head_at_launch), Some(active_head)) = (head_at_launch, active_head) {
+        if same_commit_prefix(head_at_launch, active_head) {
+            return AutoReviewTargetApplicability::MatchingHead;
+        }
+    }
+
+    let review_branch = run.branch.as_deref().and_then(non_empty_str);
+    let detached_review_branch = review_branch.is_some_and(is_auto_review_branch);
+    if active_head.is_some() && detached_review_branch && review_branch != active_branch {
+        return AutoReviewTargetApplicability::DetachedReviewWorktree;
+    }
+
+    if snapshot.is_some() && active_head.is_some() {
+        return AutoReviewTargetApplicability::OlderSnapshot;
+    }
+    if head_at_launch.is_some() && active_head.is_some() {
+        return AutoReviewTargetApplicability::OlderSnapshot;
+    }
+
+    AutoReviewTargetApplicability::Unknown
 }
 
 fn run_is_ledger_actionable(run: &AutoReviewRun, now: u64) -> bool {
@@ -889,7 +959,8 @@ fn ledger_priority(run: &AutoReviewRun) -> u8 {
     1
 }
 
-fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
+fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, options: &AutoReviewLedgerOptions) {
+    let now = options.now;
     let age_secs = now.saturating_sub(run.updated_at);
     let activity_age_secs = run
         .last_activity_at
@@ -900,11 +971,17 @@ fn append_ledger_run(lines: &mut Vec<String>, run: &AutoReviewRun, now: u64) {
         .and_then(short_sha)
         .unwrap_or("unknown");
     let branch = run.branch.as_deref().or(run.batch_id.as_deref()).unwrap_or("unknown");
+    let target = auto_review_target_applicability(
+        run,
+        options.active_branch.as_deref(),
+        options.active_head.as_deref(),
+    );
     let mut line = format!(
-        "run id={} status={:?} freshness={:?} source={:?} branch={} snapshot={} age={}",
+        "run id={} status={:?} freshness={:?} target={} source={:?} branch={} snapshot={} age={}",
         run.run_id,
         run.status,
         run.freshness,
+        target.as_ledger_value(),
         run.source,
         branch,
         snapshot,
@@ -997,6 +1074,30 @@ fn short_agent_id(value: &str) -> Option<&str> {
     }
 }
 
+fn non_empty_string(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn is_auto_review_branch(value: &str) -> bool {
+    value == "auto-review" || value.starts_with("auto-review-")
+}
+
+fn same_commit_prefix(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    if !left.is_ascii() || !right.is_ascii() {
+        return false;
+    }
+    let min_len = left.len().min(right.len());
+    min_len >= 7 && left[..min_len].eq_ignore_ascii_case(&right[..min_len])
+}
+
 fn single_line(value: &str, max_chars: usize) -> String {
     let flattened = value.split_whitespace().collect::<Vec<_>>().join(" ");
     summarize(&flattened, max_chars).unwrap_or_default()
@@ -1086,6 +1187,8 @@ mod tests {
             now,
             max_bytes: 2_400,
             max_runs: 5,
+            active_branch: None,
+            active_head: None,
         }
     }
 
@@ -1425,11 +1528,106 @@ mod tests {
         assert!(ledger.contains("status=Reviewing"));
         assert!(ledger.contains("last_activity=lt1m"));
         assert!(ledger.contains("snapshot=abcdef123456"));
+        assert!(ledger.contains("target=unknown"));
         assert!(ledger.contains("model=gpt-5.4-mini"));
         assert!(ledger.contains("reasoning=medium"));
         assert!(ledger.contains("prompt_estimate=42000t"));
         assert!(ledger.contains("tokens=84000t"));
         assert!(ledger.contains("elapsed=lt1m"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_marks_matching_head_target_separately_from_freshness() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 10);
+        run.branch = Some("feature".to_string());
+        run.snapshot_commit = Some("abcdef1234567890".to_string());
+        run.finding_count = 1;
+        run.finding_digests = vec![finding_digest(1)];
+        run.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store
+            .compact_ledger(
+                ledger_options(30).with_active_target(
+                    Some("feature".to_string()),
+                    Some("abcdef1234567890".to_string()),
+                ),
+            )
+            .expect("ledger");
+
+        assert!(ledger.contains("freshness=Unknown"));
+        assert!(ledger.contains("target=matching_head"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_marks_launch_head_mismatch_as_older_snapshot() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut run = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 10);
+        run.branch = Some("feature".to_string());
+        run.head_at_launch = Some("aaaaaaaaaaaaaaaa".to_string());
+        run.finding_count = 1;
+        run.finding_digests = vec![finding_digest(1)];
+        run.mark_status(AutoReviewRunStatus::Completed, 20);
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(run).unwrap();
+
+        let ledger = store
+            .compact_ledger(
+                ledger_options(30).with_active_target(
+                    Some("feature".to_string()),
+                    Some("bbbbbbbbbbbbbbbb".to_string()),
+                ),
+            )
+            .expect("ledger");
+
+        assert!(ledger.contains("target=older_snapshot"));
+        assert!(!ledger.contains("target=matching_head"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_ledger_marks_detached_and_older_review_targets() {
+        let code_home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        set_code_home(code_home.path());
+        let mut detached = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 10);
+        detached.branch = Some("auto-review".to_string());
+        detached.snapshot_commit = Some("1111111111111111".to_string());
+        detached.finding_count = 1;
+        detached.finding_digests = vec![finding_digest(1)];
+        detached.mark_status(AutoReviewRunStatus::Completed, 20);
+
+        let mut older = AutoReviewRun::new(Uuid::new_v4(), AutoReviewRunSource::Tui, 30);
+        older.branch = Some("feature".to_string());
+        older.snapshot_commit = Some("2222222222222222".to_string());
+        older.finding_count = 1;
+        older.finding_digests = vec![finding_digest(2)];
+        older.mark_status(AutoReviewRunStatus::Completed, 40);
+
+        let mut store = AutoReviewRunStore::open(repo.path()).unwrap();
+        store.upsert(detached).unwrap();
+        store.upsert(older).unwrap();
+
+        let ledger = store
+            .compact_ledger(
+                ledger_options(50).with_active_target(
+                    Some("feature".to_string()),
+                    Some("3333333333333333".to_string()),
+                ),
+            )
+            .expect("ledger");
+
+        assert!(ledger.contains("target=detached_review_worktree"));
+        assert!(ledger.contains("target=older_snapshot"));
+        assert!(ledger.contains("Freshness describes run recency"));
     }
 
     #[test]
@@ -1640,6 +1838,8 @@ mod tests {
                 now: 20,
                 max_bytes: 180,
                 max_runs: 10,
+                active_branch: None,
+                active_head: None,
             })
             .expect("ledger");
         assert!(ledger.len() <= 180, "ledger len was {}", ledger.len());
