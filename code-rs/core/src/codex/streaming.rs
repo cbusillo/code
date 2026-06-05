@@ -31,7 +31,10 @@ use crate::protocol::McpListToolsResponseEvent;
 use crate::protocol::TaskLifecycleEvent;
 use crate::protocol::TaskLifecyclePhase;
 use crate::protocol::TaskOriginKind;
-use crate::review_store::{AutoReviewLedgerOptions, AutoReviewRunStore};
+use crate::review_store::{
+    default_auto_review_detail_max_bytes, hard_auto_review_detail_max_bytes,
+    AutoReviewLedgerOptions, AutoReviewRunStore,
+};
 use code_app_server_protocol::AuthMode as AppAuthMode;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ResponseItem;
@@ -5073,6 +5076,7 @@ async fn handle_function_call(
         "gh_run_wait" => handle_gh_run_wait(sess, &ctx, arguments).await,
         "kill" => handle_kill(sess, &ctx, arguments).await,
         "code_bridge" | "code_bridge_subscription" => handle_code_bridge(sess, &ctx, arguments).await,
+        "auto_review_detail" => handle_auto_review_detail(sess, &ctx, arguments).await,
         TOOL_SEARCH_TOOL_NAME | LEGACY_SEARCH_TOOL_BM25_TOOL_NAME => {
             let arguments = match serde_json::from_str::<serde_json::Value>(&arguments) {
                 Ok(arguments) => arguments,
@@ -5356,6 +5360,128 @@ async fn handle_declare_worktree_decision(
         output: FunctionCallOutputPayload {
             body: code_protocol::models::FunctionCallOutputBody::Text(summary),
             success: Some(true),
+        },
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AutoReviewDetailArgs {
+    run_id: String,
+    #[serde(default)]
+    finding_id: Option<String>,
+    #[serde(default)]
+    max_bytes: Option<usize>,
+}
+
+async fn handle_auto_review_detail(
+    sess: &Session,
+    ctx: &ToolCallCtx,
+    arguments: String,
+) -> ResponseInputItem {
+    let args = match serde_json::from_str::<AutoReviewDetailArgs>(&arguments) {
+        Ok(args) => args,
+        Err(err) => {
+            return ResponseInputItem::FunctionCallOutput {
+                call_id: ctx.call_id.clone(),
+                output: FunctionCallOutputPayload {
+                    body: code_protocol::models::FunctionCallOutputBody::Text(
+                        serde_json::json!({
+                            "success": false,
+                            "error": {
+                                "code": "invalid_arguments",
+                                "message": format!("invalid auto_review_detail arguments: {err}"),
+                            }
+                        })
+                        .to_string(),
+                    ),
+                    success: Some(false),
+                },
+            };
+        }
+    };
+    let run_id = match Uuid::parse_str(&args.run_id) {
+        Ok(run_id) => run_id,
+        Err(err) => {
+            return ResponseInputItem::FunctionCallOutput {
+                call_id: ctx.call_id.clone(),
+                output: FunctionCallOutputPayload {
+                    body: code_protocol::models::FunctionCallOutputBody::Text(
+                        serde_json::json!({
+                            "success": false,
+                            "error": {
+                                "code": "invalid_run_id",
+                                "run_id": args.run_id,
+                                "message": format!("invalid auto review run_id: {err}"),
+                            }
+                        })
+                        .to_string(),
+                    ),
+                    success: Some(false),
+                },
+            };
+        }
+    };
+    let cwd = sess.cwd.clone();
+    let finding_id = args.finding_id.clone();
+    let max_bytes = args.max_bytes;
+    let lookup = tokio::task::spawn_blocking(move || {
+        let store = AutoReviewRunStore::open_existing_read_only(&cwd).map_err(|err| {
+            serde_json::json!({
+                "code": "store_unavailable",
+                "message": format!("failed to open auto review run store: {err}"),
+            })
+        })?;
+        let Some(store) = store else {
+            return Err(serde_json::json!({
+                "code": "store_missing",
+                "message": "auto review run store is not available for this workspace",
+            }));
+        };
+        store
+            .read_detail(run_id, finding_id.as_deref(), max_bytes)
+            .map_err(|err| serde_json::to_value(err).unwrap_or_else(|ser_err| {
+                serde_json::json!({
+                    "code": "detail_error",
+                    "message": format!("failed to serialize auto review detail error: {ser_err}"),
+                })
+            }))
+    })
+    .await;
+
+    let body = match lookup {
+        Ok(Ok(detail)) => serde_json::json!({
+            "success": true,
+            "detail": detail,
+            "defaults": {
+                "default_max_bytes": default_auto_review_detail_max_bytes(),
+                "hard_max_bytes": hard_auto_review_detail_max_bytes(),
+            }
+        }),
+        Ok(Err(error)) => serde_json::json!({
+            "success": false,
+            "error": error,
+            "defaults": {
+                "default_max_bytes": default_auto_review_detail_max_bytes(),
+                "hard_max_bytes": hard_auto_review_detail_max_bytes(),
+            }
+        }),
+        Err(err) => serde_json::json!({
+            "success": false,
+            "error": {
+                "code": "lookup_join_error",
+                "message": format!("auto review detail lookup task failed: {err}"),
+            }
+        }),
+    };
+    let success = body
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    ResponseInputItem::FunctionCallOutput {
+        call_id: ctx.call_id.clone(),
+        output: FunctionCallOutputPayload {
+            body: code_protocol::models::FunctionCallOutputBody::Text(body.to_string()),
+            success: Some(success),
         },
     }
 }

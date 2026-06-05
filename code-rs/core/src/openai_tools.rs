@@ -1308,6 +1308,7 @@ pub fn get_openai_tools(
     tools.push(create_kill_tool());
     tools.push(create_gh_run_wait_tool());
     tools.push(create_bridge_tool());
+    tools.push(create_auto_review_detail_tool());
 
     if config.web_search_request {
         let search_content_types = match config.web_search_tool_type {
@@ -1501,6 +1502,49 @@ pub fn create_gh_run_wait_tool() -> OpenAiTool {
     })
 }
 
+pub fn create_auto_review_detail_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "run_id".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Stable Auto Review run id from the auto_review_ledger.".to_string(),
+            ),
+            allowed_values: None,
+        },
+    );
+    properties.insert(
+        "finding_id".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional stable finding id such as f1 or f2. If omitted, returns bounded whole-run detail."
+                    .to_string(),
+            ),
+            allowed_values: None,
+        },
+    );
+    properties.insert(
+        "max_bytes".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional maximum response size in bytes; clamped to the built-in safe limit."
+                    .to_string(),
+            ),
+        },
+    );
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "auto_review_detail".to_string(),
+        description: "Retrieve bounded Auto Review run or finding details from durable sidecars using run ids shown in the Auto Review ledger. Read-only; does not change review disposition."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["run_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 pub fn create_bridge_tool() -> OpenAiTool {
     let mut properties = BTreeMap::new();
 
@@ -1644,9 +1688,38 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
             ],
         );
+    }
+
+    #[test]
+    fn auto_review_detail_tool_requires_only_run_id() {
+        let tool = create_auto_review_detail_tool();
+        let OpenAiTool::Function(ResponsesApiTool {
+            name,
+            parameters,
+            ..
+        }) = tool
+        else {
+            panic!("expected function tool");
+        };
+
+        assert_eq!(name, "auto_review_detail");
+        let JsonSchema::Object {
+            properties,
+            required,
+            additional_properties,
+        } = parameters
+        else {
+            panic!("expected object parameters");
+        };
+        assert_eq!(required, Some(vec!["run_id".to_string()]));
+        assert_eq!(additional_properties, Some(false.into()));
+        assert!(properties.contains_key("run_id"));
+        assert!(properties.contains_key("finding_id"));
+        assert!(properties.contains_key("max_bytes"));
     }
 
     #[test]
@@ -1811,6 +1884,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
             ],
         );
@@ -1845,6 +1919,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
             ],
         );
@@ -1878,6 +1953,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
             ],
         );
@@ -1950,6 +2026,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
                 "test_server/do_something_cool",
             ],
@@ -2076,6 +2153,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
                 "test_server/do_something_cool",
             ],
@@ -2204,6 +2282,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
                 "dash/search",
             ],
@@ -2281,6 +2360,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
                 "dash/paginate",
             ],
@@ -2359,6 +2439,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
                 "dash/tags",
             ],
@@ -2435,6 +2516,7 @@ mod tests {
                 "kill",
                 "gh_run_wait",
                 "code_bridge",
+                "auto_review_detail",
                 "web_search",
                 "dash/value",
             ],
