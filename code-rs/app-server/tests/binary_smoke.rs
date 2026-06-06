@@ -10,8 +10,9 @@ fn app_server_bin() -> PathBuf {
     PathBuf::from(assert_cmd::cargo::cargo_bin!("code-app-server"))
 }
 
-fn run_jsonrpc_script(requests: &[Value]) -> BTreeMap<i64, Value> {
+fn run_jsonrpc_script_with_args(args: &[&str], requests: &[Value]) -> BTreeMap<i64, Value> {
     let mut child = Command::new(app_server_bin())
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -49,6 +50,10 @@ fn run_jsonrpc_script(requests: &[Value]) -> BTreeMap<i64, Value> {
             (id, message)
         })
         .collect()
+}
+
+fn run_jsonrpc_script(requests: &[Value]) -> BTreeMap<i64, Value> {
+    run_jsonrpc_script_with_args(&[], requests)
 }
 
 #[test]
@@ -120,5 +125,75 @@ fn binary_smoke_requires_init_and_executes_command() {
     assert!(
         stdout.contains(marker),
         "execOneOffCommand stdout missing marker. stdout was: {stdout}"
+    );
+}
+
+#[test]
+fn binary_smoke_accepts_desktop_startup_polling_methods() {
+    let requests = vec![
+        json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{
+                "clientInfo":{
+                    "name":"codex-desktop-smoke",
+                    "version":"0.1.0"
+                }
+            }
+        }),
+        json!({"jsonrpc":"2.0","id":2,"method":"thread/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"model/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"skills/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"plugin/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"hooks/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":7,"method":"mcpServerStatus/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"remoteControl/status/read","params":{}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"remoteControl/enable","params":{"enabled":true}}),
+        json!({"jsonrpc":"2.0","id":10,"method":"collaborationMode/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":11,"method":"experimentalFeature/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":12,"method":"experimentalFeature/enablement/set","params":{"featureId":"desktop-smoke","enabled":true}}),
+    ];
+
+    let responses = run_jsonrpc_script_with_args(&["--analytics-default-enabled"], &requests);
+
+    for id in 2..=12 {
+        let response = responses
+            .get(&id)
+            .unwrap_or_else(|| panic!("missing response for request id {id}"));
+        assert!(
+            response.get("error").is_none(),
+            "desktop startup method returned error for id {id}: {response}"
+        );
+    }
+
+    for id in [2, 3, 4, 5, 6, 7, 10, 11] {
+        let result = responses
+            .get(&id)
+            .and_then(|response| response.get("result"))
+            .expect("expected list result");
+        assert_eq!(result.get("data"), Some(&json!([])));
+        assert_eq!(result.get("nextCursor"), Some(&json!(null)));
+    }
+    assert_eq!(
+        responses
+            .get(&8)
+            .and_then(|response| response.get("result"))
+            .and_then(|result| result.get("enabled")),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        responses
+            .get(&9)
+            .and_then(|response| response.get("result"))
+            .and_then(|result| result.get("unsupported")),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        responses
+            .get(&12)
+            .and_then(|response| response.get("result"))
+            .and_then(|result| result.get("unsupported")),
+        Some(&json!(true))
     );
 }

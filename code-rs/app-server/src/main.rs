@@ -6,6 +6,12 @@ use code_common::CliConfigOverrides;
 
 #[derive(Debug, Parser)]
 struct AppServerArgs {
+    /// Accepted for Codex Desktop compatibility. Every Code handles analytics
+    /// policy through its normal config path, so this flag is intentionally a
+    /// no-op for the app-server process.
+    #[arg(long = "analytics-default-enabled", default_value_t = false)]
+    _analytics_default_enabled: bool,
+
     /// Transport endpoint URL. Supported values: `stdio://` (default),
     /// `ws://IP:PORT`.
     #[arg(
