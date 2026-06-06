@@ -19,6 +19,20 @@
     "rustWorkspace": "code-rs",
     "upstreamMirror": "codex-rs"
   },
+  "rustWorkspaceMigration": {
+    "trackingIssue": 384,
+    "direction": "codex-base-product-workspace",
+    "status": "policy-recorded",
+    "implementationWorkspace": "code-rs",
+    "upstreamMirror": "codex-rs",
+    "crateNamingPolicy": "Imported Codex substrate crates may keep codex-* names only while compatibility-critical or mostly upstream-shaped; Every Code-owned crates and new product-layer crates should use code-* names unless a documented external compatibility contract requires upstream spelling.",
+    "rawSpikeBranch": "spike/codex-base-port",
+    "completionCriteria": [
+      "Issue #384 documents each migration PR slice before implementation starts.",
+      "Each slice states its compatibility target, ownership boundary, and validation evidence.",
+      "Each slice passes ./build-fast.sh cleanly before merge."
+    ]
+  },
   "qualityGate": {
     "build": {
       "default": "./build-fast.sh",

@@ -29,9 +29,15 @@ changing environment variable behavior.
 
 Rust implementation lives under `code-rs`:
 
-- Crate names are prefixed with `code-`. For example, the `core` folder's crate is named `code-core`.
+- Crate names are ownership markers. Imported Codex substrate crates may keep
+  their upstream `codex-*` names only when they remain compatibility-critical or
+  mostly upstream-shaped. Every Code-owned crates and new product-layer crates
+  should use `code-*` names unless a documented external compatibility contract
+  requires the upstream spelling.
 - When using format! and you can inline variables into {}, always do that.
-- Treat `codex-rs` as a read-only mirror of `openai/codex:main`; edit Rust sources under `code-rs` instead.
+- Treat `codex-rs` as a read-only mirror of `openai/codex:main`; edit Rust
+  sources under `code-rs`, including imported Codex-based sources that become
+  part of the Every Code product workspace.
 
 Completion/build step
 
