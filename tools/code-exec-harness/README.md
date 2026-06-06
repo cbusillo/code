@@ -28,6 +28,36 @@ points at the copied GitHub CLI config inside that redirected home.
 
 ## Run
 
+Run the deterministic no-token smoke suite after `./build-fast.sh`:
+
+```sh
+just harness-smoke
+```
+
+`just harness-smoke` targets `code-rs/target/dev-fast/code` by default so the
+suite validates the binary built by this checkout, not whichever `code` happens
+to be on `PATH`. To test another binary, set `CODE_EXEC_HARNESS_BIN`:
+
+```sh
+CODE_EXEC_HARNESS_BIN=/path/to/code just harness-smoke
+```
+
+The deterministic suite uses fake `/v1/responses` fixtures and does not spend
+live model tokens. It is the Dogfood Parity 1 P0 gate for `code exec --json`:
+if the built binary is missing, cannot start, stops emitting expected JSONL, or
+regresses the covered request-shape contracts, this suite should fail.
+
+Run a single scenario directly when you need narrower evidence:
+
+```sh
+python3 tools/code-exec-harness/harness.py \
+  tools/code-exec-harness/scenarios/exec-basic-smoke.json \
+  --code-bin code-rs/target/dev-fast/code
+```
+
+Run the live GitHub planning smoke only when model behavior is the thing being
+tested:
+
 ```sh
 python3 tools/code-exec-harness/harness.py \
   tools/code-exec-harness/scenarios/github-plan-smoke.json \
