@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import socketserver
 import subprocess
 import sys
@@ -312,6 +313,12 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
 def materialize_skills(scenario: dict[str, Any], paths: RunPaths, scenario_dir: Path, extra_roots: list[Path]) -> None:
     skills_dir = paths.code_home / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
+    workspace_skills = paths.workspace / ".code" / "skills"
+    if workspace_skills.is_dir():
+        for child in sorted(workspace_skills.iterdir()):
+            if child.is_dir() and (child / "SKILL.md").is_file():
+                copy_or_link(child, skills_dir / child.name, symlink=True)
+
     roots: list[Path] = []
     for value in scenario.get("skill_roots", []):
         roots.append(resolve_path(str(value), scenario_dir))
@@ -556,8 +563,24 @@ def write_fake_gh(scenario: dict[str, Any], paths: RunPaths) -> dict[str, Path] 
     shim = paths.bin_dir / "gh"
     put_text(shim, FAKE_GH)
     shim.chmod(0o755)
-    put_text(paths.shell_home / ".zshenv", f"gh() {{ {shim} \"$@\"; }}\n")
+    quoted_shim = shlex.quote(str(shim))
+    put_text(paths.shell_home / ".zshenv", f"gh() {{ {quoted_shim} \"$@\"; }}\n")
     return {"fixture": fixture_path, "log": log_path, "state": state_path}
+
+
+def code_exec_supports_option(code_bin: Path, option: str) -> bool:
+    try:
+        result = subprocess.run(
+            [str(code_bin), "exec", "--help"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return option in f"{result.stdout}\n{result.stderr}"
 
 
 def build_command(scenario: dict[str, Any], args: argparse.Namespace, paths: RunPaths) -> list[str]:
@@ -570,6 +593,7 @@ def build_command_for_prompt(
     paths: RunPaths,
     prompt: str,
     resume_session_id: str | None,
+    fake_responses_base_url: str | None = None,
 ) -> list[str]:
     code_bin_value = args.code_bin or shutil.which("code")
     if not code_bin_value:
@@ -577,7 +601,7 @@ def build_command_for_prompt(
     code_bin = Path(code_bin_value)
     command = [str(code_bin), "exec", "--json", "--skip-git-repo-check"]
     max_seconds = scenario.get("max_seconds", args.max_seconds)
-    if max_seconds:
+    if max_seconds and code_exec_supports_option(code_bin, "--max-seconds"):
         command.extend(["--max-seconds", str(max_seconds)])
     command.extend(["-C", str(paths.workspace)])
     if scenario.get("include_plan_tool", False):
@@ -592,6 +616,8 @@ def build_command_for_prompt(
     sandbox = scenario.get("sandbox") or args.sandbox
     if sandbox:
         command.extend(["--sandbox", str(sandbox)])
+    if fake_responses_base_url:
+        command.extend(["-c", f"openai_base_url={json.dumps(fake_responses_base_url)}"])
     for override in scenario.get("config_overrides", []):
         command.extend(["-c", str(override)])
     if resume_session_id:
@@ -805,6 +831,31 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
         expected = int(expect["responses_request_count"])
         if actual != expected:
             failures.append(f"responses request count expected {expected}, got {actual}")
+    event_counts = expect.get("event_count")
+    if isinstance(event_counts, dict):
+        actual_counts: dict[str, int] = {}
+        for event in summary.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            if isinstance(event_type, str):
+                actual_counts[event_type] = actual_counts.get(event_type, 0) + 1
+            msg = event.get("msg")
+            if isinstance(msg, dict):
+                msg_type = msg.get("type")
+                if isinstance(msg_type, str):
+                    key = f"msg.{msg_type}"
+                    actual_counts[key] = actual_counts.get(key, 0) + 1
+            item = event.get("item")
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if isinstance(item_type, str):
+                    key = f"item.{item_type}"
+                    actual_counts[key] = actual_counts.get(key, 0) + 1
+        for event_type, expected in event_counts.items():
+            actual = actual_counts.get(str(event_type), 0)
+            if actual != int(expected):
+                failures.append(f"event count for {event_type!r} expected {expected}, got {actual}")
     for assertion in expect.get("responses", []):
         if not isinstance(assertion, dict):
             failures.append("responses expectation entries must be objects")
@@ -911,7 +962,8 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
             last_returncode = 0
             for index, turn in enumerate(turn_prompts, start=1):
                 prompt = str(turn.get("prompt", "") if isinstance(turn, dict) else turn)
-                command = build_command_for_prompt(scenario, args, paths, prompt, session_id)
+                fake_base_url = fake_server.base_url if fake_server is not None else None
+                command = build_command_for_prompt(scenario, args, paths, prompt, session_id, fake_base_url)
                 commands.append(command)
                 returncode, events = run_exec_capture(command, scenario, paths, run_env, f"turn-{index}")
                 all_events.extend(events)
@@ -924,7 +976,17 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
                     session_id = session_id_from_summary_or_catalog(turn_summary, paths)
             return last_returncode, all_events, commands
 
-        command = build_command(scenario, args, paths)
+        if fake_server is not None:
+            command = build_command_for_prompt(
+                scenario,
+                args,
+                paths,
+                str(scenario.get("prompt", "")),
+                None,
+                fake_server.base_url,
+            )
+        else:
+            command = build_command(scenario, args, paths)
         returncode, events = run_exec_capture(command, scenario, paths, run_env, "turn-1")
         return returncode, events, [command]
 
@@ -956,6 +1018,7 @@ def run_scenario(path: Path, args: argparse.Namespace) -> int:
     summary = summarize(events, paths, returncode, summary_command)
     summary["commands"] = summary.get("commands", [])
     summary["scenario_commands"] = [" ".join(command) for command in commands]
+    summary["events"] = events
     summary["responses_requests"] = responses_requests
     failures = assert_expectations(summary, scenario)
     summary["expectation_failures"] = failures

@@ -92,6 +92,10 @@ local-fork-health:
     ./scripts/local/fork-health.sh
 
 [no-cd]
+harness-smoke:
+    ./tools/code-exec-harness/run-deterministic.sh
+
+[no-cd]
 local-cleanup-space *args:
     ./scripts/local/cleanup-space.sh "$@"
 
