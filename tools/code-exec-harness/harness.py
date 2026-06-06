@@ -729,6 +729,7 @@ def summarize(events: list[dict[str, Any]], paths: RunPaths, returncode: int, co
         "returncode": returncode,
         "thread_id": thread_id,
         "usage": usage,
+        "events": events,
         "event_count": len(events),
         "final_message": final_message,
         "commands": commands,
@@ -801,6 +802,138 @@ def request_assertion_target(request: dict[str, Any], assertion: dict[str, Any])
     raise HarnessError(f"unsupported responses assertion scope: {scope}")
 
 
+def request_input_items(request: dict[str, Any]) -> list[dict[str, Any]]:
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return []
+    input_items = body.get("input")
+    if not isinstance(input_items, list):
+        return []
+    return [item for item in input_items if isinstance(item, dict)]
+
+
+def function_call_output_text(request: dict[str, Any], call_id: str) -> str | None:
+    for item in request_input_items(request):
+        if item.get("type") != "function_call_output" or item.get("call_id") != call_id:
+            continue
+        output = item.get("output")
+        if isinstance(output, str):
+            return output
+        if isinstance(output, list):
+            text_parts = []
+            for content in output:
+                if isinstance(content, dict) and isinstance(content.get("text"), str):
+                    text_parts.append(content["text"])
+            return "\n".join(text_parts)
+    return None
+
+
+def contains_any(value: str, needles: Any) -> bool:
+    return isinstance(needles, list) and any(str(needle) in value for needle in needles)
+
+
+def command_event_matches(event: dict[str, Any], assertion: dict[str, Any]) -> bool:
+    command = ""
+    output = ""
+    status = None
+    exit_code = None
+
+    item = event.get("item")
+    if isinstance(item, dict) and item.get("type") == "command_execution":
+        command = str(item.get("command") or "")
+        status = item.get("status")
+        exit_code = item.get("exit_code")
+        output = str(item.get("aggregated_output") or "")
+    else:
+        raw_msg = event.get("msg")
+        msg: dict[str, Any] = raw_msg if isinstance(raw_msg, dict) else {}
+        msg_type = msg.get("type")
+        if msg_type == "exec_command_begin":
+            raw_command = msg.get("command", [])
+            command = " ".join(raw_command) if isinstance(raw_command, list) else str(raw_command)
+            status = "started"
+        elif msg_type == "exec_command_output_delta":
+            chunk = msg.get("chunk")
+            if isinstance(chunk, list):
+                try:
+                    output = bytes(int(part) for part in chunk).decode("utf-8", errors="replace")
+                except (TypeError, ValueError):
+                    output = str(chunk)
+            else:
+                output = str(chunk or "")
+            status = "output"
+        elif msg_type == "exec_command_end":
+            raw_command = msg.get("command", [])
+            command = " ".join(raw_command) if isinstance(raw_command, list) else str(raw_command)
+            exit_code = msg.get("exit_code")
+            status = "completed" if exit_code == 0 else "failed"
+            output = "\n".join(str(msg.get(key) or "") for key in ("stdout", "stderr"))
+        else:
+            return False
+
+    if "command_contains" in assertion and str(assertion["command_contains"]) not in command:
+        return False
+    if "output_contains" in assertion and not output:
+        return False
+    if "status" in assertion and str(status) != str(assertion["status"]):
+        return False
+    if "status_any" in assertion:
+        allowed_statuses = assertion["status_any"]
+        if not isinstance(allowed_statuses, list) or str(status) not in {str(candidate) for candidate in allowed_statuses}:
+            return False
+    if "exit_code" in assertion and exit_code != assertion["exit_code"]:
+        return False
+    for needle in assertion.get("output_contains", []):
+        if str(needle) not in output:
+            return False
+    return True
+
+
+def event_count_matches(actual_counts: dict[str, int], key: str, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return any(event_count_matches(actual_counts, key, candidate) for candidate in expected)
+    return actual_counts.get(key, 0) == int(expected)
+
+
+def event_count_failure(key: str, expected: Any, actual_counts: dict[str, int]) -> str:
+    if isinstance(expected, list):
+        values = ", ".join(str(candidate) for candidate in expected)
+        return f"event count for {key!r} expected one of [{values}], got {actual_counts.get(key, 0)}"
+    return f"event count for {key!r} expected {expected}, got {actual_counts.get(key, 0)}"
+
+
+def collect_event_counts(events: Any) -> dict[str, int]:
+    actual_counts: dict[str, int] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if isinstance(event_type, str):
+            actual_counts[event_type] = actual_counts.get(event_type, 0) + 1
+        msg = event.get("msg")
+        if isinstance(msg, dict):
+            msg_type = msg.get("type")
+            if isinstance(msg_type, str):
+                key = f"msg.{msg_type}"
+                actual_counts[key] = actual_counts.get(key, 0) + 1
+        item = event.get("item")
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            if isinstance(item_type, str):
+                key = f"item.{item_type}"
+                actual_counts[key] = actual_counts.get(key, 0) + 1
+    return actual_counts
+
+
+def event_count_set_failures(event_counts: dict[str, Any], actual_counts: dict[str, int]) -> list[str]:
+    failures = []
+    for event_type, expected in event_counts.items():
+        event_type_key = str(event_type)
+        if not event_count_matches(actual_counts, event_type_key, expected):
+            failures.append(event_count_failure(event_type_key, expected, actual_counts))
+    return failures
+
+
 def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     expect = scenario.get("expect", {})
@@ -831,31 +964,34 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
         expected = int(expect["responses_request_count"])
         if actual != expected:
             failures.append(f"responses request count expected {expected}, got {actual}")
+    for assertion in expect.get("command_events", []):
+        if not isinstance(assertion, dict):
+            failures.append("command_events expectation entries must be objects")
+            continue
+        if not any(
+            command_event_matches(event, assertion)
+            for event in summary.get("events", [])
+            if isinstance(event, dict)
+        ):
+            failures.append(f"no command event matched {assertion!r}")
     event_counts = expect.get("event_count")
+    actual_event_counts = collect_event_counts(summary.get("events", []))
     if isinstance(event_counts, dict):
-        actual_counts: dict[str, int] = {}
-        for event in summary.get("events", []):
-            if not isinstance(event, dict):
-                continue
-            event_type = event.get("type")
-            if isinstance(event_type, str):
-                actual_counts[event_type] = actual_counts.get(event_type, 0) + 1
-            msg = event.get("msg")
-            if isinstance(msg, dict):
-                msg_type = msg.get("type")
-                if isinstance(msg_type, str):
-                    key = f"msg.{msg_type}"
-                    actual_counts[key] = actual_counts.get(key, 0) + 1
-            item = event.get("item")
-            if isinstance(item, dict):
-                item_type = item.get("type")
-                if isinstance(item_type, str):
-                    key = f"item.{item_type}"
-                    actual_counts[key] = actual_counts.get(key, 0) + 1
-        for event_type, expected in event_counts.items():
-            actual = actual_counts.get(str(event_type), 0)
-            if actual != int(expected):
-                failures.append(f"event count for {event_type!r} expected {expected}, got {actual}")
+        failures.extend(event_count_set_failures(event_counts, actual_event_counts))
+    event_count_any = expect.get("event_count_any")
+    if isinstance(event_count_any, list):
+        alternatives = [alternative for alternative in event_count_any if isinstance(alternative, dict)]
+        if not alternatives:
+            failures.append("event_count_any must contain at least one object")
+        elif not any(
+            not event_count_set_failures(alternative, actual_event_counts)
+            for alternative in alternatives
+        ):
+            detail = "; ".join(
+                ", ".join(event_count_set_failures(alternative, actual_event_counts))
+                for alternative in alternatives
+            )
+            failures.append(f"no event_count_any alternative matched: {detail}")
     for assertion in expect.get("responses", []):
         if not isinstance(assertion, dict):
             failures.append("responses expectation entries must be objects")
@@ -898,6 +1034,29 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
                     failures.append(
                         f"responses request {assertion.get('request', 0)} count for {needle!r} expected {expected}, got {actual}"
                     )
+    for assertion in expect.get("function_call_outputs", []):
+        if not isinstance(assertion, dict):
+            failures.append("function_call_outputs expectation entries must be objects")
+            continue
+        try:
+            request = request_at(summary, int(assertion.get("request", 0)))
+        except HarnessError as exc:
+            failures.append(str(exc))
+            continue
+        call_id = str(assertion.get("call_id", ""))
+        output = function_call_output_text(request, call_id)
+        if output is None:
+            failures.append(f"missing function_call_output for call_id {call_id!r}")
+            continue
+        for needle in assertion.get("contains_all", []):
+            if str(needle) not in output:
+                failures.append(f"function_call_output {call_id!r} did not contain {needle!r}")
+        if "contains_any" in assertion and not contains_any(output, assertion["contains_any"]):
+            failures.append(f"function_call_output {call_id!r} did not contain any of {assertion['contains_any']!r}")
+        if "not_contains" in assertion and str(assertion["not_contains"]) in output:
+            failures.append(
+                f"function_call_output {call_id!r} unexpectedly contained {assertion['not_contains']!r}"
+            )
     return failures
 
 

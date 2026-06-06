@@ -17,6 +17,8 @@ fi
 scenarios=(
   "$ROOT_DIR/tools/code-exec-harness/scenarios/context-ledger-request-summary.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/exec-basic-smoke.json"
+  "$ROOT_DIR/tools/code-exec-harness/scenarios/exec-readonly-write-denied.json"
+  "$ROOT_DIR/tools/code-exec-harness/scenarios/exec-shell-command-roundtrip.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/image-history-replay.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/manual-skill-explicit-invocation.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/manual-skill-not-implicit.json"
