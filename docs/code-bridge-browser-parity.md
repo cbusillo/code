@@ -1,0 +1,66 @@
+# Code Bridge And Browser Parity Boundary
+
+This map supports [#399](https://github.com/cbusillo/code/issues/399). It
+classifies the pre-#390 Every Code Code Bridge/browser evidence before any
+implementation port resumes. Use `fa0c33944f` as the old evidence anchor and
+current `origin/main` as the Codex CLI fork baseline.
+
+## Boundary Decision
+
+Code Bridge is an Every Code overlay, not a Desktop compatibility mutation.
+Future bridge behavior should be additive and validated through bridge-specific
+fixtures before it touches app-server or TUI presentation code.
+
+Code Bridge `control` events must use a distinct transport or namespace from
+Codex Desktop remote-control requests. Fake bridge fixtures must prove that
+bridge control delivery does not route through Desktop remote-control status,
+probe, or request/response paths before implementation code lands.
+
+Keep these current Codex-base surfaces upstream-shaped unless a focused fixture
+proves an additive extension is required:
+
+- App-server thread, turn, and Desktop startup responses.
+- App-server remote-control compatibility status/probe responses.
+- Desktop-facing protocol schemas and generated TypeScript shapes.
+- Existing hooks browser UI and hook event semantics.
+
+## Old Evidence Classification
+
+| Old evidence | User value | Classification | First fixture before porting |
+| --- | --- | --- | --- |
+| `code-rs/browser/tests/local_navigation.rs` | Internal browser can open a local HTTP page, report current URL, execute JavaScript, and read page text in headless and headed modes. | Port | A deterministic local-navigation fixture for the new bridge/browser overlay crate or harness. |
+| `code-rs/browser/src/manager.rs`, `page.rs`, and `tools/browser_tools.rs` | Browser session lifecycle, navigation, JavaScript execution, screenshots, and tool-call facing browser actions. | Port | A no-network fixture that drives a local page through navigation, JavaScript, screenshot, and cleanup. |
+| `code-rs/core/src/bridge_client.rs` | Discover `.code/code-bridge.json`, subscribe to console/error/pageview/screenshot/control events, batch summaries, and send control requests. | Port | Metadata discovery and subscription normalization tests before reconnect/batching implementation. |
+| `code-rs/cli/src/bridge.rs` | CLI-facing bridge discovery, event tailing, screenshot request, JavaScript request, and stale heartbeat handling. | Rewrite | CLI or harness fixtures with fake bridge metadata/server before restoring user commands. |
+| `code-rs/tui/src/chatwidget/browser_sessions.rs` and `code-rs/tui/src/history_cell/browser.rs` | TUI grouping and transcript rendering for browser/page events. | Rewrite | Snapshot fixtures against current TUI history/rendering once bridge event shape is defined. |
+| `vt100_chatwidget_snapshot__browser_session_*.snap` and `vt100_chatwidget_snapshot__context_cell_browser_badge.snap` | Browser-session grouping, unordered action stability, foreign-event filtering, and context badge visibility. | Rewrite | Current TUI snapshots after the additive bridge event schema exists. |
+| `code-rs/core/templates/compact/history_bridge.md` | Preserve bridge context during compaction. | Defer | Track under #399 after bridge event storage and transcript representation are defined. |
+
+## Proposed Additive Event Contract
+
+The restored overlay should preserve these event classes without reusing Desktop
+remote-control responses as the transport contract:
+
+| Event class | Minimum payload to validate first |
+| --- | --- |
+| `console` | level, message, url or page id, timestamp. |
+| `error` | message, stack or location when available, url or page id, timestamp. |
+| `pageview` | url, title when available, page id, timestamp. |
+| `screenshot` | mime type, byte length or data reference, page id, timestamp. |
+| `control` | request id, action, delivery/result status, optional response payload. |
+
+Control actions should start with `ping`, `screenshot`, and `javascript` because
+the old CLI and browser tool paths depended on those. Navigation can follow
+after local-page fixtures prove the lifecycle boundary.
+
+## Validation Order
+
+1. Add fake bridge metadata/server fixtures that prove discovery, stale heartbeat
+   detection, subscription normalization, and control request/result matching.
+2. Port the local navigation probe to the new overlay boundary using a local HTTP
+   server and no external network.
+3. Add TUI snapshot coverage only after event schema and storage are stable.
+4. Wire implementation behind the additive Every Code bridge surface.
+
+Do not port the old browser crate, TUI cells, or CLI bridge commands wholesale
+before the relevant fixture in this document exists.
