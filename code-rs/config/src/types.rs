@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use schemars::JsonSchema;
+use serde::Deserializer;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -664,7 +665,7 @@ pub struct Tui {
     ///
     /// Using alternate screen provides a cleaner fullscreen experience but prevents
     /// scrollback in terminal multiplexers like Zellij that follow the xterm spec.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_alt_screen_mode")]
     pub alternate_screen: AltScreenMode,
 
     /// Ordered list of status line item identifiers.
@@ -692,7 +693,7 @@ pub struct Tui {
     ///
     /// When set, overrides automatic light/dark theme detection.
     /// Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_tui_theme")]
     pub theme: Option<String>,
 
     /// Preferred layout for resume/fork session picker results.
@@ -738,6 +739,41 @@ pub struct ExternalConfigMigrationPrompts {
     /// Tracks the last time a project-level external config migration prompt was shown.
     #[serde(default)]
     pub project_last_prompted_at: BTreeMap<String, i64>,
+}
+
+fn deserialize_alt_screen_mode<'de, D>(deserializer: D) -> Result<AltScreenMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum AltScreenCompat {
+        Mode(AltScreenMode),
+        LegacyBool(bool),
+    }
+
+    match AltScreenCompat::deserialize(deserializer)? {
+        AltScreenCompat::Mode(mode) => Ok(mode),
+        AltScreenCompat::LegacyBool(true) => Ok(AltScreenMode::Always),
+        AltScreenCompat::LegacyBool(false) => Ok(AltScreenMode::Never),
+    }
+}
+
+fn deserialize_tui_theme<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TuiThemeCompat {
+        Name(String),
+        LegacyTable { name: String },
+    }
+
+    Ok(Option::<TuiThemeCompat>::deserialize(deserializer)?.map(|theme| match theme {
+        TuiThemeCompat::Name(name) => name,
+        TuiThemeCompat::LegacyTable { name } => name,
+    }))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]

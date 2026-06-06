@@ -624,6 +624,53 @@ terminal_resize_reflow_max_rows = 9000
     );
 }
 
+#[test]
+fn config_toml_deserializes_legacy_tui_alternate_screen_bool() {
+    let enabled_toml = r#"
+[tui]
+alternate_screen = true
+"#;
+    let enabled_cfg: ConfigToml = toml::from_str(enabled_toml)
+        .expect("TOML deserialization should accept legacy alternate_screen bool");
+    assert_eq!(
+        enabled_cfg
+            .tui
+            .expect("tui config should deserialize")
+            .alternate_screen,
+        AltScreenMode::Always
+    );
+
+    let disabled_toml = r#"
+[tui]
+alternate_screen = false
+"#;
+    let disabled_cfg: ConfigToml = toml::from_str(disabled_toml)
+        .expect("TOML deserialization should accept legacy alternate_screen bool");
+    assert_eq!(
+        disabled_cfg
+            .tui
+            .expect("tui config should deserialize")
+            .alternate_screen,
+        AltScreenMode::Never
+    );
+}
+
+#[test]
+fn config_toml_deserializes_tui_alternate_screen_string_mode() {
+    let toml = r#"
+[tui]
+alternate_screen = "always"
+"#;
+    let cfg: ConfigToml = toml::from_str(toml)
+        .expect("TOML deserialization should accept alternate_screen string mode");
+    assert_eq!(
+        cfg.tui
+            .expect("tui config should deserialize")
+            .alternate_screen,
+        AltScreenMode::Always
+    );
+}
+
 #[tokio::test]
 async fn runtime_config_defaults_model_availability_nux() {
     let cfg = Config::load_from_base_config_with_overrides(
@@ -2152,6 +2199,21 @@ theme = "dracula"
     assert_eq!(
         parsed.tui.as_ref().and_then(|t| t.theme.as_deref()),
         Some("dracula"),
+    );
+}
+
+#[test]
+fn tui_theme_deserializes_legacy_table_from_toml() {
+    let cfg = r#"
+[tui.theme]
+name = "dark-oled-black-pro"
+is_dark = true
+"#;
+    let parsed = toml::from_str::<ConfigToml>(cfg)
+        .expect("TOML deserialization should accept legacy TUI theme table");
+    assert_eq!(
+        parsed.tui.as_ref().and_then(|t| t.theme.as_deref()),
+        Some("dark-oled-black-pro"),
     );
 }
 
