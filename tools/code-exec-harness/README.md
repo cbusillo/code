@@ -95,6 +95,11 @@ Scenarios are JSON files. Common fields:
   auth still applies.
 - `expect`: simple assertions over the final answer, commands, fake `gh` calls,
   and exit code
+- `expect.workspace_files`: assertions over files in the isolated workspace after
+  the run, including `exists`, `equals`, `contains`, `contains_all`, and
+  `not_contains`
+- `expect.workspace_git_status`: assertions over `git status --porcelain` in the
+  isolated workspace, including `equals`, `contains_all`, and `not_contains`
 
 The harness is intentionally black-box: the unit under test is the real `code
 exec` binary and its emitted JSONL stream.
