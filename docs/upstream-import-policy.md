@@ -26,7 +26,12 @@ long-running feature branch overlay.
   `just-every/code` is a fork upstream/import source. `openai/codex` / Codex CLI
   is the original/direct upstream and provenance source.
 - `codex-rs/` is a read-only local mirror of `openai/codex:main`. `code-rs/` is
-  the editable Every Code Rust implementation.
+  the editable Every Code Rust implementation. During the Codex-base substrate
+  migration, `code-rs/` is expected to become a Codex-based product workspace.
+  Imported Codex substrate crates may keep `codex-*` names only while they remain
+  compatibility-critical or mostly upstream-shaped; Every Code-owned crates and
+  new product-layer crates should use `code-*` names unless a documented external
+  compatibility contract requires the upstream spelling.
 - `CODE_HOME` / `~/.code` are primary config and state locations. `CODEX_HOME` /
   `~/.codex` are compatibility fallbacks. Keep `CODEX_*` names where external,
   backend, or upstream compatibility requires them; add `CODE_*` aliases or
@@ -58,9 +63,9 @@ cleanup. A change should add a `CODE_TUI_*` alias first, keep the old
 include focused tests for both names before any removal.
 
 Do not mass-rename deep Rust identifiers, telemetry prefixes, generated schema
-types, model names, or `codex-rs` mirror paths just to remove `codex`. Those
-names often preserve upstream compatibility, historical provenance, or external
-dashboard continuity.
+types, model names, imported crate names, or `codex-rs` mirror paths just to
+remove `codex`. Those names often preserve upstream compatibility, historical
+provenance, or external dashboard continuity.
 
 The pre-cutover `origin/main` history was archived at
 `archive/pre-every-code-main-2026-05-24` before `main` was repointed to the Every
@@ -68,7 +73,55 @@ Code product branch. Treat `local/cbusillo-overlay` as a retired branch name;
 do not revive it for new work.
 
 Treat `codex-rs/` as a read-only local mirror of `openai/codex:main`; put
-editable Rust changes under `code-rs/`.
+editable Rust changes under `code-rs/`. `code-rs/` must not depend on sibling
+`../codex-rs` paths. Import or port the needed upstream source into `code-rs`
+instead.
+
+During the Codex-base substrate migration, crate names are ownership markers:
+
+- Imported Codex substrate crates may keep `codex-*` names when they remain
+  compatibility-critical or mostly upstream-shaped.
+- Every Code-owned crates and new product-layer crates should use `code-*`
+  names unless a documented external compatibility contract requires the
+  upstream spelling.
+- Renaming a crate from `codex-*` to `code-*` should happen only when ownership,
+  compatibility impact, and upstream merge cost are understood in that PR.
+
+## Codex-Base Substrate Direction
+
+[Issue #377](https://github.com/cbusillo/code/issues/377) proved the Codex
+Desktop app launches its bundled CLI app-server and can reach the main chat UI
+when a copied app bundle uses an Every Code binary.
+[Issue #384](https://github.com/cbusillo/code/issues/384) owns the migration
+from an Every Code-divergent Rust workspace toward a Codex-base product
+workspace.
+
+The working migration direction is:
+
+- Make `code-rs/` the editable Codex-base Every Code product workspace.
+- Keep `codex-rs/` as the read-only `openai/codex:main` mirror for upstream
+  review and provenance until a later issue explicitly changes that role.
+- Keep imported Codex substrate crates internally named `codex-*` only when they
+  remain compatibility-critical or mostly upstream-shaped.
+- Add or port Every Code-owned features as `code-*` crates or product-layer
+  modules unless a documented external compatibility contract requires upstream
+  spelling.
+- Keep the Desktop-facing app-server/session/protocol contract upstream-shaped;
+  expose Every Code extensions through additive product surfaces rather than
+  mutating compatibility-critical responses without evidence.
+
+The raw `spike/codex-base-port` branch demonstrated feasibility but is not a
+merge plan. Issue #384 is the acceptance gate for turning that spike into
+reviewable PR slices. Those slices should be documented on #384 before they are
+started, and each slice must state its compatibility target, ownership boundary,
+and validation evidence. Each slice still ends with the repository gate,
+`./build-fast.sh`, passing cleanly.
+
+Do not remove the remote inbox backend merely because Codex Desktop is becoming
+the preferred GUI. Remote inbox currently carries GitHub/LaunchPlane-created
+session continuity and remote approval/reply flows. Drop or replace
+Discord-specific presentation only after a Desktop or other replacement path can
+discover, resume/continue, and answer externally-created sessions.
 
 Remote map:
 
