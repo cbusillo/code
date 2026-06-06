@@ -15,6 +15,7 @@ EOF
 fi
 
 scenarios=(
+  "$ROOT_DIR/tools/code-exec-harness/scenarios/auto-review-config-routing.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/context-ledger-request-summary.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/exec-apply-patch-roundtrip.json"
   "$ROOT_DIR/tools/code-exec-harness/scenarios/exec-basic-smoke.json"
