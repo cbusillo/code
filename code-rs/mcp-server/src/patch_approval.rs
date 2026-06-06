@@ -2,37 +2,37 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use code_core::CodexConversation;
-use code_core::protocol::FileChange;
-use code_core::protocol::Op;
-use code_core::protocol::ReviewDecision;
-use mcp_types::ElicitRequest;
-use mcp_types::ElicitRequestParamsRequestedSchema;
-use mcp_types::JSONRPCErrorError;
-use mcp_types::ModelContextProtocolRequest;
-use mcp_types::RequestId;
+use codex_core::CodexThread;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::FileChange;
+use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ReviewDecision;
+use rmcp::model::ErrorData;
+use rmcp::model::RequestId;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use serde_json::json;
 use tracing::error;
 
-use crate::code_tool_runner::INVALID_PARAMS_ERROR_CODE;
 use crate::outgoing_message::OutgoingMessageSender;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PatchApprovalElicitRequestParams {
     pub message: String,
     #[serde(rename = "requestedSchema")]
-    pub requested_schema: ElicitRequestParamsRequestedSchema,
-    pub code_elicitation: String,
-    pub code_mcp_tool_call_id: String,
-    pub code_event_id: String,
-    pub code_call_id: String,
+    pub requested_schema: Value,
+    #[serde(rename = "threadId")]
+    pub thread_id: ThreadId,
+    pub codex_elicitation: String,
+    pub codex_mcp_tool_call_id: String,
+    pub codex_event_id: String,
+    pub codex_call_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub code_reason: Option<String>,
+    pub codex_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub code_grant_root: Option<PathBuf>,
-    pub code_changes: HashMap<PathBuf, FileChange>,
+    pub codex_grant_root: Option<PathBuf>,
+    pub codex_changes: HashMap<PathBuf, FileChange>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -47,11 +47,13 @@ pub(crate) async fn handle_patch_approval_request(
     grant_root: Option<PathBuf>,
     changes: HashMap<PathBuf, FileChange>,
     outgoing: Arc<OutgoingMessageSender>,
-    codex: Arc<CodexConversation>,
+    codex: Arc<CodexThread>,
     request_id: RequestId,
     tool_call_id: String,
     event_id: String,
+    thread_id: ThreadId,
 ) {
+    let approval_id = call_id.clone();
     let mut message_lines = Vec::new();
     if let Some(r) = &reason {
         message_lines.push(r.clone());
@@ -60,18 +62,15 @@ pub(crate) async fn handle_patch_approval_request(
 
     let params = PatchApprovalElicitRequestParams {
         message: message_lines.join("\n"),
-        requested_schema: ElicitRequestParamsRequestedSchema {
-            r#type: "object".to_string(),
-            properties: json!({}),
-            required: None,
-        },
-        code_elicitation: "patch-approval".to_string(),
-        code_mcp_tool_call_id: tool_call_id.clone(),
-        code_event_id: event_id.clone(),
-        code_call_id: call_id,
-        code_reason: reason,
-        code_grant_root: grant_root,
-        code_changes: changes,
+        requested_schema: json!({"type":"object","properties":{}}),
+        thread_id,
+        codex_elicitation: "patch-approval".to_string(),
+        codex_mcp_tool_call_id: tool_call_id.clone(),
+        codex_event_id: event_id.clone(),
+        codex_call_id: call_id,
+        codex_reason: reason,
+        codex_grant_root: grant_root,
+        codex_changes: changes,
     };
     let params_json = match serde_json::to_value(&params) {
         Ok(value) => value,
@@ -80,14 +79,7 @@ pub(crate) async fn handle_patch_approval_request(
             error!("{message}");
 
             outgoing
-                .send_error(
-                    request_id.clone(),
-                    JSONRPCErrorError {
-                        code: INVALID_PARAMS_ERROR_CODE,
-                        message,
-                        data: None,
-                    },
-                )
+                .send_error(request_id.clone(), ErrorData::invalid_params(message, None))
                 .await;
 
             return;
@@ -95,26 +87,23 @@ pub(crate) async fn handle_patch_approval_request(
     };
 
     let on_response = outgoing
-        .send_request(ElicitRequest::METHOD, Some(params_json))
+        .send_request("elicitation/create", Some(params_json))
         .await;
 
     // Listen for the response on a separate task so we don't block the main agent loop.
-    // Important: correlate approval by call_id (unique per request) to match core's
-    // pending_approvals key, not by event id. Using the event id here can lead to
-    // "no pending approval found" warnings and a stuck approval UI.
     {
         let codex = codex.clone();
-        let call_id_for_response = tool_call_id.clone();
+        let approval_id = approval_id.clone();
         tokio::spawn(async move {
-            on_patch_approval_response(call_id_for_response, on_response, codex).await;
+            on_patch_approval_response(approval_id, on_response, codex).await;
         });
     }
 }
 
 pub(crate) async fn on_patch_approval_response(
     approval_id: String,
-    receiver: tokio::sync::oneshot::Receiver<mcp_types::Result>,
-    codex: Arc<CodexConversation>,
+    receiver: tokio::sync::oneshot::Receiver<serde_json::Value>,
+    codex: Arc<CodexThread>,
 ) {
     let response = receiver.await;
     let value = match response {

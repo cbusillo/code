@@ -1,148 +1,105 @@
-# Every Code CLI (Rust Implementation)
+# Codex CLI (Rust Implementation)
 
-Every Code provides a standalone native `code` executable. This directory is the
-Rust workspace that builds the product CLI used for local dogfooding and GitHub
-Release updates.
+We provide Codex CLI as a standalone executable to ensure a zero-dependency install.
 
-## Installing Every Code
+## Installing Codex
 
-The canonical internal install and update source is the repository's GitHub
-Releases, including the generated `update-manifest.json` consumed by the CLI
-updater. npm and Homebrew publishing are deferred unless package-manager
-distribution becomes intentional again.
+Today, the easiest way to install Codex is via `npm`:
 
 ```shell
-code update-check
-code update --yes
+npm i -g @openai/codex
+codex
 ```
 
-For local development, build from the repository root with:
+You can also install via Homebrew (`brew install --cask codex`) or download a platform-specific release directly from our [GitHub Releases](https://github.com/openai/codex/releases).
 
-```shell
-./build-fast.sh
-```
+## Documentation quickstart
+
+- First run with Codex? Start with [`docs/getting-started.md`](../docs/getting-started.md) (links to the walkthrough for prompts, keyboard shortcuts, and session management).
+- Want deeper control? See [`docs/config.md`](../docs/config.md) and [`docs/install.md`](../docs/install.md).
 
 ## What's new in the Rust CLI
 
-The Rust implementation is the maintained Every Code CLI and serves as the
-default experience. It includes a number of features that the legacy TypeScript
-CLI never supported.
+The Rust implementation is now the maintained Codex CLI and serves as the default experience. It includes a number of features that the legacy TypeScript CLI never supported.
 
 ### Config
 
-Code supports a rich set of configuration options. Note that the Rust CLI uses `config.toml` instead of `config.json`. See [`docs/config.md`](../docs/config.md) for details.
+Codex supports a rich set of configuration options. Note that the Rust CLI uses `config.toml` instead of `config.json`. See [`docs/config.md`](../docs/config.md) for details.
 
 ### Model Context Protocol Support
 
-Code CLI functions as an MCP client that can connect to MCP servers on startup. See the [`mcp_servers`](../docs/config.md#mcp_servers) section in the configuration documentation for details.
+#### MCP client
 
-It is still experimental, but you can also launch Code as an MCP _server_ by running `code mcp-server`. Use the [`@modelcontextprotocol/inspector`](https://github.com/modelcontextprotocol/inspector) to try it out:
+Codex CLI functions as an MCP client that allows the Codex CLI and IDE extension to connect to MCP servers on startup. See the [`configuration documentation`](../docs/config.md#connecting-to-mcp-servers) for details.
+
+#### MCP server (experimental)
+
+Codex can be launched as an MCP _server_ by running `codex mcp-server`. This allows _other_ MCP clients to use Codex as a tool for another agent.
+
+Use the [`@modelcontextprotocol/inspector`](https://github.com/modelcontextprotocol/inspector) to try it out:
 
 ```shell
-npx @modelcontextprotocol/inspector code mcp-server
+npx @modelcontextprotocol/inspector codex mcp-server
 ```
 
-Use `code mcp` to add/list/get/remove MCP server launchers defined in `config.toml`, and `code mcp-server` to run the MCP server directly.
+Use `codex mcp` to add/list/get/remove MCP server launchers defined in `config.toml`, and `codex mcp-server` to run the MCP server directly.
 
 ### Notifications
 
-You can enable notifications by configuring a script that is run whenever the agent finishes a turn. The [notify documentation](../docs/config.md#notify) includes a detailed example that explains how to get desktop notifications via [terminal-notifier](https://github.com/julienXX/terminal-notifier) on macOS.
+You can enable notifications by configuring a script that is run whenever the agent finishes a turn. The [notify documentation](../docs/config.md#notify) includes a detailed example that explains how to get desktop notifications via [terminal-notifier](https://github.com/julienXX/terminal-notifier) on macOS. When Codex detects that it is running under WSL 2 inside Windows Terminal (`WT_SESSION` is set), the TUI automatically falls back to native Windows toast notifications so approval prompts and completed turns surface even though Windows Terminal does not implement OSC 9.
 
-### `code exec` to run Code programmatically/non-interactively
+### `codex exec` to run Codex programmatically/non-interactively
 
-To run Code non-interactively, run `code exec PROMPT` (you can also pass the prompt via `stdin`) and Code will work on your task until it decides that it is done and exits. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.
+To run Codex non-interactively, run `codex exec PROMPT` (you can also pass the prompt via `stdin`) and Codex will work on your task until it decides that it is done and exits. If you provide both a prompt argument and piped stdin, Codex appends stdin as a `<stdin>` block after the prompt so patterns like `echo "my output" | codex exec "Summarize this concisely"` work naturally. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.
+Use `codex exec --ephemeral ...` to run without persisting session rollout files to disk.
 
-### Use `@` for file search
+### Experimenting with the Codex Sandbox
 
-Typing `@` triggers a fuzzy-filename search over the workspace root. Use up/down to select among the results and Tab or Enter to replace the `@` with the selected path. You can use Esc to cancel the search.
-
-### Esc–Esc to edit a previous message
-
-When the chat composer is empty, press Esc to prime “backtrack” mode. Press Esc again to open a transcript preview highlighting the last user message; press Esc repeatedly to step to older user messages. Press Enter to confirm and Code will fork the conversation from that point, trim the visible transcript accordingly, and pre‑fill the composer with the selected user message so you can edit and resubmit it.
-
-In the transcript preview, the footer shows an `Esc edit prev` hint while editing is active.
-
-### `--cd`/`-C` flag
-
-Sometimes it is not convenient to `cd` to the directory you want Code to use as the "working root" before running Code. Fortunately, `code` supports a `--cd` option so you can specify whatever folder you want. You can confirm that Code is honoring `--cd` by double-checking the **workdir** it reports in the TUI at the start of a new session.
-
-### Shell completions
-
-Generate shell completion scripts via:
-
-```shell
-code completion bash
-code completion zsh
-code completion fish
-```
-
-### Experimenting with the Code Sandbox
-
-To test to see what happens when a command is run under the sandbox provided by Code, we provide the following subcommands in Code CLI:
+To test to see what happens when a command is run under the sandbox provided by Codex, we provide the following subcommands in Codex CLI:
 
 ```
 # macOS
-code debug seatbelt [--full-auto] [COMMAND]...
+codex sandbox macos [--log-denials] [COMMAND]...
 
 # Linux
-code debug landlock [--full-auto] [COMMAND]...
+codex sandbox linux [COMMAND]...
+
+# Windows
+codex sandbox windows [COMMAND]...
+
+# Legacy aliases
+codex debug seatbelt [--log-denials] [COMMAND]...
+codex debug landlock [COMMAND]...
 ```
+
+To try a writable legacy sandbox mode with these commands, pass an explicit config override such
+as `-c 'sandbox_mode="workspace-write"'`.
 
 ### Selecting a sandbox policy via `--sandbox`
 
 The Rust CLI exposes a dedicated `--sandbox` (`-s`) flag that lets you pick the sandbox policy **without** having to reach for the generic `-c/--config` option:
 
 ```shell
-# Run Code with the default, read-only sandbox
-code --sandbox read-only
+# Run Codex with the default, read-only sandbox
+codex --sandbox read-only
 
 # Allow the agent to write within the current workspace while still blocking network access
-code --sandbox workspace-write
+codex --sandbox workspace-write
 
 # Danger! Disable sandboxing entirely (only do this if you are already running in a container or other isolated env)
-code --sandbox danger-full-access
+codex --sandbox danger-full-access
 ```
 
-The same setting can be persisted in `~/.code/config.toml` via the top-level `sandbox_mode = "MODE"` key (Code will also read legacy `~/.codex/config.toml`), e.g. `sandbox_mode = "workspace-write"`.
-
-If you want to prevent the agent from updating Git metadata (e.g., local safety), you can opt‑out with a workspace‑write tweak:
-
-```toml
-sandbox_mode = "workspace-write"
-
-[sandbox_workspace_write]
-allow_git_writes = false   # default is true; set false to protect .git
-```
-
-### TUI anti-truncation fallback
-
-If the transcript's last line intermittently clips, Code keeps a guarded
-bottom spacer enabled. The TUI adds a 1–2 row overscan pad when the computed
-history height looks like it might land flush with the viewport, reducing the
-chance the final row disappears mid-stream. Enable `RUST_LOG=debug` to log when
-the fallback fires while you iterate on layouts.
-
-### Debugging Virtual Cursor
-
-Use these console helpers to diagnose motion/cancellation behavior when testing in a real browser:
-
-- Disable clickPulse transforms and force long CSS duration:
-
-  `window.__vc && (window.__vc.clickPulse = () => (console.debug('[VC] clickPulse disabled'), 0), window.__vc.setMotion({ engine: 'css', cssDurationMs: 10000 }))`
-
-- Wrap `moveTo` to log duplicates with sequence and inter-call delta:
-
-  `(() => { const vc = window.__vc; if (!vc || vc.__wrapped) return; const orig = vc.moveTo; let seq=0, last=0; vc.moveTo = function(x,y,o){ const now=Date.now(); console.debug('[VC] moveTo call',{seq:++seq,x,y,o,sincePrevMs:last?now-last:null}); last=now; return orig.call(this,x,y,o); }; vc.__wrapped = true; console.debug('[VC] moveTo wrapper installed'); })();`
-
-- Trigger a test move (adjust coordinates as needed):
-
-  `window.__vc && window.__vc.moveTo(200, 200)`
+The same setting can be persisted in `~/.codex/config.toml` via the top-level `sandbox_mode = "MODE"` key, e.g. `sandbox_mode = "workspace-write"`.
+In `workspace-write`, Codex also includes `~/.codex/memories` in its writable roots so memory maintenance does not require an extra approval.
 
 ## Code Organization
 
 This folder is the root of a Cargo workspace. It contains quite a bit of experimental code, but here are the key crates:
 
-- [`core/`](./core) contains the business logic for Code. Ultimately, we hope this to be a library crate that is generally useful for building other Rust/native applications that use Code.
+- [`core/`](./core) contains the business logic for Codex. Ultimately, we hope this becomes a library crate that is generally useful for building other Rust/native applications that use Codex.
 - [`exec/`](./exec) "headless" CLI for use in automation.
 - [`tui/`](./tui) CLI that launches a fullscreen TUI built with [Ratatui](https://ratatui.rs/).
 - [`cli/`](./cli) CLI multitool that provides the aforementioned CLIs via subcommands.
+
+If you want to contribute or inspect behavior in detail, start by reading the module-level `README.md` files under each crate and run the project workspace from the top-level `codex-rs` directory so shared config, features, and build scripts stay aligned.

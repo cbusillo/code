@@ -16,14 +16,14 @@ use ratatui::widgets::ListState;
 use ratatui::widgets::Padding;
 use ratatui::widgets::Paragraph;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::app::App;
 use crate::app::AttemptView;
-use chrono::Local;
-use chrono::Utc;
-use code_cloud_tasks_client::AttemptStatus;
-use code_cloud_tasks_client::TaskStatus;
-use code_tui::render_markdown_text;
+use crate::util::format_relative_time_now;
+use codex_cloud_tasks_client::AttemptStatus;
+use codex_cloud_tasks_client::TaskStatus;
+use codex_tui::render_markdown_text;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -229,7 +229,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // In-box spinner during initial/refresh loads
     if app.refresh_inflight {
-        draw_centered_spinner(frame, inner, &mut app.throbber, "Loading tasks…");
+        draw_centered_spinner(frame, inner, &mut app.spinner_start, "Loading tasks…");
     }
 }
 
@@ -291,7 +291,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &mut App) {
         || app.apply_preflight_inflight
         || app.apply_inflight
     {
-        draw_inline_spinner(frame, top[1], &mut app.throbber, "Loading…");
+        draw_inline_spinner(frame, top[1], &mut app.spinner_start, "Loading…");
     } else {
         frame.render_widget(Clear, top[1]);
     }
@@ -449,7 +449,12 @@ fn draw_diff_overlay(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|o| o.sd.wrapped_lines().is_empty())
         .unwrap_or(true);
     if app.details_inflight && raw_empty {
-        draw_centered_spinner(frame, content_area, &mut app.throbber, "Loading details…");
+        draw_centered_spinner(
+            frame,
+            content_area,
+            &mut app.spinner_start,
+            "Loading details…",
+        );
     } else {
         let scroll = app
             .diff_overlay
@@ -494,11 +499,11 @@ pub fn draw_apply_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(header, rows[0]);
         // Body: spinner while preflight/apply runs; otherwise show result message and path lists
         if app.apply_preflight_inflight {
-            draw_centered_spinner(frame, rows[1], &mut app.throbber, "Checking…");
+            draw_centered_spinner(frame, rows[1], &mut app.spinner_start, "Checking…");
         } else if app.apply_inflight {
-            draw_centered_spinner(frame, rows[1], &mut app.throbber, "Applying…");
+            draw_centered_spinner(frame, rows[1], &mut app.spinner_start, "Applying…");
         } else if m.result_message.is_none() {
-            draw_centered_spinner(frame, rows[1], &mut app.throbber, "Loading…");
+            draw_centered_spinner(frame, rows[1], &mut app.spinner_start, "Loading…");
         } else if let Some(msg) = &m.result_message {
             let mut body_lines: Vec<Line> = Vec::new();
             let first = match m.result_level {
@@ -577,7 +582,10 @@ fn style_conversation_lines(
             speaker = Some(ConversationSpeaker::User);
             in_code = false;
             bullet_indent = None;
-            styled.push(conversation_header_line(ConversationSpeaker::User, None));
+            styled.push(conversation_header_line(
+                ConversationSpeaker::User,
+                /*attempt*/ None,
+            ));
             last_src = Some(src_idx);
             continue;
         }
@@ -777,7 +785,7 @@ fn style_diff_line(raw: &str) -> Line<'static> {
     Line::from(vec![Span::raw(raw.to_string())])
 }
 
-fn render_task_item(_app: &App, t: &code_cloud_tasks_client::TaskSummary) -> ListItem<'static> {
+fn render_task_item(_app: &App, t: &codex_cloud_tasks_client::TaskSummary) -> ListItem<'static> {
     let status = match t.status {
         TaskStatus::Ready => "READY".green(),
         TaskStatus::Pending => "PENDING".magenta(),
@@ -798,7 +806,7 @@ fn render_task_item(_app: &App, t: &code_cloud_tasks_client::TaskSummary) -> Lis
     if let Some(lbl) = t.environment_label.as_ref().filter(|s| !s.is_empty()) {
         meta.push(lbl.clone().dim());
     }
-    let when = format_relative_time(t.updated_at).dim();
+    let when = format_relative_time_now(t.updated_at).dim();
     if !meta.is_empty() {
         meta.push("  ".into());
         meta.push("•".dim());
@@ -835,53 +843,32 @@ fn render_task_item(_app: &App, t: &code_cloud_tasks_client::TaskSummary) -> Lis
     ListItem::new(vec![title, meta_line, sub, spacer])
 }
 
-fn format_relative_time(ts: chrono::DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let mut secs = (now - ts).num_seconds();
-    if secs < 0 {
-        secs = 0;
-    }
-    if secs < 60 {
-        return format!("{secs}s ago");
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}m ago");
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-    let local = ts.with_timezone(&Local);
-    local.format("%b %e %H:%M").to_string()
-}
-
 fn draw_inline_spinner(
     frame: &mut Frame,
     area: Rect,
-    state: &mut throbber_widgets_tui::ThrobberState,
+    spinner_start: &mut Option<Instant>,
     label: &str,
 ) {
-    use ratatui::style::Style;
-    use throbber_widgets_tui::BRAILLE_EIGHT;
-    use throbber_widgets_tui::Throbber;
-    use throbber_widgets_tui::WhichUse;
-    let w = Throbber::default()
-        .label(label)
-        .style(Style::default().cyan())
-        .throbber_style(Style::default().magenta().bold())
-        .throbber_set(BRAILLE_EIGHT)
-        .use_type(WhichUse::Spin);
-    frame.render_stateful_widget(w, area, state);
+    use ratatui::widgets::Paragraph;
+    let start = spinner_start.get_or_insert_with(Instant::now);
+    let blink_on = (start.elapsed().as_millis() / 600).is_multiple_of(2);
+    let dot = if blink_on {
+        "• ".into()
+    } else {
+        "◦ ".dim()
+    };
+    let label = label.cyan();
+    let line = Line::from(vec![dot, label]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_centered_spinner(
     frame: &mut Frame,
     area: Rect,
-    state: &mut throbber_widgets_tui::ThrobberState,
+    spinner_start: &mut Option<Instant>,
     label: &str,
 ) {
-    // Center a 1xN throbber within the given rect
+    // Center a 1xN spinner within the given rect
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -898,7 +885,7 @@ fn draw_centered_spinner(
             Constraint::Percentage(50),
         ])
         .split(rows[1]);
-    draw_inline_spinner(frame, cols[1], state, label);
+    draw_inline_spinner(frame, cols[1], spinner_start, label);
 }
 
 // Styling helpers for diff rendering live inline where used.
@@ -918,7 +905,12 @@ pub fn draw_env_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     let content = overlay_content(inner);
 
     if app.env_loading {
-        draw_centered_spinner(frame, content, &mut app.throbber, "Loading environments…");
+        draw_centered_spinner(
+            frame,
+            content,
+            &mut app.spinner_start,
+            "Loading environments…",
+        );
         return;
     }
 
@@ -934,9 +926,7 @@ pub fn draw_env_modal(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // Subheader with usage hints (dim cyan)
     let subheader = Paragraph::new(Line::from(
-        "Type to search, Enter select, Esc cancel; r refresh"
-            .cyan()
-            .dim(),
+        "Type to search, Enter select, Esc cancel".cyan().dim(),
     ))
     .wrap(Wrap { trim: true });
     frame.render_widget(subheader, rows[0]);

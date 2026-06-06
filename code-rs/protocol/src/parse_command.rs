@@ -7,9 +7,6 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ParsedCommand {
-    ReadCommand {
-        cmd: String,
-    },
     Read {
         cmd: String,
         name: String,

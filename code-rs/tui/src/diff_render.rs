@@ -1,814 +1,2481 @@
-use crossterm::terminal;
-// Color type is already in scope at the top of this module
+//! Renders unified diffs with line numbers, gutter signs, and optional syntax
+//! highlighting.
+//!
+//! Each `FileChange` variant (Add / Delete / Update) is rendered as a block of
+//! diff lines, each prefixed by a right-aligned line number, a gutter sign
+//! (`+` / `-` / ` `), and the content text.  When a recognized file extension
+//! is present, the content text is syntax-highlighted using
+//! [`crate::render::highlight`].
+//!
+//! **Theme-aware styling:** diff backgrounds adapt to the terminal's
+//! background lightness via [`DiffTheme`].  Dark terminals get muted tints
+//! (`#212922` green, `#3C170F` red); light terminals get GitHub-style pastels
+//! with distinct gutter backgrounds for contrast. The renderer uses fixed
+//! palettes for truecolor / 256-color / 16-color terminals so add/delete lines
+//! remain visually distinct even when quantizing to limited palettes.
+//!
+//! **Syntax-theme scope backgrounds:** when the active syntax theme defines
+//! background colors for `markup.inserted` / `markup.deleted` (or fallback
+//! `diff.inserted` / `diff.deleted`) scopes, those colors override the
+//! hardcoded palette for rich color levels.  ANSI-16 mode always uses
+//! foreground-only styling regardless of theme scope backgrounds.
+//!
+//! **Highlighting strategy for `Update` diffs:** the renderer highlights each
+//! hunk as a single concatenated block rather than line-by-line.  This
+//! preserves syntect's parser state across consecutive lines within a hunk
+//! (important for multi-line strings, block comments, etc.).  Cross-hunk state
+//! is intentionally *not* preserved because hunks are visually separated and
+//! re-synchronize at context boundaries anyway.
+//!
+//! **Wrapping:** long lines are hard-wrapped at the available column width.
+//! Syntax-highlighted spans are split at character boundaries with styles
+//! preserved across the split so that no color information is lost.
+
+use diffy::Hunk;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use ratatui::style::Stylize;
 use ratatui::text::Line as RtLine;
 use ratatui::text::Span as RtSpan;
+use ratatui::widgets::Paragraph;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
-use code_core::protocol::FileChange;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use unicode_width::UnicodeWidthChar;
 
-use crate::history_cell::PatchEventType;
-use crate::sanitize::{sanitize_for_tui, Mode as SanitizeMode, Options as SanitizeOptions};
+/// Display width of a tab character in columns.
+const TAB_WIDTH: usize = 4;
 
-// Sanitize diff content so tabs and control characters don’t break terminal layout.
-// Mirrors the behavior we use for user input and command output:
-// - Expand tabs to spaces using a fixed tab stop (4)
-// - Remove ASCII control characters (including ESC/CSI sequences) that could
-//   confuse terminal rendering; keep plain text only
-#[allow(dead_code)]
-fn expand_tabs_to_spaces(input: &str, tabstop: usize) -> String {
-    let ts = tabstop.max(1);
-    let mut out = String::with_capacity(input.len());
-    let mut col = 0usize;
-    for ch in input.chars() {
-        match ch {
-            '\t' => {
-                let spaces = ts - (col % ts);
-                out.extend(std::iter::repeat(' ').take(spaces));
-                col += spaces;
-            }
-            _ => {
-                // Treat all other chars as width 1 for our fixed-width wrapping pre-pass.
-                // The ratatui layer will handle wide glyphs.
-                out.push(ch);
-                col += 1;
-            }
-        }
-    }
-    out
-}
+// -- Diff background palette --------------------------------------------------
+//
+// Dark-theme tints are subtle enough to avoid clashing with syntax colors.
+// Light-theme values match GitHub's diff colors for familiarity.  The gutter
+// (line-number column) uses slightly more saturated variants on light
+// backgrounds so the numbers remain readable against the pastel line background.
+// Truecolor palette.
+const DARK_TC_ADD_LINE_BG_RGB: (u8, u8, u8) = (33, 58, 43); // #213A2B
+const DARK_TC_DEL_LINE_BG_RGB: (u8, u8, u8) = (74, 34, 29); // #4A221D
+const LIGHT_TC_ADD_LINE_BG_RGB: (u8, u8, u8) = (218, 251, 225); // #dafbe1
+const LIGHT_TC_DEL_LINE_BG_RGB: (u8, u8, u8) = (255, 235, 233); // #ffebe9
+const LIGHT_TC_ADD_NUM_BG_RGB: (u8, u8, u8) = (172, 238, 187); // #aceebb
+const LIGHT_TC_DEL_NUM_BG_RGB: (u8, u8, u8) = (255, 206, 203); // #ffcecb
+const LIGHT_TC_GUTTER_FG_RGB: (u8, u8, u8) = (31, 35, 40); // #1f2328
 
-#[allow(dead_code)]
-fn strip_control_sequences(input: &str) -> String {
-    fn is_c1(ch: char) -> bool {
-        let u = ch as u32;
-        (0x80..=0x9F).contains(&u)
-    }
+// 256-color palette.
+const DARK_256_ADD_LINE_BG_IDX: u8 = 22;
+const DARK_256_DEL_LINE_BG_IDX: u8 = 52;
+const LIGHT_256_ADD_LINE_BG_IDX: u8 = 194;
+const LIGHT_256_DEL_LINE_BG_IDX: u8 = 224;
+const LIGHT_256_ADD_NUM_BG_IDX: u8 = 157;
+const LIGHT_256_DEL_NUM_BG_IDX: u8 = 217;
+const LIGHT_256_GUTTER_FG_IDX: u8 = 236;
 
-    fn is_zero_width_or_bidi(ch: char) -> bool {
-        matches!(
-            ch,
-            // Zero-width, joiners, BOM
-            '\u{200B}' /* ZWSP */
-                | '\u{200C}' /* ZWNJ */
-                | '\u{200D}' /* ZWJ */
-                | '\u{2060}' /* WJ */
-                | '\u{FEFF}' /* BOM */
-                | '\u{00AD}' /* SOFT HYPHEN */
-                | '\u{180E}' /* MONGOLIAN VOWEL SEPARATOR (historic) */
-                // BiDi controls and isolates
-                | '\u{200E}' /* LRM */
-                | '\u{200F}' /* RLM */
-                | '\u{061C}' /* ALM */
-                | '\u{202A}' /* LRE */
-                | '\u{202B}' /* RLE */
-                | '\u{202D}' /* LRO */
-                | '\u{202E}' /* RLO */
-                | '\u{202C}' /* PDF */
-                | '\u{2066}' /* LRI */
-                | '\u{2067}' /* RLI */
-                | '\u{2068}' /* FSI */
-                | '\u{2069}' /* PDI */
-        )
-    }
+use crate::color::is_light;
+use crate::color::perceptual_distance;
+use crate::diff_model::FileChange;
+use crate::exec_command::relativize_to_home;
+use crate::render::Insets;
+use crate::render::highlight::DiffScopeBackgroundRgbs;
+use crate::render::highlight::diff_scope_background_rgbs;
+use crate::render::highlight::exceeds_highlight_limits;
+use crate::render::highlight::highlight_code_to_styled_spans;
+use crate::render::line_utils::prefix_lines;
+use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::InsetRenderable;
+use crate::render::renderable::Renderable;
+use crate::terminal_palette::StdoutColorLevel;
+use crate::terminal_palette::XTERM_COLORS;
+use crate::terminal_palette::default_bg;
+use crate::terminal_palette::indexed_color;
+use crate::terminal_palette::rgb_color;
+use crate::terminal_palette::stdout_color_level;
+use codex_git_utils::get_git_repo_root;
+use codex_terminal_detection::TerminalName;
+use codex_terminal_detection::terminal_info;
 
-    fn consume_until_st_or_bel<I: Iterator<Item = char>>(it: &mut std::iter::Peekable<I>) {
-        while let Some(&c) = it.peek() {
-            match c {
-                // BEL terminator for OSC
-                '\u{0007}' => {
-                    it.next(); // eat BEL
-                    break;
-                }
-                // ST = ESC \
-                '\u{001B}' => {
-                    // lookahead for '\\'
-                    let _ = it.next(); // ESC
-                    if matches!(it.peek(), Some('\\')) {
-                        let _ = it.next(); // '\\'
-                        break;
-                    }
-                    // Otherwise, keep eating (this also drops nested sequences defensively)
-                }
-                _ => {
-                    let _ = it.next();
-                }
-            }
-        }
-    }
-
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            // ESC-prefixed sequences
-            '\u{001B}' => {
-                match chars.peek().copied() {
-                    // CSI: ESC [ params/intermediates final
-                    Some('[') => {
-                        let _ = chars.next(); // '['
-                        // params 0x30..0x3F, intermediates 0x20..0x2F, final 0x40..0x7E
-                        while let Some(&c) = chars.peek() {
-                            let u = c as u32;
-                            if (0x40..=0x7E).contains(&u) {
-                                let _ = chars.next();
-                                break;
-                            } else {
-                                let _ = chars.next();
-                            }
-                        }
-                    }
-                    // OSC: ESC ] ... (BEL | ST)
-                    Some(']') => {
-                        let _ = chars.next(); // ']'
-                        consume_until_st_or_bel(&mut chars);
-                    }
-                    // String types (DCS/SOS/PM/APC): ESC P | X | ^ | _ ... ST
-                    Some('P') | Some('X') | Some('^') | Some('_') => {
-                        let _ = chars.next();
-                        consume_until_st_or_bel(&mut chars);
-                    }
-                    // Other ESC: consume optional intermediates then a final (0x40..0x7E)
-                    Some(_) | None => {
-                        // intermediates 0x20..0x2F
-                        while let Some(&c) = chars.peek() {
-                            let u = c as u32;
-                            if (0x20..=0x2F).contains(&u) {
-                                let _ = chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        if let Some(&c) = chars.peek() {
-                            let u = c as u32;
-                            if (0x40..=0x7E).contains(&u) {
-                                let _ = chars.next();
-                            }
-                        }
-                    }
-                }
-                // In all ESC cases: skip emission
-            }
-            // Drop other C0 control characters (0x00..0x1F, 0x7F)
-            c if (c as u32) < 0x20 || c == '\u{007F}' => {}
-            // Drop raw C1 controls if present (0x80..0x9F)
-            c if is_c1(c) => {}
-            // Drop zero-width and bidi controls that can affect layout
-            c if is_zero_width_or_bidi(c) => {}
-            // Keep printable character
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-#[inline]
-fn sanitize_diff_text(s: &str) -> String {
-    sanitize_for_tui(
-        s,
-        SanitizeMode::Plain,
-        SanitizeOptions { expand_tabs: true, tabstop: 4, debug_markers: false },
-    )
-}
-
-#[allow(dead_code)]
-// Keep one space between the line number and the sign column for typical
-// 4‑digit line numbers (e.g., "1235 + "). This value is the total target
-// width for "<ln><gap>", so with 4 digits we get 1 space gap.
-const SPACES_AFTER_LINE_NUMBER: usize = 6;
-
-// Internal representation for diff line rendering
-#[allow(dead_code)]
-enum DiffLineType {
+/// Classifies a diff line for gutter sign rendering and style selection.
+///
+/// `Insert` renders with a `+` sign and green text, `Delete` with `-` and red
+/// text (plus dim overlay when syntax-highlighted), and `Context` with a space
+/// and default styling.
+#[derive(Clone, Copy)]
+pub(crate) enum DiffLineType {
     Insert,
     Delete,
     Context,
 }
 
-#[allow(dead_code)]
-pub(super) fn create_diff_summary(
-    title: &str,
-    changes: &HashMap<PathBuf, FileChange>,
-    event_type: PatchEventType,
-) -> Vec<RtLine<'static>> {
-    create_diff_summary_with_width(title, changes, event_type, None)
+/// Controls which color palette the diff renderer uses for backgrounds and
+/// gutter styling.
+///
+/// Determined once per `render_change` call via [`diff_theme`], which probes
+/// the terminal's queried background color.  When the background cannot be
+/// determined (common in CI or piped output), `Dark` is used as the safe
+/// default.
+#[derive(Clone, Copy, Debug)]
+enum DiffTheme {
+    Dark,
+    Light,
 }
 
-/// Same as `create_diff_summary` but allows specifying a target content width in columns.
-/// When `width_cols` is provided, wrapping for detailed diff lines uses that width to
-/// ensure hanging indents align within the caller’s render area.
-pub(super) fn create_diff_summary_with_width(
-    title: &str,
-    changes: &HashMap<PathBuf, FileChange>,
-    event_type: PatchEventType,
-    width_cols: Option<usize>,
-) -> Vec<RtLine<'static>> {
-    struct FileSummary {
-        original_path: String,
-        rename_target: Option<String>,
-        added: usize,
-        removed: usize,
-        change: FileSummaryKind,
-    }
+/// Palette depth the diff renderer will target.
+///
+/// This is the *renderer's own* notion of color depth, derived from — but not
+/// identical to — the raw [`StdoutColorLevel`] reported by `supports-color`.
+/// The indirection exists because some terminals (notably Windows Terminal)
+/// advertise only ANSI-16 support while actually rendering truecolor sequences
+/// correctly; [`diff_color_level_for_terminal`] promotes those cases so the
+/// diff output uses the richer palette.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiffColorLevel {
+    TrueColor,
+    Ansi256,
+    Ansi16,
+}
 
-    enum FileSummaryKind {
-        Add { empty: bool },
-        Delete { removed_unknown: bool },
-        Update {
-            rename_only: bool,
-            no_content_change: bool,
-            binary: bool,
-            metadata_only: bool,
-        },
-    }
+/// Subset of [`DiffColorLevel`] that supports tinted backgrounds.
+///
+/// ANSI-16 terminals render backgrounds with bold, saturated palette entries
+/// that overpower syntax tokens.  This type encodes the invariant "we have
+/// enough color depth for pastel tints" so that background-producing helpers
+/// (`add_line_bg`, `del_line_bg`, `light_add_num_bg`, `light_del_num_bg`)
+/// never need an unreachable ANSI-16 arm.
+///
+/// Construct via [`RichDiffColorLevel::from_diff_color_level`], which returns
+/// `None` for ANSI-16 — callers branch on the `Option` and skip backgrounds
+/// entirely when `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RichDiffColorLevel {
+    TrueColor,
+    Ansi256,
+}
 
-    struct DiffTally {
-        added: usize,
-        removed: usize,
-        binary_marker: bool,
-        metadata_marker: bool,
-    }
-
-    let count_from_unified = |diff: &str| -> DiffTally {
-        let mut binary_marker = diff.contains("Binary files") || diff.contains("GIT binary patch");
-        if diff.as_bytes().contains(&0) {
-            binary_marker = true;
+impl RichDiffColorLevel {
+    /// Extract a rich level, returning `None` for ANSI-16.
+    fn from_diff_color_level(level: DiffColorLevel) -> Option<Self> {
+        match level {
+            DiffColorLevel::TrueColor => Some(Self::TrueColor),
+            DiffColorLevel::Ansi256 => Some(Self::Ansi256),
+            DiffColorLevel::Ansi16 => None,
         }
-        let mut metadata_marker = diff_contains_metadata_markers(diff);
-        if let Ok(patch) = diffy::Patch::from_str(diff) {
-            let (added, removed) = patch
-                .hunks()
-                .iter()
-                .flat_map(|h| h.lines())
-                .fold((0, 0), |(a, d), l| match l {
-                    diffy::Line::Insert(_) => (a + 1, d),
-                    diffy::Line::Delete(_) => (a, d + 1),
-                    _ => (a, d),
-                });
-            DiffTally {
-                added,
-                removed,
-                binary_marker,
-                metadata_marker,
-            }
-        } else {
-            // Fallback: manual scan to preserve counts even for unparsable diffs
-            let mut adds = 0usize;
-            let mut dels = 0usize;
-            for l in diff.lines() {
-                if l.starts_with("+++") || l.starts_with("---") || l.starts_with("@@") {
-                    continue;
-                }
-                let first = l.as_bytes().first().copied();
-                match first {
-                    Some(b'+') => adds += 1,
-                    Some(b'-') => dels += 1,
-                    _ => {}
-                }
-                if l.contains("Binary files") || l.contains("GIT binary patch") {
-                    binary_marker = true;
-                }
-                if !metadata_marker && line_has_metadata_marker(l) {
-                    metadata_marker = true;
-                }
-            }
-            DiffTally {
-                added: adds,
-                removed: dels,
-                binary_marker,
-                metadata_marker,
-            }
-        }
+    }
+}
+
+/// Pre-resolved background colors for insert and delete diff lines.
+///
+/// Computed once per `render_change` call from the active syntax theme's
+/// scope backgrounds (via [`resolve_diff_backgrounds`]) and then threaded
+/// through every style helper so individual lines never re-query the theme.
+///
+/// Both fields are `None` when the color level is ANSI-16 — callers fall
+/// back to foreground-only styling in that case.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ResolvedDiffBackgrounds {
+    add: Option<Color>,
+    del: Option<Color>,
+}
+
+/// Precomputed render state for diff line styling.
+///
+/// This bundles the terminal-derived theme and color depth plus theme-resolved
+/// diff backgrounds so callers rendering many lines can compute once per render
+/// pass and reuse it across all line calls.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DiffRenderStyleContext {
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    diff_backgrounds: ResolvedDiffBackgrounds,
+}
+
+/// Resolve diff backgrounds for production rendering.
+///
+/// Queries the active syntax theme for `markup.inserted` / `markup.deleted`
+/// (and `diff.*` fallbacks), then delegates to [`resolve_diff_backgrounds_for`].
+fn resolve_diff_backgrounds(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+) -> ResolvedDiffBackgrounds {
+    resolve_diff_backgrounds_for(theme, color_level, diff_scope_background_rgbs())
+}
+
+/// Snapshot the current terminal environment into a reusable style context.
+///
+/// Queries `diff_theme`, `diff_color_level`, and the active syntax theme's
+/// scope backgrounds once, bundling them into a [`DiffRenderStyleContext`]
+/// that callers thread through every line-rendering call in a single pass.
+///
+/// Call this at the top of each render frame — not per line — so the diff
+/// palette stays consistent within a frame even if the user swaps themes
+/// mid-render (theme picker live preview).
+pub(crate) fn current_diff_render_style_context() -> DiffRenderStyleContext {
+    let theme = diff_theme();
+    let color_level = diff_color_level();
+    let diff_backgrounds = resolve_diff_backgrounds(theme, color_level);
+    DiffRenderStyleContext {
+        theme,
+        color_level,
+        diff_backgrounds,
+    }
+}
+
+/// Core background-resolution logic, kept pure for testability.
+///
+/// Starts from the hardcoded fallback palette and then overrides with theme
+/// scope backgrounds when both (a) the color level is rich enough and (b) the
+/// theme defines a matching scope.  This means the fallback palette is always
+/// the baseline and theme scopes are strictly additive.
+fn resolve_diff_backgrounds_for(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    scope_backgrounds: DiffScopeBackgroundRgbs,
+) -> ResolvedDiffBackgrounds {
+    let mut resolved = fallback_diff_backgrounds(theme, color_level);
+    let Some(level) = RichDiffColorLevel::from_diff_color_level(color_level) else {
+        return resolved;
     };
 
-    let mut files: Vec<FileSummary> = Vec::new();
-    for (path, change) in changes.iter() {
-        match change {
-            FileChange::Add { content } => {
-                let added = content.lines().count();
-                let empty = added == 0;
-                files.push(FileSummary {
-                    original_path: path.display().to_string(),
-                    rename_target: None,
-                    added,
-                    removed: 0,
-                    change: FileSummaryKind::Add { empty },
-                });
-            }
-            FileChange::Delete => {
-                let (removed, removed_unknown) = match std::fs::read_to_string(path) {
-                    Ok(existing) => (existing.lines().count(), false),
-                    Err(_) => (0, true),
-                };
-                files.push(FileSummary {
-                    original_path: path.display().to_string(),
-                    rename_target: None,
-                    added: 0,
-                    removed,
-                    change: FileSummaryKind::Delete { removed_unknown },
-                });
-            }
-            FileChange::Update {
-                unified_diff,
-                move_path,
-                ..
-            } => {
-                let tally = count_from_unified(unified_diff);
-                let rename_target = move_path.as_ref().map(|new_path| new_path.display().to_string());
-                let binary_change = tally.binary_marker;
-                let metadata_only = tally.metadata_marker
-                    && tally.added == 0
-                    && tally.removed == 0;
-                let rename_only = rename_target.is_some()
-                    && tally.added == 0
-                    && tally.removed == 0
-                    && !binary_change
-                    && !tally.metadata_marker;
-                let no_content_change = rename_target.is_none()
-                    && !binary_change
-                    && !tally.metadata_marker
-                    && tally.added == 0
-                    && tally.removed == 0;
-                files.push(FileSummary {
-                    original_path: path.display().to_string(),
-                    rename_target,
-                    added: tally.added,
-                    removed: tally.removed,
-                    change: FileSummaryKind::Update {
-                        rename_only,
-                        no_content_change,
-                        binary: binary_change,
-                        metadata_only,
-                    },
-                });
-            }
-        }
+    if let Some(rgb) = scope_backgrounds.inserted {
+        resolved.add = Some(color_from_rgb_for_level(rgb, level));
+    }
+    if let Some(rgb) = scope_backgrounds.deleted {
+        resolved.del = Some(color_from_rgb_for_level(rgb, level));
+    }
+    resolved
+}
+
+/// Hardcoded palette backgrounds, used when the syntax theme provides no
+/// diff-specific scope backgrounds.  Returns empty backgrounds for ANSI-16.
+fn fallback_diff_backgrounds(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+) -> ResolvedDiffBackgrounds {
+    match RichDiffColorLevel::from_diff_color_level(color_level) {
+        Some(level) => ResolvedDiffBackgrounds {
+            add: Some(add_line_bg(theme, level)),
+            del: Some(del_line_bg(theme, level)),
+        },
+        None => ResolvedDiffBackgrounds::default(),
+    }
+}
+
+/// Convert an RGB triple to the appropriate ratatui `Color` for the given
+/// rich color level — passthrough for truecolor, quantized for ANSI-256.
+fn color_from_rgb_for_level(rgb: (u8, u8, u8), color_level: RichDiffColorLevel) -> Color {
+    match color_level {
+        RichDiffColorLevel::TrueColor => rgb_color(rgb),
+        RichDiffColorLevel::Ansi256 => quantize_rgb_to_ansi256(rgb),
+    }
+}
+
+/// Find the closest ANSI-256 color (indices 16–255) to `target` using
+/// perceptual distance.
+///
+/// Skips the first 16 entries (system colors) because their actual RGB
+/// values depend on the user's terminal configuration and are unreliable
+/// for distance calculations.
+fn quantize_rgb_to_ansi256(target: (u8, u8, u8)) -> Color {
+    let best_index = XTERM_COLORS
+        .iter()
+        .enumerate()
+        .skip(16)
+        .min_by(|(_, a), (_, b)| {
+            perceptual_distance(**a, target).total_cmp(&perceptual_distance(**b, target))
+        })
+        .map(|(index, _)| index as u8);
+    match best_index {
+        Some(index) => indexed_color(index),
+        None => indexed_color(DARK_256_ADD_LINE_BG_IDX),
+    }
+}
+
+pub struct DiffSummary {
+    changes: HashMap<PathBuf, FileChange>,
+    cwd: AbsolutePathBuf,
+}
+
+impl DiffSummary {
+    pub(crate) fn new(changes: HashMap<PathBuf, FileChange>, cwd: AbsolutePathBuf) -> Self {
+        Self { changes, cwd }
+    }
+}
+
+impl Renderable for FileChange {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let mut lines = vec![];
+        render_change(self, &mut lines, area.width as usize, /*lang*/ None);
+        Paragraph::new(lines).render(area, buf);
     }
 
-    let file_count = files.len();
-    let total_added: usize = files.iter().map(|f| f.added).sum();
-    let total_removed: usize = files.iter().map(|f| f.removed).sum();
-    let noun = if file_count == 1 { "file" } else { "files" };
+    fn desired_height(&self, width: u16) -> u16 {
+        let mut lines = vec![];
+        render_change(self, &mut lines, width as usize, /*lang*/ None);
+        lines.len() as u16
+    }
+}
 
+impl From<DiffSummary> for Box<dyn Renderable> {
+    fn from(val: DiffSummary) -> Self {
+        let mut rows: Vec<Box<dyn Renderable>> = vec![];
+
+        for (i, row) in collect_rows(&val.changes).into_iter().enumerate() {
+            if i > 0 {
+                rows.push(Box::new(RtLine::from("")));
+            }
+            let mut path = RtLine::from(display_path_for(&row.path, val.cwd.as_path()));
+            path.push_span(" ");
+            path.extend(render_line_count_summary(row.added, row.removed));
+            rows.push(Box::new(path));
+            rows.push(Box::new(RtLine::from("")));
+            rows.push(Box::new(InsetRenderable::new(
+                Box::new(row.change) as Box<dyn Renderable>,
+                Insets::tlbr(
+                    /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,
+                ),
+            )));
+        }
+
+        Box::new(ColumnRenderable::with(rows))
+    }
+}
+
+pub(crate) fn create_diff_summary(
+    changes: &HashMap<PathBuf, FileChange>,
+    cwd: &Path,
+    wrap_cols: usize,
+) -> Vec<RtLine<'static>> {
+    let rows = collect_rows(changes);
+    render_changes_block(rows, wrap_cols, cwd)
+}
+
+// Shared row for per-file presentation
+#[derive(Clone)]
+struct Row {
+    #[allow(dead_code)]
+    path: PathBuf,
+    move_path: Option<PathBuf>,
+    added: usize,
+    removed: usize,
+    change: FileChange,
+}
+
+fn collect_rows(changes: &HashMap<PathBuf, FileChange>) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    for (path, change) in changes.iter() {
+        let (added, removed) = match change {
+            FileChange::Add { content } => (content.lines().count(), 0),
+            FileChange::Delete { content } => (0, content.lines().count()),
+            FileChange::Update { unified_diff, .. } => calculate_add_remove_from_diff(unified_diff),
+        };
+        let move_path = match change {
+            FileChange::Update {
+                move_path: Some(new),
+                ..
+            } => Some(new.clone()),
+            _ => None,
+        };
+        rows.push(Row {
+            path: path.clone(),
+            move_path,
+            added,
+            removed,
+            change: change.clone(),
+        });
+    }
+    rows.sort_by_key(|r| r.path.clone());
+    rows
+}
+
+fn render_line_count_summary(added: usize, removed: usize) -> Vec<RtSpan<'static>> {
+    let mut spans = Vec::new();
+    spans.push("(".into());
+    spans.push(format!("+{added}").green());
+    spans.push(" ".into());
+    spans.push(format!("-{removed}").red());
+    spans.push(")".into());
+    spans
+}
+
+fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<RtLine<'static>> {
     let mut out: Vec<RtLine<'static>> = Vec::new();
 
-    // Header
-    let mut header_spans: Vec<RtSpan<'static>> = Vec::new();
-    // Colorize title: success for apply events, keep primary for approval requests
-    let title_style = match event_type {
-        PatchEventType::ApplyBegin { .. } | PatchEventType::ApplySuccess => Style::default()
-            .fg(crate::colors::success())
-            .add_modifier(Modifier::BOLD),
-        PatchEventType::ApplyFailure => Style::default()
-            .fg(crate::colors::error())
-            .add_modifier(Modifier::BOLD),
-        PatchEventType::ApprovalRequest => Style::default()
-            .fg(crate::colors::primary())
-            .add_modifier(Modifier::BOLD),
+    let render_path = |row: &Row| -> Vec<RtSpan<'static>> {
+        let mut spans = Vec::new();
+        spans.push(display_path_for(&row.path, cwd).into());
+        if let Some(move_path) = &row.move_path {
+            spans.push(format!(" → {}", display_path_for(move_path, cwd)).into());
+        }
+        spans
     };
-    header_spans.push(RtSpan::styled(title.to_owned(), title_style));
-    // Only include aggregate counts in header for approval requests; omit for apply/updated.
-    if matches!(event_type, PatchEventType::ApprovalRequest) {
-        header_spans.push(RtSpan::raw(" "));
-        header_spans.push(RtSpan::raw(format!("{file_count} {noun} ")));
-        header_spans.push(RtSpan::raw("("));
-        header_spans.push(RtSpan::styled(
-            format!("+{total_added}"),
-            Style::default().fg(crate::colors::success()),
-        ));
-        header_spans.push(RtSpan::raw(" "));
-        header_spans.push(RtSpan::styled(
-            format!("-{total_removed}"),
-            Style::default().fg(crate::colors::error()),
-        ));
-        header_spans.push(RtSpan::raw(")"));
+
+    // Header
+    let total_added: usize = rows.iter().map(|r| r.added).sum();
+    let total_removed: usize = rows.iter().map(|r| r.removed).sum();
+    let file_count = rows.len();
+    let noun = if file_count == 1 { "file" } else { "files" };
+    let mut header_spans: Vec<RtSpan<'static>> = vec!["• ".dim()];
+    if let [row] = &rows[..] {
+        let verb = match &row.change {
+            FileChange::Add { .. } => "Added",
+            FileChange::Delete { .. } => "Deleted",
+            _ => "Edited",
+        };
+        header_spans.push(verb.bold());
+        header_spans.push(" ".into());
+        header_spans.extend(render_path(row));
+        header_spans.push(" ".into());
+        header_spans.extend(render_line_count_summary(row.added, row.removed));
+    } else {
+        header_spans.push("Edited".bold());
+        header_spans.push(format!(" {file_count} {noun} ").into());
+        header_spans.extend(render_line_count_summary(total_added, total_removed));
     }
     out.push(RtLine::from(header_spans));
 
-    // Per-file lines with prefix
-    for (idx, f) in files.iter().enumerate() {
-        let mut spans: Vec<RtSpan<'static>> = Vec::new();
-        // Prefix
-        let prefix = if idx == 0 { "└ " } else { "  " };
-        spans.push(RtSpan::styled(
-            prefix.to_string(),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-        let dim_style = Style::default().fg(crate::colors::text_dim());
-
-        if let FileSummaryKind::Update {
-            rename_only: true,
-            ..
-        } = &f.change
-        {
-            if let Some(rename_target) = &f.rename_target {
-                spans.push(RtSpan::styled(f.original_path.clone(), dim_style));
-                spans.push(RtSpan::styled(" to ".to_string(), dim_style));
-                spans.push(RtSpan::styled(
-                    rename_target.clone(),
-                    Style::default().fg(crate::colors::text()),
-                ));
-            } else {
-                spans.push(RtSpan::styled(f.original_path.clone(), dim_style));
-                spans.push(RtSpan::styled(" (renamed)".to_string(), dim_style));
-            }
-            out.push(RtLine::from(spans));
-            continue;
+    for (idx, r) in rows.into_iter().enumerate() {
+        // Insert a blank separator between file chunks (except before the first)
+        if idx > 0 {
+            out.push("".into());
+        }
+        // File header line (skip when single-file header already shows the name)
+        let skip_file_header = file_count == 1;
+        if !skip_file_header {
+            let mut header: Vec<RtSpan<'static>> = Vec::new();
+            header.push("  └ ".dim());
+            header.extend(render_path(&r));
+            header.push(" ".into());
+            header.extend(render_line_count_summary(r.added, r.removed));
+            out.push(RtLine::from(header));
         }
 
-        let descriptor = if let Some(rename_target) = &f.rename_target {
-            format!("{} → {}", f.original_path, rename_target)
-        } else {
-            f.original_path.clone()
-        };
-        let mut annotation: Option<String> = None;
-        let mut skip_counts = false;
-
-        match &f.change {
-            FileSummaryKind::Update {
-                metadata_only: true,
-                ..
-            } => {
-                annotation = Some(" (metadata change)".to_string());
-                skip_counts = true;
-            }
-            FileSummaryKind::Update {
-                no_content_change: true,
-                ..
-            } => {
-                annotation = Some(" (no changes)".to_string());
-                skip_counts = true;
-            }
-            FileSummaryKind::Update {
-                binary: true,
-                ..
-            } => {
-                annotation = Some(" (binary change)".to_string());
-                skip_counts = true;
-            }
-            FileSummaryKind::Delete {
-                removed_unknown: true,
-            } => {
-                annotation = Some(" (deleted)".to_string());
-                skip_counts = true;
-            }
-            FileSummaryKind::Add { empty: true } => {
-                annotation = Some(" (empty file)".to_string());
-                skip_counts = true;
-            }
-            _ => {}
-        }
-
-        spans.push(RtSpan::styled(descriptor, dim_style));
-        if let Some(extra) = annotation {
-            spans.push(RtSpan::styled(extra, dim_style));
-        }
-
-        if skip_counts {
-            out.push(RtLine::from(spans));
-            continue;
-        }
-
-        if !skip_counts {
-            if let FileSummaryKind::Delete { removed_unknown: false } = &f.change {
-                spans.push(RtSpan::styled(" (".to_string(), dim_style));
-                spans.push(RtSpan::styled(
-                    format!("-{}", f.removed),
-                    Style::default().fg(crate::colors::error()),
-                ));
-                spans.push(RtSpan::styled(")".to_string(), dim_style));
-            } else if matches!(
-                &f.change,
-                FileSummaryKind::Update { .. } | FileSummaryKind::Add { empty: false }
-            ) {
-                spans.push(RtSpan::styled(" (".to_string(), dim_style));
-                spans.push(RtSpan::styled(
-                    format!("+{}", f.added),
-                    Style::default().fg(crate::colors::success()),
-                ));
-                spans.push(RtSpan::raw(" "));
-                spans.push(RtSpan::styled(
-                    format!("-{}", f.removed),
-                    Style::default().fg(crate::colors::error()),
-                ));
-                spans.push(RtSpan::styled(")".to_string(), dim_style));
-            }
-        }
-        out.push(RtLine::from(spans));
-    }
-
-    let show_details = matches!(
-        event_type,
-        PatchEventType::ApplyBegin {
-            auto_approved: true
-        }
-            | PatchEventType::ApplySuccess
-            | PatchEventType::ApprovalRequest
-    );
-
-    if show_details {
-        out.extend(render_patch_details_with_width(changes, width_cols));
+        // For renames, use the destination extension for highlighting — the
+        // diff content reflects the new file, not the old one.
+        let lang_path = r.move_path.as_deref().unwrap_or(&r.path);
+        let lang = detect_lang_for_path(lang_path);
+        let mut lines = vec![];
+        render_change(&r.change, &mut lines, wrap_cols - 4, lang.as_deref());
+        out.extend(prefix_lines(lines, "    ".into(), "    ".into()));
     }
 
     out
 }
 
-fn diff_contains_metadata_markers(diff: &str) -> bool {
-    diff.contains("new file mode")
-        || diff.contains("deleted file mode")
-        || diff.contains("old mode")
-        || diff.contains("new mode")
-        || diff.contains("similarity index")
+/// Detect the programming language for a file path by its extension.
+/// Returns the raw extension string for `normalize_lang` / `find_syntax`
+/// to resolve downstream.
+fn detect_lang_for_path(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?;
+    Some(ext.to_string())
 }
 
-fn line_has_metadata_marker(line: &str) -> bool {
-    line.contains("new file mode")
-        || line.contains("deleted file mode")
-        || line.contains("old mode")
-        || line.contains("new mode")
-        || line.contains("similarity index")
-}
-
-#[allow(dead_code)]
-pub(super) fn render_patch_details(changes: &HashMap<PathBuf, FileChange>) -> Vec<RtLine<'static>> {
-    render_patch_details_with_width(changes, None)
-}
-
-#[allow(dead_code)]
-fn render_patch_details_with_width(
-    changes: &HashMap<PathBuf, FileChange>,
-    width_cols: Option<usize>,
-) -> Vec<RtLine<'static>> {
-    let mut out: Vec<RtLine<'static>> = Vec::new();
-    // Use caller-provided width or fall back to a conservative estimate based on terminal width.
-    // Subtract a gutter safety margin so our pre-wrapping rarely exceeds the
-    // actual chat content width (prevents secondary wrapping that breaks hanging indents).
-    let term_cols: usize = if let Some(w) = width_cols {
-        w as usize
-    } else {
-        let full = terminal::size().map(|(w, _)| w as usize).unwrap_or(120);
-        full.saturating_sub(20).max(40)
-    };
-
-    let total_files = changes.len();
-    for (index, (path, change)) in changes.iter().enumerate() {
-        let is_first_file = index == 0;
-        // Add separator only between files (not at the very start)
-        if !is_first_file {
-            out.push(RtLine::from(vec![
-                RtSpan::raw("    "),
-                RtSpan::styled("...", style_dim()),
-            ]));
+fn render_change(
+    change: &FileChange,
+    out: &mut Vec<RtLine<'static>>,
+    width: usize,
+    lang: Option<&str>,
+) {
+    let style_context = current_diff_render_style_context();
+    match change {
+        FileChange::Add { content } => {
+            // Pre-highlight the entire file content as a whole.
+            let syntax_lines = lang.and_then(|l| highlight_code_to_styled_spans(content, l));
+            let line_number_width = line_number_width(content.lines().count());
+            for (i, raw) in content.lines().enumerate() {
+                let syn = syntax_lines.as_ref().and_then(|sl| sl.get(i));
+                if let Some(spans) = syn {
+                    out.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
+                        i + 1,
+                        DiffLineType::Insert,
+                        raw,
+                        width,
+                        line_number_width,
+                        Some(spans),
+                        style_context.theme,
+                        style_context.color_level,
+                        style_context.diff_backgrounds,
+                    ));
+                } else {
+                    out.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
+                        i + 1,
+                        DiffLineType::Insert,
+                        raw,
+                        width,
+                        line_number_width,
+                        /*syntax_spans*/ None,
+                        style_context.theme,
+                        style_context.color_level,
+                        style_context.diff_backgrounds,
+                    ));
+                }
+            }
         }
-        match change {
-            FileChange::Add { content } => {
-                for (i, raw) in content.lines().enumerate() {
-                    let ln = i + 1;
-                    let cleaned = sanitize_diff_text(raw);
-                    out.extend(push_wrapped_diff_line_with_width(
-                        ln,
-                        DiffLineType::Insert,
-                        &cleaned,
-                        term_cols,
-                    ));
-                }
-            }
-            FileChange::Delete => {
-                let original = std::fs::read_to_string(path).unwrap_or_default();
-                for (i, raw) in original.lines().enumerate() {
-                    let ln = i + 1;
-                    let cleaned = sanitize_diff_text(raw);
-                    out.extend(push_wrapped_diff_line_with_width(
-                        ln,
+        FileChange::Delete { content } => {
+            let syntax_lines = lang.and_then(|l| highlight_code_to_styled_spans(content, l));
+            let line_number_width = line_number_width(content.lines().count());
+            for (i, raw) in content.lines().enumerate() {
+                let syn = syntax_lines.as_ref().and_then(|sl| sl.get(i));
+                if let Some(spans) = syn {
+                    out.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
+                        i + 1,
                         DiffLineType::Delete,
-                        &cleaned,
-                        term_cols,
+                        raw,
+                        width,
+                        line_number_width,
+                        Some(spans),
+                        style_context.theme,
+                        style_context.color_level,
+                        style_context.diff_backgrounds,
+                    ));
+                } else {
+                    out.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
+                        i + 1,
+                        DiffLineType::Delete,
+                        raw,
+                        width,
+                        line_number_width,
+                        /*syntax_spans*/ None,
+                        style_context.theme,
+                        style_context.color_level,
+                        style_context.diff_backgrounds,
                     ));
                 }
             }
-            FileChange::Update {
-                unified_diff,
-                move_path: _,
-                ..
-            } => {
-                if let Ok(patch) = diffy::Patch::from_str(unified_diff) {
-                    let mut is_first_hunk = true;
-                    for h in patch.hunks() {
-                        // Render a simple separator between non-contiguous hunks
-                        // instead of diff-style @@ headers.
-                        if !is_first_hunk {
-                            out.push(RtLine::from(vec![
-                                RtSpan::raw("    "),
-                                RtSpan::styled("⋮", style_dim()),
-                            ]));
+        }
+        FileChange::Update { unified_diff, .. } => {
+            if let Ok(patch) = diffy::Patch::from_str(unified_diff) {
+                let mut max_line_number = 0;
+                let mut total_diff_bytes: usize = 0;
+                let mut total_diff_lines: usize = 0;
+                for h in patch.hunks() {
+                    let mut old_ln = h.old_range().start();
+                    let mut new_ln = h.new_range().start();
+                    for l in h.lines() {
+                        let text = match l {
+                            diffy::Line::Insert(t)
+                            | diffy::Line::Delete(t)
+                            | diffy::Line::Context(t) => t,
+                        };
+                        total_diff_bytes += text.len();
+                        total_diff_lines += 1;
+                        match l {
+                            diffy::Line::Insert(_) => {
+                                max_line_number = max_line_number.max(new_ln);
+                                new_ln += 1;
+                            }
+                            diffy::Line::Delete(_) => {
+                                max_line_number = max_line_number.max(old_ln);
+                                old_ln += 1;
+                            }
+                            diffy::Line::Context(_) => {
+                                max_line_number = max_line_number.max(new_ln);
+                                old_ln += 1;
+                                new_ln += 1;
+                            }
                         }
-                        is_first_hunk = false;
+                    }
+                }
 
-                        let mut old_ln = h.old_range().start();
-                        let mut new_ln = h.new_range().start();
-                        for l in h.lines() {
-                            match l {
-                                diffy::Line::Insert(text) => {
-                                    let s = sanitize_diff_text(text.trim_end_matches('\n'));
-                    out.extend(push_wrapped_diff_line_with_width(
-                        new_ln,
-                        DiffLineType::Insert,
-                        &s,
-                        term_cols,
-                    ));
-                                    new_ln += 1;
+                // Skip per-line syntax highlighting when the patch is too
+                // large — avoids thousands of parser initializations that
+                // would stall rendering on big diffs.
+                let diff_lang = if exceeds_highlight_limits(total_diff_bytes, total_diff_lines) {
+                    None
+                } else {
+                    lang
+                };
+
+                let line_number_width = line_number_width(max_line_number);
+                let mut is_first_hunk = true;
+                for h in patch.hunks() {
+                    if !is_first_hunk {
+                        let spacer = format!("{:width$} ", "", width = line_number_width.max(1));
+                        let spacer_span = RtSpan::styled(
+                            spacer,
+                            style_gutter_for(
+                                DiffLineType::Context,
+                                style_context.theme,
+                                style_context.color_level,
+                            ),
+                        );
+                        out.push(RtLine::from(vec![spacer_span, "⋮".dim()]));
+                    }
+                    is_first_hunk = false;
+
+                    // Highlight each hunk as a single block so syntect parser
+                    // state is preserved across consecutive lines.
+                    let hunk_syntax_lines = diff_lang.and_then(|language| {
+                        let hunk_text: String = h
+                            .lines()
+                            .iter()
+                            .map(|line| match line {
+                                diffy::Line::Insert(text)
+                                | diffy::Line::Delete(text)
+                                | diffy::Line::Context(text) => *text,
+                            })
+                            .collect();
+                        let syntax_lines = highlight_code_to_styled_spans(&hunk_text, language)?;
+                        (syntax_lines.len() == h.lines().len()).then_some(syntax_lines)
+                    });
+
+                    let mut old_ln = h.old_range().start();
+                    let mut new_ln = h.new_range().start();
+                    for (line_idx, l) in h.lines().iter().enumerate() {
+                        let syntax_spans = hunk_syntax_lines
+                            .as_ref()
+                            .and_then(|syntax_lines| syntax_lines.get(line_idx));
+                        match l {
+                            diffy::Line::Insert(text) => {
+                                let s = text.trim_end_matches('\n');
+                                if let Some(syn) = syntax_spans {
+                                    out.extend(
+                                        push_wrapped_diff_line_inner_with_theme_and_color_level(
+                                            new_ln,
+                                            DiffLineType::Insert,
+                                            s,
+                                            width,
+                                            line_number_width,
+                                            Some(syn),
+                                            style_context.theme,
+                                            style_context.color_level,
+                                            style_context.diff_backgrounds,
+                                        ),
+                                    );
+                                } else {
+                                    out.extend(
+                                        push_wrapped_diff_line_inner_with_theme_and_color_level(
+                                            new_ln,
+                                            DiffLineType::Insert,
+                                            s,
+                                            width,
+                                            line_number_width,
+                                            /*syntax_spans*/ None,
+                                            style_context.theme,
+                                            style_context.color_level,
+                                            style_context.diff_backgrounds,
+                                        ),
+                                    );
                                 }
-                                diffy::Line::Delete(text) => {
-                                    let s = sanitize_diff_text(text.trim_end_matches('\n'));
-                    out.extend(push_wrapped_diff_line_with_width(
-                        old_ln,
-                        DiffLineType::Delete,
-                        &s,
-                        term_cols,
-                    ));
-                                    old_ln += 1;
+                                new_ln += 1;
+                            }
+                            diffy::Line::Delete(text) => {
+                                let s = text.trim_end_matches('\n');
+                                if let Some(syn) = syntax_spans {
+                                    out.extend(
+                                        push_wrapped_diff_line_inner_with_theme_and_color_level(
+                                            old_ln,
+                                            DiffLineType::Delete,
+                                            s,
+                                            width,
+                                            line_number_width,
+                                            Some(syn),
+                                            style_context.theme,
+                                            style_context.color_level,
+                                            style_context.diff_backgrounds,
+                                        ),
+                                    );
+                                } else {
+                                    out.extend(
+                                        push_wrapped_diff_line_inner_with_theme_and_color_level(
+                                            old_ln,
+                                            DiffLineType::Delete,
+                                            s,
+                                            width,
+                                            line_number_width,
+                                            /*syntax_spans*/ None,
+                                            style_context.theme,
+                                            style_context.color_level,
+                                            style_context.diff_backgrounds,
+                                        ),
+                                    );
                                 }
-                                diffy::Line::Context(text) => {
-                                    let s = sanitize_diff_text(text.trim_end_matches('\n'));
-                    out.extend(push_wrapped_diff_line_with_width(
-                        new_ln,
-                        DiffLineType::Context,
-                        &s,
-                        term_cols,
-                    ));
-                                    old_ln += 1;
-                                    new_ln += 1;
+                                old_ln += 1;
+                            }
+                            diffy::Line::Context(text) => {
+                                let s = text.trim_end_matches('\n');
+                                if let Some(syn) = syntax_spans {
+                                    out.extend(
+                                        push_wrapped_diff_line_inner_with_theme_and_color_level(
+                                            new_ln,
+                                            DiffLineType::Context,
+                                            s,
+                                            width,
+                                            line_number_width,
+                                            Some(syn),
+                                            style_context.theme,
+                                            style_context.color_level,
+                                            style_context.diff_backgrounds,
+                                        ),
+                                    );
+                                } else {
+                                    out.extend(
+                                        push_wrapped_diff_line_inner_with_theme_and_color_level(
+                                            new_ln,
+                                            DiffLineType::Context,
+                                            s,
+                                            width,
+                                            line_number_width,
+                                            /*syntax_spans*/ None,
+                                            style_context.theme,
+                                            style_context.color_level,
+                                            style_context.diff_backgrounds,
+                                        ),
+                                    );
                                 }
+                                old_ln += 1;
+                                new_ln += 1;
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
 
-        // Avoid trailing blank line at the very end; only add spacing
-        // when there are more files following.
-        if index + 1 < total_files {
-            out.push(RtLine::from(RtSpan::raw("")));
-        }
+/// Format a path for display relative to the current working directory when
+/// possible, keeping output stable in jj/no-`.git` workspaces (e.g. image
+/// tool calls should show `example.png` instead of an absolute path).
+pub(crate) fn display_path_for(path: &Path, cwd: &Path) -> String {
+    if path.is_relative() {
+        return path.display().to_string();
     }
 
-    out
+    if let Ok(stripped) = path.strip_prefix(cwd) {
+        return stripped.display().to_string();
+    }
+
+    let path_in_same_repo = match (get_git_repo_root(cwd), get_git_repo_root(path)) {
+        (Some(cwd_repo), Some(path_repo)) => cwd_repo == path_repo,
+        _ => false,
+    };
+    let chosen = if path_in_same_repo {
+        pathdiff::diff_paths(path, cwd).unwrap_or_else(|| path.to_path_buf())
+    } else {
+        relativize_to_home(path)
+            .map(|p| PathBuf::from_iter([Path::new("~"), p.as_path()]))
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    chosen.display().to_string()
 }
 
-/// Produce only the detailed diff lines without any file-level headers/summaries.
-/// Used by the Diff Viewer overlay where surrounding chrome already conveys context.
-#[allow(dead_code)]
-pub(super) fn create_diff_details_only(
-    changes: &HashMap<PathBuf, FileChange>,
-) -> Vec<RtLine<'static>> {
-    render_patch_details(changes)
+pub(crate) fn calculate_add_remove_from_diff(diff: &str) -> (usize, usize) {
+    if let Ok(patch) = diffy::Patch::from_str(diff) {
+        patch
+            .hunks()
+            .iter()
+            .flat_map(Hunk::lines)
+            .fold((0, 0), |(a, d), l| match l {
+                diffy::Line::Insert(_) => (a + 1, d),
+                diffy::Line::Delete(_) => (a, d + 1),
+                diffy::Line::Context(_) => (a, d),
+            })
+    } else {
+        // For unparsable diffs, return 0 for both counts.
+        (0, 0)
+    }
 }
 
-#[allow(dead_code)]
-fn push_wrapped_diff_line_with_width(
+/// Render a single plain-text (non-syntax-highlighted) diff line, wrapped to
+/// `width` columns, using a pre-computed [`DiffRenderStyleContext`].
+///
+/// This is the convenience entry point used by the theme picker preview and
+/// any caller that does not have syntax spans.  Delegates to the inner
+/// rendering core with `syntax_spans = None`.
+pub(crate) fn push_wrapped_diff_line_with_style_context(
     line_number: usize,
     kind: DiffLineType,
     text: &str,
-    term_cols: usize,
+    width: usize,
+    line_number_width: usize,
+    style_context: DiffRenderStyleContext,
 ) -> Vec<RtLine<'static>> {
-    // Slightly smaller left padding so line numbers sit a couple of spaces left
-    let indent = "  ";
+    push_wrapped_diff_line_inner_with_theme_and_color_level(
+        line_number,
+        kind,
+        text,
+        width,
+        line_number_width,
+        /*syntax_spans*/ None,
+        style_context.theme,
+        style_context.color_level,
+        style_context.diff_backgrounds,
+    )
+}
+
+/// Render a syntax-highlighted diff line, wrapped to `width` columns, using
+/// a pre-computed [`DiffRenderStyleContext`].
+///
+/// Like [`push_wrapped_diff_line_with_style_context`] but overlays
+/// `syntax_spans` (from [`highlight_code_to_styled_spans`]) onto the diff
+/// coloring.  Delete lines receive a `DIM` modifier so syntax colors do not
+/// overpower the removal cue.
+pub(crate) fn push_wrapped_diff_line_with_syntax_and_style_context(
+    line_number: usize,
+    kind: DiffLineType,
+    text: &str,
+    width: usize,
+    line_number_width: usize,
+    syntax_spans: &[RtSpan<'static>],
+    style_context: DiffRenderStyleContext,
+) -> Vec<RtLine<'static>> {
+    push_wrapped_diff_line_inner_with_theme_and_color_level(
+        line_number,
+        kind,
+        text,
+        width,
+        line_number_width,
+        Some(syntax_spans),
+        style_context.theme,
+        style_context.color_level,
+        style_context.diff_backgrounds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_wrapped_diff_line_inner_with_theme_and_color_level(
+    line_number: usize,
+    kind: DiffLineType,
+    text: &str,
+    width: usize,
+    line_number_width: usize,
+    syntax_spans: Option<&[RtSpan<'static>]>,
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    diff_backgrounds: ResolvedDiffBackgrounds,
+) -> Vec<RtLine<'static>> {
     let ln_str = line_number.to_string();
-    let mut remaining_text: &str = text;
 
-    // Reserve a fixed number of spaces after the line number so that content starts
-    // at a consistent column. Always include a 1‑char diff sign ("+"/"-" or space)
-    // at the start of the content so gutters align across wrapped lines.
-    let gap_after_ln = SPACES_AFTER_LINE_NUMBER.saturating_sub(ln_str.len());
-    let prefix_cols = indent.len() + ln_str.len() + gap_after_ln;
+    // Reserve a fixed number of spaces (equal to the widest line number plus a
+    // trailing spacer) so the sign column stays aligned across the diff block.
+    let gutter_width = line_number_width.max(1);
+    let prefix_cols = gutter_width + 1;
 
-    let mut first = true;
-    // Continuation hanging indent equals the leading spaces of the content
-    // (after the diff sign). This keeps wrapped rows aligned under the code
-    // indentation.
-    let continuation_indent: usize = text.chars().take_while(|c| *c == ' ').count();
-    let (sign_opt, line_style) = match kind {
-        DiffLineType::Insert => (Some('+'), Some(style_add())),
-        DiffLineType::Delete => (Some('-'), Some(style_del())),
-        DiffLineType::Context => (None, None),
+    let (sign_char, sign_style, content_style) = match kind {
+        DiffLineType::Insert => (
+            '+',
+            style_sign_add(theme, color_level, diff_backgrounds),
+            style_add(theme, color_level, diff_backgrounds),
+        ),
+        DiffLineType::Delete => (
+            '-',
+            style_sign_del(theme, color_level, diff_backgrounds),
+            style_del(theme, color_level, diff_backgrounds),
+        ),
+        DiffLineType::Context => (' ', style_context(), style_context()),
     };
-    let mut lines: Vec<RtLine<'static>> = Vec::new();
 
-    loop {
-        // Fit the content for the current terminal row:
-        // compute how many columns are available after the prefix, then split
-        // at a UTF-8 character boundary so this row's chunk fits exactly.
-        // First line includes a visible sign plus a trailing space after it.
-        // Continuation lines include only the hanging space (no sign).
-        // First line reserves 1 col for the sign ('+'/'-') and 1 space after it.
-        // Continuation lines must reserve BOTH columns as well (sign column + its trailing space)
-        // before applying the hanging indent equal to the content's leading spaces.
-        let base_prefix = if first { prefix_cols + 2 } else { prefix_cols + 2 + continuation_indent };
-        let available_content_cols = term_cols
-            .saturating_sub(base_prefix)
-            .max(1);
-        let split_at_byte_index = remaining_text
-            .char_indices()
-            .nth(available_content_cols)
-            .map(|(i, _)| i)
-            .unwrap_or_else(|| remaining_text.len());
-        let (chunk, rest) = remaining_text.split_at(split_at_byte_index);
-        remaining_text = rest;
+    let line_bg = style_line_bg_for(kind, diff_backgrounds);
+    let gutter_style = style_gutter_for(kind, theme, color_level);
 
-        if first {
-            let mut spans: Vec<RtSpan<'static>> = Vec::new();
-            spans.push(RtSpan::raw(indent));
-            spans.push(RtSpan::styled(ln_str.clone(), style_dim()));
-            spans.push(RtSpan::raw(" ".repeat(gap_after_ln)));
-
-            // Always prefix the content with a sign char for consistent gutters
-            let sign_char = sign_opt.unwrap_or(' ');
-            // Add a space after the sign so it sits centered in the sign column
-            // and content starts one cell to the right: "+ <content>".
-            let display_chunk = format!("{sign_char} {chunk}");
-
-            let content_span = match line_style {
-                Some(style) => RtSpan::styled(display_chunk, style),
-                None => RtSpan::raw(display_chunk),
-            };
-            spans.push(content_span);
-            let mut line = RtLine::from(spans);
-            if let Some(style) = line_style {
-                line.style = line.style.patch(style);
-            }
-            // Apply themed tinted background for added/removed lines
-            if matches!(kind, DiffLineType::Insert | DiffLineType::Delete) {
-                let tint = match kind {
-                    DiffLineType::Insert => success_tint(),
-                    DiffLineType::Delete => error_tint(),
-                    DiffLineType::Context => crate::colors::background(),
+    // When we have syntax spans, compose them with the diff style for a richer
+    // view. The sign character keeps the diff color; content gets syntax colors
+    // with an overlay modifier for delete lines (dim).
+    if let Some(syn_spans) = syntax_spans {
+        let gutter = format!("{ln_str:>gutter_width$} ");
+        let sign = format!("{sign_char}");
+        let styled: Vec<RtSpan<'static>> = syn_spans
+            .iter()
+            .map(|sp| {
+                let style = if matches!(kind, DiffLineType::Delete) {
+                    sp.style.add_modifier(Modifier::DIM)
+                } else {
+                    sp.style
                 };
-                line.style = line.style.bg(tint);
+                RtSpan::styled(sp.content.clone().into_owned(), style)
+            })
+            .collect();
+
+        // Determine how many display columns remain for content after the
+        // gutter and sign character.
+        let available_content_cols = width.saturating_sub(prefix_cols + 1).max(1);
+
+        // Wrap the styled content spans to fit within the available columns.
+        let wrapped_chunks = wrap_styled_spans(&styled, available_content_cols);
+
+        let mut lines: Vec<RtLine<'static>> = Vec::new();
+        for (i, chunk) in wrapped_chunks.into_iter().enumerate() {
+            let mut row_spans: Vec<RtSpan<'static>> = Vec::new();
+            if i == 0 {
+                // First line: gutter + sign + content
+                row_spans.push(RtSpan::styled(gutter.clone(), gutter_style));
+                row_spans.push(RtSpan::styled(sign.clone(), sign_style));
+            } else {
+                // Continuation: empty gutter + two-space indent (matches
+                // the plain-text wrapping continuation style).
+                let cont_gutter = format!("{:gutter_width$}  ", "");
+                row_spans.push(RtSpan::styled(cont_gutter, gutter_style));
             }
-            lines.push(line);
-            first = false;
-        } else {
-            // Continuation lines keep a space for the sign column so content aligns
-            let hang_prefix = format!(
-                "{indent}{}{}  {}",
-                " ".repeat(ln_str.len()),
-                " ".repeat(gap_after_ln),
-                " ".repeat(continuation_indent)
-            );
-            let content_span = match line_style {
-                Some(style) => RtSpan::styled(chunk.to_string(), style),
-                None => RtSpan::raw(chunk.to_string()),
-            };
-            let mut line = RtLine::from(vec![RtSpan::raw(hang_prefix), content_span]);
-            if let Some(style) = line_style {
-                line.style = line.style.patch(style);
-            }
-            if matches!(kind, DiffLineType::Insert | DiffLineType::Delete) {
-                let tint = match kind {
-                    DiffLineType::Insert => success_tint(),
-                    DiffLineType::Delete => error_tint(),
-                    DiffLineType::Context => crate::colors::background(),
-                };
-                line.style = line.style.bg(tint);
-            }
-            lines.push(line);
+            row_spans.extend(chunk);
+            lines.push(RtLine::from(row_spans).style(line_bg));
         }
-        if remaining_text.is_empty() {
-            break;
-        }
+        return lines;
     }
+
+    let available_content_cols = width.saturating_sub(prefix_cols + 1).max(1);
+    let styled = vec![RtSpan::styled(text.to_string(), content_style)];
+    let wrapped_chunks = wrap_styled_spans(&styled, available_content_cols);
+
+    let mut lines: Vec<RtLine<'static>> = Vec::new();
+    for (i, chunk) in wrapped_chunks.into_iter().enumerate() {
+        let mut row_spans: Vec<RtSpan<'static>> = Vec::new();
+        if i == 0 {
+            let gutter = format!("{ln_str:>gutter_width$} ");
+            let sign = format!("{sign_char}");
+            row_spans.push(RtSpan::styled(gutter, gutter_style));
+            row_spans.push(RtSpan::styled(sign, sign_style));
+        } else {
+            let cont_gutter = format!("{:gutter_width$}  ", "");
+            row_spans.push(RtSpan::styled(cont_gutter, gutter_style));
+        }
+        row_spans.extend(chunk);
+        lines.push(RtLine::from(row_spans).style(line_bg));
+    }
+
     lines
 }
 
-#[allow(dead_code)]
-fn style_dim() -> Style {
+/// Split styled spans into chunks that fit within `max_cols` display columns.
+///
+/// Returns one `Vec<RtSpan>` per output line.  Styles are preserved across
+/// split boundaries so that wrapping never loses syntax coloring.
+///
+/// The algorithm walks characters using their Unicode display width (with tabs
+/// expanded to [`TAB_WIDTH`] columns).  When a character would overflow the
+/// current line, the accumulated text is flushed and a new line begins.  A
+/// single character wider than the remaining space forces a line break *before*
+/// the character so that progress is always made (avoiding infinite loops on
+/// CJK characters or tabs at the end of a line).
+fn wrap_styled_spans(spans: &[RtSpan<'static>], max_cols: usize) -> Vec<Vec<RtSpan<'static>>> {
+    let mut result: Vec<Vec<RtSpan<'static>>> = Vec::new();
+    let mut current_line: Vec<RtSpan<'static>> = Vec::new();
+    let mut col: usize = 0;
+
+    for span in spans {
+        let style = span.style;
+        let text = span.content.as_ref();
+        let mut remaining = text;
+
+        while !remaining.is_empty() {
+            // Accumulate characters until we fill the line.
+            let mut byte_end = 0;
+            let mut chars_col = 0;
+
+            for ch in remaining.chars() {
+                // Tabs have no Unicode width; treat them as TAB_WIDTH columns.
+                let w = ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 0 });
+                if col + chars_col + w > max_cols {
+                    // Adding this character would exceed the line width.
+                    // Break here; if this is the first character in `remaining`
+                    // we will flush/start a new line in the `byte_end == 0`
+                    // branch below before consuming it.
+                    break;
+                }
+                byte_end += ch.len_utf8();
+                chars_col += w;
+            }
+
+            if byte_end == 0 {
+                // Single character wider than remaining space — force onto a
+                // new line so we make progress.
+                if !current_line.is_empty() {
+                    result.push(std::mem::take(&mut current_line));
+                }
+                // Take at least one character to avoid an infinite loop.
+                let Some(ch) = remaining.chars().next() else {
+                    break;
+                };
+                let ch_len = ch.len_utf8();
+                current_line.push(RtSpan::styled(remaining[..ch_len].to_string(), style));
+                // Use fallback width 1 (not 0) so this branch always advances
+                // even if `ch` has unknown/zero display width.
+                col = ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 1 });
+                remaining = &remaining[ch_len..];
+                continue;
+            }
+
+            let (chunk, rest) = remaining.split_at(byte_end);
+            current_line.push(RtSpan::styled(chunk.to_string(), style));
+            col += chars_col;
+            remaining = rest;
+
+            // If we exactly filled or exceeded the line, start a new one.
+            // Do not gate on !remaining.is_empty() — the next span in the
+            // outer loop may still have content that must start on a fresh line.
+            if col >= max_cols {
+                result.push(std::mem::take(&mut current_line));
+                col = 0;
+            }
+        }
+    }
+
+    // Push the last line (always at least one, even if empty).
+    if !current_line.is_empty() || result.is_empty() {
+        result.push(current_line);
+    }
+
+    result
+}
+
+pub(crate) fn line_number_width(max_line_number: usize) -> usize {
+    if max_line_number == 0 {
+        1
+    } else {
+        max_line_number.to_string().len()
+    }
+}
+
+/// Testable helper: picks `DiffTheme` from an explicit background sample.
+fn diff_theme_for_bg(bg: Option<(u8, u8, u8)>) -> DiffTheme {
+    if let Some(rgb) = bg
+        && is_light(rgb)
+    {
+        return DiffTheme::Light;
+    }
+    DiffTheme::Dark
+}
+
+/// Probe the terminal's background and return the appropriate diff palette.
+fn diff_theme() -> DiffTheme {
+    diff_theme_for_bg(default_bg())
+}
+
+/// Return the [`DiffColorLevel`] for the current terminal session.
+///
+/// This is the environment-reading adapter: it samples runtime signals
+/// (`supports-color` level, terminal name, `WT_SESSION`, and `FORCE_COLOR`)
+/// and forwards them to [`diff_color_level_for_terminal`].
+///
+/// Keeping env reads in this thin wrapper lets
+/// [`diff_color_level_for_terminal`] stay pure and easy to unit test.
+fn diff_color_level() -> DiffColorLevel {
+    diff_color_level_for_terminal(
+        stdout_color_level(),
+        terminal_info().name,
+        std::env::var_os("WT_SESSION").is_some(),
+        has_force_color_override(),
+    )
+}
+
+/// Returns whether `FORCE_COLOR` is explicitly set.
+fn has_force_color_override() -> bool {
+    std::env::var_os("FORCE_COLOR").is_some()
+}
+
+/// Map a raw [`StdoutColorLevel`] to a [`DiffColorLevel`] using
+/// Windows Terminal-specific truecolor promotion rules.
+///
+/// This helper is intentionally pure (no env access) so tests can validate
+/// the policy table by passing explicit inputs.
+///
+/// Windows Terminal fully supports 24-bit color but the `supports-color`
+/// crate often reports only ANSI-16 there because no `COLORTERM` variable
+/// is set.  We detect Windows Terminal two ways — via `terminal_name`
+/// (parsed from `WT_SESSION` / `TERM_PROGRAM` by `terminal_info()`) and
+/// via the raw `has_wt_session` flag.
+///
+/// These signals are intentionally not equivalent: `terminal_name` is a
+/// derived classification with `TERM_PROGRAM` precedence, so `WT_SESSION`
+/// can be present while `terminal_name` is not `WindowsTerminal`.
+///
+/// When `WT_SESSION` is present, we promote to truecolor unconditionally
+/// unless `FORCE_COLOR` is set. This keeps Windows Terminal rendering rich
+/// by default while preserving explicit `FORCE_COLOR` user intent.
+///
+/// Outside `WT_SESSION`, only ANSI-16 is promoted for identified
+/// `WindowsTerminal` sessions; `Unknown` stays conservative.
+fn diff_color_level_for_terminal(
+    stdout_level: StdoutColorLevel,
+    terminal_name: TerminalName,
+    has_wt_session: bool,
+    has_force_color_override: bool,
+) -> DiffColorLevel {
+    if has_wt_session && !has_force_color_override {
+        return DiffColorLevel::TrueColor;
+    }
+
+    let base = match stdout_level {
+        StdoutColorLevel::TrueColor => DiffColorLevel::TrueColor,
+        StdoutColorLevel::Ansi256 => DiffColorLevel::Ansi256,
+        StdoutColorLevel::Ansi16 | StdoutColorLevel::Unknown => DiffColorLevel::Ansi16,
+    };
+
+    // Outside `WT_SESSION`, keep the existing Windows Terminal promotion for
+    // ANSI-16 sessions that likely support truecolor.
+    if stdout_level == StdoutColorLevel::Ansi16
+        && terminal_name == TerminalName::WindowsTerminal
+        && !has_force_color_override
+    {
+        DiffColorLevel::TrueColor
+    } else {
+        base
+    }
+}
+
+// -- Style helpers ------------------------------------------------------------
+//
+// Each diff line is composed of three visual regions, styled independently:
+//
+//   ┌──────────┬──────┬──────────────────────────────────────────┐
+//   │  gutter  │ sign │              content                     │
+//   │ (line #) │ +/-  │  (plain or syntax-highlighted text)      │
+//   └──────────┴──────┴──────────────────────────────────────────┘
+//
+// A fourth, full-width layer — `line_bg` — is applied via `RtLine::style()`
+// so that the background tint extends from the leftmost column to the right
+// edge of the terminal, including any padding beyond the content.
+//
+// On dark terminals, the sign and content share one style (colored fg + tinted
+// bg), and the gutter is simply dimmed.  On light terminals, sign and content
+// are split: the sign gets only a colored foreground (no bg, so the line bg
+// shows through), while content relies on the line bg alone; the gutter gets
+// an opaque, more-saturated background so line numbers stay readable against
+// the pastel line tint.
+
+/// Full-width background applied to the `RtLine` itself (not individual spans).
+/// Context lines intentionally leave the background unset so the terminal
+/// default shows through.
+fn style_line_bg_for(kind: DiffLineType, diff_backgrounds: ResolvedDiffBackgrounds) -> Style {
+    match kind {
+        DiffLineType::Insert => diff_backgrounds
+            .add
+            .map_or_else(Style::default, |bg| Style::default().bg(bg)),
+        DiffLineType::Delete => diff_backgrounds
+            .del
+            .map_or_else(Style::default, |bg| Style::default().bg(bg)),
+        DiffLineType::Context => Style::default(),
+    }
+}
+
+fn style_context() -> Style {
+    Style::default()
+}
+
+fn add_line_bg(theme: DiffTheme, color_level: RichDiffColorLevel) -> Color {
+    match (theme, color_level) {
+        (DiffTheme::Dark, RichDiffColorLevel::TrueColor) => rgb_color(DARK_TC_ADD_LINE_BG_RGB),
+        (DiffTheme::Dark, RichDiffColorLevel::Ansi256) => indexed_color(DARK_256_ADD_LINE_BG_IDX),
+        (DiffTheme::Light, RichDiffColorLevel::TrueColor) => rgb_color(LIGHT_TC_ADD_LINE_BG_RGB),
+        (DiffTheme::Light, RichDiffColorLevel::Ansi256) => indexed_color(LIGHT_256_ADD_LINE_BG_IDX),
+    }
+}
+
+fn del_line_bg(theme: DiffTheme, color_level: RichDiffColorLevel) -> Color {
+    match (theme, color_level) {
+        (DiffTheme::Dark, RichDiffColorLevel::TrueColor) => rgb_color(DARK_TC_DEL_LINE_BG_RGB),
+        (DiffTheme::Dark, RichDiffColorLevel::Ansi256) => indexed_color(DARK_256_DEL_LINE_BG_IDX),
+        (DiffTheme::Light, RichDiffColorLevel::TrueColor) => rgb_color(LIGHT_TC_DEL_LINE_BG_RGB),
+        (DiffTheme::Light, RichDiffColorLevel::Ansi256) => indexed_color(LIGHT_256_DEL_LINE_BG_IDX),
+    }
+}
+
+fn light_gutter_fg(color_level: DiffColorLevel) -> Color {
+    match color_level {
+        DiffColorLevel::TrueColor => rgb_color(LIGHT_TC_GUTTER_FG_RGB),
+        DiffColorLevel::Ansi256 => indexed_color(LIGHT_256_GUTTER_FG_IDX),
+        DiffColorLevel::Ansi16 => Color::Black,
+    }
+}
+
+fn light_add_num_bg(color_level: RichDiffColorLevel) -> Color {
+    match color_level {
+        RichDiffColorLevel::TrueColor => rgb_color(LIGHT_TC_ADD_NUM_BG_RGB),
+        RichDiffColorLevel::Ansi256 => indexed_color(LIGHT_256_ADD_NUM_BG_IDX),
+    }
+}
+
+fn light_del_num_bg(color_level: RichDiffColorLevel) -> Color {
+    match color_level {
+        RichDiffColorLevel::TrueColor => rgb_color(LIGHT_TC_DEL_NUM_BG_RGB),
+        RichDiffColorLevel::Ansi256 => indexed_color(LIGHT_256_DEL_NUM_BG_IDX),
+    }
+}
+
+/// Line-number gutter style.  On light backgrounds the gutter has an opaque
+/// tinted background so numbers contrast against the pastel line fill.  On
+/// dark backgrounds a simple `DIM` modifier is sufficient.
+fn style_gutter_for(kind: DiffLineType, theme: DiffTheme, color_level: DiffColorLevel) -> Style {
+    match (
+        theme,
+        kind,
+        RichDiffColorLevel::from_diff_color_level(color_level),
+    ) {
+        (DiffTheme::Light, DiffLineType::Insert, None) => {
+            Style::default().fg(light_gutter_fg(color_level))
+        }
+        (DiffTheme::Light, DiffLineType::Delete, None) => {
+            Style::default().fg(light_gutter_fg(color_level))
+        }
+        (DiffTheme::Light, DiffLineType::Insert, Some(level)) => Style::default()
+            .fg(light_gutter_fg(color_level))
+            .bg(light_add_num_bg(level)),
+        (DiffTheme::Light, DiffLineType::Delete, Some(level)) => Style::default()
+            .fg(light_gutter_fg(color_level))
+            .bg(light_del_num_bg(level)),
+        _ => style_gutter_dim(),
+    }
+}
+
+/// Sign character (`+`) for insert lines.  On dark terminals it inherits the
+/// full content style (green fg + tinted bg).  On light terminals it uses only
+/// a green foreground and lets the line-level bg show through.
+fn style_sign_add(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    diff_backgrounds: ResolvedDiffBackgrounds,
+) -> Style {
+    match theme {
+        DiffTheme::Light => Style::default().fg(Color::Green),
+        DiffTheme::Dark => style_add(theme, color_level, diff_backgrounds),
+    }
+}
+
+/// Sign character (`-`) for delete lines.  Mirror of [`style_sign_add`].
+fn style_sign_del(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    diff_backgrounds: ResolvedDiffBackgrounds,
+) -> Style {
+    match theme {
+        DiffTheme::Light => Style::default().fg(Color::Red),
+        DiffTheme::Dark => style_del(theme, color_level, diff_backgrounds),
+    }
+}
+
+/// Content style for insert lines (plain, non-syntax-highlighted text).
+///
+/// Foreground-only on ANSI-16.  On rich levels, uses the pre-resolved
+/// background from `diff_backgrounds` — which is the theme scope color when
+/// available, or the hardcoded palette otherwise.  Dark themes add an
+/// explicit green foreground for readability over the tinted background;
+/// light themes rely on the default (dark) foreground against the pastel.
+///
+/// When no background is resolved (e.g. a theme that defines no diff
+/// scopes and the fallback palette is somehow empty), the style degrades
+/// to foreground-only so the line is still legible.
+fn style_add(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    diff_backgrounds: ResolvedDiffBackgrounds,
+) -> Style {
+    match (theme, color_level, diff_backgrounds.add) {
+        (_, DiffColorLevel::Ansi16, _) => Style::default().fg(Color::Green),
+        (DiffTheme::Light, DiffColorLevel::TrueColor, Some(bg))
+        | (DiffTheme::Light, DiffColorLevel::Ansi256, Some(bg)) => Style::default().bg(bg),
+        (DiffTheme::Dark, DiffColorLevel::TrueColor, Some(bg))
+        | (DiffTheme::Dark, DiffColorLevel::Ansi256, Some(bg)) => {
+            Style::default().fg(Color::Green).bg(bg)
+        }
+        (DiffTheme::Light, DiffColorLevel::TrueColor, None)
+        | (DiffTheme::Light, DiffColorLevel::Ansi256, None) => Style::default(),
+        (DiffTheme::Dark, DiffColorLevel::TrueColor, None)
+        | (DiffTheme::Dark, DiffColorLevel::Ansi256, None) => Style::default().fg(Color::Green),
+    }
+}
+
+/// Content style for delete lines (plain, non-syntax-highlighted text).
+///
+/// Mirror of [`style_add`] with red foreground and the delete-side
+/// resolved background.
+fn style_del(
+    theme: DiffTheme,
+    color_level: DiffColorLevel,
+    diff_backgrounds: ResolvedDiffBackgrounds,
+) -> Style {
+    match (theme, color_level, diff_backgrounds.del) {
+        (_, DiffColorLevel::Ansi16, _) => Style::default().fg(Color::Red),
+        (DiffTheme::Light, DiffColorLevel::TrueColor, Some(bg))
+        | (DiffTheme::Light, DiffColorLevel::Ansi256, Some(bg)) => Style::default().bg(bg),
+        (DiffTheme::Dark, DiffColorLevel::TrueColor, Some(bg))
+        | (DiffTheme::Dark, DiffColorLevel::Ansi256, Some(bg)) => {
+            Style::default().fg(Color::Red).bg(bg)
+        }
+        (DiffTheme::Light, DiffColorLevel::TrueColor, None)
+        | (DiffTheme::Light, DiffColorLevel::Ansi256, None) => Style::default(),
+        (DiffTheme::Dark, DiffColorLevel::TrueColor, None)
+        | (DiffTheme::Dark, DiffColorLevel::Ansi256, None) => Style::default().fg(Color::Red),
+    }
+}
+
+fn style_gutter_dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-#[allow(dead_code)]
-fn style_add() -> Style {
-    // Use theme success color for additions so it adapts to light/dark themes
-    Style::default().fg(crate::colors::success())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_snapshot;
+    use pretty_assertions::assert_eq;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::text::Text;
+    use ratatui::widgets::Paragraph;
+    use ratatui::widgets::WidgetRef;
+    use ratatui::widgets::Wrap;
+
+    #[test]
+    fn ansi16_add_style_uses_foreground_only() {
+        let style = style_add(
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi16,
+            fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16),
+        );
+        assert_eq!(style.fg, Some(Color::Green));
+        assert_eq!(style.bg, None);
+    }
+
+    #[test]
+    fn ansi16_del_style_uses_foreground_only() {
+        let style = style_del(
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi16,
+            fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16),
+        );
+        assert_eq!(style.fg, Some(Color::Red));
+        assert_eq!(style.bg, None);
+    }
+
+    #[test]
+    fn ansi16_sign_styles_use_foreground_only() {
+        let add_sign = style_sign_add(
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi16,
+            fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16),
+        );
+        assert_eq!(add_sign.fg, Some(Color::Green));
+        assert_eq!(add_sign.bg, None);
+
+        let del_sign = style_sign_del(
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi16,
+            fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16),
+        );
+        assert_eq!(del_sign.fg, Some(Color::Red));
+        assert_eq!(del_sign.bg, None);
+    }
+    fn diff_summary_for_tests(changes: &HashMap<PathBuf, FileChange>) -> Vec<RtLine<'static>> {
+        create_diff_summary(changes, &PathBuf::from("/"), /*wrap_cols*/ 80)
+    }
+
+    fn snapshot_lines(name: &str, lines: Vec<RtLine<'static>>, width: u16, height: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|f| {
+                Paragraph::new(Text::from(lines))
+                    .wrap(Wrap { trim: false })
+                    .render_ref(f.area(), f.buffer_mut())
+            })
+            .expect("draw");
+        assert_snapshot!(name, terminal.backend());
+    }
+
+    fn display_width(text: &str) -> usize {
+        text.chars()
+            .map(|ch| ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 0 }))
+            .sum()
+    }
+
+    fn line_display_width(line: &RtLine<'static>) -> usize {
+        line.spans
+            .iter()
+            .map(|span| display_width(span.content.as_ref()))
+            .sum()
+    }
+
+    fn snapshot_lines_text(name: &str, lines: &[RtLine<'static>]) {
+        // Convert Lines to plain text rows and trim trailing spaces so it's
+        // easier to validate indentation visually in snapshots.
+        let text = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .map(|s| s.trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_snapshot!(name, text);
+    }
+
+    fn diff_gallery_changes() -> HashMap<PathBuf, FileChange> {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+
+        let rust_original =
+            "fn greet(name: &str) {\n    println!(\"hello\");\n    println!(\"bye\");\n}\n";
+        let rust_modified = "fn greet(name: &str) {\n    println!(\"hello {name}\");\n    println!(\"emoji: 🚀✨ and CJK: 你好世界\");\n}\n";
+        let rust_patch = diffy::create_patch(rust_original, rust_modified).to_string();
+        changes.insert(
+            PathBuf::from("src/lib.rs"),
+            FileChange::Update {
+                unified_diff: rust_patch,
+                move_path: None,
+            },
+        );
+
+        let py_original = "def add(a, b):\n\treturn a + b\n\nprint(add(1, 2))\n";
+        let py_modified = "def add(a, b):\n\treturn a + b + 42\n\nprint(add(1, 2))\n";
+        let py_patch = diffy::create_patch(py_original, py_modified).to_string();
+        changes.insert(
+            PathBuf::from("scripts/calc.txt"),
+            FileChange::Update {
+                unified_diff: py_patch,
+                move_path: Some(PathBuf::from("scripts/calc.py")),
+            },
+        );
+
+        changes.insert(
+            PathBuf::from("assets/banner.txt"),
+            FileChange::Add {
+                content: "HEADER\tVALUE\nrocket\t🚀\ncity\t東京\n".to_string(),
+            },
+        );
+        changes.insert(
+            PathBuf::from("examples/new_sample.rs"),
+            FileChange::Add {
+                content: "pub fn greet(name: &str) {\n    println!(\"Hello, {name}!\");\n}\n"
+                    .to_string(),
+            },
+        );
+
+        changes.insert(
+            PathBuf::from("tmp/obsolete.log"),
+            FileChange::Delete {
+                content: "old line 1\nold line 2\nold line 3\n".to_string(),
+            },
+        );
+        changes.insert(
+            PathBuf::from("legacy/old_script.py"),
+            FileChange::Delete {
+                content: "def legacy(x):\n    return x + 1\nprint(legacy(3))\n".to_string(),
+            },
+        );
+
+        changes
+    }
+
+    fn snapshot_diff_gallery(name: &str, width: u16, height: u16) {
+        let lines = create_diff_summary(
+            &diff_gallery_changes(),
+            &PathBuf::from("/"),
+            usize::from(width),
+        );
+        snapshot_lines(name, lines, width, height);
+    }
+
+    #[test]
+    fn display_path_prefers_cwd_without_git_repo() {
+        let cwd = if cfg!(windows) {
+            PathBuf::from(r"C:\workspace\codex")
+        } else {
+            PathBuf::from("/workspace/codex")
+        };
+        let path = cwd.join("tui").join("example.png");
+
+        let rendered = display_path_for(&path, &cwd);
+
+        assert_eq!(
+            rendered,
+            PathBuf::from("tui")
+                .join("example.png")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_wrap_behavior_insert() {
+        // Narrow width to force wrapping within our diff line rendering
+        let long_line = "this is a very long line that should wrap across multiple terminal columns and continue";
+
+        // Call the wrapping function directly so we can precisely control the width
+        let lines = push_wrapped_diff_line_with_style_context(
+            /*line_number*/ 1,
+            DiffLineType::Insert,
+            long_line,
+            /*width*/ 80,
+            line_number_width(/*max_line_number*/ 1),
+            current_diff_render_style_context(),
+        );
+
+        // Render into a small terminal to capture the visual layout
+        snapshot_lines(
+            "wrap_behavior_insert",
+            lines,
+            /*width*/ 90,
+            /*height*/ 8,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_update_block() {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        let original = "line one\nline two\nline three\n";
+        let modified = "line one\nline two changed\nline three\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        changes.insert(
+            PathBuf::from("example.txt"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: None,
+            },
+        );
+
+        let lines = diff_summary_for_tests(&changes);
+
+        snapshot_lines(
+            "apply_update_block",
+            lines,
+            /*width*/ 80,
+            /*height*/ 12,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_update_with_rename_block() {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        let original = "A\nB\nC\n";
+        let modified = "A\nB changed\nC\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        changes.insert(
+            PathBuf::from("old_name.rs"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: Some(PathBuf::from("new_name.rs")),
+            },
+        );
+
+        let lines = diff_summary_for_tests(&changes);
+
+        snapshot_lines(
+            "apply_update_with_rename_block",
+            lines,
+            /*width*/ 80,
+            /*height*/ 12,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_multiple_files_block() {
+        // Two files: one update and one add, to exercise combined header and per-file rows
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+
+        // File a.txt: single-line replacement (one delete, one insert)
+        let patch_a = diffy::create_patch("one\n", "one changed\n").to_string();
+        changes.insert(
+            PathBuf::from("a.txt"),
+            FileChange::Update {
+                unified_diff: patch_a,
+                move_path: None,
+            },
+        );
+
+        // File b.txt: newly added with one line
+        changes.insert(
+            PathBuf::from("b.txt"),
+            FileChange::Add {
+                content: "new\n".to_string(),
+            },
+        );
+
+        let lines = diff_summary_for_tests(&changes);
+
+        snapshot_lines(
+            "apply_multiple_files_block",
+            lines,
+            /*width*/ 80,
+            /*height*/ 14,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_add_block() {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("new_file.txt"),
+            FileChange::Add {
+                content: "alpha\nbeta\n".to_string(),
+            },
+        );
+
+        let lines = diff_summary_for_tests(&changes);
+
+        snapshot_lines(
+            "apply_add_block",
+            lines,
+            /*width*/ 80,
+            /*height*/ 10,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_delete_block() {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("tmp_delete_example.txt"),
+            FileChange::Delete {
+                content: "first\nsecond\nthird\n".to_string(),
+            },
+        );
+
+        let lines = diff_summary_for_tests(&changes);
+        snapshot_lines(
+            "apply_delete_block",
+            lines,
+            /*width*/ 80,
+            /*height*/ 12,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_update_block_wraps_long_lines() {
+        // Create a patch with a long modified line to force wrapping
+        let original = "line 1\nshort\nline 3\n";
+        let modified = "line 1\nshort this_is_a_very_long_modified_line_that_should_wrap_across_multiple_terminal_columns_and_continue_even_further_beyond_eighty_columns_to_force_multiple_wraps\nline 3\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("long_example.txt"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: None,
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 72);
+
+        // Render with backend width wider than wrap width to avoid Paragraph auto-wrap.
+        snapshot_lines(
+            "apply_update_block_wraps_long_lines",
+            lines,
+            /*width*/ 80,
+            /*height*/ 12,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_apply_update_block_wraps_long_lines_text() {
+        // This mirrors the desired layout example: sign only on first inserted line,
+        // subsequent wrapped pieces start aligned under the line number gutter.
+        let original = "1\n2\n3\n4\n";
+        let modified = "1\nadded long line which wraps and_if_there_is_a_long_token_it_will_be_broken\n3\n4 context line which also wraps across\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("wrap_demo.txt"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: None,
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 28);
+        snapshot_lines_text("apply_update_block_wraps_long_lines_text", &lines);
+    }
+
+    #[test]
+    fn ui_snapshot_apply_update_block_line_numbers_three_digits_text() {
+        let original = (1..=110).map(|i| format!("line {i}\n")).collect::<String>();
+        let modified = (1..=110)
+            .map(|i| {
+                if i == 100 {
+                    format!("line {i} changed\n")
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect::<String>();
+        let patch = diffy::create_patch(&original, &modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("hundreds.txt"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: None,
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 80);
+        snapshot_lines_text("apply_update_block_line_numbers_three_digits_text", &lines);
+    }
+
+    #[test]
+    fn ui_snapshot_apply_update_block_relativizes_path() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let abs_old = cwd.join("abs_old.rs");
+        let abs_new = cwd.join("abs_new.rs");
+
+        let original = "X\nY\n";
+        let modified = "X changed\nY\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            abs_old,
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: Some(abs_new),
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &cwd, /*wrap_cols*/ 80);
+
+        snapshot_lines(
+            "apply_update_block_relativizes_path",
+            lines,
+            /*width*/ 80,
+            /*height*/ 10,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_syntax_highlighted_insert_wraps() {
+        // A long Rust line that exceeds 80 cols with syntax highlighting should
+        // wrap to multiple output lines rather than being clipped.
+        let long_rust = "fn very_long_function_name(arg_one: String, arg_two: String, arg_three: String, arg_four: String) -> Result<String, Box<dyn std::error::Error>> { Ok(arg_one) }";
+
+        let syntax_spans =
+            highlight_code_to_styled_spans(long_rust, "rust").expect("rust highlighting");
+        let spans = &syntax_spans[0];
+
+        let lines = push_wrapped_diff_line_with_syntax_and_style_context(
+            /*line_number*/ 1,
+            DiffLineType::Insert,
+            long_rust,
+            /*width*/ 80,
+            line_number_width(/*max_line_number*/ 1),
+            spans,
+            current_diff_render_style_context(),
+        );
+
+        assert!(
+            lines.len() > 1,
+            "syntax-highlighted long line should wrap to multiple lines, got {}",
+            lines.len()
+        );
+
+        snapshot_lines(
+            "syntax_highlighted_insert_wraps",
+            lines,
+            /*width*/ 90,
+            /*height*/ 10,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_syntax_highlighted_insert_wraps_text() {
+        let long_rust = "fn very_long_function_name(arg_one: String, arg_two: String, arg_three: String, arg_four: String) -> Result<String, Box<dyn std::error::Error>> { Ok(arg_one) }";
+
+        let syntax_spans =
+            highlight_code_to_styled_spans(long_rust, "rust").expect("rust highlighting");
+        let spans = &syntax_spans[0];
+
+        let lines = push_wrapped_diff_line_with_syntax_and_style_context(
+            /*line_number*/ 1,
+            DiffLineType::Insert,
+            long_rust,
+            /*width*/ 80,
+            line_number_width(/*max_line_number*/ 1),
+            spans,
+            current_diff_render_style_context(),
+        );
+
+        snapshot_lines_text("syntax_highlighted_insert_wraps_text", &lines);
+    }
+
+    #[test]
+    fn ui_snapshot_diff_gallery_80x24() {
+        snapshot_diff_gallery("diff_gallery_80x24", /*width*/ 80, /*height*/ 24);
+    }
+
+    #[test]
+    fn ui_snapshot_diff_gallery_94x35() {
+        snapshot_diff_gallery("diff_gallery_94x35", /*width*/ 94, /*height*/ 35);
+    }
+
+    #[test]
+    fn ui_snapshot_diff_gallery_120x40() {
+        snapshot_diff_gallery(
+            "diff_gallery_120x40",
+            /*width*/ 120,
+            /*height*/ 40,
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_ansi16_insert_delete_no_background() {
+        let mut lines = push_wrapped_diff_line_inner_with_theme_and_color_level(
+            /*line_number*/ 1,
+            DiffLineType::Insert,
+            "added in ansi16 mode",
+            /*width*/ 80,
+            line_number_width(/*max_line_number*/ 2),
+            /*syntax_spans*/ None,
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi16,
+            fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16),
+        );
+        lines.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
+            /*line_number*/ 2,
+            DiffLineType::Delete,
+            "deleted in ansi16 mode",
+            /*width*/ 80,
+            line_number_width(/*max_line_number*/ 2),
+            /*syntax_spans*/ None,
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi16,
+            fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16),
+        ));
+
+        snapshot_lines(
+            "ansi16_insert_delete_no_background",
+            lines,
+            /*width*/ 40,
+            /*height*/ 4,
+        );
+    }
+
+    #[test]
+    fn truecolor_dark_theme_uses_configured_backgrounds() {
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Insert,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::TrueColor)
+            ),
+            Style::default().bg(rgb_color(DARK_TC_ADD_LINE_BG_RGB))
+        );
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Delete,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::TrueColor)
+            ),
+            Style::default().bg(rgb_color(DARK_TC_DEL_LINE_BG_RGB))
+        );
+        assert_eq!(
+            style_gutter_for(
+                DiffLineType::Insert,
+                DiffTheme::Dark,
+                DiffColorLevel::TrueColor
+            ),
+            style_gutter_dim()
+        );
+        assert_eq!(
+            style_gutter_for(
+                DiffLineType::Delete,
+                DiffTheme::Dark,
+                DiffColorLevel::TrueColor
+            ),
+            style_gutter_dim()
+        );
+    }
+
+    #[test]
+    fn ansi256_dark_theme_uses_distinct_add_and_delete_backgrounds() {
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Insert,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi256)
+            ),
+            Style::default().bg(indexed_color(DARK_256_ADD_LINE_BG_IDX))
+        );
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Delete,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi256)
+            ),
+            Style::default().bg(indexed_color(DARK_256_DEL_LINE_BG_IDX))
+        );
+        assert_ne!(
+            style_line_bg_for(
+                DiffLineType::Insert,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi256)
+            ),
+            style_line_bg_for(
+                DiffLineType::Delete,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi256)
+            ),
+            "256-color mode should keep add/delete backgrounds distinct"
+        );
+    }
+
+    #[test]
+    fn theme_scope_backgrounds_override_truecolor_fallback_when_available() {
+        let backgrounds = resolve_diff_backgrounds_for(
+            DiffTheme::Dark,
+            DiffColorLevel::TrueColor,
+            DiffScopeBackgroundRgbs {
+                inserted: Some((1, 2, 3)),
+                deleted: Some((4, 5, 6)),
+            },
+        );
+        assert_eq!(
+            style_line_bg_for(DiffLineType::Insert, backgrounds),
+            Style::default().bg(rgb_color((1, 2, 3)))
+        );
+        assert_eq!(
+            style_line_bg_for(DiffLineType::Delete, backgrounds),
+            Style::default().bg(rgb_color((4, 5, 6)))
+        );
+    }
+
+    #[test]
+    fn theme_scope_backgrounds_quantize_to_ansi256() {
+        let backgrounds = resolve_diff_backgrounds_for(
+            DiffTheme::Dark,
+            DiffColorLevel::Ansi256,
+            DiffScopeBackgroundRgbs {
+                inserted: Some((0, 95, 0)),
+                deleted: None,
+            },
+        );
+        assert_eq!(
+            style_line_bg_for(DiffLineType::Insert, backgrounds),
+            Style::default().bg(indexed_color(/*index*/ 22))
+        );
+        assert_eq!(
+            style_line_bg_for(DiffLineType::Delete, backgrounds),
+            Style::default().bg(indexed_color(DARK_256_DEL_LINE_BG_IDX))
+        );
+    }
+
+    #[test]
+    fn ui_snapshot_theme_scope_background_resolution() {
+        let backgrounds = resolve_diff_backgrounds_for(
+            DiffTheme::Dark,
+            DiffColorLevel::TrueColor,
+            DiffScopeBackgroundRgbs {
+                inserted: Some((12, 34, 56)),
+                deleted: None,
+            },
+        );
+        let snapshot = format!(
+            "insert={:?}\ndelete={:?}",
+            style_line_bg_for(DiffLineType::Insert, backgrounds).bg,
+            style_line_bg_for(DiffLineType::Delete, backgrounds).bg,
+        );
+        assert_snapshot!("theme_scope_background_resolution", snapshot);
+    }
+
+    #[test]
+    fn ansi16_disables_line_and_gutter_backgrounds() {
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Insert,
+                fallback_diff_backgrounds(DiffTheme::Dark, DiffColorLevel::Ansi16)
+            ),
+            Style::default()
+        );
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Delete,
+                fallback_diff_backgrounds(DiffTheme::Light, DiffColorLevel::Ansi16)
+            ),
+            Style::default()
+        );
+        assert_eq!(
+            style_gutter_for(
+                DiffLineType::Insert,
+                DiffTheme::Light,
+                DiffColorLevel::Ansi16
+            ),
+            Style::default().fg(Color::Black)
+        );
+        assert_eq!(
+            style_gutter_for(
+                DiffLineType::Delete,
+                DiffTheme::Light,
+                DiffColorLevel::Ansi16
+            ),
+            Style::default().fg(Color::Black)
+        );
+        let themed_backgrounds = resolve_diff_backgrounds_for(
+            DiffTheme::Light,
+            DiffColorLevel::Ansi16,
+            DiffScopeBackgroundRgbs {
+                inserted: Some((8, 9, 10)),
+                deleted: Some((11, 12, 13)),
+            },
+        );
+        assert_eq!(
+            style_line_bg_for(DiffLineType::Insert, themed_backgrounds),
+            Style::default()
+        );
+        assert_eq!(
+            style_line_bg_for(DiffLineType::Delete, themed_backgrounds),
+            Style::default()
+        );
+    }
+
+    #[test]
+    fn light_truecolor_theme_uses_readable_gutter_and_line_backgrounds() {
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Insert,
+                fallback_diff_backgrounds(DiffTheme::Light, DiffColorLevel::TrueColor)
+            ),
+            Style::default().bg(rgb_color(LIGHT_TC_ADD_LINE_BG_RGB))
+        );
+        assert_eq!(
+            style_line_bg_for(
+                DiffLineType::Delete,
+                fallback_diff_backgrounds(DiffTheme::Light, DiffColorLevel::TrueColor)
+            ),
+            Style::default().bg(rgb_color(LIGHT_TC_DEL_LINE_BG_RGB))
+        );
+        assert_eq!(
+            style_gutter_for(
+                DiffLineType::Insert,
+                DiffTheme::Light,
+                DiffColorLevel::TrueColor
+            ),
+            Style::default()
+                .fg(rgb_color(LIGHT_TC_GUTTER_FG_RGB))
+                .bg(rgb_color(LIGHT_TC_ADD_NUM_BG_RGB))
+        );
+        assert_eq!(
+            style_gutter_for(
+                DiffLineType::Delete,
+                DiffTheme::Light,
+                DiffColorLevel::TrueColor
+            ),
+            Style::default()
+                .fg(rgb_color(LIGHT_TC_GUTTER_FG_RGB))
+                .bg(rgb_color(LIGHT_TC_DEL_NUM_BG_RGB))
+        );
+    }
+
+    #[test]
+    fn light_theme_wrapped_lines_keep_number_gutter_contrast() {
+        let lines = push_wrapped_diff_line_inner_with_theme_and_color_level(
+            /*line_number*/ 12,
+            DiffLineType::Insert,
+            "abcdefghij",
+            /*width*/ 8,
+            line_number_width(/*max_line_number*/ 12),
+            /*syntax_spans*/ None,
+            DiffTheme::Light,
+            DiffColorLevel::TrueColor,
+            fallback_diff_backgrounds(DiffTheme::Light, DiffColorLevel::TrueColor),
+        );
+
+        assert!(
+            lines.len() > 1,
+            "expected wrapped output for gutter style verification"
+        );
+        assert_eq!(
+            lines[0].spans[0].style,
+            Style::default()
+                .fg(rgb_color(LIGHT_TC_GUTTER_FG_RGB))
+                .bg(rgb_color(LIGHT_TC_ADD_NUM_BG_RGB))
+        );
+        assert_eq!(
+            lines[1].spans[0].style,
+            Style::default()
+                .fg(rgb_color(LIGHT_TC_GUTTER_FG_RGB))
+                .bg(rgb_color(LIGHT_TC_ADD_NUM_BG_RGB))
+        );
+        assert_eq!(lines[0].style.bg, Some(rgb_color(LIGHT_TC_ADD_LINE_BG_RGB)));
+        assert_eq!(lines[1].style.bg, Some(rgb_color(LIGHT_TC_ADD_LINE_BG_RGB)));
+    }
+
+    #[test]
+    fn windows_terminal_promotes_ansi16_to_truecolor_for_diffs() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Ansi16,
+                TerminalName::WindowsTerminal,
+                /*has_wt_session*/ false,
+                /*has_force_color_override*/ false,
+            ),
+            DiffColorLevel::TrueColor
+        );
+    }
+
+    #[test]
+    fn wt_session_promotes_ansi16_to_truecolor_for_diffs() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Ansi16,
+                TerminalName::Unknown,
+                /*has_wt_session*/ true,
+                /*has_force_color_override*/ false,
+            ),
+            DiffColorLevel::TrueColor
+        );
+    }
+
+    #[test]
+    fn non_windows_terminal_keeps_ansi16_diff_palette() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Ansi16,
+                TerminalName::WezTerm,
+                /*has_wt_session*/ false,
+                /*has_force_color_override*/ false,
+            ),
+            DiffColorLevel::Ansi16
+        );
+    }
+
+    #[test]
+    fn wt_session_promotes_unknown_color_level_to_truecolor() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Unknown,
+                TerminalName::WindowsTerminal,
+                /*has_wt_session*/ true,
+                /*has_force_color_override*/ false,
+            ),
+            DiffColorLevel::TrueColor
+        );
+    }
+
+    #[test]
+    fn non_wt_windows_terminal_keeps_unknown_color_level_conservative() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Unknown,
+                TerminalName::WindowsTerminal,
+                /*has_wt_session*/ false,
+                /*has_force_color_override*/ false,
+            ),
+            DiffColorLevel::Ansi16
+        );
+    }
+
+    #[test]
+    fn explicit_force_override_keeps_ansi16_on_windows_terminal() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Ansi16,
+                TerminalName::WindowsTerminal,
+                /*has_wt_session*/ false,
+                /*has_force_color_override*/ true,
+            ),
+            DiffColorLevel::Ansi16
+        );
+    }
+
+    #[test]
+    fn explicit_force_override_keeps_ansi256_on_windows_terminal() {
+        assert_eq!(
+            diff_color_level_for_terminal(
+                StdoutColorLevel::Ansi256,
+                TerminalName::WindowsTerminal,
+                /*has_wt_session*/ true,
+                /*has_force_color_override*/ true,
+            ),
+            DiffColorLevel::Ansi256
+        );
+    }
+
+    #[test]
+    fn add_diff_uses_path_extension_for_highlighting() {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("highlight_add.rs"),
+            FileChange::Add {
+                content: "pub fn sum(a: i32, b: i32) -> i32 { a + b }\n".to_string(),
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 80);
+        let has_rgb = lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(..))))
+        });
+        assert!(
+            has_rgb,
+            "add diff for .rs file should produce syntax-highlighted (RGB) spans"
+        );
+    }
+
+    #[test]
+    fn delete_diff_uses_path_extension_for_highlighting() {
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("highlight_delete.py"),
+            FileChange::Delete {
+                content: "def scale(x):\n    return x * 2\n".to_string(),
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 80);
+        let has_rgb = lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(..))))
+        });
+        assert!(
+            has_rgb,
+            "delete diff for .py file should produce syntax-highlighted (RGB) spans"
+        );
+    }
+
+    #[test]
+    fn detect_lang_for_common_paths() {
+        // Standard extensions are detected.
+        assert!(detect_lang_for_path(Path::new("foo.rs")).is_some());
+        assert!(detect_lang_for_path(Path::new("bar.py")).is_some());
+        assert!(detect_lang_for_path(Path::new("app.tsx")).is_some());
+
+        // Extensionless files return None.
+        assert!(detect_lang_for_path(Path::new("Makefile")).is_none());
+        assert!(detect_lang_for_path(Path::new("randomfile")).is_none());
+    }
+
+    #[test]
+    fn wrap_styled_spans_single_line() {
+        // Content that fits in one line should produce exactly one chunk.
+        let spans = vec![RtSpan::raw("short")];
+        let result = wrap_styled_spans(&spans, /*max_cols*/ 80);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn wrap_styled_spans_splits_long_content() {
+        // Content wider than max_cols should produce multiple chunks.
+        let long_text = "a".repeat(100);
+        let spans = vec![RtSpan::raw(long_text)];
+        let result = wrap_styled_spans(&spans, /*max_cols*/ 40);
+        assert!(
+            result.len() >= 3,
+            "100 chars at 40 cols should produce at least 3 lines, got {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn wrap_styled_spans_flushes_at_span_boundary() {
+        // When span A fills exactly to max_cols and span B follows, the line
+        // must be flushed before B starts. Otherwise B's first character lands
+        // on an already-full line, producing over-width output.
+        let style_a = Style::default().fg(Color::Red);
+        let style_b = Style::default().fg(Color::Blue);
+        let spans = vec![
+            RtSpan::styled("aaaa", style_a), // 4 cols, fills line exactly at max_cols=4
+            RtSpan::styled("bb", style_b),   // should start on a new line
+        ];
+        let result = wrap_styled_spans(&spans, /*max_cols*/ 4);
+        assert_eq!(
+            result.len(),
+            2,
+            "span ending exactly at max_cols should flush before next span: {result:?}"
+        );
+        // First line should only contain the 'a' span.
+        let first_width: usize = result[0].iter().map(|s| s.content.chars().count()).sum();
+        assert!(
+            first_width <= 4,
+            "first line should be at most 4 cols wide, got {first_width}"
+        );
+    }
+
+    #[test]
+    fn wrap_styled_spans_preserves_styles() {
+        // Verify that styles survive split boundaries.
+        let style = Style::default().fg(Color::Green);
+        let text = "x".repeat(50);
+        let spans = vec![RtSpan::styled(text, style)];
+        let result = wrap_styled_spans(&spans, /*max_cols*/ 20);
+        for chunk in &result {
+            for span in chunk {
+                assert_eq!(span.style, style, "style should be preserved across wraps");
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_styled_spans_tabs_have_visible_width() {
+        // A tab should count as TAB_WIDTH columns, not zero.
+        // With max_cols=8, a tab (4 cols) + "abcde" (5 cols) = 9 cols → must wrap.
+        let spans = vec![RtSpan::raw("\tabcde")];
+        let result = wrap_styled_spans(&spans, /*max_cols*/ 8);
+        assert!(
+            result.len() >= 2,
+            "tab + 5 chars should exceed 8 cols and wrap, got {} line(s): {result:?}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn wrap_styled_spans_wraps_before_first_overflowing_char() {
+        let spans = vec![RtSpan::raw("abcd\t界")];
+        let result = wrap_styled_spans(&spans, /*max_cols*/ 5);
+
+        let line_text: Vec<String> = result
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(line_text, vec!["abcd", "\t", "界"]);
+
+        let line_width = |line: &[RtSpan<'static>]| -> usize {
+            line.iter()
+                .flat_map(|span| span.content.chars())
+                .map(|ch| ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 0 }))
+                .sum()
+        };
+        for line in &result {
+            assert!(
+                line_width(line) <= 5,
+                "wrapped line exceeded width 5: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_wrapping_uses_display_width_for_tabs_and_wide_chars() {
+        let width = 8;
+        let lines = push_wrapped_diff_line_with_style_context(
+            /*line_number*/ 1,
+            DiffLineType::Insert,
+            "abcd\t界🙂",
+            width,
+            line_number_width(/*max_line_number*/ 1),
+            current_diff_render_style_context(),
+        );
+
+        assert!(lines.len() >= 2, "expected wrapped output, got {lines:?}");
+        for line in &lines {
+            assert!(
+                line_display_width(line) <= width,
+                "fallback wrapped line exceeded width {width}: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn large_update_diff_skips_highlighting() {
+        // Build a patch large enough to exceed MAX_HIGHLIGHT_LINES (10_000).
+        // Without the pre-check this would attempt 10k+ parser initializations.
+        let line_count = 10_500;
+        let original: String = (0..line_count).map(|i| format!("line {i}\n")).collect();
+        let modified: String = (0..line_count)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("line {i} changed\n")
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect();
+        let patch = diffy::create_patch(&original, &modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("huge.rs"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: None,
+            },
+        );
+
+        // Should complete quickly (no per-line parser init). If guardrails
+        // are bypassed this would be extremely slow.
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 80);
+
+        // The diff rendered without timing out — the guardrails prevented
+        // thousands of per-line parser initializations.  Verify we actually
+        // got output (the patch is non-empty).
+        assert!(
+            lines.len() > 100,
+            "expected many output lines from large diff, got {}",
+            lines.len(),
+        );
+
+        // No span should contain an RGB foreground color (syntax themes
+        // produce RGB; plain diff styles only use named Color variants).
+        for line in &lines {
+            for span in &line.spans {
+                if let Some(ratatui::style::Color::Rgb(..)) = span.style.fg {
+                    panic!(
+                        "large diff should not have syntax-highlighted spans, \
+                         got RGB color in style {:?} for {:?}",
+                        span.style, span.content,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rename_diff_uses_destination_extension_for_highlighting() {
+        // A rename from an unknown extension to .rs should highlight as Rust.
+        // Without the fix, detect_lang_for_path uses the source path (.xyzzy),
+        // which has no syntax definition, so highlighting is skipped.
+        let original = "fn main() {}\n";
+        let modified = "fn main() { println!(\"hi\"); }\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("foo.xyzzy"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: Some(PathBuf::from("foo.rs")),
+            },
+        );
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 80);
+        let has_rgb = lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(..))))
+        });
+        assert!(
+            has_rgb,
+            "rename from .xyzzy to .rs should produce syntax-highlighted (RGB) spans"
+        );
+    }
+
+    #[test]
+    fn update_diff_preserves_multiline_highlight_state_within_hunk() {
+        let original = "fn demo() {\n    let s = \"hello\";\n}\n";
+        let modified = "fn demo() {\n    let s = \"hello\nworld\";\n}\n";
+        let patch = diffy::create_patch(original, modified).to_string();
+
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        changes.insert(
+            PathBuf::from("demo.rs"),
+            FileChange::Update {
+                unified_diff: patch,
+                move_path: None,
+            },
+        );
+
+        let expected_multiline =
+            highlight_code_to_styled_spans("    let s = \"hello\nworld\";\n", "rust")
+                .expect("rust highlighting");
+        let expected_style = expected_multiline
+            .get(1)
+            .and_then(|line| {
+                line.iter()
+                    .find(|span| span.content.as_ref().contains("world"))
+            })
+            .map(|span| span.style)
+            .expect("expected highlighted span for second multiline string line");
+
+        let lines = create_diff_summary(&changes, &PathBuf::from("/"), /*wrap_cols*/ 120);
+        let actual_style = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref().contains("world"))
+            .map(|span| span.style)
+            .expect("expected rendered diff span containing 'world'");
+
+        assert_eq!(actual_style, expected_style);
+    }
 }
-
-#[allow(dead_code)]
-fn style_del() -> Style {
-    // Use theme error color for deletions so it adapts to light/dark themes
-    Style::default().fg(crate::colors::error())
-}
-
-// --- Very light tinted backgrounds for insert/delete lines ------------------
-use ratatui::style::Color;
-
-fn success_tint() -> Color {
-    crate::colors::tint_background_toward(crate::colors::success())
-}
-
-fn error_tint() -> Color {
-    crate::colors::tint_background_toward(crate::colors::error())
-}
-
-// Removed per-line tinted backgrounds per design feedback

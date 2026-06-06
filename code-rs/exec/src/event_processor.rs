@@ -1,22 +1,31 @@
 use std::path::Path;
 
-use code_core::config::Config;
-use code_core::protocol::Event;
+use codex_app_server_protocol::ServerNotification;
+use codex_core::config::Config;
+use codex_protocol::protocol::SessionConfiguredEvent;
 
-pub(crate) enum CodexStatus {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexStatus {
     Running,
     InitiateShutdown,
-    Shutdown,
 }
 
 pub(crate) trait EventProcessor {
     /// Print summary of effective configuration and user prompt.
-    fn print_config_summary(&mut self, config: &Config, prompt: &str);
+    fn print_config_summary(
+        &mut self,
+        config: &Config,
+        prompt: &str,
+        session_configured: &SessionConfiguredEvent,
+    );
 
-    /// Handle a single event emitted by the agent.
-    fn process_event(&mut self, event: Event) -> CodexStatus;
+    /// Handle a single typed app-server notification emitted by the agent.
+    fn process_server_notification(&mut self, notification: ServerNotification) -> CodexStatus;
 
-    // No exit_code method; CLI controls process exit based on core events.
+    /// Handle a local exec warning that is not represented as an app-server notification.
+    fn process_warning(&mut self, message: String) -> CodexStatus;
+
+    fn print_final_output(&mut self) {}
 }
 
 pub(crate) fn handle_last_message(last_agent_message: Option<&str>, output_file: &Path) {
@@ -31,9 +40,9 @@ pub(crate) fn handle_last_message(last_agent_message: Option<&str>, output_file:
 }
 
 fn write_last_message_file(contents: &str, last_message_path: Option<&Path>) {
-    if let Some(path) = last_message_path {
-        if let Err(e) = std::fs::write(path, contents) {
-            eprintln!("Failed to write last message file {path:?}: {e}");
-        }
+    if let Some(path) = last_message_path
+        && let Err(e) = std::fs::write(path, contents)
+    {
+        eprintln!("Failed to write last message file {path:?}: {e}");
     }
 }

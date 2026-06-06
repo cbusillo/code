@@ -1,530 +1,944 @@
-use std::env;
+use std::fmt;
+use std::future::Future;
+use std::io::IsTerminal;
 use std::io::Result;
 use std::io::Stdout;
-use std::io::stdout;
-use std::io::BufWriter;
 use std::io::Write;
-use std::process::Command;
+use std::io::stdin;
+use std::io::stdout;
+use std::panic;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-use code_core::config::Config;
-use crossterm::cursor::MoveTo;
+use crossterm::Command;
+use crossterm::SynchronizedUpdate;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::DisableBracketedPaste;
-use crossterm::event::DisableMouseCapture;
 use crossterm::event::DisableFocusChange;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::event::EnableFocusChange;
-use crossterm::event::KeyboardEnhancementFlags;
-use crossterm::event::PopKeyboardEnhancementFlags;
-use crossterm::event::PushKeyboardEnhancementFlags;
-use crossterm::style::SetColors;
-use crossterm::style::{Color as CtColor, SetBackgroundColor, SetForegroundColor};
-use crossterm::style::Print;
-use crossterm::style::ResetColor;
-use crossterm::cursor::MoveToNextLine;
-use crossterm::terminal::Clear;
-use crossterm::terminal::ClearType;
-use ratatui::Terminal;
+use crossterm::event::KeyEvent;
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::terminal::LeaveAlternateScreen;
+#[cfg(not(unix))]
+use crossterm::terminal::supports_keyboard_enhancement;
+use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::disable_raw_mode;
 use ratatui::crossterm::terminal::enable_raw_mode;
-use crossterm::terminal::supports_keyboard_enhancement;
-use ratatui_image::picker::Picker;
+use ratatui::layout::Offset;
+use ratatui::layout::Position;
+use ratatui::layout::Rect;
+use ratatui::layout::Size;
+use ratatui::text::Line;
+use tokio::sync::broadcast;
+use tokio_stream::Stream;
+
+pub use self::frame_requester::FrameRequester;
+use crate::custom_terminal;
+use crate::custom_terminal::Terminal as CustomTerminal;
+use crate::insert_history::HistoryLineWrapPolicy;
+use crate::notifications::DesktopNotificationBackend;
+use crate::notifications::detect_backend;
+use crate::tui::event_stream::EventBroker;
+use crate::tui::event_stream::TuiEventStream;
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use crate::tui::job_control::SuspendContext;
+use codex_config::types::NotificationCondition;
+use codex_config::types::NotificationMethod;
+
+mod event_stream;
+mod frame_rate_limiter;
+mod frame_requester;
+#[cfg(unix)]
+mod job_control;
+mod keyboard_modes;
+
+/// Target frame interval for UI redraw scheduling.
+pub(crate) const TARGET_FRAME_INTERVAL: Duration = frame_rate_limiter::MIN_FRAME_INTERVAL;
 
 /// A type alias for the terminal type used in this application
-pub type Tui = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
+pub type Terminal = CustomTerminal<CrosstermBackend<Stdout>>;
 
-/// Terminal information queried at startup
-#[derive(Clone)]
-pub struct TerminalInfo {
-    /// The image picker with detected capabilities
-    pub picker: Option<Picker>,
-    /// Measured font size (width, height) in pixels
-    pub font_size: (u16, u16),
+pub(crate) fn running_in_vscode_terminal() -> bool {
+    keyboard_modes::running_in_vscode_terminal()
 }
 
-impl std::fmt::Debug for TerminalInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TerminalInfo")
-            .field("picker", &self.picker.is_some())
-            .field("font_size", &self.font_size)
-            .finish()
+fn should_emit_notification(condition: NotificationCondition, terminal_focused: bool) -> bool {
+    match condition {
+        NotificationCondition::Unfocused => !terminal_focused,
+        NotificationCondition::Always => true,
     }
-}
-
-/// Initialize the terminal (full screen mode with alternate screen)
-pub fn init(config: &Config) -> Result<(Tui, TerminalInfo)> {
-    // Initialize the theme based on config
-    crate::theme::init_theme(&config.tui.theme);
-    // Initialize spinner selection and register custom spinners from config
-    crate::spinner::init_spinner(&config.tui.spinner.name);
-    if !config.tui.spinner.custom.is_empty() {
-        let mut custom = Vec::new();
-        for (name, cs) in &config.tui.spinner.custom {
-            let label = cs
-                .label
-                .clone()
-                .unwrap_or_else(|| crate::spinner::spinner_label_for(name));
-            custom.push(crate::spinner::Spinner {
-                name: name.clone(),
-                label,
-                group: "Custom".to_string(),
-                interval_ms: cs.interval,
-                frames: cs.frames.clone(),
-            });
-        }
-        crate::spinner::set_custom_spinners(custom);
-    }
-    // Initialize syntax highlighting preference from config
-    crate::syntax_highlight::init_highlight_from_config(&config.tui.highlight);
-
-    execute!(stdout(), EnableBracketedPaste)?;
-    enable_alternate_scroll_mode()?;
-    // Enable focus change events so we can detect when the terminal window/tab
-    // regains focus and proactively repaint the UI (helps terminals that clear
-    // their alt‑screen buffer while unfocused). However, certain environments
-    // (notably Windows Terminal running Git Bash/MSYS and some legacy Windows
-    // terminals) will echo ESC [ I / ESC [ O literally ("[I", "[O") and may
-    // disrupt input handling. Apply a conservative heuristic and allow users to
-    // override via env vars:
-    //   - CODE_DISABLE_FOCUS=1 forces off
-    //   - CODE_ENABLE_FOCUS=1 forces on
-    if should_enable_focus_change() {
-        let _ = execute!(stdout(), EnableFocusChange);
-    } else {
-        tracing::info!(
-            "Focus tracking disabled (heuristic). Set CODE_ENABLE_FOCUS=1 to force on."
-        );
-    }
-
-    // Enter alternate screen mode for full screen TUI
-    execute!(stdout(), crossterm::terminal::EnterAlternateScreen)?;
-
-    // Query terminal capabilities and font size after entering alternate screen
-    // but before enabling raw mode
-    let terminal_info = query_terminal_info();
-
-    enable_raw_mode()?;
-    // Enable keyboard enhancement flags only when supported *and* the current
-    // terminal environment is known to handle them reliably. Some Windows
-    // terminal stacks (including WSL/ConPTY-derived PTYs) can report support
-    // but still deliver broken input when these flags are enabled.
-    if supports_keyboard_enhancement().unwrap_or(false) && should_enable_keyboard_enhancement() {
-        let _ = execute!(
-            stdout(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-            )
-        );
-    } else {
-        tracing::info!("Keyboard enhancement flags unsupported or disabled; skipping enable.");
-    }
-    set_panic_hook();
-
-    // Clear screen with theme background color
-    let theme_bg = crate::colors::background();
-    let theme_fg = crate::colors::text();
-    execute!(
-        stdout(),
-        SetColors(crossterm::style::Colors::new(
-            theme_fg.into(),
-            theme_bg.into()
-        )),
-        Clear(ClearType::All),
-        MoveTo(0, 0),
-        crossterm::terminal::SetTitle("Code"),
-        crossterm::terminal::EnableLineWrap
-    )?;
-
-    // Some terminals (notably macOS Terminal.app with certain profiles)
-    // clear to the terminal's default background color instead of the
-    // currently set background attribute. Proactively painting the full
-    // screen with our theme bg fixes that — but doing so on Windows Terminal
-    // has been reported to cause broken colors/animation for some users.
-    //
-    // Restrict the explicit paint to terminals that benefit from it and skip
-    // it on Windows Terminal (TERM_PROGRAM=Windows_Terminal or WT_SESSION set).
-    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    let is_windows_terminal = term_program == "Windows_Terminal" || std::env::var("WT_SESSION").is_ok();
-    let should_paint_bg = if term_program == "Apple_Terminal" {
-        true
-    } else if is_windows_terminal {
-        false
-    } else {
-        // For other terminals, be conservative and skip unless a user opts in
-        // via CODE_FORCE_FULL_BG_PAINT=1.
-        std::env::var("CODE_FORCE_FULL_BG_PAINT").map(|v| v == "1").unwrap_or(false)
-    };
-
-    if should_paint_bg {
-        if let Ok((cols, rows)) = crossterm::terminal::size() {
-            // Build a single line of spaces once to reduce allocations.
-            let blank = " ".repeat(cols as usize);
-            // Set explicit fg/bg to the theme's colors while painting.
-            execute!(stdout(), SetForegroundColor(CtColor::from(theme_fg)), SetBackgroundColor(CtColor::from(theme_bg)))?;
-            for y in 0..rows {
-                execute!(stdout(), MoveTo(0, y), Print(&blank))?;
-            }
-            // Restore cursor to home and keep our colors configured for subsequent drawing.
-            // Avoid ResetColor here to prevent some terminals from flashing to their
-            // profile default background (e.g., white) between frames.
-            execute!(stdout(), MoveTo(0, 0), SetColors(crossterm::style::Colors::new(theme_fg.into(), theme_bg.into())))?;
-        }
-    }
-
-    // Wrap stdout in a larger BufWriter to reduce syscalls and flushes.
-    // A larger buffer significantly helps during heavy scrolling where many cells change.
-    let backend = CrosstermBackend::new(BufWriter::with_capacity(512 * 1024, stdout()));
-    let tui = Terminal::new(backend)?;
-    Ok((tui, terminal_info))
-}
-
-/// Query terminal capabilities before entering raw mode
-fn query_terminal_info() -> TerminalInfo {
-    if should_skip_terminal_capability_queries() {
-        tracing::info!(
-            "Skipping terminal capability queries because the tmux session has no attached clients"
-        );
-        return TerminalInfo {
-            picker: None,
-            font_size: default_terminal_font_size(),
-        };
-    }
-
-    // Try to query using ratatui_image's picker
-    let picker = match Picker::from_query_stdio() {
-        Ok(p) => {
-            tracing::info!("Successfully queried terminal capabilities via Picker");
-            Some(p)
-        }
-        Err(e) => {
-            tracing::warn!("Failed to query terminal via Picker: {}", e);
-            None
-        }
-    };
-
-    // Get font size from picker if available, otherwise fall back to terminal_info query
-    let font_size = if let Some(ref p) = picker {
-        // The picker has font size information
-        let (w, h) = p.font_size();
-        tracing::info!("Got font size from Picker: {}x{}", w, h);
-        (w, h)
-    } else {
-        // Fall back to our own terminal query
-        crate::terminal_info::get_cell_size_pixels().unwrap_or_else(|| {
-            tracing::warn!("Failed to get cell size, using defaults");
-            default_terminal_font_size()
-        })
-    };
-
-    TerminalInfo { picker, font_size }
-}
-
-fn default_terminal_font_size() -> (u16, u16) {
-    if std::env::var("TERM_PROGRAM").unwrap_or_default() == "iTerm.app" {
-        (7, 15)
-    } else {
-        (8, 16)
-    }
-}
-
-fn should_skip_terminal_capability_queries() -> bool {
-    if std::env::var_os("CODE_FORCE_TERMINAL_CAPABILITY_QUERIES").is_some() {
-        return false;
-    }
-
-    if std::env::var_os("TMUX").is_none() {
-        return false;
-    }
-
-    match tmux_session_attached() {
-        Some(true) => false,
-        Some(false) | None => true,
-    }
-}
-
-fn tmux_session_attached() -> Option<bool> {
-    let mut command = Command::new("tmux");
-    command.args(["display-message", "-p", "#{session_attached}"]);
-    if let Some(pane) = std::env::var_os("TMUX_PANE") {
-        command.arg("-t").arg(pane);
-    }
-
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    parse_tmux_session_attached_output(&output.stdout)
-}
-
-fn parse_tmux_session_attached_output(output: &[u8]) -> Option<bool> {
-    match std::str::from_utf8(output).ok()?.trim() {
-        "0" => Some(false),
-        "1" => Some(true),
-        _ => None,
-    }
-}
-
-fn set_panic_hook() {
-    crate::install_unified_panic_hook();
-}
-
-/// Restore the terminal to its original state
-pub fn restore() -> Result<()> {
-    // Pop may fail on platforms that didn't support the push; ignore errors.
-    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    // Belt-and-suspenders: on terminals that do not maintain a clean stack,
-    // explicitly set enhancement flags to empty, then pop again. This avoids
-    // leaving kitty/xterm enhanced keyboard protocols active after exit.
-    if supports_keyboard_enhancement().unwrap_or(false) && should_enable_keyboard_enhancement() {
-        let _ = execute!(stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::empty()));
-        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    }
-    disable_alternate_scroll_mode()?;
-    execute!(stdout(), DisableBracketedPaste)?;
-    // Best‑effort: disable focus change notifications if supported.
-    let _ = execute!(stdout(), DisableFocusChange);
-    execute!(stdout(), DisableMouseCapture)?;
-    disable_raw_mode()?;
-    // Leave alternate screen mode
-    execute!(stdout(), crossterm::terminal::LeaveAlternateScreen)?;
-    // Reset colors and move to a fresh line so the shell prompt doesn't
-    // overlap any residual UI.
-    execute!(stdout(), ResetColor, MoveToNextLine(1))?;
-    Ok(())
-}
-
-/// Leave only the alternate screen, keeping raw mode and input configuration intact.
-/// This is used for the Ctrl+T "standard terminal" mode so users can scroll
-/// and select text in the host terminal.
-pub fn leave_alt_screen_only() -> Result<()> {
-    // Best effort: disable mouse capture so selection/scroll works naturally.
-    let _ = execute!(stdout(), DisableMouseCapture);
-    // Also disable bracketed paste and focus tracking to avoid escape sequences
-    // being echoed into the normal buffer by some terminals.
-    let _ = execute!(stdout(), DisableBracketedPaste);
-    let _ = execute!(stdout(), DisableFocusChange);
-    let _ = disable_alternate_scroll_mode();
-    // Pop keyboard enhancement flags so keys like Enter/Arrows don't emit
-    // enhanced escape sequences (e.g., kitty/xterm modifyOtherKeys) into the buffer.
-    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    if supports_keyboard_enhancement().unwrap_or(false) && should_enable_keyboard_enhancement() {
-        let _ = execute!(stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::empty()));
-        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    }
-    execute!(stdout(), crossterm::terminal::LeaveAlternateScreen)?;
-    Ok(())
-}
-
-/// Re-enter the alternate screen without reinitializing global state.
-/// Restores title and colors and performs a full clear to ensure a clean frame.
-pub fn enter_alt_screen_only(theme_fg: ratatui::style::Color, theme_bg: ratatui::style::Color) -> Result<()> {
-    // Re-enable enhanced keyboard and focus/paste signaling for full TUI fidelity.
-    if supports_keyboard_enhancement().unwrap_or(false) && should_enable_keyboard_enhancement() {
-        let _ = execute!(
-            stdout(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-            )
-        );
-    }
-    if should_enable_focus_change() {
-        let _ = execute!(stdout(), EnableFocusChange);
-    }
-    let _ = execute!(stdout(), EnableBracketedPaste);
-    let _ = enable_alternate_scroll_mode();
-    execute!(
-        stdout(),
-        crossterm::terminal::EnterAlternateScreen,
-        SetColors(crossterm::style::Colors::new(theme_fg.into(), theme_bg.into())),
-        Clear(ClearType::All),
-        MoveTo(0, 0),
-        crossterm::terminal::SetTitle("Code"),
-        crossterm::terminal::EnableLineWrap
-    )?;
-    Ok(())
-}
-
-fn enable_alternate_scroll_mode() -> Result<()> {
-    if !should_enable_alternate_scroll_mode() {
-        return Ok(());
-    }
-    let mut handle = stdout();
-    handle.write_all(b"\x1b[?1007h")?;
-    handle.flush()?;
-    Ok(())
-}
-
-fn disable_alternate_scroll_mode() -> Result<()> {
-    if !should_enable_alternate_scroll_mode() {
-        return Ok(());
-    }
-    let mut handle = stdout();
-    handle.write_all(b"\x1b[?1007l")?;
-    handle.flush()?;
-    Ok(())
-}
-
-/// Best-effort readiness check to avoid blocking writes when the terminal/PTY
-/// consumer is paused (e.g., when the display sleeps). Falls back to writable
-/// on poll errors or non-Unix platforms.
-#[cfg(unix)]
-pub fn stdout_ready_for_writes() -> bool {
-    use libc::{poll, pollfd, POLLOUT};
-
-    let fd = std::io::stdout().as_raw_fd();
-    let mut fds = pollfd {
-        fd,
-        events: POLLOUT,
-        revents: 0,
-    };
-    let rc = unsafe { poll(&mut fds, 1, 0) };
-    if rc < 0 {
-        return true;
-    }
-    fds.revents & POLLOUT != 0
-}
-
-#[cfg(not(unix))]
-pub fn stdout_ready_for_writes() -> bool {
-    true
-}
-
-fn should_enable_alternate_scroll_mode() -> bool {
-    // macOS Terminal hijacks scrolling when 1007h is set without also enabling
-    // mouse reporting, so skip the escape in that environment.
-    !matches!(env::var("TERM_PROGRAM"), Ok(value) if value.eq_ignore_ascii_case("Apple_Terminal"))
-}
-
-/// Clear the current screen (normal buffer) with the theme background and reset cursor.
-// Removed: clear_screen_with_theme — we no longer hard-clear the normal buffer in terminal mode.
-
-/// Determine whether to enable xterm focus change tracking for the current
-/// environment. We default to enabling on modern terminals, but disable for
-/// known-problematic combinations — especially Windows Terminal + Git Bash
-/// (MSYS) — where focus sequences may be echoed as text and interfere with
-/// input. Users can force behavior with env overrides.
-fn should_enable_focus_change() -> bool {
-    use std::env;
-
-    // Hard overrides first
-    if env::var("CODE_DISABLE_FOCUS").map(|v| v == "1").unwrap_or(false) {
-        return false;
-    }
-    if env::var("CODE_ENABLE_FOCUS").map(|v| v == "1").unwrap_or(false) {
-        return true;
-    }
-
-    let term = env::var("TERM").unwrap_or_default().to_lowercase();
-
-    // Disable on terminals that are frequently problematic with DECSET 1004
-    // (focus tracking) on Windows or MSYS stacks.
-    #[cfg(windows)]
-    {
-        let term_program = env::var("TERM_PROGRAM").unwrap_or_default().to_lowercase();
-        let is_windows_terminal = !env::var("WT_SESSION").unwrap_or_default().is_empty()
-            || term_program.contains("windows_terminal");
-        let is_msys = env::var("MSYSTEM").is_ok(); // Git Bash / MSYS2
-        let looks_like_mintty = term_program.contains("mintty")
-            || env::var("TERM_PROGRAM").unwrap_or_default().contains("mintty");
-        let looks_like_conemu = term_program.contains("conemu") || term_program.contains("cmder");
-
-        if is_msys || looks_like_mintty || looks_like_conemu || (is_windows_terminal && is_msys) {
-            return false;
-        }
-    }
-
-    // Very old / limited terminals
-    if term == "dumb" {
-        return false;
-    }
-
-    // Default: enabled for modern terminals (xterm-256color, iTerm2, Alacritty, kitty, tmux, etc.)
-    true
-}
-
-pub(crate) fn should_enable_keyboard_enhancement() -> bool {
-    // Hard overrides first
-    if env::var("CODE_DISABLE_KBD_ENHANCEMENT")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    if env::var("CODE_ENABLE_KBD_ENHANCEMENT")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    // Windows Terminal + ConPTY/WSL stacks are a frequent source of flaky input
-    // when keyboard enhancement flags are enabled.
-    if env::var("WT_SESSION").is_ok() {
-        return false;
-    }
-
-    // Git Bash / MSYS2 frequently struggles with these sequences.
-    if env::var("MSYSTEM").is_ok() {
-        return false;
-    }
-
-    true
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_tmux_session_attached_output;
-    use super::should_enable_keyboard_enhancement;
+    use std::io::Write as _;
+
+    use super::clear_for_viewport_change;
+    use super::should_emit_notification;
+    use crate::custom_terminal::Terminal as CustomTerminal;
+    use crate::test_backend::VT100Backend;
+    use codex_config::types::NotificationCondition;
+    use ratatui::layout::Position;
+    use ratatui::layout::Rect;
 
     #[test]
-    fn parse_tmux_session_attached_values() {
-        assert_eq!(parse_tmux_session_attached_output(b"0\n"), Some(false));
-        assert_eq!(parse_tmux_session_attached_output(b"1\n"), Some(true));
-        assert_eq!(parse_tmux_session_attached_output(b""), None);
-        assert_eq!(parse_tmux_session_attached_output(b"not-a-bool\n"), None);
-        assert_eq!(parse_tmux_session_attached_output(b"2\n"), None);
+    fn unfocused_notification_condition_is_suppressed_when_focused() {
+        assert!(!should_emit_notification(
+            NotificationCondition::Unfocused,
+            /*terminal_focused*/ true
+        ));
     }
 
     #[test]
-    fn keyboard_enhancement_respects_env_overrides() {
-        let prev_wt_session = std::env::var("WT_SESSION").ok();
-        let prev_enable = std::env::var("CODE_ENABLE_KBD_ENHANCEMENT").ok();
-        let prev_disable = std::env::var("CODE_DISABLE_KBD_ENHANCEMENT").ok();
-
-        unsafe {
-            std::env::set_var("WT_SESSION", "1");
-            std::env::remove_var("CODE_ENABLE_KBD_ENHANCEMENT");
-            std::env::remove_var("CODE_DISABLE_KBD_ENHANCEMENT");
-        }
-        assert!(!should_enable_keyboard_enhancement());
-
-        unsafe {
-            std::env::set_var("CODE_ENABLE_KBD_ENHANCEMENT", "1");
-        }
-        assert!(should_enable_keyboard_enhancement());
-
-        unsafe {
-            std::env::set_var("CODE_DISABLE_KBD_ENHANCEMENT", "1");
-        }
-        assert!(!should_enable_keyboard_enhancement());
-
-        restore_env("WT_SESSION", prev_wt_session);
-        restore_env("CODE_ENABLE_KBD_ENHANCEMENT", prev_enable);
-        restore_env("CODE_DISABLE_KBD_ENHANCEMENT", prev_disable);
+    fn always_notification_condition_emits_when_focused() {
+        assert!(should_emit_notification(
+            NotificationCondition::Always,
+            /*terminal_focused*/ true
+        ));
     }
 
-    fn restore_env(key: &str, value: Option<String>) {
-        match value {
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            None => unsafe { std::env::remove_var(key) },
+    #[test]
+    fn unfocused_notification_condition_emits_when_unfocused() {
+        assert!(should_emit_notification(
+            NotificationCondition::Unfocused,
+            /*terminal_focused*/ false
+        ));
+    }
+
+    #[test]
+    fn first_viewport_change_clears_from_new_viewport_when_old_viewport_is_empty() {
+        let width = 12;
+        let height = 4;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal =
+            CustomTerminal::with_options_and_cursor_position(backend, Position { x: 0, y: 1 })
+                .expect("terminal");
+        write!(
+            terminal.backend_mut(),
+            "shell line\r\nstale cells\r\nmore stale"
+        )
+        .expect("prefill terminal");
+
+        clear_for_viewport_change(
+            &mut terminal,
+            Rect::new(
+                /*x*/ 0,
+                /*y*/ 1,
+                /*width*/ width,
+                /*height*/ height - 1,
+            ),
+        )
+        .expect("clear transition");
+
+        let rows: Vec<String> = terminal
+            .backend()
+            .vt100()
+            .screen()
+            .rows(/*start*/ 0, width)
+            .collect();
+        assert!(
+            rows[0].contains("shell line"),
+            "expected content before the viewport to remain visible, rows: {rows:?}"
+        );
+        assert!(
+            !rows.iter().skip(1).any(|row| row.contains("stale")),
+            "expected stale cells inside the new viewport to be cleared, rows: {rows:?}"
+        );
+    }
+}
+
+pub fn set_modes() -> Result<()> {
+    execute!(stdout(), EnableBracketedPaste)?;
+
+    enable_raw_mode()?;
+    // Enable keyboard enhancement flags so modifiers for keys like Enter are disambiguated.
+    // chat_composer.rs is using a keyboard event listener to enter for any modified keys
+    // to create a new line that require this.
+    // Some terminals (notably legacy Windows consoles) do not support
+    // keyboard enhancement flags. Attempt to enable them, but continue
+    // gracefully if unsupported.
+    keyboard_modes::enable_keyboard_enhancement();
+
+    let _ = execute!(stdout(), EnableFocusChange);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableAlternateScroll;
+
+impl Command for EnableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> Result<()> {
+        Err(std::io::Error::other(
+            "tried to execute EnableAlternateScroll using WinAPI; use ANSI instead",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScroll;
+
+impl Command for DisableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> Result<()> {
+        Err(std::io::Error::other(
+            "tried to execute DisableAlternateScroll using WinAPI; use ANSI instead",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawModeRestore {
+    Disable,
+    Keep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardRestore {
+    PopStack,
+    ResetAfterExit,
+}
+
+fn restore_common(
+    raw_mode_restore: RawModeRestore,
+    keyboard_restore: KeyboardRestore,
+) -> Result<()> {
+    match keyboard_restore {
+        KeyboardRestore::PopStack => keyboard_modes::restore_keyboard_enhancement_stack(),
+        KeyboardRestore::ResetAfterExit => keyboard_modes::reset_keyboard_reporting_after_exit(),
+    }
+
+    let mut first_error = execute!(stdout(), DisableBracketedPaste).err();
+    let _ = execute!(stdout(), DisableFocusChange);
+    if matches!(raw_mode_restore, RawModeRestore::Disable)
+        && let Err(err) = disable_raw_mode()
+    {
+        first_error.get_or_insert(err);
+    }
+    if let Err(err) = execute!(
+        stdout(),
+        SetCursorStyle::DefaultUserShape,
+        crossterm::cursor::Show
+    ) {
+        first_error.get_or_insert(err);
+    }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Restore the terminal to its original state.
+/// Inverse of `set_modes`.
+pub fn restore() -> Result<()> {
+    restore_common(RawModeRestore::Disable, KeyboardRestore::PopStack)
+}
+
+/// Restore the terminal after Codex is exiting.
+///
+/// Uses a stronger keyboard reset than [`restore`] so the parent shell recovers even if a
+/// terminal missed the stack pop that normally pairs with [`set_modes`].
+pub fn restore_after_exit() -> Result<()> {
+    restore_common(RawModeRestore::Disable, KeyboardRestore::ResetAfterExit)
+}
+
+/// Restore the terminal to its original state, but keep raw mode enabled.
+pub fn restore_keep_raw() -> Result<()> {
+    restore_common(RawModeRestore::Keep, KeyboardRestore::PopStack)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreMode {
+    #[allow(dead_code)]
+    Full, // Fully restore the terminal (disables raw mode).
+    KeepRaw, // Restore the terminal but keep raw mode enabled.
+}
+
+impl RestoreMode {
+    fn restore(self) -> Result<()> {
+        match self {
+            RestoreMode::Full => restore(),
+            RestoreMode::KeepRaw => restore_keep_raw(),
         }
+    }
+}
+
+/// Flush the underlying stdin buffer to clear any input that may be buffered at the terminal level.
+/// For example, clears any user input that occurred while the crossterm EventStream was dropped.
+#[cfg(unix)]
+fn flush_terminal_input_buffer() {
+    // Safety: flushing the stdin queue is safe and does not move ownership.
+    let result = unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        tracing::warn!("failed to tcflush stdin: {err}");
+    }
+}
+
+/// Flush the underlying stdin buffer to clear any input that may be buffered at the terminal level.
+/// For example, clears any user input that occurred while the crossterm EventStream was dropped.
+#[cfg(windows)]
+fn flush_terminal_input_buffer() {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::FlushConsoleInputBuffer;
+    use windows_sys::Win32::System::Console::GetStdHandle;
+    use windows_sys::Win32::System::Console::STD_INPUT_HANDLE;
+
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle == INVALID_HANDLE_VALUE || handle == 0 {
+        let err = unsafe { GetLastError() };
+        tracing::warn!("failed to get stdin handle for flush: error {err}");
+        return;
+    }
+
+    let result = unsafe { FlushConsoleInputBuffer(handle) };
+    if result == 0 {
+        let err = unsafe { GetLastError() };
+        tracing::warn!("failed to flush stdin buffer: error {err}");
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn flush_terminal_input_buffer() {}
+
+/// Initialize the terminal (inline viewport; history stays in normal scrollback)
+pub fn init() -> Result<Terminal> {
+    if !stdin().is_terminal() {
+        return Err(std::io::Error::other("stdin is not a terminal"));
+    }
+    if !stdout().is_terminal() {
+        return Err(std::io::Error::other("stdout is not a terminal"));
+    }
+    set_modes()?;
+
+    flush_terminal_input_buffer();
+
+    set_panic_hook();
+
+    #[cfg(unix)]
+    let backend = CrosstermBackend::new(stdout());
+
+    #[cfg(unix)]
+    let cursor_pos =
+        match crate::terminal_probe::cursor_position(crate::terminal_probe::DEFAULT_TIMEOUT) {
+            Ok(Some(pos)) => pos,
+            Ok(None) => {
+                tracing::warn!("initial cursor position probe timed out; defaulting to origin");
+                Position { x: 0, y: 0 }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to read initial cursor position; defaulting to origin: {err}"
+                );
+                Position { x: 0, y: 0 }
+            }
+        };
+
+    #[cfg(not(unix))]
+    let mut backend = CrosstermBackend::new(stdout());
+
+    #[cfg(not(unix))]
+    let cursor_pos = cursor_position_with_crossterm(&mut backend);
+
+    let tui = CustomTerminal::with_options_and_cursor_position(backend, cursor_pos)?;
+    Ok(tui)
+}
+
+#[cfg(not(unix))]
+fn cursor_position_with_crossterm(backend: &mut CrosstermBackend<Stdout>) -> Position {
+    backend.get_cursor_position().unwrap_or_else(|err| {
+        tracing::warn!("failed to read initial cursor position; defaulting to origin: {err}");
+        Position { x: 0, y: 0 }
+    })
+}
+
+#[cfg(unix)]
+fn detect_keyboard_enhancement_supported() -> bool {
+    crate::terminal_probe::keyboard_enhancement_supported(crate::terminal_probe::DEFAULT_TIMEOUT)
+        .unwrap_or(/*default*/ None)
+        .unwrap_or(/*default*/ false)
+}
+
+#[cfg(not(unix))]
+fn detect_keyboard_enhancement_supported() -> bool {
+    // Non-Unix startup keeps the existing crossterm path because the bounded probe implementation
+    // relies on Unix file descriptors and `/dev/tty` semantics.
+    supports_keyboard_enhancement().unwrap_or(/*default*/ false)
+}
+
+fn set_panic_hook() {
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        let _ = restore_after_exit(); // ignore any errors as we are already failing
+        hook(panic_info);
+    }));
+}
+
+#[derive(Clone, Debug)]
+pub enum TuiEvent {
+    /// A terminal key event after focus, paste, and protocol bookkeeping has been handled.
+    Key(KeyEvent),
+    /// A bracketed paste payload normalized by the app layer before it reaches the composer.
+    Paste(String),
+    /// A terminal size notification that should be handled as resize-sensitive draw work.
+    ///
+    /// Resize is separate from `Draw` so the app can run feature-gated pre-render logic without
+    /// changing the default draw path for scheduled frames.
+    Resize,
+    /// A scheduled repaint that does not necessarily correspond to a terminal size change.
+    Draw,
+}
+
+pub struct Tui {
+    frame_requester: FrameRequester,
+    draw_tx: broadcast::Sender<()>,
+    event_broker: Arc<EventBroker>,
+    pub(crate) terminal: Terminal,
+    pending_history_lines: Vec<PendingHistoryLines>,
+    alt_saved_viewport: Option<ratatui::layout::Rect>,
+    #[cfg(unix)]
+    suspend_context: SuspendContext,
+    // True when overlay alt-screen UI is active
+    alt_screen_active: Arc<AtomicBool>,
+    // True when terminal/tab is focused; updated internally from crossterm events
+    terminal_focused: Arc<AtomicBool>,
+    enhanced_keys_supported: bool,
+    notification_backend: Option<DesktopNotificationBackend>,
+    notification_condition: NotificationCondition,
+    is_zellij: bool,
+    // When false, enter_alt_screen() becomes a no-op (for Zellij scrollback support)
+    alt_screen_enabled: bool,
+}
+
+struct PendingHistoryLines {
+    lines: Vec<Line<'static>>,
+    wrap_policy: HistoryLineWrapPolicy,
+}
+
+fn clear_for_viewport_change<B>(terminal: &mut CustomTerminal<B>, new_area: Rect) -> Result<()>
+where
+    B: Backend + Write,
+{
+    let clear_position = if terminal.viewport_area.is_empty() {
+        new_area.as_position()
+    } else {
+        terminal.viewport_area.as_position()
+    };
+    terminal.clear_after_position(clear_position)
+}
+
+impl Tui {
+    pub fn new(terminal: Terminal) -> Self {
+        let (draw_tx, _) = broadcast::channel(1);
+        let frame_requester = FrameRequester::new(draw_tx.clone());
+
+        // Detect keyboard enhancement support before any EventStream is created so the
+        // crossterm poller can acquire its lock without contention.
+        let enhanced_keys_supported = !keyboard_modes::keyboard_enhancement_disabled()
+            && detect_keyboard_enhancement_supported();
+        // Cache this to avoid contention with the event reader.
+        supports_color::on_cached(supports_color::Stream::Stdout);
+        let _ = crate::terminal_palette::default_colors();
+        let is_zellij = matches!(
+            codex_terminal_detection::terminal_info().multiplexer,
+            Some(codex_terminal_detection::Multiplexer::Zellij {})
+        );
+
+        Self {
+            frame_requester,
+            draw_tx,
+            event_broker: Arc::new(EventBroker::new()),
+            terminal,
+            pending_history_lines: vec![],
+            alt_saved_viewport: None,
+            #[cfg(unix)]
+            suspend_context: SuspendContext::new(),
+            alt_screen_active: Arc::new(AtomicBool::new(false)),
+            terminal_focused: Arc::new(AtomicBool::new(true)),
+            enhanced_keys_supported,
+            notification_backend: Some(detect_backend(NotificationMethod::default())),
+            notification_condition: NotificationCondition::default(),
+            is_zellij,
+            alt_screen_enabled: true,
+        }
+    }
+
+    /// Set whether alternate screen is enabled. When false, enter_alt_screen() becomes a no-op.
+    pub fn set_alt_screen_enabled(&mut self, enabled: bool) {
+        self.alt_screen_enabled = enabled;
+    }
+
+    pub fn set_notification_settings(
+        &mut self,
+        method: NotificationMethod,
+        condition: NotificationCondition,
+    ) {
+        self.notification_backend = Some(detect_backend(method));
+        self.notification_condition = condition;
+    }
+
+    pub fn frame_requester(&self) -> FrameRequester {
+        self.frame_requester.clone()
+    }
+
+    pub fn enhanced_keys_supported(&self) -> bool {
+        self.enhanced_keys_supported
+    }
+
+    pub fn is_alt_screen_active(&self) -> bool {
+        self.alt_screen_active.load(Ordering::Relaxed)
+    }
+
+    // Drop crossterm EventStream to avoid stdin conflicts with other processes.
+    pub fn pause_events(&mut self) {
+        self.event_broker.pause_events();
+    }
+
+    // Resume crossterm EventStream to resume stdin polling.
+    // Inverse of `pause_events`.
+    pub fn resume_events(&mut self) {
+        self.event_broker.resume_events();
+    }
+
+    /// Temporarily restore terminal state to run an external interactive program `f`.
+    ///
+    /// This pauses crossterm's stdin polling by dropping the underlying event stream, restores
+    /// terminal modes (optionally keeping raw mode enabled), then re-applies Codex TUI modes and
+    /// flushes pending stdin input before resuming events.
+    pub async fn with_restored<R, F, Fut>(&mut self, mode: RestoreMode, f: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = R>,
+    {
+        // Pause crossterm events to avoid stdin conflicts with external program `f`.
+        self.pause_events();
+
+        // Leave alt screen if active to avoid conflicts with external program `f`.
+        let was_alt_screen = self.is_alt_screen_active();
+        if was_alt_screen {
+            let _ = self.leave_alt_screen();
+        }
+
+        if let Err(err) = mode.restore() {
+            tracing::warn!("failed to restore terminal modes before external program: {err}");
+        }
+
+        let output = f().await;
+
+        if let Err(err) = set_modes() {
+            tracing::warn!("failed to re-enable terminal modes after external program: {err}");
+        }
+        // After the external program `f` finishes, reset terminal state and flush any buffered keypresses.
+        flush_terminal_input_buffer();
+
+        if was_alt_screen {
+            let _ = self.enter_alt_screen();
+        }
+
+        self.resume_events();
+        output
+    }
+
+    /// Emit a desktop notification now if the terminal is unfocused.
+    /// Returns true if a notification was posted.
+    pub fn notify(&mut self, message: impl AsRef<str>) -> bool {
+        let terminal_focused = self.terminal_focused.load(Ordering::Relaxed);
+        if !should_emit_notification(self.notification_condition, terminal_focused) {
+            return false;
+        }
+
+        let Some(backend) = self.notification_backend.as_mut() else {
+            return false;
+        };
+
+        let message = message.as_ref().to_string();
+        match backend.notify(&message) {
+            Ok(()) => true,
+            Err(err) => {
+                let method = backend.method();
+                tracing::warn!(
+                    error = %err,
+                    method = %method,
+                    "Failed to emit terminal notification; disabling future notifications"
+                );
+                self.notification_backend = None;
+                false
+            }
+        }
+    }
+
+    pub fn event_stream(&self) -> Pin<Box<dyn Stream<Item = TuiEvent> + Send + 'static>> {
+        #[cfg(unix)]
+        let stream = TuiEventStream::new(
+            self.event_broker.clone(),
+            self.draw_tx.subscribe(),
+            self.terminal_focused.clone(),
+            self.suspend_context.clone(),
+            self.alt_screen_active.clone(),
+        );
+        #[cfg(not(unix))]
+        let stream = TuiEventStream::new(
+            self.event_broker.clone(),
+            self.draw_tx.subscribe(),
+            self.terminal_focused.clone(),
+        );
+        Box::pin(stream)
+    }
+
+    /// Enter alternate screen and expand the viewport to full terminal size, saving the current
+    /// inline viewport for restoration when leaving.
+    pub fn enter_alt_screen(&mut self) -> Result<()> {
+        if !self.alt_screen_enabled {
+            return Ok(());
+        }
+        let _ = execute!(self.terminal.backend_mut(), EnterAlternateScreen);
+        // Enable "alternate scroll" so terminals may translate wheel to arrows
+        let _ = execute!(self.terminal.backend_mut(), EnableAlternateScroll);
+        if let Ok(size) = self.terminal.size() {
+            self.alt_saved_viewport = Some(self.terminal.viewport_area);
+            self.terminal.set_viewport_area(ratatui::layout::Rect::new(
+                0,
+                0,
+                size.width,
+                size.height,
+            ));
+            let _ = self.terminal.clear();
+        }
+        self.alt_screen_active.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Leave alternate screen and restore the previously saved inline viewport, if any.
+    pub fn leave_alt_screen(&mut self) -> Result<()> {
+        if !self.alt_screen_enabled {
+            return Ok(());
+        }
+        // Disable alternate scroll when leaving alt-screen
+        let _ = execute!(self.terminal.backend_mut(), DisableAlternateScroll);
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        if let Some(saved) = self.alt_saved_viewport.take() {
+            self.terminal.set_viewport_area(saved);
+        }
+        self.alt_screen_active.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn insert_history_lines(&mut self, lines: Vec<Line<'static>>) {
+        self.insert_history_lines_with_wrap_policy(lines, HistoryLineWrapPolicy::PreWrap);
+    }
+
+    pub fn insert_history_lines_with_wrap_policy(
+        &mut self,
+        lines: Vec<Line<'static>>,
+        wrap_policy: HistoryLineWrapPolicy,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        if let Some(last) = self.pending_history_lines.last_mut()
+            && last.wrap_policy == wrap_policy
+        {
+            last.lines.extend(lines);
+        } else {
+            self.pending_history_lines
+                .push(PendingHistoryLines { lines, wrap_policy });
+        }
+        self.frame_requester().schedule_frame();
+    }
+
+    pub fn clear_pending_history_lines(&mut self) {
+        self.pending_history_lines.clear();
+    }
+
+    /// Resize the inline viewport to `height` rows, scrolling content above it if
+    /// the viewport would extend past the bottom of the screen. Returns `true` when
+    /// the caller must invalidate the diff buffer (Zellij mode), because the scroll
+    /// was performed with raw newlines that ratatui cannot track.
+    fn update_inline_viewport(
+        terminal: &mut Terminal,
+        height: u16,
+        is_zellij: bool,
+    ) -> Result<bool> {
+        let size = terminal.size()?;
+        let mut needs_full_repaint = false;
+
+        let mut area = terminal.viewport_area;
+        area.height = height.min(size.height);
+        area.width = size.width;
+        if area.bottom() > size.height {
+            let scroll_by = area.bottom() - size.height;
+            if is_zellij {
+                Self::scroll_zellij_expanded_viewport(terminal, size, scroll_by)?;
+                needs_full_repaint = true;
+            } else {
+                terminal
+                    .backend_mut()
+                    .scroll_region_up(0..area.top(), scroll_by)?;
+            }
+            area.y = size.height - area.height;
+        }
+        if area != terminal.viewport_area {
+            // On startup, the old viewport can still be empty. Clear from the
+            // new viewport top so stale shell cells do not show through spaces.
+            clear_for_viewport_change(terminal, area)?;
+            terminal.set_viewport_area(area);
+        }
+
+        Ok(needs_full_repaint)
+    }
+
+    /// Push content above the viewport upward by `scroll_by` rows using raw
+    /// newlines at the screen bottom. This is the Zellij-safe alternative to
+    /// `scroll_region_up`, which relies on DECSTBM sequences Zellij does not
+    /// support.
+    fn scroll_zellij_expanded_viewport(
+        terminal: &mut Terminal,
+        size: Size,
+        scroll_by: u16,
+    ) -> Result<()> {
+        crossterm::queue!(
+            terminal.backend_mut(),
+            crossterm::cursor::MoveTo(0, size.height.saturating_sub(1))
+        )?;
+        for _ in 0..scroll_by {
+            crossterm::queue!(terminal.backend_mut(), crossterm::style::Print("\n"))?;
+        }
+        Ok(())
+    }
+
+    /// Resize the inline viewport for the resize-reflow path.
+    ///
+    /// Unlike the legacy draw path, this path does not scroll rows above the viewport when the
+    /// terminal shrinks. Resize reflow owns rebuilding those rows from transcript source, so
+    /// scrolling here would move the viewport once and then replay history into the wrong row.
+    fn update_inline_viewport_for_resize_reflow(
+        terminal: &mut Terminal,
+        height: u16,
+        is_zellij: bool,
+    ) -> Result<bool> {
+        let size = terminal.size()?;
+        let terminal_height_shrank = size.height < terminal.last_known_screen_size.height;
+        let terminal_height_grew = size.height > terminal.last_known_screen_size.height;
+        let viewport_was_bottom_aligned =
+            terminal.viewport_area.bottom() == terminal.last_known_screen_size.height;
+        let previous_area = terminal.viewport_area;
+
+        let mut area = terminal.viewport_area;
+        area.height = height.min(size.height);
+        area.width = size.width;
+        let mut needs_full_repaint = false;
+
+        if area.bottom() > size.height {
+            let scroll_by = area.bottom() - size.height;
+            if !terminal_height_shrank {
+                if is_zellij {
+                    Self::scroll_zellij_expanded_viewport(terminal, size, scroll_by)?;
+                } else {
+                    terminal
+                        .backend_mut()
+                        .scroll_region_up(0..area.top(), scroll_by)?;
+                }
+            }
+            area.y = size.height - area.height;
+        } else if terminal_height_grew && viewport_was_bottom_aligned {
+            area.y = size.height - area.height;
+        }
+
+        if area != terminal.viewport_area {
+            let clear_position = Position::new(/*x*/ 0, previous_area.y.min(area.y));
+            terminal.set_viewport_area(area);
+            terminal.clear_after_position(clear_position)?;
+            needs_full_repaint = true;
+        }
+
+        Ok(needs_full_repaint)
+    }
+
+    /// Write any buffered history lines above the viewport and clear the buffer.
+    /// Returns `true` when Zellij mode was used, signaling that the caller must
+    /// invalidate the diff buffer for a full repaint.
+    fn flush_pending_history_lines(
+        terminal: &mut Terminal,
+        pending_history_lines: &mut Vec<PendingHistoryLines>,
+        is_zellij: bool,
+    ) -> Result<bool> {
+        if pending_history_lines.is_empty() {
+            return Ok(false);
+        }
+
+        for batch in pending_history_lines.iter() {
+            crate::insert_history::insert_history_lines_with_mode_and_wrap_policy(
+                terminal,
+                batch.lines.clone(),
+                crate::insert_history::InsertHistoryMode::new(is_zellij),
+                batch.wrap_policy,
+            )?;
+        }
+        pending_history_lines.clear();
+        Ok(is_zellij)
+    }
+
+    pub fn draw(
+        &mut self,
+        height: u16,
+        draw_fn: impl FnOnce(&mut custom_terminal::Frame),
+    ) -> Result<()> {
+        // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
+        // in the synchronized update.
+        #[cfg(unix)]
+        let mut prepared_resume = self
+            .suspend_context
+            .prepare_resume_action(&mut self.terminal, &mut self.alt_saved_viewport);
+
+        // Precompute any viewport updates that need a cursor-position query before entering
+        // the synchronized update, to avoid racing with the event reader.
+        let mut pending_viewport_area = self.pending_viewport_area()?;
+
+        stdout().sync_update(|_| {
+            #[cfg(unix)]
+            if let Some(prepared) = prepared_resume.take() {
+                prepared.apply(&mut self.terminal)?;
+            }
+
+            let terminal = &mut self.terminal;
+            if let Some(new_area) = pending_viewport_area.take() {
+                terminal.set_viewport_area(new_area);
+                terminal.clear()?;
+            }
+
+            let mut needs_full_repaint =
+                Self::update_inline_viewport(terminal, height, self.is_zellij)?;
+            needs_full_repaint |= Self::flush_pending_history_lines(
+                terminal,
+                &mut self.pending_history_lines,
+                self.is_zellij,
+            )?;
+
+            if needs_full_repaint {
+                terminal.invalidate_viewport();
+            }
+
+            // Update the y position for suspending so Ctrl-Z can place the cursor correctly.
+            #[cfg(unix)]
+            {
+                let area = terminal.viewport_area;
+                let inline_area_bottom = if self.alt_screen_active.load(Ordering::Relaxed) {
+                    self.alt_saved_viewport
+                        .map(|r| r.bottom().saturating_sub(1))
+                        .unwrap_or_else(|| area.bottom().saturating_sub(1))
+                } else {
+                    area.bottom().saturating_sub(1)
+                };
+                self.suspend_context.set_cursor_y(inline_area_bottom);
+            }
+
+            terminal.draw(|frame| {
+                draw_fn(frame);
+            })
+        })?
+    }
+
+    /// Draw a frame using the resize-reflow viewport and history insertion rules.
+    ///
+    /// This is the feature-gated counterpart to `draw`. It intentionally skips
+    /// `pending_viewport_area`, whose cursor-position heuristic is part of the legacy path, and
+    /// instead lets transcript reflow rebuild scrollback before the frame is rendered.
+    pub fn draw_with_resize_reflow(
+        &mut self,
+        height: u16,
+        draw_fn: impl FnOnce(&mut custom_terminal::Frame),
+    ) -> Result<()> {
+        // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
+        // in the synchronized update.
+        #[cfg(unix)]
+        let mut prepared_resume = self
+            .suspend_context
+            .prepare_resume_action(&mut self.terminal, &mut self.alt_saved_viewport);
+
+        stdout().sync_update(|_| {
+            #[cfg(unix)]
+            if let Some(prepared) = prepared_resume.take() {
+                prepared.apply(&mut self.terminal)?;
+            }
+
+            let terminal = &mut self.terminal;
+            let mut needs_full_repaint =
+                Self::update_inline_viewport_for_resize_reflow(terminal, height, self.is_zellij)?;
+            let flushed_history = Self::flush_pending_history_lines(
+                terminal,
+                &mut self.pending_history_lines,
+                self.is_zellij,
+            )?;
+            needs_full_repaint |= flushed_history;
+
+            if needs_full_repaint {
+                terminal.invalidate_viewport();
+            }
+
+            // Update the y position for suspending so Ctrl-Z can place the cursor correctly.
+            #[cfg(unix)]
+            {
+                let area = terminal.viewport_area;
+                let inline_area_bottom = if self.alt_screen_active.load(Ordering::Relaxed) {
+                    self.alt_saved_viewport
+                        .map(|r| r.bottom().saturating_sub(1))
+                        .unwrap_or_else(|| area.bottom().saturating_sub(1))
+                } else {
+                    area.bottom().saturating_sub(1)
+                };
+                self.suspend_context.set_cursor_y(inline_area_bottom);
+            }
+
+            terminal.draw(|frame| {
+                draw_fn(frame);
+            })
+        })?
+    }
+
+    fn pending_viewport_area(&mut self) -> Result<Option<Rect>> {
+        let terminal = &mut self.terminal;
+        let screen_size = terminal.size()?;
+        let last_known_screen_size = terminal.last_known_screen_size;
+        if screen_size != last_known_screen_size
+            && let Ok(cursor_pos) = terminal.get_cursor_position()
+        {
+            let last_known_cursor_pos = terminal.last_known_cursor_pos;
+            // If we resized AND the cursor moved, we adjust the viewport area to keep the
+            // cursor in the same position. This is a heuristic that seems to work well
+            // at least in iTerm2.
+            if cursor_pos.y != last_known_cursor_pos.y {
+                let offset = Offset {
+                    x: 0,
+                    y: cursor_pos.y as i32 - last_known_cursor_pos.y as i32,
+                };
+                return Ok(Some(terminal.viewport_area.offset(offset)));
+            }
+        }
+        Ok(None)
     }
 }

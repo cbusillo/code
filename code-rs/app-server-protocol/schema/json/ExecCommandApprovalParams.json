@@ -8,26 +8,6 @@
             "cmd": {
               "type": "string"
             },
-            "type": {
-              "enum": [
-                "read_command"
-              ],
-              "title": "ReadCommandParsedCommandType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "cmd",
-            "type"
-          ],
-          "title": "ReadCommandParsedCommand",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "cmd": {
-              "type": "string"
-            },
             "name": {
               "type": "string"
             },
@@ -145,7 +125,7 @@
       ]
     },
     "callId": {
-      "description": "Use to correlate this with [codex_core::protocol::ExecCommandBeginEvent] and [codex_core::protocol::ExecCommandEndEvent].",
+      "description": "Use to correlate this with [codex_protocol::protocol::ExecCommandBeginEvent] and [codex_protocol::protocol::ExecCommandEndEvent].",
       "type": "string"
     },
     "command": {

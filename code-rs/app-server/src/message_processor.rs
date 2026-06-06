@@ -1,225 +1,584 @@
-use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
-use std::path::PathBuf;
+use std::future::Future;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
-use crate::code_message_processor::CodexMessageProcessor;
-use crate::external_agent_config_api::ExternalAgentConfigApi;
-use crate::error_code::INTERNAL_ERROR_CODE;
-use crate::error_code::INVALID_REQUEST_ERROR_CODE;
+use crate::config_manager::ConfigManager;
+use crate::connection_rpc_gate::ConnectionRpcGate;
+use crate::error_code::invalid_request;
+use crate::fs_watch::FsWatchManager;
 use crate::outgoing_message::ConnectionId;
+use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
-use code_app_server_protocol::AuthMode;
-use code_app_server_protocol::ConfigRequirements;
-use code_app_server_protocol::CancelLoginAccountParams;
-use code_app_server_protocol::Config as V2Config;
-use code_app_server_protocol::ConfigBatchWriteParams;
-use code_app_server_protocol::ConfigEdit;
-use code_app_server_protocol::ConfigReadParams;
-use code_app_server_protocol::ConfigReadResponse;
-use code_app_server_protocol::ConfigRequirementsReadResponse;
-use code_app_server_protocol::ConfigValueWriteParams;
-use code_app_server_protocol::ConfigWriteErrorCode;
-use code_app_server_protocol::ConfigWriteResponse;
-use code_app_server_protocol::ExternalAgentConfigDetectParams;
-use code_app_server_protocol::ExternalAgentConfigImportParams;
-use code_app_server_protocol::ExperimentalFeatureListResponse;
-use code_app_server_protocol::GetAccountParams;
-use code_app_server_protocol::ListMcpServerStatusResponse;
-use code_app_server_protocol::LoginAccountParams;
-use code_app_server_protocol::MergeStrategy;
-use code_app_server_protocol::ModelListResponse;
-use code_app_server_protocol::ThreadListResponse;
-use code_app_server_protocol::ToolsV2;
-use code_app_server_protocol::AskForApproval as V2AskForApproval;
-use code_app_server_protocol::WriteStatus;
-use code_protocol::config_types::Verbosity;
-use code_protocol::config_types::WebSearchMode;
-use code_protocol::config_types::WebSearchToolConfig;
-use code_core::AuthManager;
-use code_core::ConversationManager;
-use code_core::config::Config;
-use code_core::default_client::get_code_user_agent_with_suffix;
-use code_protocol::mcp_protocol::ClientRequest;
-use code_protocol::mcp_protocol::ClientRequest::Initialize;
-use code_protocol::mcp_protocol::GetUserAgentResponse;
-use code_protocol::mcp_protocol::InitializeResponse;
-use code_protocol::protocol::SessionSource;
-use mcp_types::JSONRPCError;
-use mcp_types::JSONRPCErrorError;
-use mcp_types::JSONRPCNotification;
-use mcp_types::JSONRPCRequest;
-use mcp_types::JSONRPCResponse;
-use code_utils_absolute_path::AbsolutePathBuf;
-use code_utils_json_to_toml::json_to_toml;
-use serde_json::json;
-use sha1::Digest;
-use sha1::Sha1;
-use toml::Value as TomlValue;
+use crate::outgoing_message::RequestContext;
+use crate::request_processors::AccountRequestProcessor;
+use crate::request_processors::AppsRequestProcessor;
+use crate::request_processors::CatalogRequestProcessor;
+use crate::request_processors::CommandExecRequestProcessor;
+use crate::request_processors::ConfigRequestProcessor;
+use crate::request_processors::ExternalAgentConfigRequestProcessor;
+use crate::request_processors::FeedbackRequestProcessor;
+use crate::request_processors::FsRequestProcessor;
+use crate::request_processors::GitRequestProcessor;
+use crate::request_processors::InitializeRequestProcessor;
+use crate::request_processors::MarketplaceRequestProcessor;
+use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::PluginRequestProcessor;
+use crate::request_processors::ProcessExecRequestProcessor;
+use crate::request_processors::SearchRequestProcessor;
+use crate::request_processors::ThreadGoalRequestProcessor;
+use crate::request_processors::ThreadRequestProcessor;
+use crate::request_processors::TurnRequestProcessor;
+use crate::request_processors::WindowsSandboxRequestProcessor;
+use crate::request_serialization::QueuedInitializedRequest;
+use crate::request_serialization::RequestSerializationQueueKey;
+use crate::request_serialization::RequestSerializationQueues;
+use crate::thread_state::ThreadStateManager;
+use crate::transport::AppServerTransport;
+use crate::transport::RemoteControlHandle;
+use async_trait::async_trait;
+use codex_analytics::AnalyticsEventsClient;
+use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AuthMode as LoginAuthMode;
+use codex_app_server_protocol::ChatgptAuthTokensRefreshParams;
+use codex_app_server_protocol::ChatgptAuthTokensRefreshReason;
+use codex_app_server_protocol::ChatgptAuthTokensRefreshResponse;
+use codex_app_server_protocol::ClientNotification;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ClientResponsePayload;
+use codex_app_server_protocol::ConfigWarningNotification;
+use codex_app_server_protocol::ExperimentalApi;
+use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::JSONRPCNotification;
+use codex_app_server_protocol::JSONRPCRequest;
+use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ServerRequestPayload;
+use codex_app_server_protocol::experimental_required_message;
+use codex_arg0::Arg0DispatchPaths;
+use codex_chatgpt::workspace_settings;
+use codex_core::ThreadManager;
+use codex_core::config::Config;
+use codex_core::thread_store_from_config;
+use codex_exec_server::EnvironmentManager;
+use codex_feedback::CodexFeedback;
+use codex_login::AuthManager;
+use codex_login::auth::ExternalAuth;
+use codex_login::auth::ExternalAuthRefreshContext;
+use codex_login::auth::ExternalAuthRefreshReason;
+use codex_login::auth::ExternalAuthTokens;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::W3cTraceContext;
+use codex_rollout::StateDbHandle;
+use codex_state::log_db::LogDbLayer;
+use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
+use tokio::sync::broadcast;
+use tokio::sync::watch;
+use tokio::time::Duration;
+use tokio::time::timeout;
+use tracing::Instrument;
+
+const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+#[derive(Clone)]
+struct ExternalAuthRefreshBridge {
+    outgoing: Arc<OutgoingMessageSender>,
+}
+
+impl ExternalAuthRefreshBridge {
+    fn map_reason(reason: ExternalAuthRefreshReason) -> ChatgptAuthTokensRefreshReason {
+        match reason {
+            ExternalAuthRefreshReason::Unauthorized => ChatgptAuthTokensRefreshReason::Unauthorized,
+        }
+    }
+}
+
+#[async_trait]
+impl ExternalAuth for ExternalAuthRefreshBridge {
+    fn auth_mode(&self) -> LoginAuthMode {
+        LoginAuthMode::Chatgpt
+    }
+
+    async fn refresh(
+        &self,
+        context: ExternalAuthRefreshContext,
+    ) -> std::io::Result<ExternalAuthTokens> {
+        let params = ChatgptAuthTokensRefreshParams {
+            reason: Self::map_reason(context.reason),
+            previous_account_id: context.previous_account_id,
+        };
+
+        let (request_id, rx) = self
+            .outgoing
+            .send_request(ServerRequestPayload::ChatgptAuthTokensRefresh(params))
+            .await;
+
+        let result = match timeout(EXTERNAL_AUTH_REFRESH_TIMEOUT, rx).await {
+            Ok(result) => {
+                // Two failure scenarios:
+                // 1) `oneshot::Receiver` failed (sender dropped) => request canceled/channel closed.
+                // 2) client answered with JSON-RPC error payload => propagate code/message.
+                let result = result.map_err(|err| {
+                    std::io::Error::other(format!("auth refresh request canceled: {err}"))
+                })?;
+                result.map_err(|err| {
+                    std::io::Error::other(format!(
+                        "auth refresh request failed: code={} message={}",
+                        err.code, err.message
+                    ))
+                })?
+            }
+            Err(_) => {
+                let _canceled = self.outgoing.cancel_request(&request_id).await;
+                return Err(std::io::Error::other(format!(
+                    "auth refresh request timed out after {}s",
+                    EXTERNAL_AUTH_REFRESH_TIMEOUT.as_secs()
+                )));
+            }
+        };
+
+        let response: ChatgptAuthTokensRefreshResponse =
+            serde_json::from_value(result).map_err(std::io::Error::other)?;
+
+        Ok(ExternalAuthTokens::chatgpt(
+            response.access_token,
+            response.chatgpt_account_id,
+            response.chatgpt_plan_type,
+        ))
+    }
+}
 
 pub(crate) struct MessageProcessor {
     outgoing: Arc<OutgoingMessageSender>,
-    code_message_processor: CodexMessageProcessor,
-    external_agent_config_api: ExternalAgentConfigApi,
-    base_config: Arc<Config>,
-    config_warnings: Arc<Vec<serde_json::Value>>,
-    cli_overrides: Vec<(String, TomlValue)>,
+    account_processor: AccountRequestProcessor,
+    apps_processor: AppsRequestProcessor,
+    catalog_processor: CatalogRequestProcessor,
+    command_exec_processor: CommandExecRequestProcessor,
+    process_exec_processor: ProcessExecRequestProcessor,
+    config_processor: ConfigRequestProcessor,
+    external_agent_config_processor: ExternalAgentConfigRequestProcessor,
+    feedback_processor: FeedbackRequestProcessor,
+    fs_processor: FsRequestProcessor,
+    git_processor: GitRequestProcessor,
+    initialize_processor: InitializeRequestProcessor,
+    marketplace_processor: MarketplaceRequestProcessor,
+    mcp_processor: McpRequestProcessor,
+    plugin_processor: PluginRequestProcessor,
+    search_processor: SearchRequestProcessor,
+    thread_goal_processor: ThreadGoalRequestProcessor,
+    thread_processor: ThreadRequestProcessor,
+    turn_processor: TurnRequestProcessor,
+    windows_sandbox_processor: WindowsSandboxRequestProcessor,
+    request_serialization_queues: RequestSerializationQueues,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ConnectionSessionState {
-    pub(crate) initialized: bool,
-    pub(crate) user_agent_suffix: Option<String>,
+    pub(crate) rpc_gate: Arc<ConnectionRpcGate>,
+    initialized: OnceLock<InitializedConnectionSessionState>,
+}
+
+#[derive(Debug)]
+pub(crate) struct InitializedConnectionSessionState {
+    pub(crate) experimental_api_enabled: bool,
     pub(crate) opted_out_notification_methods: HashSet<String>,
+    pub(crate) app_server_client_name: String,
+    pub(crate) client_version: String,
+}
+
+impl Default for ConnectionSessionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConnectionSessionState {
+    pub(crate) fn new() -> Self {
+        Self {
+            rpc_gate: Arc::new(ConnectionRpcGate::new()),
+            initialized: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn initialized(&self) -> bool {
+        self.initialized.get().is_some()
+    }
+
+    pub(crate) fn experimental_api_enabled(&self) -> bool {
+        self.initialized
+            .get()
+            .is_some_and(|session| session.experimental_api_enabled)
+    }
+
+    pub(crate) fn opted_out_notification_methods(&self) -> HashSet<String> {
+        self.initialized
+            .get()
+            .map(|session| session.opted_out_notification_methods.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn app_server_client_name(&self) -> Option<&str> {
+        self.initialized
+            .get()
+            .map(|session| session.app_server_client_name.as_str())
+    }
+
+    pub(crate) fn client_version(&self) -> Option<&str> {
+        self.initialized
+            .get()
+            .map(|session| session.client_version.as_str())
+    }
+
+    pub(crate) fn initialize(&self, session: InitializedConnectionSessionState) -> Result<(), ()> {
+        self.initialized.set(session).map_err(|_| ())
+    }
+}
+
+pub(crate) struct MessageProcessorArgs {
+    pub(crate) outgoing: Arc<OutgoingMessageSender>,
+    pub(crate) analytics_events_client: AnalyticsEventsClient,
+    pub(crate) arg0_paths: Arg0DispatchPaths,
+    pub(crate) config: Arc<Config>,
+    pub(crate) config_manager: ConfigManager,
+    pub(crate) environment_manager: Arc<EnvironmentManager>,
+    pub(crate) feedback: CodexFeedback,
+    pub(crate) log_db: Option<LogDbLayer>,
+    pub(crate) state_db: Option<StateDbHandle>,
+    pub(crate) config_warnings: Vec<ConfigWarningNotification>,
+    pub(crate) session_source: SessionSource,
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) installation_id: String,
+    pub(crate) rpc_transport: AppServerRpcTransport,
+    pub(crate) remote_control_handle: Option<RemoteControlHandle>,
+    pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
 }
 
 impl MessageProcessor {
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
-    /// `Sender` so handlers can enqueue messages to be written to the
-    /// transport.
-    pub(crate) fn new(
-        outgoing: Arc<OutgoingMessageSender>,
-        code_linux_sandbox_exe: Option<PathBuf>,
-        config: Arc<Config>,
-        config_warnings: Vec<serde_json::Value>,
-        cli_overrides: Vec<(String, TomlValue)>,
-    ) -> Self {
-        let auth_manager = AuthManager::shared_with_mode_and_originator(
-            config.code_home.clone(),
-            AuthMode::ApiKey,
-            config.responses_originator_header.clone(),
-        );
-        let conversation_manager = Arc::new(ConversationManager::new(
-            auth_manager.clone(),
-            SessionSource::Mcp,
-        ));
-        let config_for_processor = config.clone();
-        let code_message_processor = CodexMessageProcessor::new(
+    /// `Sender` so handlers can enqueue messages to be written to stdout.
+    pub(crate) fn new(args: MessageProcessorArgs) -> Self {
+        let MessageProcessorArgs {
+            outgoing,
+            analytics_events_client,
+            arg0_paths,
+            config,
+            config_manager,
+            environment_manager,
+            feedback,
+            log_db,
+            state_db,
+            config_warnings,
+            session_source,
             auth_manager,
-            conversation_manager,
+            installation_id,
+            rpc_transport,
+            remote_control_handle,
+            plugin_startup_tasks,
+        } = args;
+        auth_manager.set_external_auth(Arc::new(ExternalAuthRefreshBridge {
+            outgoing: outgoing.clone(),
+        }));
+        // The thread store is intentionally process-scoped. Config reloads can
+        // affect per-thread behavior, but they must not move newly started,
+        // resumed, or forked threads to a different persistence backend/root.
+        let thread_store = thread_store_from_config(config.as_ref(), state_db.clone());
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.as_ref(),
+            auth_manager.clone(),
+            session_source,
+            environment_manager,
+            Some(analytics_events_client.clone()),
+            Arc::clone(&thread_store),
+            state_db.clone(),
+            installation_id,
+        ));
+        thread_manager
+            .plugins_manager()
+            .set_analytics_events_client(analytics_events_client.clone());
+
+        let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+        let thread_state_manager = ThreadStateManager::new();
+        let thread_watch_manager =
+            crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
+        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
+        let workspace_settings_cache =
+            Arc::new(workspace_settings::WorkspaceSettingsCache::default());
+        let account_processor = AccountRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
             outgoing.clone(),
-            code_linux_sandbox_exe,
-            config_for_processor.clone(),
+            Arc::clone(&config),
+            config_manager.clone(),
         );
-        let external_agent_config_api =
-            ExternalAgentConfigApi::new(config.code_home.clone());
+        let apps_processor = AppsRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            outgoing.clone(),
+            config_manager.clone(),
+            Arc::clone(&workspace_settings_cache),
+        );
+        let catalog_processor = CatalogRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            Arc::clone(&config),
+            config_manager.clone(),
+            Arc::clone(&workspace_settings_cache),
+        );
+        let command_exec_processor = CommandExecRequestProcessor::new(
+            arg0_paths.clone(),
+            Arc::clone(&config),
+            outgoing.clone(),
+        );
+        let process_exec_processor = ProcessExecRequestProcessor::new(outgoing.clone());
+        let feedback_processor = FeedbackRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            Arc::clone(&config),
+            feedback,
+            log_db,
+            state_db.clone(),
+        );
+        let git_processor = GitRequestProcessor::new();
+        let initialize_processor = InitializeRequestProcessor::new(
+            outgoing.clone(),
+            analytics_events_client.clone(),
+            Arc::clone(&config),
+            config_warnings,
+            rpc_transport,
+        );
+        let marketplace_processor = MarketplaceRequestProcessor::new(
+            Arc::clone(&config),
+            config_manager.clone(),
+            Arc::clone(&thread_manager),
+        );
+        let mcp_processor = McpRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            outgoing.clone(),
+            config_manager.clone(),
+        );
+        let plugin_processor = PluginRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            outgoing.clone(),
+            analytics_events_client.clone(),
+            config_manager.clone(),
+            workspace_settings_cache,
+        );
+        let search_processor = SearchRequestProcessor::new(outgoing.clone());
+        let thread_goal_processor = ThreadGoalRequestProcessor::new(
+            Arc::clone(&thread_manager),
+            outgoing.clone(),
+            Arc::clone(&config),
+            thread_state_manager.clone(),
+            state_db.clone(),
+        );
+        let thread_processor = ThreadRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            outgoing.clone(),
+            arg0_paths.clone(),
+            Arc::clone(&config),
+            config_manager.clone(),
+            Arc::clone(&thread_store),
+            Arc::clone(&pending_thread_unloads),
+            thread_state_manager.clone(),
+            thread_watch_manager.clone(),
+            Arc::clone(&thread_list_state_permit),
+            thread_goal_processor.clone(),
+            state_db,
+        );
+        let turn_processor = TurnRequestProcessor::new(
+            auth_manager.clone(),
+            Arc::clone(&thread_manager),
+            outgoing.clone(),
+            analytics_events_client.clone(),
+            arg0_paths.clone(),
+            Arc::clone(&config),
+            config_manager.clone(),
+            pending_thread_unloads,
+            thread_state_manager,
+            thread_watch_manager,
+            thread_list_state_permit,
+        );
+        if matches!(plugin_startup_tasks, crate::PluginStartupTasks::Start) {
+            // Keep plugin startup warmups aligned at app-server startup.
+            let on_effective_plugins_changed =
+                plugin_processor.effective_plugins_changed_callback();
+            thread_manager
+                .plugins_manager()
+                .maybe_start_plugin_startup_tasks_for_config(
+                    &config.plugins_config_input(),
+                    auth_manager.clone(),
+                    Some(on_effective_plugins_changed),
+                );
+        }
+        let fs_watch_manager = FsWatchManager::new(outgoing.clone());
+        let config_processor = ConfigRequestProcessor::new(
+            outgoing.clone(),
+            config_manager.clone(),
+            auth_manager,
+            thread_manager.clone(),
+            analytics_events_client,
+            remote_control_handle,
+        );
+        let external_agent_config_processor = ExternalAgentConfigRequestProcessor::new(
+            outgoing.clone(),
+            Arc::clone(&thread_manager),
+            config_manager.clone(),
+            config_processor.clone(),
+            arg0_paths,
+            config.codex_home.to_path_buf(),
+        );
+        let fs_processor = FsRequestProcessor::new(
+            thread_manager
+                .environment_manager()
+                .local_environment()
+                .get_filesystem(),
+            fs_watch_manager,
+        );
+        let windows_sandbox_processor = WindowsSandboxRequestProcessor::new(
+            outgoing.clone(),
+            Arc::clone(&config),
+            config_manager,
+        );
 
         Self {
             outgoing,
-            code_message_processor,
-            external_agent_config_api,
-            base_config: config_for_processor,
-            config_warnings: Arc::new(config_warnings),
-            cli_overrides,
+            account_processor,
+            apps_processor,
+            catalog_processor,
+            command_exec_processor,
+            process_exec_processor,
+            config_processor,
+            external_agent_config_processor,
+            feedback_processor,
+            fs_processor,
+            git_processor,
+            initialize_processor,
+            marketplace_processor,
+            mcp_processor,
+            plugin_processor,
+            search_processor,
+            thread_goal_processor,
+            thread_processor,
+            turn_processor,
+            windows_sandbox_processor,
+            request_serialization_queues: RequestSerializationQueues::default(),
         }
     }
 
+    pub(crate) fn clear_runtime_references(&self) {
+        self.account_processor.clear_external_auth();
+    }
+
     pub(crate) async fn process_request(
-        &mut self,
+        self: &Arc<Self>,
         connection_id: ConnectionId,
         request: JSONRPCRequest,
-        session: &mut ConnectionSessionState,
-        outbound_initialized: &AtomicBool,
-        outbound_opted_out_notification_methods: &RwLock<HashSet<String>>,
+        transport: &AppServerTransport,
+        session: Arc<ConnectionSessionState>,
     ) {
-        let request_id = request.id.clone();
-
-        if self
-            .try_process_v2_config_request(request_id.clone(), &request, session.initialized)
-            .await
-        {
-            return;
-        }
-
-        if let Ok(request_json) = serde_json::to_value(request)
-            && let Ok(code_request) = serde_json::from_value::<ClientRequest>(request_json)
-        {
-            match code_request {
-                // Handle Initialize internally so CodexMessageProcessor does not have to concern
-                // itself with per-connection initialization state.
-                Initialize { request_id, params } => {
-                    if session.initialized {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: "Already initialized".to_string(),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return;
+        let request_method = request.method.as_str();
+        tracing::trace!(
+            ?connection_id,
+            request_id = ?request.id,
+            "app-server request: {request_method}"
+        );
+        let request_id = ConnectionRequestId {
+            connection_id,
+            request_id: request.id.clone(),
+        };
+        let request_span =
+            crate::app_server_tracing::request_span(&request, transport, connection_id, &session);
+        let request_trace = request.trace.as_ref().map(|trace| W3cTraceContext {
+            traceparent: trace.traceparent.clone(),
+            tracestate: trace.tracestate.clone(),
+        });
+        let request_context = RequestContext::new(request_id.clone(), request_span, request_trace);
+        Self::run_request_with_context(
+            Arc::clone(&self.outgoing),
+            request_context.clone(),
+            async {
+                let codex_request = serde_json::to_value(&request)
+                    .map_err(|err| invalid_request(format!("Invalid request: {err}")))
+                    .and_then(|request_json| {
+                        serde_json::from_value::<ClientRequest>(request_json)
+                            .map_err(|err| invalid_request(format!("Invalid request: {err}")))
+                    });
+                let result = match codex_request {
+                    Ok(codex_request) => {
+                        // Websocket callers finalize outbound readiness in lib.rs after mirroring
+                        // session state into outbound state and sending initialize notifications to
+                        // this specific connection. Passing `None` avoids marking the connection
+                        // ready too early from inside the shared request handler.
+                        self.handle_client_request(
+                            request_id.clone(),
+                            codex_request,
+                            Arc::clone(&session),
+                            /*outbound_initialized*/ None,
+                            request_context.clone(),
+                        )
+                        .await
                     }
-
-                    let client_info = params.client_info;
-                    let opted_out_notification_methods = params
-                        .capabilities
-                        .and_then(|capabilities| capabilities.opt_out_notification_methods)
-                        .unwrap_or_default();
-                    session.opted_out_notification_methods =
-                        opted_out_notification_methods.into_iter().collect();
-                    session.user_agent_suffix = Some(format!("{}; {}", client_info.name, client_info.version));
-
-                    if let Ok(mut methods) = outbound_opted_out_notification_methods.write() {
-                        *methods = session.opted_out_notification_methods.clone();
-                    }
-
-                    let user_agent = get_code_user_agent_with_suffix(
-                        Some(&self.base_config.responses_originator_header),
-                        session.user_agent_suffix.as_deref(),
-                    );
-                    let response = InitializeResponse { user_agent };
-                    self.outgoing.send_response(request_id, response).await;
-
-                    session.initialized = true;
-                    outbound_initialized.store(true, Ordering::Release);
-                    return;
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    self.outgoing.send_error(request_id.clone(), error).await;
                 }
-                ClientRequest::GetUserAgent { request_id, .. } => {
-                    if !session.initialized {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: "Not initialized".to_string(),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return;
-                    }
+            },
+        )
+        .await;
+    }
 
-                    let response = GetUserAgentResponse {
-                        user_agent: get_code_user_agent_with_suffix(
-                            Some(&self.base_config.responses_originator_header),
-                            session.user_agent_suffix.as_deref(),
-                        ),
-                    };
-                    self.outgoing.send_response(request_id, response).await;
-                    return;
+    /// Handles a typed request path used by in-process embedders.
+    ///
+    /// This bypasses JSON request deserialization but keeps identical request
+    /// semantics by delegating to `handle_client_request`.
+    pub(crate) async fn process_client_request(
+        self: &Arc<Self>,
+        connection_id: ConnectionId,
+        request: ClientRequest,
+        session: Arc<ConnectionSessionState>,
+        outbound_initialized: &AtomicBool,
+    ) {
+        let request_id = ConnectionRequestId {
+            connection_id,
+            request_id: request.id().clone(),
+        };
+        let request_span =
+            crate::app_server_tracing::typed_request_span(&request, connection_id, &session);
+        let request_context =
+            RequestContext::new(request_id.clone(), request_span, /*parent_trace*/ None);
+        tracing::trace!(
+            ?connection_id,
+            request_id = ?request_id.request_id,
+            "app-server typed request"
+        );
+        Self::run_request_with_context(
+            Arc::clone(&self.outgoing),
+            request_context.clone(),
+            async {
+                // In-process clients do not have the websocket transport loop that performs
+                // post-initialize bookkeeping, so they still finalize outbound readiness in
+                // the shared request handler.
+                let result = self
+                    .handle_client_request(
+                        request_id.clone(),
+                        request,
+                        Arc::clone(&session),
+                        Some(outbound_initialized),
+                        request_context.clone(),
+                    )
+                    .await;
+                if let Err(error) = result {
+                    self.outgoing.send_error(request_id.clone(), error).await;
                 }
-                _ => {
-                    if !session.initialized {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: "Not initialized".to_string(),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return;
-                    }
-                }
-            }
-
-            self.code_message_processor
-                .process_request_for_connection(connection_id, code_request)
-                .await;
-        } else {
-            let error = JSONRPCErrorError {
-                code: INVALID_REQUEST_ERROR_CODE,
-                message: "Invalid request".to_string(),
-                data: None,
-            };
-            self.outgoing.send_error(request_id, error).await;
-        }
+            },
+        )
+        .await;
     }
 
     pub(crate) async fn process_notification(&self, notification: JSONRPCNotification) {
@@ -228,952 +587,692 @@ impl MessageProcessor {
         tracing::info!("<- notification: {:?}", notification);
     }
 
-    pub(crate) async fn send_initialize_notifications(&self, connection_id: ConnectionId) {
-        for params in self.config_warnings.iter().cloned() {
-            self.outgoing
-                .send_notification_to_connection(
-                    connection_id,
-                    crate::outgoing_message::OutgoingNotification {
-                        method: "configWarning".to_string(),
-                        params: Some(params),
-                    },
-                )
-                .await;
-        }
+    /// Handles typed notifications from in-process clients.
+    pub(crate) async fn process_client_notification(&self, notification: ClientNotification) {
+        // Currently, we do not expect to receive any typed notifications from
+        // in-process clients, so we just log them.
+        tracing::info!("<- typed notification: {:?}", notification);
     }
 
-    pub(crate) async fn on_connection_closed(&mut self, connection_id: ConnectionId) {
-        self.code_message_processor
-            .on_connection_closed(connection_id)
+    async fn run_request_with_context<F>(
+        outgoing: Arc<OutgoingMessageSender>,
+        request_context: RequestContext,
+        request_fut: F,
+    ) where
+        F: Future<Output = ()>,
+    {
+        outgoing
+            .register_request_context(request_context.clone())
             .await;
+        request_fut.instrument(request_context.span()).await;
+    }
+
+    pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
+        self.thread_processor.thread_created_receiver()
+    }
+
+    pub(crate) async fn send_initialize_notifications_to_connection(
+        &self,
+        connection_id: ConnectionId,
+    ) {
+        self.initialize_processor
+            .send_initialize_notifications_to_connection(connection_id)
+            .await;
+    }
+
+    pub(crate) async fn connection_initialized(&self, connection_id: ConnectionId) {
+        self.thread_processor
+            .connection_initialized(connection_id)
+            .await;
+    }
+
+    pub(crate) async fn send_initialize_notifications(&self) {
+        self.initialize_processor
+            .send_initialize_notifications()
+            .await;
+    }
+
+    pub(crate) async fn try_attach_thread_listener(
+        &self,
+        thread_id: ThreadId,
+        connection_ids: Vec<ConnectionId>,
+    ) {
+        self.thread_processor
+            .try_attach_thread_listener(thread_id, connection_ids)
+            .await;
+    }
+
+    pub(crate) async fn drain_background_tasks(&self) {
+        self.thread_processor.drain_background_tasks().await;
+    }
+
+    pub(crate) async fn cancel_active_login(&self) {
+        self.account_processor.cancel_active_login().await;
+    }
+
+    pub(crate) async fn clear_all_thread_listeners(&self) {
+        self.thread_processor.clear_all_thread_listeners().await;
+    }
+
+    pub(crate) async fn shutdown_threads(&self) {
+        self.thread_processor.shutdown_threads().await;
+    }
+
+    pub(crate) async fn connection_closed(
+        &self,
+        connection_id: ConnectionId,
+        session_state: &ConnectionSessionState,
+    ) {
+        session_state.rpc_gate.shutdown().await;
+        self.outgoing.connection_closed(connection_id).await;
+        self.fs_processor.connection_closed(connection_id).await;
+        self.command_exec_processor
+            .connection_closed(connection_id)
+            .await;
+        self.process_exec_processor
+            .connection_closed(connection_id)
+            .await;
+        self.thread_processor.connection_closed(connection_id).await;
+    }
+
+    pub(crate) fn subscribe_running_assistant_turn_count(&self) -> watch::Receiver<usize> {
+        self.thread_processor
+            .subscribe_running_assistant_turn_count()
     }
 
     /// Handle a standalone JSON-RPC response originating from the peer.
-    pub(crate) async fn process_response(
-        &mut self,
-        connection_id: ConnectionId,
-        response: JSONRPCResponse,
-    ) {
+    pub(crate) async fn process_response(&self, response: JSONRPCResponse) {
         tracing::info!("<- response: {:?}", response);
         let JSONRPCResponse { id, result, .. } = response;
-        self.outgoing
-            .notify_client_response_for_connection(Some(connection_id), id, result)
-            .await
+        self.outgoing.notify_client_response(id, result).await
     }
 
     /// Handle an error object received from the peer.
-    pub(crate) async fn process_error(&mut self, connection_id: ConnectionId, err: JSONRPCError) {
+    pub(crate) async fn process_error(&self, err: JSONRPCError) {
         tracing::error!("<- error: {:?}", err);
-        self.outgoing
-            .notify_client_error_for_connection(Some(connection_id), err.id, err.error)
-            .await;
+        self.outgoing.notify_client_error(err.id, err.error).await;
     }
 
-    async fn try_process_v2_config_request(
-        &self,
-        request_id: mcp_types::RequestId,
-        request: &JSONRPCRequest,
-        session_initialized: bool,
-    ) -> bool {
-        let is_v2_request = matches!(
-            request.method.as_str(),
-            "config/read"
-                | "configRequirements/read"
-                | "config/value/write"
-                | "config/batchWrite"
-                | "externalAgentConfig/detect"
-                | "externalAgentConfig/import"
-                | "thread/list"
-                | "model/list"
-                | "skills/list"
-                | "plugin/list"
-                | "hooks/list"
-                | "mcpServerStatus/list"
-                | "remoteControl/status/read"
-                | "remoteControl/enable"
-                | "collaborationMode/list"
-                | "experimentalFeature/list"
-                | "experimentalFeature/enablement/set"
-                | "account/read"
-                | "account/login/start"
-                | "account/login/cancel"
-                | "account/logout"
-                | "account/rateLimits/read"
-        );
-        if is_v2_request && !session_initialized {
-            let error = JSONRPCErrorError {
-                code: INVALID_REQUEST_ERROR_CODE,
-                message: "Not initialized".to_string(),
-                data: None,
-            };
-            self.outgoing.send_error(request_id, error).await;
-            return true;
+    async fn handle_client_request(
+        self: &Arc<Self>,
+        connection_request_id: ConnectionRequestId,
+        codex_request: ClientRequest,
+        session: Arc<ConnectionSessionState>,
+        // `Some(...)` means the caller wants initialize to immediately mark the
+        // connection outbound-ready. Websocket JSON-RPC calls pass `None` so
+        // lib.rs can deliver connection-scoped initialize notifications first.
+        outbound_initialized: Option<&AtomicBool>,
+        request_context: RequestContext,
+    ) -> Result<(), JSONRPCErrorError> {
+        let connection_id = connection_request_id.connection_id;
+        if let ClientRequest::Initialize { request_id, params } = codex_request {
+            let connection_initialized = self
+                .initialize_processor
+                .initialize(
+                    connection_id,
+                    request_id,
+                    params,
+                    &session,
+                    outbound_initialized,
+                )
+                .await?;
+            if connection_initialized {
+                self.thread_processor
+                    .connection_initialized(connection_id)
+                    .await;
+            }
+            return Ok(());
         }
 
-        match request.method.as_str() {
-            "config/read" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ConfigReadParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid config/read params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                let config = match self.load_effective_config(params.cwd.as_deref()) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                let response = ConfigReadResponse {
-                    config: self.v2_config_snapshot_from(&config),
-                    origins: HashMap::new(),
-                    layers: if params.include_layers {
-                        Some(Vec::new())
-                    } else {
-                        None
-                    },
-                };
-                self.outgoing.send_response(request_id, response).await;
-                true
-            }
-            "configRequirements/read" => {
-                let requirements = match code_core::config::load_allowed_approval_policies(
-                    &self.base_config.code_home,
-                ) {
-                    Ok(Some(allowed_approval_policies)) => Some(ConfigRequirements {
-                        allowed_approval_policies: Some(
-                            allowed_approval_policies
-                                .into_iter()
-                                .map(map_approval_policy_to_v2)
-                                .collect(),
-                        ),
-                        allowed_sandbox_modes: None,
-                        allowed_web_search_modes: None,
-                        enforce_residency: None,
-                        network: None,
-                    }),
-                    Ok(None) => None,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INTERNAL_ERROR_CODE,
-                            message: format!("Unable to read config requirements: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                let response = ConfigRequirementsReadResponse { requirements };
-                self.outgoing.send_response(request_id, response).await;
-                true
-            }
-            "config/value/write" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ConfigValueWriteParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid config/value/write params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                match self.apply_config_value_write(params) {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "config/batchWrite" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ConfigBatchWriteParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid config/batchWrite params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                match self.apply_config_batch_write(params) {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "externalAgentConfig/detect" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ExternalAgentConfigDetectParams =
-                    match serde_json::from_value(params_value) {
-                        Ok(params) => params,
-                        Err(err) => {
-                            let error = JSONRPCErrorError {
-                                code: INVALID_REQUEST_ERROR_CODE,
-                                message: format!(
-                                    "Invalid externalAgentConfig/detect params: {err}"
-                                ),
-                                data: None,
-                            };
-                            self.outgoing.send_error(request_id, error).await;
-                            return true;
-                        }
-                    };
-
-                match self.external_agent_config_api.detect(params).await {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "externalAgentConfig/import" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: ExternalAgentConfigImportParams =
-                    match serde_json::from_value(params_value) {
-                        Ok(params) => params,
-                        Err(err) => {
-                            let error = JSONRPCErrorError {
-                                code: INVALID_REQUEST_ERROR_CODE,
-                                message: format!(
-                                    "Invalid externalAgentConfig/import params: {err}"
-                                ),
-                                data: None,
-                            };
-                            self.outgoing.send_error(request_id, error).await;
-                            return true;
-                        }
-                    };
-
-                match self.external_agent_config_api.import(params).await {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "thread/list" => {
-                let response = ThreadListResponse {
-                    data: Vec::new(),
-                    next_cursor: None,
-                };
-                self.outgoing.send_response(request_id, response).await;
-                true
-            }
-            "model/list" => {
-                let response = ModelListResponse {
-                    data: Vec::new(),
-                    next_cursor: None,
-                };
-                self.outgoing.send_response(request_id, response).await;
-                true
-            }
-            "skills/list" => {
-                self.outgoing
-                    .send_response(request_id, json!({ "data": [], "nextCursor": null }))
-                    .await;
-                true
-            }
-            "plugin/list" | "hooks/list" => {
-                self.outgoing
-                    .send_response(request_id, json!({ "data": [], "nextCursor": null }))
-                    .await;
-                true
-            }
-            "mcpServerStatus/list" => {
-                let response = ListMcpServerStatusResponse {
-                    data: Vec::new(),
-                    next_cursor: None,
-                };
-                self.outgoing.send_response(request_id, response).await;
-                true
-            }
-            "remoteControl/status/read" => {
-                self.outgoing
-                    .send_response(request_id, json!({ "enabled": false }))
-                    .await;
-                true
-            }
-            "remoteControl/enable" => {
-                self.outgoing
-                    .send_response(
-                        request_id,
-                        json!({
-                            "enabled": false,
-                            "unsupported": true,
-                        }),
-                    )
-                    .await;
-                true
-            }
-            "collaborationMode/list" => {
-                self.outgoing
-                    .send_response(request_id, json!({ "data": [], "nextCursor": null }))
-                    .await;
-                true
-            }
-            "experimentalFeature/list" => {
-                let response = ExperimentalFeatureListResponse {
-                    data: Vec::new(),
-                    next_cursor: None,
-                };
-                self.outgoing.send_response(request_id, response).await;
-                true
-            }
-            "experimentalFeature/enablement/set" => {
-                self.outgoing
-                    .send_response(
-                        request_id,
-                        json!({
-                            "enabled": false,
-                            "unsupported": true,
-                        }),
-                    )
-                    .await;
-                true
-            }
-            "account/read" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: GetAccountParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid account/read params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                match self
-                    .code_message_processor
-                    .get_account_response_v2(params.refresh_token)
-                    .await
-                {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "account/login/start" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: LoginAccountParams = match serde_json::from_value(params_value) {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid account/login/start params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                match self.code_message_processor.login_account_v2(params).await {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "account/login/cancel" => {
-                let params_value = request.params.clone().unwrap_or_else(|| json!({}));
-                let params: CancelLoginAccountParams = match serde_json::from_value(params_value)
-                {
-                    Ok(params) => params,
-                    Err(err) => {
-                        let error = JSONRPCErrorError {
-                            code: INVALID_REQUEST_ERROR_CODE,
-                            message: format!("Invalid account/login/cancel params: {err}"),
-                            data: None,
-                        };
-                        self.outgoing.send_error(request_id, error).await;
-                        return true;
-                    }
-                };
-
-                match self.code_message_processor.cancel_login_account_v2(params).await {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "account/logout" => {
-                match self.code_message_processor.logout_account_v2().await {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            "account/rateLimits/read" => {
-                match self.code_message_processor.get_account_rate_limits_v2() {
-                    Ok(response) => self.outgoing.send_response(request_id, response).await,
-                    Err(error) => self.outgoing.send_error(request_id, error).await,
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn load_effective_config(&self, cwd: Option<&str>) -> Result<Config, JSONRPCErrorError> {
-        let mut overrides = code_core::config::ConfigOverrides::default();
-        overrides.code_linux_sandbox_exe = self.base_config.code_linux_sandbox_exe.clone();
-        overrides.cwd = cwd.map(PathBuf::from);
-
-        Config::load_with_cli_overrides(self.cli_overrides.clone(), overrides).map_err(|err| {
-            JSONRPCErrorError {
-                code: INTERNAL_ERROR_CODE,
-                message: format!("Unable to load effective config: {err}"),
-                data: None,
-            }
-        })
-    }
-
-    fn v2_config_snapshot_from(&self, config: &Config) -> V2Config {
-        V2Config {
-            model: Some(config.model.clone()),
-            review_model: Some(config.review_model.clone()),
-            model_context_window: config
-                .model_context_window
-                .and_then(|value| i64::try_from(value).ok()),
-            model_auto_compact_token_limit: config.model_auto_compact_token_limit,
-            model_provider: Some(config.model_provider_id.clone()),
-            approval_policy: Some(match config.approval_policy {
-                code_core::protocol::AskForApproval::UnlessTrusted => {
-                    V2AskForApproval::UnlessTrusted
-                }
-                code_core::protocol::AskForApproval::OnFailure => V2AskForApproval::OnFailure,
-                code_core::protocol::AskForApproval::OnRequest => V2AskForApproval::OnRequest,
-                code_core::protocol::AskForApproval::Reject(config) => V2AskForApproval::Reject {
-                    sandbox_approval: config.sandbox_approval,
-                    rules: config.rules,
-                    skill_approval: config.skill_approval,
-                    request_permissions: config.request_permissions,
-                    mcp_elicitations: config.mcp_elicitations,
-                },
-                code_core::protocol::AskForApproval::Never => V2AskForApproval::Never,
-            }),
-            sandbox_mode: None,
-            sandbox_workspace_write: None,
-            forced_chatgpt_workspace_id: None,
-            forced_login_method: None,
-            web_search: Some(if config.tools_web_search_request {
-                WebSearchMode::Cached
-            } else {
-                WebSearchMode::Disabled
-            }),
-            tools: Some(ToolsV2 {
-                web_search: config
-                    .tools_web_search_request
-                    .then(|| WebSearchToolConfig {
-                        allowed_domains: config.tools_web_search_allowed_domains.clone(),
-                        ..Default::default()
-                    }),
-                view_image: Some(config.include_view_image_tool),
-            }),
-            profile: config.active_profile.clone(),
-            profiles: HashMap::new(),
-            instructions: config.base_instructions.clone(),
-            developer_instructions: None,
-            compact_prompt: config.compact_prompt_override.clone(),
-            model_reasoning_effort: None,
-            model_reasoning_summary: None,
-            model_verbosity: Some(match config.model_text_verbosity {
-                code_core::config_types::TextVerbosity::Low => Verbosity::Low,
-                code_core::config_types::TextVerbosity::Medium => Verbosity::Medium,
-                code_core::config_types::TextVerbosity::High => Verbosity::High,
-            }),
-            analytics: None,
-            apps: None,
-            additional: HashMap::new(),
-        }
-    }
-
-    fn apply_config_value_write(
-        &self,
-        params: ConfigValueWriteParams,
-    ) -> Result<ConfigWriteResponse, JSONRPCErrorError> {
-        let ConfigValueWriteParams {
-            key_path,
-            value,
-            merge_strategy,
-            file_path,
-            expected_version,
-        } = params;
-        self.apply_config_edits(
-            vec![ConfigEdit {
-                key_path,
-                value,
-                merge_strategy,
-            }],
-            file_path,
-            expected_version,
+        self.dispatch_initialized_client_request(
+            connection_request_id,
+            codex_request,
+            session,
+            request_context,
         )
+        .await
     }
 
-    fn apply_config_batch_write(
-        &self,
-        params: ConfigBatchWriteParams,
-    ) -> Result<ConfigWriteResponse, JSONRPCErrorError> {
-        self.apply_config_edits(params.edits, params.file_path, params.expected_version)
-    }
+    async fn dispatch_initialized_client_request(
+        self: &Arc<Self>,
+        connection_request_id: ConnectionRequestId,
+        codex_request: ClientRequest,
+        session: Arc<ConnectionSessionState>,
+        request_context: RequestContext,
+    ) -> Result<(), JSONRPCErrorError> {
+        if !session.initialized() {
+            return Err(invalid_request("Not initialized"));
+        }
 
-    fn apply_config_edits(
-        &self,
-        edits: Vec<ConfigEdit>,
-        file_path: Option<String>,
-        expected_version: Option<String>,
-    ) -> Result<ConfigWriteResponse, JSONRPCErrorError> {
-        let allowed_file_path = self.base_config.code_home.join("config.toml");
-        let file_path = self.resolve_config_file_path(file_path, &allowed_file_path)?;
-        let current_contents = match std::fs::read_to_string(&file_path) {
-            Ok(contents) => contents,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(err) => {
-                return Err(config_write_error(
-                    ConfigWriteErrorCode::ConfigValidationError,
-                    format!("Unable to read config file: {err}"),
-                ));
-            }
-        };
-        let current_version = config_version(&current_contents);
-        if let Some(expected_version) = expected_version
-            && expected_version != current_version
+        if let Some(reason) = codex_request.experimental_reason()
+            && !session.experimental_api_enabled()
         {
-            return Err(config_write_error(
-                ConfigWriteErrorCode::ConfigVersionConflict,
-                "Config version conflict",
-            ));
+            return Err(invalid_request(experimental_required_message(reason)));
         }
+        let connection_id = connection_request_id.connection_id;
+        self.initialize_processor.track_initialized_request(
+            connection_id,
+            connection_request_id.request_id.clone(),
+            &codex_request,
+        );
 
-        let mut root = if current_contents.trim().is_empty() {
-            TomlValue::Table(Default::default())
+        let serialization_scope = codex_request.serialization_scope();
+        let app_server_client_name = session.app_server_client_name().map(str::to_string);
+        let client_version = session.client_version().map(str::to_string);
+        let error_request_id = connection_request_id.clone();
+        let rpc_gate = Arc::clone(&session.rpc_gate);
+        let processor = Arc::clone(self);
+        let span = request_context.span();
+        let request = QueuedInitializedRequest::new(
+            rpc_gate,
+            async move {
+                let processor_for_request = Arc::clone(&processor);
+                let result = processor_for_request
+                    .handle_initialized_client_request(
+                        connection_request_id,
+                        codex_request,
+                        request_context,
+                        app_server_client_name,
+                        client_version,
+                    )
+                    .await;
+                if let Err(error) = result {
+                    processor.outgoing.send_error(error_request_id, error).await;
+                }
+            }
+            .instrument(span),
+        );
+
+        if let Some(scope) = serialization_scope {
+            let (key, access) = RequestSerializationQueueKey::from_scope(connection_id, scope);
+            self.request_serialization_queues
+                .enqueue(key, access, request)
+                .await;
         } else {
-            current_contents.parse::<TomlValue>().map_err(|err| {
-                config_write_error(
-                    ConfigWriteErrorCode::ConfigValidationError,
-                    format!("Invalid TOML in config file: {err}"),
-                )
-            })?
+            tokio::spawn(async move {
+                request.run().await;
+            });
+        }
+        Ok(())
+    }
+
+    async fn handle_initialized_client_request(
+        self: Arc<Self>,
+        connection_request_id: ConnectionRequestId,
+        codex_request: ClientRequest,
+        request_context: RequestContext,
+        app_server_client_name: Option<String>,
+        client_version: Option<String>,
+    ) -> Result<(), JSONRPCErrorError> {
+        let connection_id = connection_request_id.connection_id;
+        let request_id = ConnectionRequestId {
+            connection_id,
+            request_id: codex_request.id().clone(),
         };
 
-        for edit in edits {
-            apply_toml_edit(
-                &mut root,
-                edit.key_path.as_str(),
-                json_to_toml(edit.value),
-                edit.merge_strategy,
-            )?;
-        }
-
-        let serialized = toml::to_string_pretty(&root).map_err(|err| {
-            config_write_error(
-                ConfigWriteErrorCode::ConfigValidationError,
-                format!("Unable to serialize config TOML: {err}"),
-            )
-        })?;
-
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                config_write_error(
-                    ConfigWriteErrorCode::UserLayerNotFound,
-                    format!("Unable to create config directory: {err}"),
-                )
-            })?;
-        }
-
-        std::fs::write(&file_path, serialized.as_bytes()).map_err(|err| {
-            config_write_error(
-                ConfigWriteErrorCode::ConfigValidationError,
-                format!("Unable to write config file: {err}"),
-            )
-        })?;
-
-        let absolute_file_path = to_absolute_path_buf(&file_path).map_err(|err| {
-            config_write_error(
-                ConfigWriteErrorCode::ConfigValidationError,
-                format!("Unable to resolve config file path: {err}"),
-            )
-        })?;
-
-        Ok(ConfigWriteResponse {
-            status: WriteStatus::Ok,
-            version: config_version(serialized.as_str()),
-            file_path: absolute_file_path,
-            overridden_metadata: None,
-        })
-    }
-
-    fn resolve_config_file_path(
-        &self,
-        file_path: Option<String>,
-        allowed_file_path: &Path,
-    ) -> Result<PathBuf, JSONRPCErrorError> {
-        let path = match file_path {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                if !path.is_absolute() {
-                    return Err(config_write_error(
-                        ConfigWriteErrorCode::ConfigValidationError,
-                        "filePath must be an absolute path",
-                    ));
-                }
-                if !paths_match(allowed_file_path, &path) {
-                    return Err(config_write_error(
-                        ConfigWriteErrorCode::ConfigLayerReadonly,
-                        "Only writes to the user config are allowed",
-                    ));
-                }
-                path
+        let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
+            ClientRequest::Initialize { .. } => {
+                panic!("Initialize should be handled before initialized request dispatch");
             }
-            None => allowed_file_path.to_path_buf(),
+            ClientRequest::ConfigRead { params, .. } => self
+                .config_processor
+                .read(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::WindowsSandboxReadiness { .. } => self
+                .windows_sandbox_processor
+                .windows_sandbox_readiness()
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ExternalAgentConfigDetect { params, .. } => self
+                .external_agent_config_processor
+                .detect(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ExternalAgentConfigImport { params, .. } => self
+                .external_agent_config_processor
+                .import(request_id.clone(), params)
+                .await
+                .map(|()| None),
+            ClientRequest::ConfigValueWrite { params, .. } => {
+                self.config_processor.value_write(params).await.map(Some)
+            }
+            ClientRequest::ConfigBatchWrite { params, .. } => {
+                self.config_processor.batch_write(params).await.map(Some)
+            }
+            ClientRequest::ExperimentalFeatureEnablementSet { params, .. } => {
+                self.config_processor
+                    .experimental_feature_enablement_set(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ConfigRequirementsRead { params: _, .. } => self
+                .config_processor
+                .config_requirements_read()
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsReadFile { params, .. } => self
+                .fs_processor
+                .read_file(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsWriteFile { params, .. } => self
+                .fs_processor
+                .write_file(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsCreateDirectory { params, .. } => self
+                .fs_processor
+                .create_directory(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsGetMetadata { params, .. } => self
+                .fs_processor
+                .get_metadata(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsReadDirectory { params, .. } => self
+                .fs_processor
+                .read_directory(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsRemove { params, .. } => self
+                .fs_processor
+                .remove(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsCopy { params, .. } => self
+                .fs_processor
+                .copy(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsWatch { params, .. } => self
+                .fs_processor
+                .watch(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FsUnwatch { params, .. } => self
+                .fs_processor
+                .unwatch(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ModelProviderCapabilitiesRead { params: _, .. } => self
+                .config_processor
+                .model_provider_capabilities_read()
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ThreadStart { params, .. } => {
+                self.thread_processor
+                    .thread_start(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                        request_context,
+                    )
+                    .await
+            }
+            ClientRequest::ThreadUnsubscribe { params, .. } => {
+                self.thread_processor
+                    .thread_unsubscribe(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadResume { params, .. } => {
+                self.thread_processor
+                    .thread_resume(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadFork { params, .. } => {
+                self.thread_processor
+                    .thread_fork(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadArchive { params, .. } => {
+                self.thread_processor
+                    .thread_archive(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadIncrementElicitation { params, .. } => {
+                self.thread_processor
+                    .thread_increment_elicitation(params)
+                    .await
+            }
+            ClientRequest::ThreadDecrementElicitation { params, .. } => {
+                self.thread_processor
+                    .thread_decrement_elicitation(params)
+                    .await
+            }
+            ClientRequest::ThreadSetName { params, .. } => {
+                self.thread_processor
+                    .thread_set_name(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadGoalSet { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_set(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadGoalGet { params, .. } => {
+                self.thread_goal_processor.thread_goal_get(params).await
+            }
+            ClientRequest::ThreadGoalClear { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_clear(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadMetadataUpdate { params, .. } => {
+                self.thread_processor.thread_metadata_update(params).await
+            }
+            ClientRequest::ThreadMemoryModeSet { params, .. } => {
+                self.thread_processor.thread_memory_mode_set(params).await
+            }
+            ClientRequest::MemoryReset { .. } => self.thread_processor.memory_reset().await,
+            ClientRequest::ThreadUnarchive { params, .. } => {
+                self.thread_processor
+                    .thread_unarchive(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadCompactStart { params, .. } => {
+                self.thread_processor
+                    .thread_compact_start(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadBackgroundTerminalsClean { params, .. } => {
+                self.thread_processor
+                    .thread_background_terminals_clean(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadRollback { params, .. } => {
+                self.thread_processor
+                    .thread_rollback(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadList { params, .. } => {
+                self.thread_processor.thread_list(params).await
+            }
+            ClientRequest::ThreadLoadedList { params, .. } => {
+                self.thread_processor.thread_loaded_list(params).await
+            }
+            ClientRequest::ThreadRead { params, .. } => {
+                self.thread_processor.thread_read(params).await
+            }
+            ClientRequest::ThreadTurnsList { params, .. } => {
+                self.thread_processor.thread_turns_list(params).await
+            }
+            ClientRequest::ThreadTurnsItemsList { params, .. } => {
+                self.thread_processor.thread_turns_items_list(params).await
+            }
+            ClientRequest::ThreadShellCommand { params, .. } => {
+                self.thread_processor
+                    .thread_shell_command(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadApproveGuardianDeniedAction { params, .. } => {
+                self.thread_processor
+                    .thread_approve_guardian_denied_action(&request_id, params)
+                    .await
+            }
+            ClientRequest::GetConversationSummary { params, .. } => {
+                self.thread_processor.conversation_summary(params).await
+            }
+            ClientRequest::SkillsList { params, .. } => {
+                self.catalog_processor.skills_list(params).await
+            }
+            ClientRequest::HooksList { params, .. } => {
+                self.catalog_processor.hooks_list(params).await
+            }
+            ClientRequest::MarketplaceAdd { params, .. } => {
+                self.marketplace_processor.marketplace_add(params).await
+            }
+            ClientRequest::MarketplaceRemove { params, .. } => {
+                self.marketplace_processor.marketplace_remove(params).await
+            }
+            ClientRequest::MarketplaceUpgrade { params, .. } => {
+                self.marketplace_processor.marketplace_upgrade(params).await
+            }
+            ClientRequest::PluginList { params, .. } => {
+                self.plugin_processor.plugin_list(params).await
+            }
+            ClientRequest::PluginRead { params, .. } => {
+                self.plugin_processor.plugin_read(params).await
+            }
+            ClientRequest::PluginSkillRead { params, .. } => {
+                self.plugin_processor.plugin_skill_read(params).await
+            }
+            ClientRequest::PluginShareSave { params, .. } => {
+                self.plugin_processor.plugin_share_save(params).await
+            }
+            ClientRequest::PluginShareUpdateTargets { params, .. } => {
+                self.plugin_processor
+                    .plugin_share_update_targets(params)
+                    .await
+            }
+            ClientRequest::PluginShareList { params, .. } => {
+                self.plugin_processor.plugin_share_list(params).await
+            }
+            ClientRequest::PluginShareDelete { params, .. } => {
+                self.plugin_processor.plugin_share_delete(params).await
+            }
+            ClientRequest::AppsList { params, .. } => {
+                self.apps_processor.apps_list(&request_id, params).await
+            }
+            ClientRequest::SkillsConfigWrite { params, .. } => {
+                self.catalog_processor.skills_config_write(params).await
+            }
+            ClientRequest::PluginInstall { params, .. } => {
+                self.plugin_processor.plugin_install(params).await
+            }
+            ClientRequest::PluginUninstall { params, .. } => {
+                self.plugin_processor.plugin_uninstall(params).await
+            }
+            ClientRequest::ModelList { params, .. } => {
+                self.catalog_processor.model_list(params).await
+            }
+            ClientRequest::ExperimentalFeatureList { params, .. } => {
+                self.catalog_processor
+                    .experimental_feature_list(params)
+                    .await
+            }
+            ClientRequest::CollaborationModeList { params, .. } => {
+                self.catalog_processor.collaboration_mode_list(params).await
+            }
+            ClientRequest::MockExperimentalMethod { params, .. } => {
+                self.catalog_processor
+                    .mock_experimental_method(params)
+                    .await
+            }
+            ClientRequest::TurnStart { params, .. } => {
+                self.turn_processor
+                    .turn_start(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadInjectItems { params, .. } => {
+                self.turn_processor.thread_inject_items(params).await
+            }
+            ClientRequest::TurnSteer { params, .. } => {
+                self.turn_processor.turn_steer(&request_id, params).await
+            }
+            ClientRequest::TurnInterrupt { params, .. } => {
+                self.turn_processor
+                    .turn_interrupt(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadRealtimeStart { params, .. } => {
+                self.turn_processor
+                    .thread_realtime_start(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadRealtimeAppendAudio { params, .. } => {
+                self.turn_processor
+                    .thread_realtime_append_audio(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadRealtimeAppendText { params, .. } => {
+                self.turn_processor
+                    .thread_realtime_append_text(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadRealtimeStop { params, .. } => {
+                self.turn_processor
+                    .thread_realtime_stop(&request_id, params)
+                    .await
+            }
+            ClientRequest::ThreadRealtimeListVoices { params: _, .. } => {
+                self.turn_processor.thread_realtime_list_voices().await
+            }
+            ClientRequest::ReviewStart { params, .. } => {
+                self.turn_processor.review_start(&request_id, params).await
+            }
+            ClientRequest::McpServerOauthLogin { params, .. } => {
+                self.mcp_processor.mcp_server_oauth_login(params).await
+            }
+            ClientRequest::McpServerRefresh { params, .. } => {
+                self.mcp_processor.mcp_server_refresh(params).await
+            }
+            ClientRequest::McpServerStatusList { params, .. } => {
+                self.mcp_processor
+                    .mcp_server_status_list(&request_id, params)
+                    .await
+            }
+            ClientRequest::McpResourceRead { params, .. } => {
+                self.mcp_processor
+                    .mcp_resource_read(&request_id, params)
+                    .await
+            }
+            ClientRequest::McpServerToolCall { params, .. } => {
+                self.mcp_processor
+                    .mcp_server_tool_call(&request_id, params)
+                    .await
+            }
+            ClientRequest::WindowsSandboxSetupStart { params, .. } => {
+                self.windows_sandbox_processor
+                    .windows_sandbox_setup_start(&request_id, params)
+                    .await
+            }
+            ClientRequest::LoginAccount { params, .. } => {
+                self.account_processor
+                    .login_account(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::LogoutAccount { .. } => {
+                self.account_processor
+                    .logout_account(request_id.clone())
+                    .await
+            }
+            ClientRequest::CancelLoginAccount { params, .. } => {
+                self.account_processor.cancel_login_account(params).await
+            }
+            ClientRequest::GetAccount { params, .. } => {
+                self.account_processor.get_account(params).await
+            }
+            ClientRequest::GetAuthStatus { params, .. } => {
+                self.account_processor.get_auth_status(params).await
+            }
+            ClientRequest::GetAccountRateLimits { .. } => {
+                self.account_processor.get_account_rate_limits().await
+            }
+            ClientRequest::SendAddCreditsNudgeEmail { params, .. } => {
+                self.account_processor
+                    .send_add_credits_nudge_email(params)
+                    .await
+            }
+            ClientRequest::GitDiffToRemote { params, .. } => {
+                self.git_processor.git_diff_to_remote(params).await
+            }
+            ClientRequest::FuzzyFileSearch { params, .. } => self
+                .search_processor
+                .fuzzy_file_search(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FuzzyFileSearchSessionStart { params, .. } => self
+                .search_processor
+                .fuzzy_file_search_session_start_response(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FuzzyFileSearchSessionUpdate { params, .. } => self
+                .search_processor
+                .fuzzy_file_search_session_update_response(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::FuzzyFileSearchSessionStop { params, .. } => self
+                .search_processor
+                .fuzzy_file_search_session_stop(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::OneOffCommandExec { params, .. } => {
+                self.command_exec_processor
+                    .one_off_command_exec(&request_id, params)
+                    .await
+            }
+            ClientRequest::CommandExecWrite { params, .. } => {
+                self.command_exec_processor
+                    .command_exec_write(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::CommandExecResize { params, .. } => {
+                self.command_exec_processor
+                    .command_exec_resize(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::CommandExecTerminate { params, .. } => {
+                self.command_exec_processor
+                    .command_exec_terminate(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ProcessSpawn { params, .. } => self
+                .process_exec_processor
+                .process_spawn(request_id.clone(), params)
+                .await
+                .map(|()| None),
+            ClientRequest::ProcessWriteStdin { params, .. } => {
+                self.process_exec_processor
+                    .process_write_stdin(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ProcessKill { params, .. } => {
+                self.process_exec_processor
+                    .process_kill(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ProcessResizePty { params, .. } => {
+                self.process_exec_processor
+                    .process_resize_pty(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::FeedbackUpload { params, .. } => {
+                self.feedback_processor.feedback_upload(params).await
+            }
         };
 
-        Ok(path)
-    }
-}
-
-fn paths_match(expected: &Path, provided: &Path) -> bool {
-    let expected = expected.canonicalize().unwrap_or_else(|_| expected.to_path_buf());
-    let provided = provided.canonicalize().unwrap_or_else(|_| provided.to_path_buf());
-    expected == provided
-}
-
-fn map_approval_policy_to_v2(
-    policy: code_core::protocol::AskForApproval,
-) -> V2AskForApproval {
-    match policy {
-        code_core::protocol::AskForApproval::UnlessTrusted => V2AskForApproval::UnlessTrusted,
-        code_core::protocol::AskForApproval::OnFailure => V2AskForApproval::OnFailure,
-        code_core::protocol::AskForApproval::OnRequest => V2AskForApproval::OnRequest,
-        code_core::protocol::AskForApproval::Reject(config) => V2AskForApproval::Reject {
-            sandbox_approval: config.sandbox_approval,
-            rules: config.rules,
-            skill_approval: config.skill_approval,
-            request_permissions: config.request_permissions,
-            mcp_elicitations: config.mcp_elicitations,
-        },
-        code_core::protocol::AskForApproval::Never => V2AskForApproval::Never,
-    }
-}
-
-fn apply_toml_edit(
-    root: &mut TomlValue,
-    key_path: &str,
-    value: TomlValue,
-    merge_strategy: MergeStrategy,
-) -> Result<(), JSONRPCErrorError> {
-    match merge_strategy {
-        MergeStrategy::Replace => set_toml_path(root, key_path, value),
-        MergeStrategy::Upsert => upsert_toml_path(root, key_path, value),
-    }
-}
-
-fn set_toml_path(root: &mut TomlValue, key_path: &str, value: TomlValue) -> Result<(), JSONRPCErrorError> {
-    let segments: Vec<&str> = key_path.split('.').filter(|segment| !segment.is_empty()).collect();
-    if segments.is_empty() {
-        return Err(config_write_error(
-            ConfigWriteErrorCode::ConfigPathNotFound,
-            "Config key path must not be empty",
-        ));
-    }
-
-    let mut current = root;
-    for segment in &segments[..segments.len() - 1] {
-        if !current.is_table() {
-            *current = TomlValue::Table(Default::default());
-        }
-        let table = current
-            .as_table_mut()
-            .expect("table should exist after conversion");
-        current = table
-            .entry((*segment).to_string())
-            .or_insert_with(|| TomlValue::Table(Default::default()));
-    }
-
-    if !current.is_table() {
-        *current = TomlValue::Table(Default::default());
-    }
-    let table = current
-        .as_table_mut()
-        .expect("table should exist after conversion");
-    table.insert(
-        segments
-            .last()
-            .expect("segments cannot be empty")
-            .to_string(),
-        value,
-    );
-
-    Ok(())
-}
-
-fn upsert_toml_path(
-    root: &mut TomlValue,
-    key_path: &str,
-    value: TomlValue,
-) -> Result<(), JSONRPCErrorError> {
-    let segments: Vec<&str> = key_path.split('.').filter(|segment| !segment.is_empty()).collect();
-    if segments.is_empty() {
-        return Err(config_write_error(
-            ConfigWriteErrorCode::ConfigPathNotFound,
-            "Config key path must not be empty",
-        ));
-    }
-
-    let mut current = root;
-    for segment in &segments[..segments.len() - 1] {
-        if !current.is_table() {
-            *current = TomlValue::Table(Default::default());
-        }
-        let table = current
-            .as_table_mut()
-            .expect("table should exist after conversion");
-        current = table
-            .entry((*segment).to_string())
-            .or_insert_with(|| TomlValue::Table(Default::default()));
-    }
-
-    if !current.is_table() {
-        *current = TomlValue::Table(Default::default());
-    }
-
-    let table = current
-        .as_table_mut()
-        .expect("table should exist after conversion");
-    let key = segments
-        .last()
-        .expect("segments cannot be empty")
-        .to_string();
-    if let Some(existing) = table.get_mut(&key) {
-        merge_toml_values(existing, value);
-    } else {
-        table.insert(key, value);
-    }
-    Ok(())
-}
-
-fn merge_toml_values(target: &mut TomlValue, incoming: TomlValue) {
-    match (target, incoming) {
-        (TomlValue::Table(target_table), TomlValue::Table(incoming_table)) => {
-            for (key, incoming_value) in incoming_table {
-                if let Some(existing) = target_table.get_mut(&key) {
-                    merge_toml_values(existing, incoming_value);
-                } else {
-                    target_table.insert(key, incoming_value);
-                }
+        match result {
+            Ok(Some(response)) => {
+                self.outgoing
+                    .send_response_as(request_id.clone(), response)
+                    .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.outgoing.send_error(request_id.clone(), error).await;
             }
         }
-        (target_value, incoming_value) => {
-            *target_value = incoming_value;
-        }
-    }
-}
-
-fn config_version(contents: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(contents.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn to_absolute_path_buf(path: &Path) -> std::io::Result<AbsolutePathBuf> {
-    let absolute_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    absolute_path
-        .try_into()
-        .map_err(std::io::Error::other)
-}
-
-fn config_write_error(code: ConfigWriteErrorCode, message: impl Into<String>) -> JSONRPCErrorError {
-    JSONRPCErrorError {
-        code: INVALID_REQUEST_ERROR_CODE,
-        message: message.into(),
-        data: Some(json!({
-            "config_write_error_code": code,
-        })),
+        Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::outgoing_message::OutgoingEnvelope;
-    use crate::outgoing_message::OutgoingMessage;
-    use mcp_types::JSONRPC_VERSION;
-    use mcp_types::RequestId;
-    use serde_json::json;
-    use tokio::sync::mpsc;
-    use uuid::Uuid;
-
-    #[tokio::test]
-    async fn initialize_applies_opt_out_notification_methods_per_connection() {
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(8);
-        let outgoing = Arc::new(OutgoingMessageSender::new_with_routed_sender(outgoing_tx));
-        let config = Arc::new(
-            Config::load_with_cli_overrides(Vec::new(), code_core::config::ConfigOverrides::default())
-                .expect("load default config"),
-        );
-        let mut processor = MessageProcessor::new(outgoing, None, config, Vec::new(), Vec::new());
-        let mut session = ConnectionSessionState::default();
-        let outbound_initialized = AtomicBool::new(false);
-        let outbound_opted_out_notification_methods = RwLock::new(HashSet::new());
-
-        let request = JSONRPCRequest {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: RequestId::Integer(1),
-            method: "initialize".to_string(),
-            params: Some(json!({
-                "clientInfo": {
-                    "name": "client-a",
-                    "version": "1.0.0"
-                },
-                "capabilities": {
-                    "experimentalApi": false,
-                    "optOutNotificationMethods": ["configWarning", "codex/event/session_configured"]
-                }
-            })),
-        };
-
-        processor
-            .process_request(
-                ConnectionId(42),
-                request,
-                &mut session,
-                &outbound_initialized,
-                &outbound_opted_out_notification_methods,
-            )
-            .await;
-
-        assert!(session.initialized, "session should be initialized");
-        assert!(
-            outbound_initialized.load(Ordering::Acquire),
-            "outbound initialized flag should be set"
-        );
-
-        let opted_out = outbound_opted_out_notification_methods
-            .read()
-            .expect("read lock");
-        assert!(opted_out.contains("configWarning"));
-        assert!(opted_out.contains("codex/event/session_configured"));
-
-        // Drain initialize response envelope to ensure processing completed.
-        let envelope = outgoing_rx.recv().await.expect("initialize response envelope");
-        match envelope {
-            OutgoingEnvelope::Broadcast { .. } => {}
-            _ => panic!("expected initialize response to be emitted"),
-        }
-    }
-
-    #[tokio::test]
-    async fn v2_requests_require_initialize() {
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(8);
-        let outgoing = Arc::new(OutgoingMessageSender::new_with_routed_sender(outgoing_tx));
-        let config = Arc::new(
-            Config::load_with_cli_overrides(Vec::new(), code_core::config::ConfigOverrides::default())
-                .expect("load default config"),
-        );
-        let mut processor = MessageProcessor::new(outgoing, None, config, Vec::new(), Vec::new());
-        let mut session = ConnectionSessionState::default();
-        let outbound_initialized = AtomicBool::new(false);
-        let outbound_opted_out_notification_methods = RwLock::new(HashSet::new());
-
-        let request = JSONRPCRequest {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: RequestId::Integer(7),
-            method: "config/read".to_string(),
-            params: Some(json!({
-                "includeLayers": false,
-            })),
-        };
-
-        processor
-            .process_request(
-                ConnectionId(42),
-                request,
-                &mut session,
-                &outbound_initialized,
-                &outbound_opted_out_notification_methods,
-            )
-            .await;
-
-        let envelope = outgoing_rx
-            .recv()
-            .await
-            .expect("expected not-initialized error");
-        match envelope {
-            OutgoingEnvelope::Broadcast {
-                message: OutgoingMessage::Error(error),
-            } => {
-                assert_eq!(error.id, RequestId::Integer(7));
-                assert_eq!(error.error.message, "Not initialized");
-            }
-            _ => panic!("expected broadcast error response"),
-        }
-    }
-
-    #[test]
-    fn config_write_rejects_unreadable_existing_path() {
-        let (outgoing_tx, _outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(8);
-        let outgoing = Arc::new(OutgoingMessageSender::new_with_routed_sender(outgoing_tx));
-
-        let mut config =
-            Config::load_with_cli_overrides(Vec::new(), code_core::config::ConfigOverrides::default())
-                .expect("load default config");
-        let temp_code_home = std::env::temp_dir().join(format!(
-            "code-app-server-message-processor-{}",
-            Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&temp_code_home).expect("create temp code home");
-        let config_toml_path = temp_code_home.join("config.toml");
-        std::fs::create_dir_all(&config_toml_path).expect("create unreadable config path");
-        config.code_home = temp_code_home.clone();
-
-        let processor = MessageProcessor::new(
-            outgoing,
-            None,
-            Arc::new(config),
-            Vec::new(),
-            Vec::new(),
-        );
-        let result = processor.apply_config_value_write(ConfigValueWriteParams {
-            key_path: "model".to_string(),
-            value: json!("o3"),
-            merge_strategy: MergeStrategy::Replace,
-            file_path: None,
-            expected_version: None,
-        });
-
-        let err = result.expect_err("write should fail when reading config path fails");
-        assert!(err.message.contains("Unable to read config file"));
-        assert_eq!(
-            err.data,
-            Some(json!({
-                "config_write_error_code": ConfigWriteErrorCode::ConfigValidationError,
-            }))
-        );
-
-        let _ = std::fs::remove_dir_all(temp_code_home);
-    }
-}
+#[path = "message_processor_tracing_tests.rs"]
+mod message_processor_tracing_tests;

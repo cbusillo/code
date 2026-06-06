@@ -1,4523 +1,2176 @@
-use std::collections::BTreeMap;
-use std::io::BufRead;
-use std::path::Path;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+//! Session- and turn-scoped helpers for talking to model provider APIs.
+//!
+//! `ModelClient` is intended to live for the lifetime of a Codex session and holds the stable
+//! configuration and state needed to talk to a provider (auth, provider selection, conversation id,
+//! and transport fallback state).
+//!
+//! Per-turn settings (model selection, reasoning controls, telemetry context, and turn metadata)
+//! are passed explicitly to streaming and unary methods so that the turn lifetime is visible at the
+//! call site.
+//!
+//! A [`ModelClientSession`] is created per turn and is used to stream one or more Responses API
+//! requests during that turn. It caches a Responses WebSocket connection (opened lazily) and stores
+//! per-turn state such as the `x-codex-turn-state` token used for sticky routing.
+//!
+//! WebSocket prewarm is a v2-only `response.create` with `generate=false`; it waits for completion
+//! so the next request can reuse the same connection and `previous_response_id`.
+//!
+//! Turn execution performs prewarm as a best-effort step before the first stream request so the
+//! subsequent request can reuse the same connection.
+//!
+//! ## Retry-Budget Tradeoff
+//!
+//! WebSocket prewarm is treated as the first websocket connection attempt for a turn. If it
+//! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
-use crate::AuthManager;
-use crate::RefreshTokenError;
-use crate::account_usage;
-use crate::auth;
-use crate::auth_accounts;
-use bytes::Bytes;
-use code_app_server_protocol::AuthMode;
-use code_protocol::models::ResponseItem;
-use eventsource_stream::Eventsource;
-use futures::prelude::*;
-use httpdate::parse_http_date;
-use regex_lite::Regex;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+use codex_api::ApiError;
+use codex_api::AuthProvider;
+use codex_api::CompactClient as ApiCompactClient;
+use codex_api::CompactionInput as ApiCompactionInput;
+use codex_api::Compression;
+use codex_api::MemoriesClient as ApiMemoriesClient;
+use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
+use codex_api::MemorySummarizeOutput as ApiMemorySummarizeOutput;
+use codex_api::Provider as ApiProvider;
+use codex_api::RawMemory as ApiRawMemory;
+use codex_api::RealtimeCallClient as ApiRealtimeCallClient;
+use codex_api::RealtimeSessionConfig as ApiRealtimeSessionConfig;
+use codex_api::Reasoning;
+use codex_api::RequestTelemetry;
+use codex_api::ReqwestTransport;
+use codex_api::ResponseCreateWsRequest;
+use codex_api::ResponsesApiRequest;
+use codex_api::ResponsesClient as ApiResponsesClient;
+use codex_api::ResponsesOptions as ApiResponsesOptions;
+use codex_api::ResponsesWebsocketClient as ApiWebSocketResponsesClient;
+use codex_api::ResponsesWebsocketConnection as ApiWebSocketConnection;
+use codex_api::ResponsesWsRequest;
+use codex_api::SharedAuthProvider;
+use codex_api::SseTelemetry;
+use codex_api::TransportError;
+use codex_api::WebsocketTelemetry;
+use codex_api::auth_header_telemetry;
+use codex_api::build_session_headers;
+use codex_api::create_text_param_for_request;
+use codex_api::response_create_client_metadata;
+use codex_app_server_protocol::AuthMode;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
+use codex_login::RefreshTokenError;
+use codex_login::UnauthorizedRecovery;
+use codex_login::default_client::build_reqwest_client;
+use codex_otel::SessionTelemetry;
+use codex_otel::current_span_w3c_trace_context;
+
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
+use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::InternalSessionSource;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::W3cTraceContext;
+use codex_rollout_trace::CompactionTraceContext;
+use codex_rollout_trace::InferenceTraceAttempt;
+use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::create_tools_json_for_responses_api;
+use eventsource_stream::Event;
+use eventsource_stream::EventStreamError;
+use futures::StreamExt;
+use http::HeaderMap as ApiHeaderMap;
+use http::HeaderValue;
+use http::StatusCode as HttpStatusCode;
 use reqwest::StatusCode;
-use reqwest::header::HeaderMap;
-use reqwest::header::HeaderValue;
-use serde::Deserialize;
-use serde::Serialize;
-use serde_json::Value;
-use tokio::sync::Mutex as TokioMutex;
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::timeout;
-use tokio_util::io::ReaderStream;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::oneshot::error::TryRecvError;
+use tokio_tungstenite::tungstenite::Error;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
+use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
-use uuid::Uuid;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use tokio_tungstenite::MaybeTlsStream;
-use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::Error as WsError;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-const AUTH_REQUIRED_MESSAGE: &str = "Authentication required. Run `code login` to continue.";
-
-use crate::agent_defaults::{
-    default_agent_configs,
-    enabled_agent_model_specs_for_auth,
-    filter_agent_model_names_for_auth,
-};
-use crate::chat_completions::AggregateStreamExt;
-use crate::chat_completions::stream_chat_completions;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
-use crate::client_common::ResponsesApiRequest;
-use crate::client_common::create_reasoning_param_for_request;
-use crate::client_common::replace_image_payloads_for_model;
-use crate::client_common::rewrite_image_generation_calls_for_input;
-use crate::config::Config;
-use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
-use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use crate::config_types::ContextMode;
-use crate::config_types::ServiceTier;
-use crate::config_types::TextVerbosity as TextVerbosityConfig;
-use crate::debug_logger::DebugLogger;
-use crate::default_client::create_client;
-use crate::error::{CodexErr, RetryAfter};
-use crate::error::Result;
-use crate::error::ModelCapError;
-use crate::error::RetryLimitReachedError;
-use crate::error::UnexpectedResponseError;
-use crate::error::UsageLimitReachedError;
+use crate::feedback_tags;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
-use crate::model_family::{find_family_for_model, ModelFamily};
-use crate::model_provider_info::ModelProviderInfo;
-use crate::model_provider_info::WireApi;
-use crate::openai_tools::create_tools_json_for_responses_api;
-use crate::openai_tools::ConfigShellToolType;
-use crate::openai_tools::ToolsConfig;
-use crate::protocol::RateLimitSnapshotEvent;
-use crate::protocol::RateLimitReachedType;
-use crate::protocol::SandboxPolicy;
-use crate::protocol::TokenUsage;
-use crate::reasoning::clamp_reasoning_effort_for_model;
-use crate::slash_commands::get_enabled_agents;
-use crate::util::backoff;
-use code_otel::otel_event_manager::{OtelEventManager, TurnLatencyPayload};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
+use crate::util::emit_feedback_auth_recovery_tags;
+use codex_api::map_api_error;
+use codex_feedback::FeedbackRequestTags;
+use codex_feedback::emit_feedback_request_tags_with_auth_env;
+use codex_login::auth_env_telemetry::AuthEnvTelemetry;
+use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
+use codex_model_provider::SharedModelProvider;
+use codex_model_provider::create_model_provider;
+#[cfg(test)]
+use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result;
+use codex_response_debug_context::extract_response_debug_context;
+use codex_response_debug_context::extract_response_debug_context_from_api_error;
+use codex_response_debug_context::telemetry_api_error_message;
+use codex_response_debug_context::telemetry_transport_error_message;
 
-const RESPONSES_BETA_HEADER_V1: &str = "responses=v1";
-const RESPONSES_BETA_HEADER_EXPERIMENTAL: &str = "responses=experimental";
-const RESPONSES_WEBSOCKETS_BETA_HEADER_V1: &str = "responses_websockets=2026-02-04";
-const RESPONSES_WEBSOCKETS_BETA_HEADER_V2: &str = "responses_websockets=2026-02-06";
-const RESPONSES_WEBSOCKET_INGRESS_BUFFER: usize = 256;
+pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
+pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
+pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
+pub const X_CODEX_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
+pub const X_CODEX_PARENT_THREAD_ID_HEADER: &str = "x-codex-parent-thread-id";
+pub const X_CODEX_WINDOW_ID_HEADER: &str = "x-codex-window-id";
+pub const X_OPENAI_MEMGEN_REQUEST_HEADER: &str = "x-openai-memgen-request";
+pub const X_OPENAI_SUBAGENT_HEADER: &str = "x-openai-subagent";
+pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
+    "x-responsesapi-include-timing-metrics";
+const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const RESPONSES_ENDPOINT: &str = "/responses";
+const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
+#[cfg(test)]
+pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
+    Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponsesWebsocketVersion {
-    V1,
-    V2,
+pub(crate) struct CompactConversationRequestSettings {
+    pub(crate) effort: Option<ReasoningEffortConfig>,
+    pub(crate) summary: ReasoningSummaryConfig,
+    pub(crate) service_tier: Option<String>,
 }
 
-fn preferred_ws_version_from_env() -> ResponsesWebsocketVersion {
-    match std::env::var("CODE_RESPONSES_WEBSOCKET_VERSION") {
-        Ok(value) if value.eq_ignore_ascii_case("v1") => ResponsesWebsocketVersion::V1,
-        _ => ResponsesWebsocketVersion::V2,
+/// Session-scoped state shared by all [`ModelClient`] clones.
+///
+/// This is intentionally kept minimal so `ModelClient` does not need to hold a full `Config`. Most
+/// configuration is per turn and is passed explicitly to streaming/unary methods.
+#[derive(Debug)]
+struct ModelClientState {
+    session_id: SessionId,
+    thread_id: ThreadId,
+    window_generation: AtomicU64,
+    installation_id: String,
+    provider: SharedModelProvider,
+    auth_env_telemetry: AuthEnvTelemetry,
+    session_source: SessionSource,
+    model_verbosity: Option<VerbosityConfig>,
+    enable_request_compression: bool,
+    include_timing_metrics: bool,
+    beta_features_header: Option<String>,
+    disable_websockets: AtomicBool,
+    cached_websocket_session: StdMutex<WebsocketSession>,
+}
+
+/// Resolved API client setup for a single request attempt.
+///
+/// Keeping this as a single bundle ensures prewarm and normal request paths
+/// share the same auth/provider setup flow.
+struct CurrentClientSetup {
+    auth: Option<CodexAuth>,
+    api_provider: ApiProvider,
+    api_auth: SharedAuthProvider,
+}
+
+#[derive(Clone, Copy)]
+struct RequestRouteTelemetry {
+    endpoint: &'static str,
+}
+
+impl RequestRouteTelemetry {
+    fn for_endpoint(endpoint: &'static str) -> Self {
+        Self { endpoint }
     }
 }
 
-// Sticky-routing token captured at the start of a turn. When present, it must
-// be replayed on every subsequent request within the same turn (retries,
-// continuations, websocket reconnects).
-const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
-const X_CODEX_WINDOW_ID_HEADER: &str = "x-codex-window-id";
-
-const MODEL_CAP_MODEL_HEADER: &str = "x-codex-model-cap-model";
-const MODEL_CAP_RESET_AFTER_HEADER: &str = "x-codex-model-cap-reset-after-seconds";
-
-const CODE_OPENAI_SUBAGENT_ENV: &str = "CODE_OPENAI_SUBAGENT";
-
-type ResponsesWebSocketStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
-#[derive(Clone, Debug, PartialEq)]
-struct ResponsesRequestSnapshot {
-    comparable_payload: Value,
-    input: Vec<ResponseItem>,
+/// A session-scoped client for model-provider API calls.
+///
+/// This holds configuration and state that should be shared across turns within a Codex session
+/// (auth, provider selection, thread id, and transport fallback state).
+///
+/// WebSocket fallback is session-scoped: once a turn activates the HTTP fallback, subsequent turns
+/// will also use HTTP for the remainder of the session.
+///
+/// Turn-scoped settings (model selection, reasoning controls, telemetry context, and turn
+/// metadata) are passed explicitly to the relevant methods to keep turn lifetime visible at the
+/// call site.
+#[derive(Debug, Clone)]
+pub struct ModelClient {
+    state: Arc<ModelClientState>,
 }
 
-#[derive(Default)]
-struct ResponsesWebsocketSession {
-    connection: Option<ResponsesWebSocketStream>,
+/// A turn-scoped streaming session created from a [`ModelClient`].
+///
+/// The session establishes a Responses WebSocket connection lazily and reuses it across multiple
+/// requests within the turn. It also caches per-turn state:
+///
+/// - The last full request, so subsequent calls can reuse incremental websocket request payloads
+///   only when the current request is an incremental extension of the previous one.
+/// - The `x-codex-turn-state` sticky-routing token, which must be replayed for all requests within
+///   the same turn.
+///
+/// Create a fresh `ModelClientSession` for each Codex turn. Reusing it across turns would replay
+/// the previous turn's sticky-routing token into the next turn, which violates the client/server
+/// contract and can cause routing bugs.
+pub struct ModelClientSession {
+    client: ModelClient,
+    websocket_session: WebsocketSession,
+    /// Turn state for sticky routing.
+    ///
+    /// This is an `OnceLock` that stores the turn state value received from the server
+    /// on turn start via the `x-codex-turn-state` response header. Once set, this value
+    /// should be sent back to the server in the `x-codex-turn-state` request header for
+    /// all subsequent requests within the same turn to maintain sticky routing.
+    ///
+    /// This is a contract between the client and server: we receive it at turn start,
+    /// keep sending it unchanged between turn requests (e.g., for retries, incremental
+    /// appends, or continuation requests), and must not send it between different turns.
     turn_state: Arc<OnceLock<String>>,
-    last_request: Option<ResponsesRequestSnapshot>,
-    last_response_id: Option<String>,
-    last_response_from_warmup: bool,
 }
 
-impl std::fmt::Debug for ResponsesWebsocketSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResponsesWebsocketSession")
-            .field("connected", &self.connection.is_some())
-            .field("has_turn_state", &self.turn_state.get().is_some())
-            .field("has_last_request", &self.last_request.is_some())
-            .field("has_last_response_id", &self.last_response_id.is_some())
-            .field("last_response_from_warmup", &self.last_response_from_warmup)
-            .finish()
+#[derive(Debug, Clone)]
+struct LastResponse {
+    response_id: String,
+    items_added: Vec<ResponseItem>,
+}
+
+#[derive(Debug, Default)]
+struct WebsocketSession {
+    connection: Option<ApiWebSocketConnection>,
+    last_request: Option<ResponsesApiRequest>,
+    last_response_rx: Option<oneshot::Receiver<LastResponse>>,
+    connection_reused: StdMutex<bool>,
+}
+
+impl WebsocketSession {
+    fn set_connection_reused(&self, connection_reused: bool) {
+        *self
+            .connection_reused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = connection_reused;
+    }
+
+    fn connection_reused(&self) -> bool {
+        *self
+            .connection_reused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
-fn responses_request_snapshot(
-    payload_json: &Value,
-    input: &[ResponseItem],
-) -> ResponsesRequestSnapshot {
-    let mut comparable_payload = payload_json.clone();
-    if let Some(obj) = comparable_payload.as_object_mut() {
-        obj.remove("input");
-    }
-    ResponsesRequestSnapshot {
-        comparable_payload,
-        input: input.to_vec(),
-    }
+enum WebsocketStreamOutcome {
+    Stream(ResponseStream),
+    FallbackToHttp,
 }
 
-fn incremental_input_for_websocket_request(
-    previous: &ResponsesRequestSnapshot,
-    current: &ResponsesRequestSnapshot,
-) -> Option<Vec<ResponseItem>> {
-    if previous.comparable_payload != current.comparable_payload {
-        return None;
-    }
-    if !current.input.starts_with(&previous.input) {
-        return None;
-    }
-    Some(current.input[previous.input.len()..].to_vec())
+/// Result of opening a WebRTC Realtime call.
+///
+/// The SDP answer goes back to the client. The call id and auth headers stay on the server so the
+/// ordinary Realtime WebSocket machinery can join the same in-progress call as a sideband
+/// controller.
+pub(crate) struct RealtimeWebrtcCallStart {
+    pub(crate) sdp: String,
+    pub(crate) call_id: String,
+    pub(crate) sideband_headers: ApiHeaderMap,
 }
 
-fn build_responses_websocket_payload(
-    payload_json: &Value,
-    input_override: Option<Vec<ResponseItem>>,
-    previous_response_id: Option<String>,
-    generate: Option<bool>,
-) -> Result<String> {
-    let mut ws_payload = serde_json::Map::new();
-    ws_payload.insert(
-        "type".to_string(),
-        serde_json::Value::String("response.create".to_string()),
-    );
-    if let Some(obj) = payload_json.as_object() {
-        for (k, v) in obj {
-            ws_payload.insert(k.clone(), v.clone());
+/// Reuses the API-auth material that created the WebRTC call for the sideband WebSocket join.
+///
+/// API-key sessions send that API bearer. ChatGPT-auth sessions send their bearer plus account id;
+/// transceiver is responsible for accepting that same call-create identity on the direct
+/// `api.openai.com` sideband path.
+fn sideband_websocket_auth_headers(api_auth: &dyn AuthProvider) -> ApiHeaderMap {
+    let mut headers = ApiHeaderMap::new();
+    api_auth.add_auth_headers(&mut headers);
+    headers
+}
+
+impl ModelClient {
+    #[allow(clippy::too_many_arguments)]
+    /// Creates a new session-scoped `ModelClient`.
+    ///
+    /// All arguments are expected to be stable for the lifetime of a Codex session. Per-turn values
+    /// are passed to [`ModelClientSession::stream`] (and other turn-scoped methods) explicitly.
+    pub fn new(
+        auth_manager: Option<Arc<AuthManager>>,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        installation_id: String,
+        provider_info: ModelProviderInfo,
+        session_source: SessionSource,
+        model_verbosity: Option<VerbosityConfig>,
+        enable_request_compression: bool,
+        include_timing_metrics: bool,
+        beta_features_header: Option<String>,
+    ) -> Self {
+        let model_provider = create_model_provider(provider_info, auth_manager);
+        let codex_api_key_env_enabled = model_provider
+            .auth_manager()
+            .as_ref()
+            .is_some_and(|manager| manager.codex_api_key_env_enabled());
+        let auth_env_telemetry =
+            collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
+        Self {
+            state: Arc::new(ModelClientState {
+                session_id,
+                thread_id,
+                window_generation: AtomicU64::new(0),
+                installation_id,
+                provider: model_provider,
+                auth_env_telemetry,
+                session_source,
+                model_verbosity,
+                enable_request_compression,
+                include_timing_metrics,
+                beta_features_header,
+                disable_websockets: AtomicBool::new(false),
+                cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+            }),
         }
     }
-    if let Some(input) = input_override {
-        ws_payload.insert("input".to_string(), serde_json::to_value(input)?);
+
+    /// Creates a fresh turn-scoped streaming session.
+    ///
+    /// This constructor does not perform network I/O itself; the session opens a websocket lazily
+    /// when the first stream request is issued.
+    pub fn new_session(&self) -> ModelClientSession {
+        ModelClientSession {
+            client: self.clone(),
+            websocket_session: self.take_cached_websocket_session(),
+            turn_state: Arc::new(OnceLock::new()),
+        }
     }
-    if let Some(previous_response_id) = previous_response_id {
-        ws_payload.insert(
-            "previous_response_id".to_string(),
-            Value::String(previous_response_id),
+
+    pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
+        self.state.provider.auth_manager()
+    }
+
+    pub(crate) fn set_window_generation(&self, window_generation: u64) {
+        self.state
+            .window_generation
+            .store(window_generation, Ordering::Relaxed);
+        self.store_cached_websocket_session(WebsocketSession::default());
+    }
+
+    pub(crate) fn advance_window_generation(&self) {
+        self.state.window_generation.fetch_add(1, Ordering::Relaxed);
+        self.store_cached_websocket_session(WebsocketSession::default());
+    }
+
+    fn current_window_id(&self) -> String {
+        let thread_id = self.state.thread_id;
+        let window_generation = self.state.window_generation.load(Ordering::Relaxed);
+        format!("{thread_id}:{window_generation}")
+    }
+
+    fn take_cached_websocket_session(&self) -> WebsocketSession {
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *cached_websocket_session)
+    }
+
+    fn store_cached_websocket_session(&self, websocket_session: WebsocketSession) {
+        *self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = websocket_session;
+    }
+
+    pub(crate) fn force_http_fallback(
+        &self,
+        session_telemetry: &SessionTelemetry,
+        _model_info: &ModelInfo,
+    ) -> bool {
+        let websocket_enabled = self.responses_websocket_enabled();
+        let activated =
+            websocket_enabled && !self.state.disable_websockets.swap(true, Ordering::Relaxed);
+        if activated {
+            warn!("falling back to HTTP");
+            session_telemetry.counter(
+                "codex.transport.fallback_to_http",
+                /*inc*/ 1,
+                &[("from_wire_api", "responses_websocket")],
+            );
+        }
+
+        self.store_cached_websocket_session(WebsocketSession::default());
+        activated
+    }
+
+    /// Compacts the current conversation history using the Compact endpoint.
+    ///
+    /// This is a unary call (no streaming) that returns a new list of
+    /// `ResponseItem`s representing the compacted transcript.
+    ///
+    /// The model selection and telemetry context are passed explicitly to keep `ModelClient`
+    /// session-scoped.
+    pub(crate) async fn compact_conversation_history(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        settings: CompactConversationRequestSettings,
+        session_telemetry: &SessionTelemetry,
+        compaction_trace: &CompactionTraceContext,
+    ) -> Result<Vec<ResponseItem>> {
+        if prompt.input.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client_setup = self.current_client_setup().await?;
+        let transport = ReqwestTransport::new(build_reqwest_client());
+        let request_telemetry = Self::build_request_telemetry(
+            session_telemetry,
+            AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                PendingUnauthorizedRetry::default(),
+            ),
+            RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
+            self.state.auth_env_telemetry.clone(),
         );
+        let request = self.build_responses_request(
+            &client_setup.api_provider,
+            prompt,
+            model_info,
+            settings.effort,
+            settings.summary,
+            settings.service_tier,
+        )?;
+        let ResponsesApiRequest {
+            model,
+            instructions,
+            input,
+            tools,
+            parallel_tool_calls,
+            reasoning,
+            service_tier,
+            prompt_cache_key,
+            text,
+            ..
+        } = request;
+        let client =
+            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                .with_telemetry(Some(request_telemetry));
+        let payload = ApiCompactionInput {
+            model: &model,
+            input: &input,
+            instructions: &instructions,
+            tools,
+            parallel_tool_calls,
+            reasoning,
+            service_tier: service_tier.as_deref(),
+            prompt_cache_key: prompt_cache_key.as_deref(),
+            text,
+        };
+
+        let mut extra_headers = ApiHeaderMap::new();
+        if let Ok(header_value) = HeaderValue::from_str(&self.state.installation_id) {
+            extra_headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
+        }
+        extra_headers.extend(build_responses_headers(
+            self.state.beta_features_header.as_deref(),
+            /*turn_state*/ None,
+            /*turn_metadata_header*/ None,
+        ));
+        extra_headers.extend(self.build_responses_identity_headers());
+        extra_headers.extend(build_session_headers(
+            Some(self.state.session_id.to_string()),
+            Some(self.state.thread_id.to_string()),
+        ));
+        let trace_attempt = compaction_trace.start_attempt(&payload);
+        let result = client
+            .compact_input(&payload, extra_headers)
+            .await
+            .map_err(map_api_error);
+        trace_attempt.record_result(result.as_deref());
+        result
     }
-    if let Some(generate) = generate {
-        ws_payload.insert("generate".to_string(), Value::Bool(generate));
+
+    pub(crate) async fn create_realtime_call_with_headers(
+        &self,
+        sdp: String,
+        session_config: ApiRealtimeSessionConfig,
+        extra_headers: ApiHeaderMap,
+    ) -> Result<RealtimeWebrtcCallStart> {
+        // Create the media call over HTTP first, then retain matching auth so realtime can attach
+        // the server-side control WebSocket to the call id from that HTTP response.
+        let client_setup = self.current_client_setup().await?;
+        let mut sideband_headers = extra_headers.clone();
+        sideband_headers.extend(sideband_websocket_auth_headers(
+            client_setup.api_auth.as_ref(),
+        ));
+        let transport = ReqwestTransport::new(build_reqwest_client());
+        let response =
+            ApiRealtimeCallClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                .create_with_session_and_headers(sdp, session_config, extra_headers)
+                .await
+                .map_err(map_api_error)?;
+        Ok(RealtimeWebrtcCallStart {
+            sdp: response.sdp,
+            call_id: response.call_id,
+            sideband_headers,
+        })
     }
-    Ok(serde_json::to_string(&Value::Object(ws_payload))?)
+
+    /// Builds memory summaries for each provided normalized raw memory.
+    ///
+    /// This is a unary call (no streaming) to `/v1/memories/trace_summarize`.
+    ///
+    /// The model selection, reasoning effort, and telemetry context are passed explicitly to keep
+    /// `ModelClient` session-scoped.
+    pub async fn summarize_memories(
+        &self,
+        raw_memories: Vec<ApiRawMemory>,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        session_telemetry: &SessionTelemetry,
+    ) -> Result<Vec<ApiMemorySummarizeOutput>> {
+        if raw_memories.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let client_setup = self.current_client_setup().await?;
+        let transport = ReqwestTransport::new(build_reqwest_client());
+        let request_telemetry = Self::build_request_telemetry(
+            session_telemetry,
+            AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                PendingUnauthorizedRetry::default(),
+            ),
+            RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
+            self.state.auth_env_telemetry.clone(),
+        );
+        let client =
+            ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                .with_telemetry(Some(request_telemetry));
+
+        let payload = ApiMemorySummarizeInput {
+            model: model_info.slug.clone(),
+            raw_memories,
+            reasoning: effort.map(|effort| Reasoning {
+                effort: Some(effort),
+                summary: None,
+            }),
+        };
+
+        client
+            .summarize_input(&payload, self.build_subagent_headers())
+            .await
+            .map_err(map_api_error)
+    }
+
+    fn build_subagent_headers(&self) -> ApiHeaderMap {
+        let mut extra_headers = ApiHeaderMap::new();
+        if let Some(subagent) = subagent_header_value(&self.state.session_source)
+            && let Ok(val) = HeaderValue::from_str(&subagent)
+        {
+            extra_headers.insert(X_OPENAI_SUBAGENT_HEADER, val);
+        }
+        if matches!(
+            self.state.session_source,
+            SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+        ) {
+            extra_headers.insert(
+                X_OPENAI_MEMGEN_REQUEST_HEADER,
+                HeaderValue::from_static("true"),
+            );
+        }
+        extra_headers
+    }
+
+    fn build_responses_identity_headers(&self) -> ApiHeaderMap {
+        let mut extra_headers = self.build_subagent_headers();
+        if let Some(parent_thread_id) = parent_thread_id_header_value(&self.state.session_source)
+            && let Ok(val) = HeaderValue::from_str(&parent_thread_id)
+        {
+            extra_headers.insert(X_CODEX_PARENT_THREAD_ID_HEADER, val);
+        }
+        if let Ok(val) = HeaderValue::from_str(&self.current_window_id()) {
+            extra_headers.insert(X_CODEX_WINDOW_ID_HEADER, val);
+        }
+        extra_headers
+    }
+
+    fn build_ws_client_metadata(
+        &self,
+        turn_metadata_header: Option<&str>,
+    ) -> HashMap<String, String> {
+        let mut client_metadata = HashMap::new();
+        client_metadata.insert(
+            X_CODEX_INSTALLATION_ID_HEADER.to_string(),
+            self.state.installation_id.clone(),
+        );
+        client_metadata.insert(
+            X_CODEX_WINDOW_ID_HEADER.to_string(),
+            self.current_window_id(),
+        );
+        if let Some(subagent) = subagent_header_value(&self.state.session_source) {
+            client_metadata.insert(X_OPENAI_SUBAGENT_HEADER.to_string(), subagent);
+        }
+        if let Some(parent_thread_id) = parent_thread_id_header_value(&self.state.session_source) {
+            client_metadata.insert(
+                X_CODEX_PARENT_THREAD_ID_HEADER.to_string(),
+                parent_thread_id,
+            );
+        }
+        if let Some(turn_metadata_header) = parse_turn_metadata_header(turn_metadata_header)
+            && let Ok(turn_metadata) = turn_metadata_header.to_str()
+        {
+            client_metadata.insert(
+                X_CODEX_TURN_METADATA_HEADER.to_string(),
+                turn_metadata.to_string(),
+            );
+        }
+        client_metadata
+    }
+
+    /// Builds request telemetry for unary API calls (e.g., Compact endpoint).
+    fn build_request_telemetry(
+        session_telemetry: &SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+        auth_env_telemetry: AuthEnvTelemetry,
+    ) -> Arc<dyn RequestTelemetry> {
+        let telemetry = Arc::new(ApiTelemetry::new(
+            session_telemetry.clone(),
+            auth_context,
+            request_route_telemetry,
+            auth_env_telemetry,
+        ));
+        let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
+        request_telemetry
+    }
+
+    fn build_reasoning(
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+    ) -> Option<Reasoning> {
+        if model_info.supports_reasoning_summaries {
+            Some(Reasoning {
+                effort: effort.or(model_info.default_reasoning_level),
+                summary: if summary == ReasoningSummaryConfig::None {
+                    None
+                } else {
+                    Some(summary)
+                },
+            })
+        } else {
+            None
+        }
+    }
+
+    fn build_responses_request(
+        &self,
+        provider: &codex_api::Provider,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+    ) -> Result<ResponsesApiRequest> {
+        let instructions = &prompt.base_instructions.text;
+        let input = prompt.get_formatted_input();
+        let tools = create_tools_json_for_responses_api(&prompt.tools)?;
+        let reasoning = Self::build_reasoning(model_info, effort, summary);
+        let include = if reasoning.is_some() {
+            vec!["reasoning.encrypted_content".to_string()]
+        } else {
+            Vec::new()
+        };
+        let verbosity = if model_info.support_verbosity {
+            self.state.model_verbosity.or(model_info.default_verbosity)
+        } else {
+            if self.state.model_verbosity.is_some() {
+                warn!(
+                    "model_verbosity is set but ignored as the model does not support verbosity: {}",
+                    model_info.slug
+                );
+            }
+            None
+        };
+        let text = create_text_param_for_request(
+            verbosity,
+            &prompt.output_schema,
+            prompt.output_schema_strict,
+        );
+        let prompt_cache_key = Some(self.state.thread_id.to_string());
+        let request = ResponsesApiRequest {
+            model: model_info.slug.clone(),
+            instructions: instructions.clone(),
+            input,
+            tools,
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: prompt.parallel_tool_calls,
+            reasoning,
+            store: provider.is_azure_responses_endpoint(),
+            stream: true,
+            include,
+            service_tier,
+            prompt_cache_key,
+            text,
+            client_metadata: Some(HashMap::from([(
+                X_CODEX_INSTALLATION_ID_HEADER.to_string(),
+                self.state.installation_id.clone(),
+            )])),
+        };
+        Ok(request)
+    }
+
+    /// Returns whether the Responses-over-WebSocket transport is active for this session.
+    ///
+    /// WebSocket use is controlled by provider capability and session-scoped fallback state.
+    pub fn responses_websocket_enabled(&self) -> bool {
+        if !self.state.provider.info().supports_websockets
+            || self.state.disable_websockets.load(Ordering::Relaxed)
+            || (*CODEX_RS_SSE_FIXTURE).is_some()
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// Returns auth + provider configuration resolved from the current session auth state.
+    ///
+    /// This centralizes setup used by both prewarm and normal request paths so they stay in
+    /// lockstep when auth/provider resolution changes.
+    async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
+        let auth = self.state.provider.auth().await;
+        let api_provider = self.state.provider.api_provider().await?;
+        let api_auth = self.state.provider.api_auth().await?;
+        Ok(CurrentClientSetup {
+            auth,
+            api_provider,
+            api_auth,
+        })
+    }
+
+    /// Opens a websocket connection using the same header and telemetry wiring as normal turns.
+    ///
+    /// Both startup prewarm and in-turn `needs_new` reconnects call this path so handshake
+    /// behavior remains consistent across both flows.
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_websocket(
+        &self,
+        session_telemetry: &SessionTelemetry,
+        api_provider: codex_api::Provider,
+        api_auth: SharedAuthProvider,
+        turn_state: Option<Arc<OnceLock<String>>>,
+        turn_metadata_header: Option<&str>,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+    ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
+        let headers = self.build_websocket_headers(turn_state.as_ref(), turn_metadata_header);
+        let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
+            session_telemetry,
+            auth_context,
+            request_route_telemetry,
+            self.state.auth_env_telemetry.clone(),
+        );
+        let websocket_connect_timeout = self.state.provider.info().websocket_connect_timeout();
+        let start = Instant::now();
+        let result = match tokio::time::timeout(
+            websocket_connect_timeout,
+            ApiWebSocketResponsesClient::new(api_provider, api_auth).connect(
+                headers,
+                codex_login::default_client::default_headers(),
+                turn_state,
+                Some(websocket_telemetry),
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
+        };
+        let error_message = result.as_ref().err().map(telemetry_api_error_message);
+        let response_debug = result
+            .as_ref()
+            .err()
+            .map(extract_response_debug_context_from_api_error)
+            .unwrap_or_default();
+        let status = result.as_ref().err().and_then(api_error_http_status);
+        session_telemetry.record_websocket_connect(
+            start.elapsed(),
+            status,
+            error_message.as_deref(),
+            auth_context.auth_header_attached,
+            auth_context.auth_header_name,
+            auth_context.retry_after_unauthorized,
+            auth_context.recovery_mode,
+            auth_context.recovery_phase,
+            request_route_telemetry.endpoint,
+            /*connection_reused*/ false,
+            response_debug.request_id.as_deref(),
+            response_debug.cf_ray.as_deref(),
+            response_debug.auth_error.as_deref(),
+            response_debug.auth_error_code.as_deref(),
+        );
+        emit_feedback_request_tags_with_auth_env(
+            &FeedbackRequestTags {
+                endpoint: request_route_telemetry.endpoint,
+                auth_header_attached: auth_context.auth_header_attached,
+                auth_header_name: auth_context.auth_header_name,
+                auth_mode: auth_context.auth_mode,
+                auth_retry_after_unauthorized: Some(auth_context.retry_after_unauthorized),
+                auth_recovery_mode: auth_context.recovery_mode,
+                auth_recovery_phase: auth_context.recovery_phase,
+                auth_connection_reused: Some(false),
+                auth_request_id: response_debug.request_id.as_deref(),
+                auth_cf_ray: response_debug.cf_ray.as_deref(),
+                auth_error: response_debug.auth_error.as_deref(),
+                auth_error_code: response_debug.auth_error_code.as_deref(),
+                auth_recovery_followup_success: auth_context
+                    .retry_after_unauthorized
+                    .then_some(result.is_ok()),
+                auth_recovery_followup_status: auth_context
+                    .retry_after_unauthorized
+                    .then_some(status)
+                    .flatten(),
+            },
+            &self.state.auth_env_telemetry,
+        );
+        result
+    }
+
+    /// Builds websocket handshake headers for both prewarm and turn-time reconnect.
+    ///
+    /// Callers should pass the current turn-state lock when available so sticky-routing state is
+    /// replayed on reconnect within the same turn.
+    fn build_websocket_headers(
+        &self,
+        turn_state: Option<&Arc<OnceLock<String>>>,
+        turn_metadata_header: Option<&str>,
+    ) -> ApiHeaderMap {
+        let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
+        let session_id = self.state.session_id.to_string();
+        let thread_id = self.state.thread_id.to_string();
+        let mut headers = build_responses_headers(
+            self.state.beta_features_header.as_deref(),
+            turn_state,
+            turn_metadata_header.as_ref(),
+        );
+        if let Ok(header_value) = HeaderValue::from_str(&thread_id) {
+            headers.insert("x-client-request-id", header_value);
+        }
+        headers.extend(build_session_headers(Some(session_id), Some(thread_id)));
+        headers.extend(self.build_responses_identity_headers());
+        headers.insert(
+            OPENAI_BETA_HEADER,
+            HeaderValue::from_static(RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE),
+        );
+        if self.state.include_timing_metrics {
+            headers.insert(
+                X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER,
+                HeaderValue::from_static("true"),
+            );
+        }
+        headers
+    }
 }
 
-fn terminal_response_id_from_websocket_event(text: &str) -> Option<Option<String>> {
-    let event: SseEvent = serde_json::from_str(text).ok()?;
-    match event.kind.as_str() {
-        "response.completed" => {
-            let response = event.response?;
-            let completed: ResponseCompleted = serde_json::from_value(response).ok()?;
-            Some(Some(completed.id))
+impl Drop for ModelClientSession {
+    fn drop(&mut self) {
+        let websocket_session = std::mem::take(&mut self.websocket_session);
+        self.client
+            .store_cached_websocket_session(websocket_session);
+    }
+}
+
+impl ModelClientSession {
+    pub(crate) fn reset_websocket_session(&mut self) {
+        self.websocket_session.connection = None;
+        self.websocket_session.last_request = None;
+        self.websocket_session.last_response_rx = None;
+        self.websocket_session
+            .set_connection_reused(/*connection_reused*/ false);
+    }
+
+    pub(crate) async fn send_response_processed(&self, response_id: &str) {
+        let Some(connection) = self.websocket_session.connection.as_ref() else {
+            return;
+        };
+        if let Err(err) = connection
+            .send_response_processed(response_id.to_string())
+            .await
+        {
+            debug!("failed to send response.processed websocket request: {err}");
         }
-        "response.done" => {
-            let response = event.response?;
-            let done: ResponseDone = serde_json::from_value(response).ok()?;
-            Some(done.id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Builds shared Responses API transport options and request-body options.
+    ///
+    /// Keeping option construction in one place ensures request-scoped headers are consistent
+    /// regardless of transport choice.
+    fn build_responses_options(
+        &self,
+        turn_metadata_header: Option<&str>,
+        compression: Compression,
+    ) -> ApiResponsesOptions {
+        let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
+        let session_id = self.client.state.session_id.to_string();
+        let thread_id = self.client.state.thread_id.to_string();
+        ApiResponsesOptions {
+            session_id: Some(session_id),
+            thread_id: Some(thread_id),
+            session_source: Some(self.client.state.session_source.clone()),
+            extra_headers: {
+                let mut headers = build_responses_headers(
+                    self.client.state.beta_features_header.as_deref(),
+                    Some(&self.turn_state),
+                    turn_metadata_header.as_ref(),
+                );
+                headers.extend(self.client.build_responses_identity_headers());
+                headers
+            },
+            compression,
+            turn_state: Some(Arc::clone(&self.turn_state)),
         }
-        "response.failed" | "response.incomplete" => Some(None),
+    }
+
+    fn get_incremental_items(
+        &self,
+        request: &ResponsesApiRequest,
+        last_response: Option<&LastResponse>,
+        allow_empty_delta: bool,
+    ) -> Option<Vec<ResponseItem>> {
+        // Checks whether the current request is an incremental extension of the previous request.
+        // We only reuse an incremental input delta when non-input request fields are unchanged and
+        // `input` is a strict
+        // extension of the previous known input. Server-returned output items are treated as part
+        // of the baseline so we do not resend them.
+        let previous_request = self.websocket_session.last_request.as_ref()?;
+        let mut previous_without_input = previous_request.clone();
+        previous_without_input.input.clear();
+        let mut request_without_input = request.clone();
+        request_without_input.input.clear();
+        if previous_without_input != request_without_input {
+            trace!(
+                "incremental request failed, properties didn't match {previous_without_input:?} != {request_without_input:?}"
+            );
+            return None;
+        }
+
+        let mut baseline = previous_request.input.clone();
+        if let Some(last_response) = last_response {
+            baseline.extend(last_response.items_added.clone());
+        }
+
+        let baseline_len = baseline.len();
+        if request.input.starts_with(&baseline)
+            && (allow_empty_delta || baseline_len < request.input.len())
+        {
+            Some(request.input[baseline_len..].to_vec())
+        } else {
+            trace!("incremental request failed, items didn't match");
+            None
+        }
+    }
+
+    fn get_last_response(&mut self) -> Option<LastResponse> {
+        self.websocket_session
+            .last_response_rx
+            .take()
+            .and_then(|mut receiver| match receiver.try_recv() {
+                Ok(last_response) => Some(last_response),
+                Err(TryRecvError::Closed) | Err(TryRecvError::Empty) => None,
+            })
+    }
+
+    fn prepare_websocket_request(
+        &mut self,
+        payload: ResponseCreateWsRequest,
+        request: &ResponsesApiRequest,
+    ) -> ResponsesWsRequest {
+        let Some(last_response) = self.get_last_response() else {
+            return ResponsesWsRequest::ResponseCreate(payload);
+        };
+        let Some(incremental_items) = self.get_incremental_items(
+            request,
+            Some(&last_response),
+            /*allow_empty_delta*/ true,
+        ) else {
+            return ResponsesWsRequest::ResponseCreate(payload);
+        };
+
+        if last_response.response_id.is_empty() {
+            trace!("incremental request failed, no previous response id");
+            return ResponsesWsRequest::ResponseCreate(payload);
+        }
+
+        ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+            previous_response_id: Some(last_response.response_id),
+            input: incremental_items,
+            ..payload
+        })
+    }
+
+    /// Opportunistically preconnects a websocket for this turn-scoped client session.
+    ///
+    /// This performs only connection setup; it never sends prompt payloads.
+    pub async fn preconnect_websocket(
+        &mut self,
+        session_telemetry: &SessionTelemetry,
+        _model_info: &ModelInfo,
+    ) -> std::result::Result<(), ApiError> {
+        if !self.client.responses_websocket_enabled() {
+            return Ok(());
+        }
+        if self.websocket_session.connection.is_some() {
+            return Ok(());
+        }
+
+        let client_setup = self.client.current_client_setup().await.map_err(|err| {
+            ApiError::Stream(format!(
+                "failed to build websocket prewarm client setup: {err}"
+            ))
+        })?;
+        let auth_context = AuthRequestTelemetryContext::new(
+            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+            client_setup.api_auth.as_ref(),
+            PendingUnauthorizedRetry::default(),
+        );
+        let connection = self
+            .client
+            .connect_websocket(
+                session_telemetry,
+                client_setup.api_provider,
+                client_setup.api_auth,
+                Some(Arc::clone(&self.turn_state)),
+                /*turn_metadata_header*/ None,
+                auth_context,
+                RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
+            )
+            .await?;
+        self.websocket_session.connection = Some(connection);
+        self.websocket_session
+            .set_connection_reused(/*connection_reused*/ false);
+        Ok(())
+    }
+    /// Returns a websocket connection for this turn.
+    #[instrument(
+        name = "model_client.websocket_connection",
+        level = "info",
+        skip_all,
+        fields(
+            provider = %self.client.state.provider.info().name,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "responses_websocket",
+            api.path = "responses",
+            turn.has_metadata_header = params.turn_metadata_header.is_some()
+        )
+    )]
+    async fn websocket_connection(
+        &mut self,
+        params: WebsocketConnectParams<'_>,
+    ) -> std::result::Result<&ApiWebSocketConnection, ApiError> {
+        let WebsocketConnectParams {
+            session_telemetry,
+            api_provider,
+            api_auth,
+            turn_metadata_header,
+            options,
+            auth_context,
+            request_route_telemetry,
+        } = params;
+        let needs_new = match self.websocket_session.connection.as_ref() {
+            Some(conn) => conn.is_closed().await,
+            None => true,
+        };
+
+        if needs_new {
+            self.websocket_session.last_request = None;
+            self.websocket_session.last_response_rx = None;
+            let turn_state = options
+                .turn_state
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.turn_state));
+            let new_conn = match self
+                .client
+                .connect_websocket(
+                    session_telemetry,
+                    api_provider,
+                    api_auth,
+                    Some(turn_state),
+                    turn_metadata_header,
+                    auth_context,
+                    request_route_telemetry,
+                )
+                .await
+            {
+                Ok(new_conn) => new_conn,
+                Err(err) => {
+                    if matches!(err, ApiError::Transport(TransportError::Timeout)) {
+                        self.reset_websocket_session();
+                    }
+                    return Err(err);
+                }
+            };
+            self.websocket_session.connection = Some(new_conn);
+            self.websocket_session
+                .set_connection_reused(/*connection_reused*/ false);
+        } else {
+            self.websocket_session
+                .set_connection_reused(/*connection_reused*/ true);
+        }
+
+        self.websocket_session
+            .connection
+            .as_ref()
+            .ok_or(ApiError::Stream(
+                "websocket connection is unavailable".to_string(),
+            ))
+    }
+
+    fn responses_request_compression(&self, auth: Option<&CodexAuth>) -> Compression {
+        if self.client.state.enable_request_compression
+            && auth.is_some_and(CodexAuth::uses_codex_backend)
+            && self.client.state.provider.info().is_openai()
+        {
+            Compression::Zstd
+        } else {
+            Compression::None
+        }
+    }
+
+    /// Streams a turn via the OpenAI Responses API.
+    ///
+    /// Handles SSE fixtures, reasoning summaries, verbosity, and the
+    /// `text` controls used for output schemas.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_responses_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "responses_http",
+            http.method = "POST",
+            api.path = "responses",
+            turn.has_metadata_header = turn_metadata_header.is_some()
+        )
+    )]
+    async fn stream_responses_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        turn_metadata_header: Option<&str>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
+            warn!(path, "Streaming from fixture");
+            let stream = codex_api::stream_from_fixture(
+                path,
+                self.client.state.provider.info().stream_idle_timeout(),
+            )
+            .map_err(map_api_error)?;
+            let (stream, _last_request_rx) = map_response_stream(
+                stream,
+                session_telemetry.clone(),
+                InferenceTraceAttempt::disabled(),
+            );
+            return Ok(stream);
+        }
+
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let options = self.build_responses_options(turn_metadata_header, compression);
+
+            let request = self.client.build_responses_request(
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                effort,
+                summary,
+                service_tier.clone(),
+            )?;
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.record_started(&request);
+            let client = ApiResponsesClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let stream_result = client.stream_request(request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        inference_trace_attempt,
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Streams a turn via the Responses API over WebSocket transport.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_responses_websocket",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "responses_websocket",
+            api.path = "responses",
+            turn.has_metadata_header = turn_metadata_header.is_some(),
+            websocket.warmup = warmup
+        )
+    )]
+    async fn stream_responses_websocket(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        turn_metadata_header: Option<&str>,
+        warmup: bool,
+        request_trace: Option<W3cTraceContext>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<WebsocketStreamOutcome> {
+        let auth_manager = self.client.state.provider.auth_manager();
+
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+
+            let options = self.build_responses_options(turn_metadata_header, compression);
+            let request = self.client.build_responses_request(
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                effort,
+                summary,
+                service_tier.clone(),
+            )?;
+            let mut ws_payload = ResponseCreateWsRequest {
+                client_metadata: response_create_client_metadata(
+                    Some(self.client.build_ws_client_metadata(turn_metadata_header)),
+                    request_trace.as_ref(),
+                ),
+                ..ResponseCreateWsRequest::from(&request)
+            };
+            if warmup {
+                ws_payload.generate = Some(false);
+            }
+
+            match self
+                .websocket_connection(WebsocketConnectParams {
+                    session_telemetry,
+                    api_provider: client_setup.api_provider,
+                    api_auth: client_setup.api_auth,
+                    turn_metadata_header,
+                    options: &options,
+                    auth_context: request_auth_context,
+                    request_route_telemetry: RequestRouteTelemetry::for_endpoint(
+                        RESPONSES_ENDPOINT,
+                    ),
+                })
+                .await
+            {
+                Ok(_) => {}
+                Err(ApiError::Transport(TransportError::Http { status, .. }))
+                    if status == StatusCode::UPGRADE_REQUIRED =>
+                {
+                    return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+
+            let ws_request = self.prepare_websocket_request(ws_payload, &request);
+            self.websocket_session.last_request = Some(request);
+            let inference_trace_attempt = if warmup {
+                // Prewarm sends `generate=false`; it is connection setup, not a
+                // model inference attempt that should appear in rollout traces.
+                InferenceTraceAttempt::disabled()
+            } else {
+                inference_trace.start_attempt()
+            };
+            inference_trace_attempt.record_started(&ws_request);
+            let websocket_connection =
+                self.websocket_session.connection.as_ref().ok_or_else(|| {
+                    map_api_error(ApiError::Stream(
+                        "websocket connection is unavailable".to_string(),
+                    ))
+                })?;
+            let stream_result = websocket_connection
+                .stream_request(ws_request, self.websocket_session.connection_reused())
+                .await
+                .map_err(|err| {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    err
+                })?;
+            let (stream, last_request_rx) = map_response_stream(
+                stream_result,
+                session_telemetry.clone(),
+                inference_trace_attempt,
+            );
+            self.websocket_session.last_response_rx = Some(last_request_rx);
+            return Ok(WebsocketStreamOutcome::Stream(stream));
+        }
+    }
+
+    /// Builds request and SSE telemetry for streaming API calls.
+    fn build_streaming_telemetry(
+        session_telemetry: &SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+        auth_env_telemetry: AuthEnvTelemetry,
+    ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
+        let telemetry = Arc::new(ApiTelemetry::new(
+            session_telemetry.clone(),
+            auth_context,
+            request_route_telemetry,
+            auth_env_telemetry,
+        ));
+        let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
+        let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
+        (request_telemetry, sse_telemetry)
+    }
+
+    /// Builds telemetry for the Responses API WebSocket transport.
+    fn build_websocket_telemetry(
+        session_telemetry: &SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+        auth_env_telemetry: AuthEnvTelemetry,
+    ) -> Arc<dyn WebsocketTelemetry> {
+        let telemetry = Arc::new(ApiTelemetry::new(
+            session_telemetry.clone(),
+            auth_context,
+            request_route_telemetry,
+            auth_env_telemetry,
+        ));
+        let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
+        websocket_telemetry
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prewarm_websocket(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        turn_metadata_header: Option<&str>,
+    ) -> Result<()> {
+        if !self.client.responses_websocket_enabled() {
+            return Ok(());
+        }
+        if self.websocket_session.last_request.is_some() {
+            return Ok(());
+        }
+
+        let disabled_trace = InferenceTraceContext::disabled();
+        match self
+            .stream_responses_websocket(
+                prompt,
+                model_info,
+                session_telemetry,
+                effort,
+                summary,
+                service_tier,
+                turn_metadata_header,
+                /*warmup*/ true,
+                current_span_w3c_trace_context(),
+                &disabled_trace,
+            )
+            .await
+        {
+            Ok(WebsocketStreamOutcome::Stream(mut stream)) => {
+                // Wait for the v2 warmup request to complete before sending the first turn request.
+                while let Some(event) = stream.next().await {
+                    match event {
+                        Ok(ResponseEvent::Completed { .. }) => break,
+                        Err(err) => return Err(err),
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+            Ok(WebsocketStreamOutcome::FallbackToHttp) => {
+                self.try_switch_fallback_transport(session_telemetry, model_info);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Streams a single model request within the current turn.
+    ///
+    /// The caller is responsible for passing per-turn settings explicitly (model selection,
+    /// reasoning settings, telemetry context, and turn metadata). This method will prefer the
+    /// Responses WebSocket transport when the provider supports it and it remains healthy, and will
+    /// fall back to the HTTP Responses API transport otherwise. The trace context may be enabled or
+    /// disabled, but is always explicit so transport paths do not need separate trace/no-trace
+    /// branches.
+    pub async fn stream(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        turn_metadata_header: Option<&str>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let wire_api = self.client.state.provider.info().wire_api;
+        match wire_api {
+            WireApi::Responses => {
+                if self.client.responses_websocket_enabled() {
+                    let request_trace = current_span_w3c_trace_context();
+                    match self
+                        .stream_responses_websocket(
+                            prompt,
+                            model_info,
+                            session_telemetry,
+                            effort,
+                            summary,
+                            service_tier.clone(),
+                            turn_metadata_header,
+                            /*warmup*/ false,
+                            request_trace,
+                            inference_trace,
+                        )
+                        .await?
+                    {
+                        WebsocketStreamOutcome::Stream(stream) => return Ok(stream),
+                        WebsocketStreamOutcome::FallbackToHttp => {
+                            self.try_switch_fallback_transport(session_telemetry, model_info);
+                        }
+                    }
+                }
+
+                self.stream_responses_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    turn_metadata_header,
+                    inference_trace,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Permanently disables WebSockets for this Codex session and resets WebSocket state.
+    ///
+    /// This is used after exhausting the provider retry budget, to force subsequent requests onto
+    /// the HTTP transport.
+    ///
+    /// Returns `true` if this call activated fallback, or `false` if fallback was already active.
+    pub(crate) fn try_switch_fallback_transport(
+        &mut self,
+        session_telemetry: &SessionTelemetry,
+        model_info: &ModelInfo,
+    ) -> bool {
+        let activated = self
+            .client
+            .force_http_fallback(session_telemetry, model_info);
+        self.websocket_session = WebsocketSession::default();
+        activated
+    }
+}
+
+/// Parses per-turn metadata into an HTTP header value.
+///
+/// Invalid values are treated as absent so callers can compare and propagate
+/// metadata with the same sanitization path used when constructing headers.
+fn parse_turn_metadata_header(turn_metadata_header: Option<&str>) -> Option<HeaderValue> {
+    turn_metadata_header.and_then(|value| HeaderValue::from_str(value).ok())
+}
+
+/// Builds the extra headers attached to Responses API requests.
+///
+/// These headers implement Codex-specific conventions:
+///
+/// - `x-codex-beta-features`: comma-separated beta feature keys enabled for the session.
+/// - `x-codex-turn-state`: sticky routing token captured earlier in the turn.
+/// - `x-codex-turn-metadata`: optional per-turn metadata for observability.
+fn build_responses_headers(
+    beta_features_header: Option<&str>,
+    turn_state: Option<&Arc<OnceLock<String>>>,
+    turn_metadata_header: Option<&HeaderValue>,
+) -> ApiHeaderMap {
+    let mut headers = ApiHeaderMap::new();
+    if let Some(value) = beta_features_header
+        && !value.is_empty()
+        && let Ok(header_value) = HeaderValue::from_str(value)
+    {
+        headers.insert("x-codex-beta-features", header_value);
+    }
+    if let Some(turn_state) = turn_state
+        && let Some(state) = turn_state.get()
+        && let Ok(header_value) = HeaderValue::from_str(state)
+    {
+        headers.insert(X_CODEX_TURN_STATE_HEADER, header_value);
+    }
+    if let Some(header_value) = turn_metadata_header {
+        headers.insert(X_CODEX_TURN_METADATA_HEADER, header_value.clone());
+    }
+    headers
+}
+
+fn subagent_header_value(session_source: &SessionSource) -> Option<String> {
+    match session_source {
+        SessionSource::SubAgent(subagent_source) => match subagent_source {
+            SubAgentSource::Review => Some("review".to_string()),
+            SubAgentSource::Compact => Some("compact".to_string()),
+            SubAgentSource::MemoryConsolidation => Some("memory_consolidation".to_string()),
+            SubAgentSource::ThreadSpawn { .. } => Some("collab_spawn".to_string()),
+            SubAgentSource::Other(label) => Some(label.clone()),
+        },
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation) => {
+            Some("memory_consolidation".to_string())
+        }
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Unknown => None,
+    }
+}
+
+fn parent_thread_id_header_value(session_source: &SessionSource) -> Option<String> {
+    match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) => Some(parent_thread_id.to_string()),
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Internal(_)
+        | SessionSource::SubAgent(_)
+        | SessionSource::Unknown => None,
+    }
+}
+
+const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
+const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
+
+fn map_response_stream(
+    api_stream: codex_api::ResponseStream,
+    session_telemetry: SessionTelemetry,
+    inference_trace_attempt: InferenceTraceAttempt,
+) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
+    let codex_api::ResponseStream {
+        rx_event,
+        upstream_request_id,
+    } = api_stream;
+    let api_stream = codex_api::ResponseStream {
+        rx_event,
+        upstream_request_id: None,
+    };
+    map_response_events(
+        upstream_request_id,
+        api_stream,
+        session_telemetry,
+        inference_trace_attempt,
+    )
+}
+
+fn map_response_events<S>(
+    upstream_request_id: Option<String>,
+    api_stream: S,
+    session_telemetry: SessionTelemetry,
+    inference_trace_attempt: InferenceTraceAttempt,
+) -> (ResponseStream, oneshot::Receiver<LastResponse>)
+where
+    S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
+        + Unpin
+        + Send
+        + 'static,
+{
+    let (tx_event, rx_event) =
+        mpsc::channel::<Result<ResponseEvent>>(RESPONSE_STREAM_CHANNEL_CAPACITY);
+    let (tx_last_response, rx_last_response) = oneshot::channel::<LastResponse>();
+    let consumer_dropped = CancellationToken::new();
+    let consumer_dropped_for_stream = consumer_dropped.clone();
+
+    tokio::spawn(async move {
+        let mut logged_error = false;
+        let mut tx_last_response = Some(tx_last_response);
+        let mut items_added: Vec<ResponseItem> = Vec::new();
+        let mut api_stream = api_stream;
+        let upstream_request_id = upstream_request_id.as_deref();
+        if let Some(upstream_request_id) = upstream_request_id {
+            feedback_tags!(last_model_request_id = upstream_request_id);
+        }
+        loop {
+            let event = tokio::select! {
+                _ = consumer_dropped.cancelled() => {
+                    inference_trace_attempt.record_cancelled(
+                        STREAM_DROPPED_REASON,
+                        upstream_request_id,
+                        &items_added,
+                    );
+                    return;
+                }
+                event = api_stream.next() => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
+            match event {
+                Ok(ResponseEvent::OutputItemDone(item)) => {
+                    items_added.push(item.clone());
+                    if tx_event
+                        .send(Ok(ResponseEvent::OutputItemDone(item)))
+                        .await
+                        .is_err()
+                    {
+                        inference_trace_attempt.record_cancelled(
+                            STREAM_DROPPED_REASON,
+                            upstream_request_id,
+                            &items_added,
+                        );
+                        return;
+                    }
+                }
+                Ok(ResponseEvent::Completed {
+                    response_id,
+                    token_usage,
+                    end_turn,
+                }) => {
+                    feedback_tags!(last_model_response_id = &response_id);
+                    if let Some(usage) = &token_usage {
+                        session_telemetry.sse_event_completed(
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            Some(usage.cached_input_tokens),
+                            Some(usage.reasoning_output_tokens),
+                            usage.total_tokens,
+                        );
+                    }
+                    inference_trace_attempt.record_completed(
+                        &response_id,
+                        upstream_request_id,
+                        &token_usage,
+                        &items_added,
+                    );
+                    if let Some(sender) = tx_last_response.take() {
+                        let _ = sender.send(LastResponse {
+                            response_id: response_id.clone(),
+                            items_added: std::mem::take(&mut items_added),
+                        });
+                    }
+                    if tx_event
+                        .send(Ok(ResponseEvent::Completed {
+                            response_id,
+                            token_usage,
+                            end_turn,
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(event) => {
+                    if tx_event.send(Ok(event)).await.is_err() {
+                        inference_trace_attempt.record_cancelled(
+                            STREAM_DROPPED_REASON,
+                            upstream_request_id,
+                            &items_added,
+                        );
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let upstream_request_id =
+                        upstream_request_id.or(response_debug_context.request_id.as_deref());
+                    if let Some(upstream_request_id) = upstream_request_id {
+                        feedback_tags!(last_model_request_id = upstream_request_id);
+                    }
+                    let mapped = map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &mapped,
+                        upstream_request_id,
+                        &items_added,
+                    );
+                    if !logged_error {
+                        session_telemetry.see_event_completed_failed(&mapped);
+                        logged_error = true;
+                    }
+                    if tx_event.send(Err(mapped)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+        inference_trace_attempt.record_failed(
+            "stream closed before response.completed",
+            upstream_request_id,
+            &items_added,
+        );
+    });
+
+    (
+        ResponseStream {
+            rx_event,
+            consumer_dropped: consumer_dropped_for_stream,
+        },
+        rx_last_response,
+    )
+}
+
+/// Handles a 401 response by optionally refreshing ChatGPT tokens once.
+///
+/// When refresh succeeds, the caller should retry the API call; otherwise
+/// the mapped `CodexErr` is returned to the caller.
+#[derive(Clone, Copy, Debug)]
+struct UnauthorizedRecoveryExecution {
+    mode: &'static str,
+    phase: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PendingUnauthorizedRetry {
+    retry_after_unauthorized: bool,
+    recovery_mode: Option<&'static str>,
+    recovery_phase: Option<&'static str>,
+}
+
+impl PendingUnauthorizedRetry {
+    fn from_recovery(recovery: UnauthorizedRecoveryExecution) -> Self {
+        Self {
+            retry_after_unauthorized: true,
+            recovery_mode: Some(recovery.mode),
+            recovery_phase: Some(recovery.phase),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AuthRequestTelemetryContext {
+    auth_mode: Option<&'static str>,
+    auth_header_attached: bool,
+    auth_header_name: Option<&'static str>,
+    retry_after_unauthorized: bool,
+    recovery_mode: Option<&'static str>,
+    recovery_phase: Option<&'static str>,
+}
+
+impl AuthRequestTelemetryContext {
+    fn new(
+        auth_mode: Option<AuthMode>,
+        api_auth: &dyn AuthProvider,
+        retry: PendingUnauthorizedRetry,
+    ) -> Self {
+        let auth_telemetry = auth_header_telemetry(api_auth);
+        Self {
+            auth_mode: auth_mode.map(|mode| match mode {
+                AuthMode::ApiKey => "ApiKey",
+                AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens | AuthMode::AgentIdentity => {
+                    "Chatgpt"
+                }
+            }),
+            auth_header_attached: auth_telemetry.attached,
+            auth_header_name: auth_telemetry.name,
+            retry_after_unauthorized: retry.retry_after_unauthorized,
+            recovery_mode: retry.recovery_mode,
+            recovery_phase: retry.recovery_phase,
+        }
+    }
+}
+
+struct WebsocketConnectParams<'a> {
+    session_telemetry: &'a SessionTelemetry,
+    api_provider: codex_api::Provider,
+    api_auth: SharedAuthProvider,
+    turn_metadata_header: Option<&'a str>,
+    options: &'a ApiResponsesOptions,
+    auth_context: AuthRequestTelemetryContext,
+    request_route_telemetry: RequestRouteTelemetry,
+}
+
+async fn handle_unauthorized(
+    transport: TransportError,
+    auth_recovery: &mut Option<UnauthorizedRecovery>,
+    session_telemetry: &SessionTelemetry,
+) -> Result<UnauthorizedRecoveryExecution> {
+    let debug = extract_response_debug_context(&transport);
+    if let Some(recovery) = auth_recovery
+        && recovery.has_next()
+    {
+        let mode = recovery.mode_name();
+        let phase = recovery.step_name();
+        return match recovery.next().await {
+            Ok(step_result) => {
+                session_telemetry.record_auth_recovery(
+                    mode,
+                    phase,
+                    "recovery_succeeded",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                    /*recovery_reason*/ None,
+                    step_result.auth_state_changed(),
+                );
+                emit_feedback_auth_recovery_tags(
+                    mode,
+                    phase,
+                    "recovery_succeeded",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                );
+                Ok(UnauthorizedRecoveryExecution { mode, phase })
+            }
+            Err(RefreshTokenError::Permanent(failed)) => {
+                session_telemetry.record_auth_recovery(
+                    mode,
+                    phase,
+                    "recovery_failed_permanent",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                    /*recovery_reason*/ None,
+                    /*auth_state_changed*/ None,
+                );
+                emit_feedback_auth_recovery_tags(
+                    mode,
+                    phase,
+                    "recovery_failed_permanent",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                );
+                Err(CodexErr::RefreshTokenFailed(failed))
+            }
+            Err(RefreshTokenError::Transient(other)) => {
+                session_telemetry.record_auth_recovery(
+                    mode,
+                    phase,
+                    "recovery_failed_transient",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                    /*recovery_reason*/ None,
+                    /*auth_state_changed*/ None,
+                );
+                emit_feedback_auth_recovery_tags(
+                    mode,
+                    phase,
+                    "recovery_failed_transient",
+                    debug.request_id.as_deref(),
+                    debug.cf_ray.as_deref(),
+                    debug.auth_error.as_deref(),
+                    debug.auth_error_code.as_deref(),
+                );
+                Err(CodexErr::Io(other))
+            }
+        };
+    }
+
+    let (mode, phase, recovery_reason) = match auth_recovery.as_ref() {
+        Some(recovery) => (
+            recovery.mode_name(),
+            recovery.step_name(),
+            Some(recovery.unavailable_reason()),
+        ),
+        None => ("none", "none", Some("auth_manager_missing")),
+    };
+    session_telemetry.record_auth_recovery(
+        mode,
+        phase,
+        "recovery_not_run",
+        debug.request_id.as_deref(),
+        debug.cf_ray.as_deref(),
+        debug.auth_error.as_deref(),
+        debug.auth_error_code.as_deref(),
+        recovery_reason,
+        /*auth_state_changed*/ None,
+    );
+    emit_feedback_auth_recovery_tags(
+        mode,
+        phase,
+        "recovery_not_run",
+        debug.request_id.as_deref(),
+        debug.cf_ray.as_deref(),
+        debug.auth_error.as_deref(),
+        debug.auth_error_code.as_deref(),
+    );
+
+    Err(map_api_error(ApiError::Transport(transport)))
+}
+
+fn api_error_http_status(error: &ApiError) -> Option<u16> {
+    match error {
+        ApiError::Transport(TransportError::Http { status, .. }) => Some(status.as_u16()),
         _ => None,
     }
 }
 
-#[derive(Default, Debug)]
-struct StreamCheckpoint {
-    /// Highest sequence_number observed across attempts. Used to drop replayed deltas.
-    last_sequence: Option<u64>,
+struct ApiTelemetry {
+    session_telemetry: SessionTelemetry,
+    auth_context: AuthRequestTelemetryContext,
+    request_route_telemetry: RequestRouteTelemetry,
+    auth_env_telemetry: AuthEnvTelemetry,
 }
 
-#[derive(Debug, Deserialize)]
-struct ErrorResponse {
-    error: Error,
-}
-
-#[derive(Debug, Deserialize)]
-struct WrappedWebsocketErrorEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(alias = "status_code")]
-    status: Option<u16>,
-    #[serde(default)]
-    error: Option<Error>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Error {
-    r#type: Option<String>,
-    #[allow(dead_code)]
-    code: Option<String>,
-    /// Optional parameter that triggered the error (e.g. "reasoning.summary").
-    #[allow(dead_code)]
-    param: Option<String>,
-    message: Option<String>,
-
-    // Optional fields available on "usage_limit_reached" and "usage_not_included" errors
-    plan_type: Option<String>,
-    resets_in_seconds: Option<u64>,
-    rate_limit_reached_type: Option<RateLimitReachedType>,
-}
-
-#[derive(Serialize)]
-struct CompactHistoryRequest<'a> {
-    model: &'a str,
-    #[serde(borrow)]
-    input: &'a [ResponseItem],
-    instructions: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    service_tier: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_key: Option<&'a str>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompactHistoryResponse {
-    output: Vec<ResponseItem>,
-}
-
-fn rate_limit_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)(?:please\s+try\s+again|try\s+again|please\s+retry|retry|try)\s+(?:in|after)\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|sec|secs|seconds?)"
-        )
-            .expect("valid rate limit regex")
-    })
-}
-
-fn try_parse_retry_after(err: &Error, now: DateTime<Utc>) -> Option<RetryAfter> {
-    if let Some(seconds) = err.resets_in_seconds {
-        return Some(RetryAfter::from_duration(Duration::from_secs(seconds), now));
-    }
-
-    let message = err.message.as_deref()?;
-    let re = rate_limit_regex();
-    let captures = re.captures(message)?;
-    let value = captures.get(1)?.as_str().trim().parse::<f64>().ok()?;
-    if value.is_sign_negative() {
-        return None;
-    }
-    let unit = captures.get(2)?.as_str().trim().to_ascii_lowercase();
-
-    if unit.starts_with("ms") {
-        Some(RetryAfter::from_duration(Duration::from_millis(value.round() as u64), now))
-    } else if unit.starts_with("sec") || unit == "s" || unit.starts_with("second") {
-        Some(RetryAfter::from_duration(Duration::from_secs_f64(value), now))
-    } else {
-        None
-    }
-}
-
-fn is_quota_exceeded_error(error: &Error) -> bool {
-    matches!(
-        error.code.as_deref().or_else(|| error.r#type.as_deref()),
-        Some("insufficient_quota")
-    )
-}
-
-fn is_quota_exceeded_http_error(status: StatusCode, error: &Error) -> bool {
-    status.is_client_error() && is_quota_exceeded_error(error)
-}
-
-fn is_server_overloaded_error(error: &Error) -> bool {
-    matches!(
-        error.code.as_deref(),
-        Some("server_is_overloaded") | Some("slow_down")
-    )
-}
-
-fn is_reasoning_summary_rejected(error: &Error) -> bool {
-    let param_matches = matches!(error.param.as_deref(), Some("reasoning.summary"));
-    let code_matches = matches!(error.code.as_deref(), Some("unsupported_value"));
-
-    let message_matches = error
-        .message
-        .as_deref()
-        .map(|msg| {
-            let msg = msg.to_ascii_lowercase();
-            msg.contains("organization must be verified") && msg.contains("reasoning summar")
-        })
-        .unwrap_or(false);
-
-    // Only treat as rejection if it's specifically an "unsupported_value" error
-    // for the reasoning.summary parameter, or if the message explicitly says
-    // the organization must be verified for reasoning summaries.
-    (param_matches && code_matches) || (code_matches && message_matches)
-}
-
-fn map_unauthorized_outcome(
-    had_auth: bool,
-    refresh_error: Option<&RefreshTokenError>,
-) -> Option<CodexErr> {
-    if let Some(err) = refresh_error {
-        if err.is_permanent() {
-            return Some(CodexErr::AuthRefreshPermanent(err.message.clone()));
-        }
-        return None;
-    }
-
-    if !had_auth {
-        return Some(CodexErr::AuthRefreshPermanent(
-            AUTH_REQUIRED_MESSAGE.to_string(),
-        ));
-    }
-
-    None
-}
-
-#[derive(Debug)]
-pub struct ModelClient {
-    config: Arc<Config>,
-    auth_manager: Option<Arc<AuthManager>>,
-    otel_event_manager: Option<OtelEventManager>,
-    client: reqwest::Client,
-    provider: ModelProviderInfo,
-    session_id: Uuid,
-    effort: ReasoningEffortConfig,
-    summary: ReasoningSummaryConfig,
-    reasoning_summary_disabled: AtomicBool,
-    websockets_disabled: AtomicBool,
-    websocket_session: Arc<TokioMutex<ResponsesWebsocketSession>>,
-    verbosity: TextVerbosityConfig,
-    debug_logger: Arc<Mutex<DebugLogger>>,
-}
-
-impl Clone for ModelClient {
-    fn clone(&self) -> Self {
-        Self {
-            config: Arc::clone(&self.config),
-            auth_manager: self.auth_manager.clone(),
-            otel_event_manager: self.otel_event_manager.clone(),
-            client: self.client.clone(),
-            provider: self.provider.clone(),
-            session_id: self.session_id,
-            effort: self.effort,
-            summary: self.summary,
-            reasoning_summary_disabled: AtomicBool::new(
-                self.reasoning_summary_disabled.load(Ordering::Relaxed),
-            ),
-            websockets_disabled: AtomicBool::new(
-                self.websockets_disabled.load(Ordering::Relaxed),
-            ),
-            websocket_session: Arc::new(TokioMutex::new(ResponsesWebsocketSession::default())),
-            verbosity: self.verbosity,
-            debug_logger: Arc::clone(&self.debug_logger),
-        }
-    }
-}
-
-impl ModelClient {
-    pub fn new(
-        config: Arc<Config>,
-        auth_manager: Option<Arc<AuthManager>>,
-        otel_event_manager: Option<OtelEventManager>,
-        provider: ModelProviderInfo,
-        effort: ReasoningEffortConfig,
-        summary: ReasoningSummaryConfig,
-        verbosity: TextVerbosityConfig,
-        session_id: Uuid,
-        debug_logger: Arc<Mutex<DebugLogger>>,
+impl ApiTelemetry {
+    fn new(
+        session_telemetry: SessionTelemetry,
+        auth_context: AuthRequestTelemetryContext,
+        request_route_telemetry: RequestRouteTelemetry,
+        auth_env_telemetry: AuthEnvTelemetry,
     ) -> Self {
-        let effective_verbosity = clamp_text_verbosity_for_model(config.model.as_str(), verbosity);
-        let clamped_effort = clamp_reasoning_effort_for_model(config.model.as_str(), effort);
-        let client = create_client(&config.responses_originator_header);
-
         Self {
-            config,
-            auth_manager,
-            otel_event_manager,
-            client,
-            provider,
-            session_id,
-            effort: clamped_effort,
-            summary,
-            reasoning_summary_disabled: AtomicBool::new(false),
-            websockets_disabled: AtomicBool::new(false),
-            websocket_session: Arc::new(TokioMutex::new(ResponsesWebsocketSession::default())),
-            verbosity: effective_verbosity,
-            debug_logger,
+            session_telemetry,
+            auth_context,
+            request_route_telemetry,
+            auth_env_telemetry,
         }
     }
+}
 
-    fn active_ws_version_for_prompt(&self, prompt: &Prompt) -> Option<ResponsesWebsocketVersion> {
-        if self.websockets_disabled.load(Ordering::Relaxed) {
-            return None;
-        }
-
-        match self.provider.wire_api {
-            WireApi::ResponsesWebsocket => Some(preferred_ws_version_from_env()),
-            WireApi::Responses => {
-                let prefer_websockets = prompt
-                    .model_family_override
-                    .as_ref()
-                    .map(|family| family.prefer_websockets)
-                    .or_else(|| {
-                        prompt
-                            .model_override
-                            .as_deref()
-                            .and_then(find_family_for_model)
-                            .map(|family| family.prefer_websockets)
-                    })
-                    .unwrap_or(self.config.model_family.prefer_websockets);
-
-                prefer_websockets.then_some(preferred_ws_version_from_env())
-            }
-            WireApi::Chat => None,
-        }
-    }
-
-    /// Get the reasoning effort configuration
-    pub fn get_reasoning_effort(&self) -> ReasoningEffortConfig {
-        self.effort
-    }
-
-    /// Get the reasoning summary configuration
-    pub fn get_reasoning_summary(&self) -> ReasoningSummaryConfig {
-        if self.reasoning_summary_disabled.load(Ordering::Relaxed) {
-            ReasoningSummaryConfig::None
-        } else {
-            self.summary
-        }
-    }
-
-    fn apply_requested_model_headers(
+impl RequestTelemetry for ApiTelemetry {
+    fn on_request(
         &self,
-        req_builder: reqwest::RequestBuilder,
-        model: &str,
-    ) -> reqwest::RequestBuilder {
-        req_builder.headers(crate::default_client::requested_model_headers(
-            Some(self.config.responses_originator_header.as_str()),
-            model,
-        ))
+        attempt: u64,
+        status: Option<HttpStatusCode>,
+        error: Option<&TransportError>,
+        duration: Duration,
+    ) {
+        let error_message = error.map(telemetry_transport_error_message);
+        let status = status.map(|s| s.as_u16());
+        let debug = error
+            .map(extract_response_debug_context)
+            .unwrap_or_default();
+        self.session_telemetry.record_api_request(
+            attempt,
+            status,
+            error_message.as_deref(),
+            duration,
+            self.auth_context.auth_header_attached,
+            self.auth_context.auth_header_name,
+            self.auth_context.retry_after_unauthorized,
+            self.auth_context.recovery_mode,
+            self.auth_context.recovery_phase,
+            self.request_route_telemetry.endpoint,
+            debug.request_id.as_deref(),
+            debug.cf_ray.as_deref(),
+            debug.auth_error.as_deref(),
+            debug.auth_error_code.as_deref(),
+        );
+        emit_feedback_request_tags_with_auth_env(
+            &FeedbackRequestTags {
+                endpoint: self.request_route_telemetry.endpoint,
+                auth_header_attached: self.auth_context.auth_header_attached,
+                auth_header_name: self.auth_context.auth_header_name,
+                auth_mode: self.auth_context.auth_mode,
+                auth_retry_after_unauthorized: Some(self.auth_context.retry_after_unauthorized),
+                auth_recovery_mode: self.auth_context.recovery_mode,
+                auth_recovery_phase: self.auth_context.recovery_phase,
+                auth_connection_reused: None,
+                auth_request_id: debug.request_id.as_deref(),
+                auth_cf_ray: debug.cf_ray.as_deref(),
+                auth_error: debug.auth_error.as_deref(),
+                auth_error_code: debug.auth_error_code.as_deref(),
+                auth_recovery_followup_success: self
+                    .auth_context
+                    .retry_after_unauthorized
+                    .then_some(error.is_none()),
+                auth_recovery_followup_status: self
+                    .auth_context
+                    .retry_after_unauthorized
+                    .then_some(status)
+                    .flatten(),
+            },
+            &self.auth_env_telemetry,
+        );
     }
+}
 
-    fn current_reasoning_param(
+impl SseTelemetry for ApiTelemetry {
+    fn on_sse_poll(
         &self,
-        family: &ModelFamily,
-        effort: ReasoningEffortConfig,
-    ) -> Option<crate::client_common::Reasoning> {
-        if self.reasoning_summary_disabled.load(Ordering::Relaxed) {
-            return None;
-        }
+        result: &std::result::Result<
+            Option<std::result::Result<Event, EventStreamError<TransportError>>>,
+            tokio::time::error::Elapsed,
+        >,
+        duration: Duration,
+    ) {
+        self.session_telemetry.log_sse_event(result, duration);
+    }
+}
 
-        create_reasoning_param_for_request(
-            family,
-            Some(effort),
-            self.summary,
-        )
+impl WebsocketTelemetry for ApiTelemetry {
+    fn on_ws_request(&self, duration: Duration, error: Option<&ApiError>, connection_reused: bool) {
+        let error_message = error.map(telemetry_api_error_message);
+        let status = error.and_then(api_error_http_status);
+        let debug = error
+            .map(extract_response_debug_context_from_api_error)
+            .unwrap_or_default();
+        self.session_telemetry.record_websocket_request(
+            duration,
+            error_message.as_deref(),
+            connection_reused,
+        );
+        emit_feedback_request_tags_with_auth_env(
+            &FeedbackRequestTags {
+                endpoint: self.request_route_telemetry.endpoint,
+                auth_header_attached: self.auth_context.auth_header_attached,
+                auth_header_name: self.auth_context.auth_header_name,
+                auth_mode: self.auth_context.auth_mode,
+                auth_retry_after_unauthorized: Some(self.auth_context.retry_after_unauthorized),
+                auth_recovery_mode: self.auth_context.recovery_mode,
+                auth_recovery_phase: self.auth_context.recovery_phase,
+                auth_connection_reused: Some(connection_reused),
+                auth_request_id: debug.request_id.as_deref(),
+                auth_cf_ray: debug.cf_ray.as_deref(),
+                auth_error: debug.auth_error.as_deref(),
+                auth_error_code: debug.auth_error_code.as_deref(),
+                auth_recovery_followup_success: self
+                    .auth_context
+                    .retry_after_unauthorized
+                    .then_some(error.is_none()),
+                auth_recovery_followup_status: self
+                    .auth_context
+                    .retry_after_unauthorized
+                    .then_some(status)
+                    .flatten(),
+            },
+            &self.auth_env_telemetry,
+        );
     }
 
-    fn disable_reasoning_summary(&self) {
-        if !self.reasoning_summary_disabled.swap(true, Ordering::Relaxed) {
-            tracing::warn!("disabling reasoning summaries after API rejection");
-        }
-    }
-
-    /// Get the text verbosity configuration
-    #[allow(dead_code)]
-    pub fn get_text_verbosity(&self) -> TextVerbosityConfig {
-        self.verbosity
-    }
-
-    pub fn get_otel_event_manager(&self) -> Option<OtelEventManager> {
-        self.otel_event_manager.clone()
-    }
-
-    pub fn log_turn_latency_debug(&self, payload: &TurnLatencyPayload) {
-        if let Ok(logger) = self.debug_logger.lock() {
-            let _ = logger.log_turn_latency(payload);
-        }
-    }
-
-    pub fn code_home(&self) -> &Path {
-        &self.config.code_home
-    }
-
-    fn current_window_id(&self, session_id: Uuid) -> String {
-        format!("{session_id}:0")
-    }
-
-    pub(crate) fn config(&self) -> &crate::config::Config {
-        &self.config
-    }
-
-    pub fn debug_enabled(&self) -> bool {
-        self.config.debug
-    }
-
-    pub fn auto_switch_accounts_on_rate_limit(&self) -> bool {
-        self.config.auto_switch_accounts_on_rate_limit
-    }
-
-    pub fn api_key_fallback_on_all_accounts_limited(&self) -> bool {
-        self.config.api_key_fallback_on_all_accounts_limited
-    }
-
-    pub fn memories_enabled(&self) -> bool {
-        self.config.memories_enabled
-    }
-
-    pub fn memories_generate_enabled(&self) -> bool {
-        self.config.memories.generate_memories
-    }
-
-    pub fn memories_use_enabled(&self) -> bool {
-        self.config.memories.use_memories
-    }
-
-    pub fn build_tools_config_with_sandbox(
+    fn on_ws_event(
         &self,
-        sandbox_policy: SandboxPolicy,
-    ) -> ToolsConfig {
-        self.build_tools_config_with_sandbox_for_family(sandbox_policy, &self.config.model_family)
-    }
-
-    pub fn build_tools_config_with_sandbox_for_family(
-        &self,
-        sandbox_policy: SandboxPolicy,
-        model_family: &ModelFamily,
-    ) -> ToolsConfig {
-        let mut tools_config = ToolsConfig::new(
-            model_family,
-            self.config.approval_policy,
-            sandbox_policy.clone(),
-            self.config.include_plan_tool,
-            self.config.include_apply_patch_tool,
-            self.config.tools_web_search_request,
-            self.config.use_experimental_streamable_shell_tool,
-            self.config.include_view_image_tool,
-        );
-        tools_config.web_search_allowed_domains = self.config.tools_web_search_allowed_domains.clone();
-        tools_config.web_search_external = self.config.tools_web_search_external;
-        tools_config.search_tool = self.config.tools_search_tool;
-
-        let auth_mode = self
-            .auth_manager
-            .as_ref()
-            .and_then(|manager| manager.auth().map(|auth| auth.mode))
-            .or(Some(if self.config.using_chatgpt_auth {
-                AuthMode::Chatgpt
-            } else {
-                AuthMode::ApiKey
-            }));
-        let image_generation_auth_allowed = self
-            .auth_manager
-            .as_ref()
-            .and_then(|manager| manager.auth().map(|auth| auth.mode))
-            .is_some_and(|mode| matches!(mode, AuthMode::Chatgpt));
-        tools_config.image_gen_tool = model_family.supports_image_generation
-            && image_generation_auth_allowed;
-        let supports_pro_only_models = self
-            .auth_manager
-            .as_ref()
-            .is_some_and(|manager| manager.supports_pro_only_models());
-
-        let mut agent_models: Vec<String> = if self.config.agents.is_empty() {
-            default_agent_configs()
-                .into_iter()
-                .filter(|cfg| cfg.enabled)
-                .map(|cfg| cfg.name)
-                .collect()
-        } else {
-            get_enabled_agents(&self.config.agents)
-        };
-        agent_models = filter_agent_model_names_for_auth(
-            agent_models,
-            auth_mode,
-            supports_pro_only_models,
-        );
-        if agent_models.is_empty() {
-            agent_models = enabled_agent_model_specs_for_auth(auth_mode, supports_pro_only_models)
-                .into_iter()
-                .map(|spec| spec.slug.to_string())
-                .collect();
-        }
-        agent_models.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
-        agent_models.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        tools_config.set_agent_models(agent_models);
-
-        let base_shell_type = tools_config.shell_type.clone();
-        let base_uses_native_shell = matches!(
-            &base_shell_type,
-            ConfigShellToolType::LocalShell
-                | ConfigShellToolType::StreamableShell
-                | ConfigShellToolType::ShellCommand { .. }
-        );
-
-        tools_config.shell_type = match sandbox_policy.clone() {
-            SandboxPolicy::ReadOnly => {
-                if base_uses_native_shell {
-                    base_shell_type.clone()
-                } else {
-                    ConfigShellToolType::ShellWithRequest {
-                        sandbox_policy: SandboxPolicy::ReadOnly,
-                    }
-                }
-            }
-            sp @ SandboxPolicy::WorkspaceWrite { .. } => {
-                if base_uses_native_shell {
-                    base_shell_type.clone()
-                } else {
-                    ConfigShellToolType::ShellWithRequest { sandbox_policy: sp }
-                }
-            }
-            SandboxPolicy::DangerFullAccess => base_shell_type,
-        };
-
-        tools_config
-    }
-
-    pub fn build_tools_config(&self) -> ToolsConfig {
-        self.build_tools_config_with_sandbox(self.config.sandbox_policy.clone())
-    }
-
-    pub fn get_auto_compact_token_limit(&self) -> Option<i64> {
-        self.config
-            .model_auto_compact_token_limit
-            .or_else(|| self.config.model_family.auto_compact_token_limit())
-    }
-
-    pub fn get_context_mode(&self) -> Option<ContextMode> {
-        self.config.context_mode
-    }
-
-    pub fn default_model_slug(&self) -> &str {
-        self.config.model.as_str()
-    }
-
-    pub fn default_model_family(&self) -> &ModelFamily {
-        &self.config.model_family
-    }
-
-    /// Dispatches to either the Responses or Chat implementation depending on
-    /// the provider config.  Public callers always invoke `stream()` – the
-    /// specialised helpers are private to avoid accidental misuse.
-    pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
-        let env_log_tag = std::env::var("CODE_DEBUG_LOG_TAG").ok();
-        let log_tag = env_log_tag
-            .as_deref()
-            .or(prompt.log_tag.as_deref());
-        match self.provider.wire_api {
-            WireApi::Responses => {
-                if let Some(ws_version) = self.active_ws_version_for_prompt(prompt) {
-                    let ws_result = match self
-                        .prewarm_responses_websocket_if_needed(prompt, log_tag, ws_version)
-                        .await
-                    {
-                        Ok(()) => self
-                            .stream_responses_websocket(prompt, log_tag, ws_version, false)
-                            .await,
-                        Err(err) => Err(err),
-                    };
-                    match ws_result {
-                        Ok(stream) => Ok(stream),
-                        Err(err) => {
-                            self.websockets_disabled.store(true, Ordering::Relaxed);
-                            self.reset_responses_websocket_session().await;
-                            warn!(
-                                "preferred websocket transport failed; falling back to responses HTTP stream: {err}"
-                            );
-                            self.stream_responses(prompt, log_tag).await
-                        }
-                    }
-                } else {
-                    self.stream_responses(prompt, log_tag).await
-                }
-            }
-            WireApi::ResponsesWebsocket => {
-                if self.websockets_disabled.load(Ordering::Relaxed) {
-                    warn!(
-                        "responses_websocket transport disabled for this session; using responses HTTP stream"
-                    );
-                    return self.stream_responses(prompt, log_tag).await;
-                }
-                let ws_version = self
-                    .active_ws_version_for_prompt(prompt)
-                    .unwrap_or(preferred_ws_version_from_env());
-                let ws_result = match self
-                    .prewarm_responses_websocket_if_needed(prompt, log_tag, ws_version)
-                    .await
-                {
-                    Ok(()) => self
-                        .stream_responses_websocket(prompt, log_tag, ws_version, false)
-                        .await,
-                    Err(err) => Err(err),
-                };
-                match ws_result {
-                    Ok(stream) => Ok(stream),
-                    Err(err) => {
-                        self.websockets_disabled.store(true, Ordering::Relaxed);
-                        self.reset_responses_websocket_session().await;
-                        warn!(
-                            "responses_websocket transport failed; falling back to responses HTTP stream: {err}"
-                        );
-                        self.stream_responses(prompt, log_tag).await
-                    }
-                }
-            }
-            WireApi::Chat => {
-                let effective_family = prompt
-                    .model_family_override
-                    .as_ref()
-                    .unwrap_or(&self.config.model_family);
-                let model_slug = prompt
-                    .model_override
-                    .as_deref()
-                    .unwrap_or(self.config.model.as_str());
-                // Create the raw streaming connection first.
-                let response_stream = stream_chat_completions(
-                    prompt,
-                    effective_family,
-                    model_slug,
-                    &self.client,
-                    &self.provider,
-                    self.config.responses_originator_header.as_str(),
-                    &self.debug_logger,
-                    self.auth_manager.clone(),
-                    self.otel_event_manager.clone(),
-                    log_tag,
-                )
-                .await?;
-
-                // Wrap it with the aggregation adapter so callers see *only*
-                // the final assistant message per turn (matching the
-                // behaviour of the Responses API).
-                let mut aggregated = if self.config.show_raw_agent_reasoning {
-                    crate::chat_completions::AggregatedChatStream::streaming_mode(response_stream)
-                } else {
-                    response_stream.aggregate()
-                };
-
-                // Bridge the aggregated stream back into a standard
-                // `ResponseStream` by forwarding events through a channel.
-                let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(16);
-
-                tokio::spawn(async move {
-                    use futures::StreamExt;
-                    while let Some(ev) = aggregated.next().await {
-                        // Exit early if receiver hung up.
-                        if tx.send(ev).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                Ok(ResponseStream { rx_event: rx })
-            }
-        }
-    }
-
-    async fn reset_responses_websocket_session(&self) {
-        let mut session = self.websocket_session.lock().await;
-        *session = ResponsesWebsocketSession::default();
-    }
-
-    async fn prewarm_responses_websocket_if_needed(
-        &self,
-        prompt: &Prompt,
-        log_tag: Option<&str>,
-        ws_version: ResponsesWebsocketVersion,
-    ) -> Result<()> {
-        {
-            let session = self.websocket_session.lock().await;
-            if session.last_request.is_some() {
-                return Ok(());
-            }
-        }
-
-        let mut stream = self
-            .stream_responses_websocket(prompt, log_tag, ws_version, true)
-            .await?;
-        while let Some(event) = stream.next().await {
-            match event? {
-                ResponseEvent::Completed { .. } => return Ok(()),
-                _ => {}
-            }
-        }
-        Err(CodexErr::Stream(
-            "websocket prewarm ended before response.completed".to_string(),
-            None,
-            None,
-        ))
-    }
-
-    async fn stream_responses_websocket(
-        &self,
-        prompt: &Prompt,
-        log_tag: Option<&str>,
-        ws_version: ResponsesWebsocketVersion,
-        warmup: bool,
-    ) -> Result<ResponseStream> {
-        let auth_manager = self.auth_manager.clone();
-        let auth_mode = auth_manager
-            .as_ref()
-            .and_then(|m| m.auth())
-            .as_ref()
-            .map(|a| a.mode);
-
-        // Use non-stored turns on all paths for stability.
-        let store = false;
-
-        let request_model = prompt
-            .model_override
-            .as_deref()
-            .unwrap_or(self.config.model.as_str());
-        let effective_effort = clamp_reasoning_effort_for_model(request_model, self.effort);
-        let request_family = prompt
-            .model_family_override
-            .clone()
-            .or_else(|| find_family_for_model(request_model))
-            .unwrap_or_else(|| self.config.model_family.clone());
-
-        let full_instructions = prompt.get_full_instructions(&request_family);
-        let mut tools_json = create_tools_json_for_responses_api(&prompt.tools)?;
-        if matches!(effective_effort, ReasoningEffortConfig::Minimal) {
-            tools_json.retain(|tool| {
-                tool.get("type")
-                    .and_then(|value| value.as_str())
-                    .map(|tool_type| tool_type != "web_search")
-                    .unwrap_or(true)
-            });
-        }
-
-        let mut input_with_instructions = prompt.get_formatted_input();
-        rewrite_image_generation_calls_for_input(&mut input_with_instructions);
-        replace_image_payloads_for_model(&mut input_with_instructions, request_model);
-        let context_ledger =
-            prompt.context_ledger_for_request(&request_family, &input_with_instructions, &tools_json);
-        debug!(
-            target: "code_core::context_ledger",
-            summary = %context_ledger.compact_summary(),
-            entries = ?context_ledger.entries(),
-            "assembled context ledger for responses request"
-        );
-
-        let want_format = prompt.text_format.clone().or_else(|| {
-            prompt.output_schema.as_ref().map(|schema| crate::client_common::TextFormat {
-                r#type: "json_schema".to_string(),
-                name: Some("code_output_schema".to_string()),
-                strict: Some(true),
-                schema: Some(schema.clone()),
-            })
-        });
-
-        let effective_verbosity = clamp_text_verbosity_for_model(request_model, self.verbosity);
-        let verbosity = match &request_family.family {
-            family if family == "gpt-5" || family == "gpt-5.1" => Some(effective_verbosity),
-            _ => None,
-        };
-
-        let text_template = match (auth_mode, want_format, verbosity) {
-            (Some(mode), None, _) if mode.is_chatgpt() => None,
-            (_, Some(fmt), _) => Some(crate::client_common::Text {
-                verbosity: effective_verbosity.into(),
-                format: Some(fmt),
-            }),
-            (_, None, Some(_)) => Some(crate::client_common::Text {
-                verbosity: effective_verbosity.into(),
-                format: None,
-            }),
-            (_, None, None) => None,
-        };
-
-        let model_slug = request_model;
-        let session_id = prompt.session_id_override.unwrap_or(self.session_id);
-        let session_id_str = session_id.to_string();
-        let mut attempt = 0;
-        let max_retries = self.provider.request_max_retries();
-        let mut request_id = String::new();
-
-        loop {
-            attempt += 1;
-
-            let reasoning = self.current_reasoning_param(&request_family, effective_effort);
-            let include: Vec<String> = if !store && reasoning.is_some() {
-                vec!["reasoning.encrypted_content".to_string()]
-            } else {
-                Vec::new()
-            };
-
-            let payload = ResponsesApiRequest {
-                model: model_slug,
-                instructions: &full_instructions,
-                input: &input_with_instructions,
-                tools: &tools_json,
-                tool_choice: "auto",
-                parallel_tool_calls: request_family.supports_parallel_tool_calls,
-                reasoning,
-                text: text_template.clone(),
-                store: self.provider.is_azure_responses_endpoint(),
-                stream: true,
-                include,
-                service_tier: match self.config.service_tier {
-                    Some(ServiceTier::Fast) => Some("priority".to_string()),
-                    Some(service_tier) => Some(service_tier.to_string()),
-                    None => None,
-                },
-                prompt_cache_key: Some(session_id_str.clone()),
-            };
-
-            let mut payload_json = serde_json::to_value(&payload)?;
-            if let Some(model_value) = payload_json.get_mut("model") {
-                *model_value = serde_json::Value::String(model_slug.to_string());
-            }
-            if self.provider.is_azure_responses_endpoint() {
-                attach_item_ids(&mut payload_json, &input_with_instructions);
-            }
-            if let Some(openrouter_cfg) = self.provider.openrouter_config() {
-                if let Some(obj) = payload_json.as_object_mut() {
-                    if let Some(provider) = &openrouter_cfg.provider {
-                        obj.insert("provider".to_string(), serde_json::to_value(provider)?);
-                    }
-                    if let Some(route) = &openrouter_cfg.route {
-                        obj.insert("route".to_string(), route.clone());
-                    }
-                    for (key, value) in &openrouter_cfg.extra {
-                        obj.entry(key.clone()).or_insert(value.clone());
-                    }
-                }
-            }
-
-            let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
-            let auth = self.provider.effective_auth(&base_auth).await?;
-            let endpoint = self.provider.get_full_url(&auth);
-
-            let url = reqwest::Url::parse(&endpoint).map_err(|err| {
-                CodexErr::Stream(
-                    format!("[ws] invalid URL: {err}"),
-                    None,
-                    Some(request_id.clone()),
-                )
-            })?;
-
-            let ws_endpoint = match url.scheme() {
-                "http" => endpoint.replacen("http://", "ws://", 1),
-                "https" => endpoint.replacen("https://", "wss://", 1),
-                _ => endpoint.clone(),
-            };
-            let mut req_builder = self
-                .provider
-                .create_request_builder_for_url_with_auth(
-                    &self.client,
-                    &auth,
-                    reqwest::Method::GET,
-                    url,
-                )
-                .await?;
-            req_builder = self.apply_requested_model_headers(req_builder, request_model);
-
-            let has_beta_header = req_builder
-                .try_clone()
-                .and_then(|builder| builder.build().ok())
-                .map_or(false, |req| req.headers().contains_key("OpenAI-Beta"));
-
-            if !has_beta_header {
-                let beta_value = if self.provider.is_public_openai_responses_endpoint() {
-                    RESPONSES_BETA_HEADER_V1
-                } else {
-                    RESPONSES_BETA_HEADER_EXPERIMENTAL
-                };
-                req_builder = req_builder.header("OpenAI-Beta", beta_value);
-            }
-
-            req_builder = attach_openai_subagent_header(req_builder);
-            req_builder = attach_codex_beta_features_header(req_builder, &self.config);
-            let turn_state = {
-                let session = self.websocket_session.lock().await;
-                Arc::clone(&session.turn_state)
-            };
-            if let Some(state) = turn_state.get() {
-                req_builder = req_builder.header(X_CODEX_TURN_STATE_HEADER, state);
-            }
-            req_builder = req_builder
-                .header("conversation_id", session_id_str.clone())
-                .header("session_id", session_id_str.clone())
-                .header("thread_id", session_id_str.clone());
-            if let Ok(window_id) = HeaderValue::from_str(&self.current_window_id(session_id)) {
-                req_builder = req_builder.header(X_CODEX_WINDOW_ID_HEADER, window_id);
-            }
-
-            if let Some(auth) = auth.as_ref()
-                && auth.mode.is_chatgpt()
-                && let Some(account_id) = auth.get_account_id()
-            {
-                req_builder = req_builder.header("chatgpt-account-id", account_id);
-            }
-
-            let header_snapshot = req_builder
-                .try_clone()
-                .and_then(|builder| builder.build().ok())
-                .map(|req| header_map_to_json(req.headers()));
-
-            if request_id.is_empty() {
-                if let Ok(logger) = self.debug_logger.lock() {
-                    request_id = logger
-                        .start_request_log(&endpoint, &payload_json, header_snapshot.as_ref(), log_tag)
-                        .unwrap_or_default();
-                }
-            }
-
-            let ws_headers = req_builder
-                .try_clone()
-                .and_then(|builder| builder.build().ok())
-                .map(|req| req.headers().clone())
-                .unwrap_or_else(HeaderMap::new);
-
-            let mut ws_request = ws_endpoint
-                .into_client_request()
-                .map_err(|err| {
-                    CodexErr::Stream(
-                        format!("[ws] failed to build request: {err}"),
-                        None,
-                        Some(request_id.clone()),
-                    )
-                })?;
-            ws_request.headers_mut().extend(ws_headers);
-            // The Responses API websocket wire requires its own beta token (distinct from
-            // `responses=v1` / `responses=experimental`).
-            ws_request.headers_mut().insert(
-                reqwest::header::HeaderName::from_static("openai-beta"),
-                HeaderValue::from_static(match ws_version {
-                    ResponsesWebsocketVersion::V2 => RESPONSES_WEBSOCKETS_BETA_HEADER_V2,
-                    ResponsesWebsocketVersion::V1 => RESPONSES_WEBSOCKETS_BETA_HEADER_V1,
-                }),
-            );
-
-            let current_snapshot =
-                responses_request_snapshot(&payload_json, &input_with_instructions);
-            let (input_override, previous_response_id) = if warmup {
-                (None, None)
-            } else {
-                let session = self.websocket_session.lock().await;
-                match (&session.last_request, &session.last_response_id) {
-                    (Some(previous), Some(response_id)) => {
-                        match incremental_input_for_websocket_request(
-                            previous,
-                            &current_snapshot,
-                        ) {
-                            Some(input)
-                                if !input.is_empty() || session.last_response_from_warmup =>
-                            {
-                                (Some(input), Some(response_id.clone()))
-                            }
-                            None => (None, None),
-                            _ => (None, None),
-                        }
-                    }
-                    _ => (None, None),
-                }
-            };
-            let ws_payload_text = build_responses_websocket_payload(
-                &payload_json,
-                input_override,
-                previous_response_id,
-                warmup.then_some(false),
-            )?;
-
-            let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
-            let _ = tx_event
-                .send(Ok(ResponseEvent::ContextLedger(context_ledger.clone())))
-                .await;
-            let mut session = self.websocket_session.lock().await;
-            if session.connection.is_none() {
-                let connect = timeout(
-                    self.provider.websocket_connect_timeout(),
-                    tokio_tungstenite::connect_async(ws_request),
-                )
-                .await;
-                match connect {
-                    Ok(Ok((ws_stream, response))) => {
-                        let response_headers = header_map_to_json(response.headers());
-                        if tx_event
-                            .send(Ok(ResponseEvent::ResponseHeaders(response_headers)))
-                            .await
-                            .is_err()
-                        {
-                            debug!("receiver dropped response headers event");
-                        }
-
-                        if let Some(value) = response
-                            .headers()
-                            .get(X_CODEX_TURN_STATE_HEADER)
-                            .and_then(|value| value.to_str().ok())
-                        {
-                            if let Some(existing) = session.turn_state.get()
-                                && existing != value
-                            {
-                                warn!(
-                                    existing,
-                                    new = value,
-                                    "received new x-codex-turn-state during websocket connect"
-                                );
-                                let refreshed = Arc::new(OnceLock::new());
-                                let _ = refreshed.set(value.to_string());
-                                session.turn_state = refreshed;
-                            } else {
-                                let _ = session.turn_state.set(value.to_string());
-                            }
-                        }
-
-                        if let Some(snapshot) = parse_rate_limit_snapshot(response.headers()) {
-                            debug!(
-                                "rate limit headers:\n{}",
-                                format_rate_limit_headers(response.headers())
-                            );
-                            if tx_event
-                                .send(Ok(ResponseEvent::RateLimits(snapshot)))
-                                .await
-                                .is_err()
-                            {
-                                debug!("receiver dropped rate limit snapshot event");
-                            }
-                        }
-
-                        let models_etag = response
-                            .headers()
-                            .get("X-Models-Etag")
-                            .and_then(|value| value.to_str().ok())
-                            .map(ToString::to_string);
-                        if let Some(etag) = models_etag {
-                            if tx_event
-                                .send(Ok(ResponseEvent::ModelsEtag(etag)))
-                                .await
-                                .is_err()
-                            {
-                                debug!("receiver dropped models etag event");
-                            }
-                        }
-
-                        if response.headers().contains_key("x-reasoning-included") {
-                            if tx_event
-                                .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
-                                .await
-                                .is_err()
-                            {
-                                debug!("receiver dropped server reasoning included event");
-                            }
-                        }
-
-                        session.connection = Some(ws_stream);
-                    }
-                    Ok(Err(err)) => {
-                        drop(session);
-                        if websocket_connect_is_upgrade_required(&err) {
-                            self.websockets_disabled.store(true, Ordering::Relaxed);
-                            warn!("responses websocket upgrade required; falling back to HTTP responses transport");
-                            return self.stream_responses(prompt, log_tag).await;
-                        }
-
-                        let err = CodexErr::Stream(
-                            format!("[ws] failed to connect: {err}"),
-                            None,
-                            Some(request_id.clone()),
-                        );
-                        if (attempt as u64) < max_retries {
-                            tokio::time::sleep(backoff(attempt as u64)).await;
-                            continue;
-                        }
-                        self.websockets_disabled.store(true, Ordering::Relaxed);
-                        return Err(err);
-                    }
-                    Err(_) => {
-                        drop(session);
-                        let err = CodexErr::Stream(
-                            format!(
-                                "[ws] timed out connecting after {} ms",
-                                self.provider.websocket_connect_timeout().as_millis()
-                            ),
-                            None,
-                            Some(request_id.clone()),
-                        );
-                        if (attempt as u64) < max_retries {
-                            tokio::time::sleep(backoff(attempt as u64)).await;
-                            continue;
-                        }
-                        self.websockets_disabled.store(true, Ordering::Relaxed);
-                        return Err(err);
-                    }
-                }
-            }
-
-            let Some(ws_stream) = session.connection.as_mut() else {
-                return Err(CodexErr::Stream(
-                    "[ws] websocket connection is closed".to_string(),
-                    None,
-                    Some(request_id.clone()),
-                ));
-            };
-            if let Err(err) = ws_stream.send(Message::Text(ws_payload_text)).await {
-                session.connection = None;
-                session.last_request = None;
-                session.last_response_id = None;
-                session.last_response_from_warmup = false;
-                let err = CodexErr::Stream(
-                    format!("[ws] failed to send websocket request: {err}"),
-                    None,
-                    Some(request_id.clone()),
-                );
-                if (attempt as u64) < max_retries {
-                    drop(session);
-                    tokio::time::sleep(backoff(attempt as u64)).await;
-                    continue;
-                }
-                self.websockets_disabled.store(true, Ordering::Relaxed);
-                return Err(err);
-            }
-            drop(session);
-
-            // Keep websocket ingress bounded so a slow downstream consumer
-            // cannot cause unbounded buffering and memory growth. The reader
-            // exits on the terminal response event and leaves the connection in
-            // the session for the next chained request.
-            let (tx_bytes, rx_bytes) =
-                mpsc::channel::<Result<Bytes>>(RESPONSES_WEBSOCKET_INGRESS_BUFFER);
-            let request_id_for_ws = request_id.clone();
-            let websocket_session = Arc::clone(&self.websocket_session);
-            let (reader_ready_tx, reader_ready_rx) = oneshot::channel();
-            tokio::spawn(async move {
-                let mut session = websocket_session.lock().await;
-                let _ = reader_ready_tx.send(());
-                let Some(ws_stream) = session.connection.as_mut() else {
-                    let _ = tx_bytes
-                        .send(Err(CodexErr::Stream(
-                            "[ws] websocket connection is closed".to_string(),
-                            None,
-                            Some(request_id_for_ws.clone()),
-                        )))
-                        .await;
-                    return;
-                };
-
-                loop {
-                    let Some(next) = ws_stream.next().await else {
-                        session.connection = None;
-                        session.last_request = None;
-                        session.last_response_id = None;
-                        session.last_response_from_warmup = false;
-                        break;
-                    };
-                    match next {
-                        Ok(Message::Text(text)) => {
-                            if let Some(error) = parse_wrapped_websocket_error_event(&text)
-                                .and_then(map_wrapped_websocket_error_event)
-                            {
-                                session.connection = None;
-                                session.last_request = None;
-                                session.last_response_id = None;
-                                session.last_response_from_warmup = false;
-                                let _ = tx_bytes.send(Err(error)).await;
-                                break;
-                            }
-
-                            let terminal_response_id = terminal_response_id_from_websocket_event(&text);
-                            let chunk = format!("data: {text}\n\n");
-                            if tx_bytes.send(Ok(Bytes::from(chunk))).await.is_err() {
-                                break;
-                            }
-                            if let Some(response_id) = terminal_response_id {
-                                match response_id {
-                                    Some(response_id) if !response_id.is_empty() => {
-                                        session.last_request = Some(current_snapshot);
-                                        session.last_response_id = Some(response_id);
-                                        session.last_response_from_warmup = warmup;
-                                    }
-                                    _ => {
-                                        session.last_request = None;
-                                        session.last_response_id = None;
-                                        session.last_response_from_warmup = false;
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                        Ok(Message::Ping(payload)) => {
-                            if ws_stream.send(Message::Pong(payload)).await.is_err() {
-                                session.connection = None;
-                                break;
-                            }
-                        }
-                        Ok(Message::Pong(_)) => {}
-                        Ok(Message::Close(_)) => {
-                            session.connection = None;
-                            session.last_request = None;
-                            session.last_response_id = None;
-                            session.last_response_from_warmup = false;
-                            break;
-                        }
-                        Ok(Message::Binary(_)) => {
-                            session.connection = None;
-                            session.last_request = None;
-                            session.last_response_id = None;
-                            session.last_response_from_warmup = false;
-                            let _ = tx_bytes
-                                .send(Err(CodexErr::Stream(
-                                    "[ws] unexpected binary websocket event".to_string(),
-                                    None,
-                                    Some(request_id_for_ws.clone()),
-                                )))
-                                .await;
-                            break;
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            session.connection = None;
-                            session.last_request = None;
-                            session.last_response_id = None;
-                            session.last_response_from_warmup = false;
-                            let _ = tx_bytes
-                                .send(Err(CodexErr::Stream(
-                                    format!("[ws] websocket error: {err}"),
-                                    None,
-                                    Some(request_id_for_ws.clone()),
-                                )))
-                                .await;
-                            break;
-                        }
-                    }
-                }
-            });
-            let _ = reader_ready_rx.await;
-
-            let stream = ReceiverStream::new(rx_bytes);
-            let debug_logger = Arc::clone(&self.debug_logger);
-            let request_id_clone = request_id.clone();
-            let otel_event_manager = self.otel_event_manager.clone();
-            let stream_idle_timeout = self.provider.stream_idle_timeout();
-            tokio::spawn(async move {
-                process_sse(
-                    stream,
-                    tx_event,
-                    stream_idle_timeout,
-                    debug_logger,
-                    request_id_clone,
-                    otel_event_manager,
-                    Arc::new(RwLock::new(StreamCheckpoint::default())),
-                )
-                .await;
-            });
-
-            return Ok(ResponseStream { rx_event });
-        }
-    }
-
-    /// Implementation for the OpenAI *Responses* experimental API.
-    async fn stream_responses(&self, prompt: &Prompt, log_tag: Option<&str>) -> Result<ResponseStream> {
-        if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
-            // short circuit for tests
-            warn!(path, "Streaming from fixture");
-            return stream_from_fixture(path, self.provider.clone(), self.otel_event_manager.clone())
-                .await;
-        }
-
-        let auth_manager = self.auth_manager.clone();
-
-        let auth_mode = auth_manager
-            .as_ref()
-            .and_then(|m| m.auth())
-            .as_ref()
-            .map(|a| a.mode);
-
-        // Use non-stored turns on all paths for stability.
-        let store = false;
-        let turn_state: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
-
-        let request_model = prompt
-            .model_override
-            .as_deref()
-            .unwrap_or(self.config.model.as_str());
-        let effective_effort = clamp_reasoning_effort_for_model(request_model, self.effort);
-        let request_family = prompt
-            .model_family_override
-            .clone()
-            .or_else(|| find_family_for_model(request_model))
-            .unwrap_or_else(|| self.config.model_family.clone());
-
-        let full_instructions = prompt.get_full_instructions(&request_family);
-        let mut tools_json = create_tools_json_for_responses_api(&prompt.tools)?;
-        if matches!(effective_effort, ReasoningEffortConfig::Minimal) {
-            tools_json.retain(|tool| {
-                tool.get("type")
-                    .and_then(|value| value.as_str())
-                    .map(|tool_type| tool_type != "web_search")
-                    .unwrap_or(true)
-                });
-        }
-
-        let mut input_with_instructions = prompt.get_formatted_input();
-        rewrite_image_generation_calls_for_input(&mut input_with_instructions);
-        replace_image_payloads_for_model(&mut input_with_instructions, request_model);
-        let context_ledger =
-            prompt.context_ledger_for_request(&request_family, &input_with_instructions, &tools_json);
-        debug!(
-            target: "code_core::context_ledger",
-            summary = %context_ledger.compact_summary(),
-            entries = ?context_ledger.entries(),
-            "assembled context ledger for responses request"
-        );
-
-        // Build `text` parameter with conditional verbosity and optional format.
-        // - Omit entirely for ChatGPT auth unless a `text.format` or output schema is present.
-        // - Only include `text.verbosity` for GPT-5 family models; warn and ignore otherwise.
-        // - When a structured `format` is present, still include `verbosity` so GPT-5 can honor it.
-        let want_format = prompt.text_format.clone().or_else(|| {
-            prompt.output_schema.as_ref().map(|schema| crate::client_common::TextFormat {
-                r#type: "json_schema".to_string(),
-                name: Some("code_output_schema".to_string()),
-                strict: Some(true),
-                schema: Some(schema.clone()),
-            })
-        });
-
-        let effective_verbosity = clamp_text_verbosity_for_model(request_model, self.verbosity);
-
-        let verbosity = match &request_family.family {
-            family if family == "gpt-5" || family == "gpt-5.1" => Some(effective_verbosity),
-            _ => None,
-        };
-
-        let text_template = match (auth_mode, want_format, verbosity) {
-            (Some(mode), None, _) if mode.is_chatgpt() => None,
-            (_, Some(fmt), _) => Some(crate::client_common::Text {
-                verbosity: effective_verbosity.into(),
-                format: Some(fmt),
-            }),
-            (_, None, Some(_)) => Some(crate::client_common::Text {
-                verbosity: effective_verbosity.into(),
-                format: None,
-            }),
-            (_, None, None) => None,
-        };
-
-        // In general, we want to explicitly send `store: false` when using the Responses API,
-        // but in practice, the Azure Responses API rejects `store: false`:
-        //
-        // - If store = false and id is sent an error is thrown that ID is not found
-        // - If store = false and id is not sent an error is thrown that ID is required
-        //
-        // For Azure, we send `store: true` and preserve reasoning item IDs.
-        let azure_workaround = self.provider.is_azure_responses_endpoint();
-
-        let model_slug = request_model;
-
-        let session_id = prompt
-            .session_id_override
-            .unwrap_or(self.session_id);
-        let session_id_str = session_id.to_string();
-
-        let mut attempt = 0;
-        let max_retries = self.provider.request_max_retries();
-        let mut request_id = String::new();
-        let mut rate_limit_switch_state = crate::account_switching::RateLimitSwitchState::default();
-
-        // Compute endpoint with the latest available auth (may be None at this point).
-        let endpoint = self
-            .provider
-            .get_full_url(&auth_manager.as_ref().and_then(|m| m.auth()));
-
-        loop {
-            attempt += 1;
-
-            let reasoning = self.current_reasoning_param(&request_family, effective_effort);
-            // Request encrypted COT if we are not storing responses,
-            // otherwise reasoning items will be referenced by ID
-            let include: Vec<String> = if !store && reasoning.is_some() {
-                vec!["reasoning.encrypted_content".to_string()]
-            } else {
-                Vec::new()
-            };
-
-            let text = text_template.clone();
-
-            let payload = ResponsesApiRequest {
-                model: model_slug,
-                instructions: &full_instructions,
-                input: &input_with_instructions,
-                tools: &tools_json,
-                tool_choice: "auto",
-                parallel_tool_calls: request_family.supports_parallel_tool_calls,
-                reasoning,
-                text,
-                store: azure_workaround,
-                stream: true,
-                include,
-                service_tier: match self.config.service_tier {
-                    Some(ServiceTier::Fast) => Some("priority".to_string()),
-                    Some(service_tier) => Some(service_tier.to_string()),
-                    None => None,
-                },
-                // Use a stable per-process cache key (session id). With store=false this is inert.
-                prompt_cache_key: Some(session_id_str.clone()),
-            };
-
-            let mut payload_json = serde_json::to_value(&payload)?;
-            if let Some(model_value) = payload_json.get_mut("model") {
-                *model_value = serde_json::Value::String(model_slug.to_string());
-            }
-            if azure_workaround {
-                attach_item_ids(&mut payload_json, &input_with_instructions);
-            }
-            if let Some(openrouter_cfg) = self.provider.openrouter_config() {
-                if let Some(obj) = payload_json.as_object_mut() {
-                    if let Some(provider) = &openrouter_cfg.provider {
-                        obj.insert(
-                            "provider".to_string(),
-                            serde_json::to_value(provider)?
-                        );
-                    }
-                    if let Some(route) = &openrouter_cfg.route {
-                        obj.insert("route".to_string(), route.clone());
-                    }
-                    for (key, value) in &openrouter_cfg.extra {
-                        obj.entry(key.clone()).or_insert(value.clone());
-                    }
-                }
-            }
-            let payload_body = serde_json::to_string(&payload_json)?;
-
-            let mut auth_refresh_error: Option<RefreshTokenError> = None;
-
-            // Always fetch the latest auth in case a prior attempt refreshed the token.
-            let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
-            let auth = self.provider.effective_auth(&base_auth).await?;
-
-            trace!(
-                "POST to {}: {}",
-                self.provider.get_full_url(&auth),
-                payload_body.as_str()
-            );
-
-            let mut req_builder = self
-                .provider
-                .create_request_builder_with_auth(&self.client, &auth)
-                .await?;
-            req_builder = self.apply_requested_model_headers(req_builder, request_model);
-
-            let has_beta_header = req_builder
-                .try_clone()
-                .and_then(|builder| builder.build().ok())
-                .map_or(false, |req| req.headers().contains_key("OpenAI-Beta"));
-
-            if !has_beta_header {
-                let beta_value = if self.provider.is_public_openai_responses_endpoint() {
-                    RESPONSES_BETA_HEADER_V1
-                } else {
-                    RESPONSES_BETA_HEADER_EXPERIMENTAL
-                };
-                req_builder = req_builder.header("OpenAI-Beta", beta_value);
-            }
-
-            req_builder = attach_openai_subagent_header(req_builder);
-            req_builder = attach_codex_beta_features_header(req_builder, &self.config);
-            if let Some(state) = turn_state.get() {
-                req_builder = req_builder.header(X_CODEX_TURN_STATE_HEADER, state);
-            }
-
-            req_builder = req_builder
-                // Send `conversation_id`/`session_id` so the server can hit the prompt-cache.
-                .header("conversation_id", session_id_str.clone())
-                .header("session_id", session_id_str.clone())
-                .header("thread_id", session_id_str.clone())
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(&payload_json);
-            if let Ok(window_id) = HeaderValue::from_str(&self.current_window_id(session_id)) {
-                req_builder = req_builder.header(X_CODEX_WINDOW_ID_HEADER, window_id);
-            }
-
-            if let Some(auth) = auth.as_ref()
-                && auth.mode.is_chatgpt()
-                && let Some(account_id) = auth.get_account_id()
-            {
-                req_builder = req_builder.header("chatgpt-account-id", account_id);
-            }
-
-            if request_id.is_empty() {
-                let endpoint_for_log = self.provider.get_full_url(&auth);
-                let header_snapshot = req_builder
-                    .try_clone()
-                    .and_then(|builder| builder.build().ok())
-                    .map(|req| header_map_to_json(req.headers()));
-
-                if let Ok(logger) = self.debug_logger.lock() {
-                    request_id = logger
-                        .start_request_log(
-                            &endpoint_for_log,
-                            &payload_json,
-                            header_snapshot.as_ref(),
-                            log_tag,
-                        )
-                        .unwrap_or_default();
-                }
-            }
-
-            let res = if let Some(otel) = self.otel_event_manager.as_ref() {
-                otel.log_request(attempt, || req_builder.send()).await
-            } else {
-                req_builder.send().await
-            };
-            if let Ok(resp) = &res {
-                trace!(
-                    "Response status: {}, request-id: {}",
-                    resp.status(),
-                    resp.headers()
-                        .get("x-request-id")
-                        .map(|v| v.to_str().unwrap_or_default())
-                        .unwrap_or_default()
-                );
-            }
-
-            match res {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Some(value) = resp
-                        .headers()
-                        .get(X_CODEX_TURN_STATE_HEADER)
-                        .and_then(|value| value.to_str().ok())
-                    {
-                        if let Some(existing) = turn_state.get()
-                            && existing != value
-                        {
-                            warn!(
-                                existing,
-                                new = value,
-                                "received unexpected x-codex-turn-state during responses request"
-                            );
-                        } else {
-                            let _ = turn_state.set(value.to_string());
-                        }
-                    }
-
-                    // Log successful response initiation
-                    if let Ok(logger) = self.debug_logger.lock() {
-                        let _ = logger.append_response_event(
-                            &request_id,
-                            "stream_initiated",
-                            &serde_json::json!({
-                                "status": "success",
-                                "status_code": resp.status().as_u16(),
-                                "x_request_id": resp.headers()
-                                    .get("x-request-id")
-                                    .and_then(|v| v.to_str().ok())
-                                    .unwrap_or_default(),
-                                "headers": header_map_to_json(resp.headers()),
-                            }),
-                        );
-                    }
-                    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
-                    let _ = tx_event
-                        .send(Ok(ResponseEvent::ContextLedger(context_ledger.clone())))
-                        .await;
-
-                    let response_headers = header_map_to_json(resp.headers());
-                    if tx_event
-                        .send(Ok(ResponseEvent::ResponseHeaders(response_headers)))
-                        .await
-                        .is_err()
-                    {
-                        debug!("receiver dropped response headers event");
-                    }
-
-                    if let Some(snapshot) = parse_rate_limit_snapshot(resp.headers()) {
-                        debug!(
-                            "rate limit headers:\n{}",
-                            format_rate_limit_headers(resp.headers())
-                        );
-
-                        if tx_event
-                            .send(Ok(ResponseEvent::RateLimits(snapshot)))
-                            .await
-                            .is_err()
-                        {
-                            debug!("receiver dropped rate limit snapshot event");
-                        }
-                    }
-
-                    let models_etag = resp
-                        .headers()
-                        .get("X-Models-Etag")
-                        .and_then(|value| value.to_str().ok())
-                        .map(ToString::to_string);
-                    if let Some(etag) = models_etag {
-                        if tx_event
-                            .send(Ok(ResponseEvent::ModelsEtag(etag)))
-                            .await
-                            .is_err()
-                        {
-                            debug!("receiver dropped models etag event");
-                        }
-                    }
-
-                    // spawn task to process SSE
-                    let stream = resp.bytes_stream().map_err(CodexErr::Reqwest);
-                    let debug_logger = Arc::clone(&self.debug_logger);
-                    let request_id_clone = request_id.clone();
-                    let otel_event_manager = self.otel_event_manager.clone();
-                    tokio::spawn(process_sse(
-                        stream,
-                        tx_event,
-                        self.provider.stream_idle_timeout(),
-                        debug_logger,
-                        request_id_clone,
-                        otel_event_manager,
-                        Arc::new(RwLock::new(StreamCheckpoint::default())),
-                    ));
-
-                    return Ok(ResponseStream { rx_event });
-                }
-                Ok(res) => {
-                    let status = res.status();
-                    let headers = res.headers().clone();
-                    if let Some(value) = headers
-                        .get(X_CODEX_TURN_STATE_HEADER)
-                        .and_then(|value| value.to_str().ok())
-                    {
-                        if let Some(existing) = turn_state.get()
-                            && existing != value
-                        {
-                            warn!(
-                                existing,
-                                new = value,
-                                "received unexpected x-codex-turn-state during responses request"
-                            );
-                        } else {
-                            let _ = turn_state.set(value.to_string());
-                        }
-                    }
-                    // Capture x-request-id up-front in case we consume the response body later.
-                    let x_request_id = headers
-                        .get("x-request-id")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-                    let now = Utc::now();
-
-                    // Pull out Retry‑After header if present.
-                    let retry_after_hint = headers
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|raw| parse_retry_after_header(raw, now));
-
-                    if status == StatusCode::UNAUTHORIZED {
-                        if self.provider.has_command_auth() {
-                            self.provider.invalidate_cached_auth_token();
-                        } else if let Some(manager) = auth_manager.as_ref() {
-                            match manager.refresh_token_classified().await {
-                                Ok(Some(_)) => {}
-                                Ok(None) => {
-                                    auth_refresh_error = Some(RefreshTokenError::permanent(
-                                        AUTH_REQUIRED_MESSAGE,
-                                    ));
-                                }
-                                Err(err) => {
-                                    auth_refresh_error = Some(err);
-                                }
-                            }
-                        } else if auth.is_none() {
-                            auth_refresh_error = Some(RefreshTokenError::permanent(
-                                "Authentication manager unavailable; please log in again.",
-                            ));
-                        }
-                    }
-
-                    // Read the response body once for diagnostics across error branches.
-                    let body_text = res.text().await.unwrap_or_default();
-                    let body = serde_json::from_str::<ErrorResponse>(&body_text).ok();
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        if let Some(model) = headers
-                            .get(MODEL_CAP_MODEL_HEADER)
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_string)
-                        {
-                            let reset_after_seconds = headers
-                                .get(MODEL_CAP_RESET_AFTER_HEADER)
-                                .and_then(|value| value.to_str().ok())
-                                .and_then(|value| value.parse::<u64>().ok());
-                            return Err(CodexErr::ModelCap(ModelCapError {
-                                model,
-                                reset_after_seconds,
-                            }));
-                        }
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS
-                        && self.config.auto_switch_accounts_on_rate_limit
-                        && auth_manager.is_some()
-                        && auth::read_code_api_key_from_env().is_none()
-                    {
-                        let current_account_id = auth
-                            .as_ref()
-                            .and_then(|current| current.get_account_id())
-                            .or_else(|| {
-                                auth_accounts::get_active_account_id(self.code_home())
-                                    .ok()
-                                    .flatten()
-                            });
-                        if let Some(current_account_id) = current_account_id {
-                            let mut retry_after_delay = retry_after_hint.clone();
-                            if retry_after_delay.is_none() {
-                                if let Some(ErrorResponse { ref error }) = body {
-                                    retry_after_delay = try_parse_retry_after(error, now);
-                                }
-                            }
-
-                            let current_auth_mode = auth
-                                .as_ref()
-                                .map(|a| a.mode)
-                                .unwrap_or(AuthMode::ApiKey);
-
-                            let switch_reason = match body
-                                .as_ref()
-                                .and_then(|err| err.error.r#type.as_deref())
-                            {
-                                Some("usage_limit_reached") => "usage_limit_reached",
-                                Some("usage_not_included") => "usage_not_included",
-                                _ => "http_429",
-                            };
-
-                            let (blocked_until, should_record_usage_limit) = match body.as_ref() {
-                                Some(ErrorResponse { error })
-                                    if error.r#type.as_deref() == Some("usage_limit_reached") =>
-                                {
-                                    (
-                                        error
-                                            .resets_in_seconds
-                                            .map(|seconds| now + ChronoDuration::seconds(seconds as i64)),
-                                        true,
-                                    )
-                                }
-                                _ => (retry_after_delay.as_ref().map(|info| info.resume_at), false),
-                            };
-
-                            rate_limit_switch_state.mark_limited(
-                                &current_account_id,
-                                current_auth_mode,
-                                blocked_until,
-                            );
-
-                            if let Ok(Some(next_account_id)) =
-                                crate::account_switching::select_next_account_id(
-                                    self.code_home(),
-                                    &rate_limit_switch_state,
-                                    self.config.api_key_fallback_on_all_accounts_limited,
-                                    now,
-                                    Some(current_account_id.as_str()),
-                                )
-                            {
-                                if should_record_usage_limit {
-                                    let plan_type = body
-                                        .as_ref()
-                                        .and_then(|err| err.error.plan_type.as_deref())
-                                        .map(|s| s.to_string());
-                                    let resets_in_seconds =
-                                        body.as_ref().and_then(|err| err.error.resets_in_seconds);
-                                    let reached_type = body
-                                        .as_ref()
-                                        .and_then(|err| err.error.rate_limit_reached_type);
-                                    let code_home = self.code_home().to_path_buf();
-                                    let account_id = current_account_id.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        let observed_at = Utc::now();
-                                        if let Err(err) = account_usage::record_usage_limit_hint_with_type(
-                                            &code_home,
-                                            &account_id,
-                                            plan_type.as_deref(),
-                                            resets_in_seconds,
-                                            observed_at,
-                                            reached_type,
-                                        ) {
-                                            tracing::warn!("Failed to persist usage limit hint: {err}");
-                                        }
-                                    });
-                                }
-
-                                tracing::info!(
-                                    from_account_id = %current_account_id,
-                                    to_account_id = %next_account_id,
-                                    reason = switch_reason,
-                                    "rate limit hit; auto-switching active account"
-                                );
-
-                                if let Ok(logger) = self.debug_logger.lock() {
-                                    let _ = logger.append_response_event(
-                                        &request_id,
-                                        "account_switch",
-                                        &serde_json::json!({
-                                            "reason": switch_reason,
-                                            "from_account_id": current_account_id.clone(),
-                                            "to_account_id": next_account_id.clone(),
-                                            "status": status.as_u16(),
-                                        }),
-                                    );
-                                }
-
-                                if let Err(err) =
-                                    auth::activate_account(self.code_home(), &next_account_id)
-                                {
-                                    tracing::warn!(
-                                        from_account_id = %current_account_id,
-                                        to_account_id = %next_account_id,
-                                        error = %err,
-                                        "failed to activate account after rate limit"
-                                    );
-                                } else {
-                                    if let Some(manager) = auth_manager.as_ref() {
-                                        manager.reload();
-                                    }
-                                    attempt = 0;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    if status == StatusCode::BAD_REQUEST {
-                        if let Some(ErrorResponse { ref error }) = body {
-                            if !self.reasoning_summary_disabled.load(Ordering::Relaxed)
-                                && is_reasoning_summary_rejected(error)
-                            {
-                                self.disable_reasoning_summary();
-
-                                if let Ok(logger) = self.debug_logger.lock() {
-                                    let _ = logger.append_response_event(
-                                        &request_id,
-                                        "reasoning_summary_disabled",
-                                        &serde_json::json!({
-                                            "status": status.as_u16(),
-                                            "message": error.message.clone(),
-                                            "code": error.code.clone(),
-                                            "param": error.param.clone(),
-                                        }),
-                                    );
-                                }
-
-                                // Retry immediately with reasoning summaries removed.
-                                attempt = 0;
-                                continue;
-                            }
-                        }
-                    }
-
-                    // The OpenAI Responses endpoint returns structured JSON bodies even for 4xx/5xx
-                    // errors. When we bubble early with only the HTTP status the caller sees an opaque
-                    // "unexpected status 400 Bad Request" which makes debugging nearly impossible.
-                    // Instead, read (and include) the response text so higher layers and users see the
-                    // exact error message (e.g. "Unknown parameter: 'input[0].metadata'"). The body is
-                    // small and this branch only runs on error paths so the extra allocation is
-                    // negligible.
-                    if !(status == StatusCode::TOO_MANY_REQUESTS
-                        || status == StatusCode::UNAUTHORIZED
-                        || status.is_server_error())
-                    {
-                        // Log error response
-                        if let Ok(logger) = self.debug_logger.lock() {
-                            let _ = logger.append_response_event(
-                                &request_id,
-                                "error",
-                                &serde_json::json!({
-                                    "status": status.as_u16(),
-                                    "headers": header_map_to_json(&headers),
-                                    "body": body_text
-                                }),
-                            );
-                            let _ = logger.end_request_log(&request_id);
-                        }
-                        return Err(CodexErr::UnexpectedStatus(UnexpectedResponseError {
-                            status,
-                            body: body_text,
-                            request_id: None,
-                        }));
-                    }
-
-                    if let Some(ErrorResponse { ref error }) = body {
-                        if is_quota_exceeded_http_error(status, error) {
-                            return Err(CodexErr::QuotaExceeded);
-                        }
-                    }
-
-                    if status == StatusCode::UNAUTHORIZED {
-                        if let Some(error) =
-                            map_unauthorized_outcome(auth.is_some(), auth_refresh_error.as_ref())
-                        {
-                            return Err(error);
-                        }
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        if let Some(ErrorResponse { ref error }) = body {
-                            if error.r#type.as_deref() == Some("usage_limit_reached") {
-                                // Prefer the plan_type provided in the error message if present
-                                // because it's more up to date than the one encoded in the auth
-                                // token.
-                                let plan_type = error
-                                    .plan_type
-                                    .clone()
-                                    .or_else(|| auth.and_then(|a| a.get_plan_type()));
-                                let resets_in_seconds = error.resets_in_seconds;
-                                return Err(CodexErr::UsageLimitReached(UsageLimitReachedError {
-                                    plan_type,
-                                    resets_in_seconds,
-                                    rate_limit_reached_type: error.rate_limit_reached_type,
-                                }));
-                            } else if error.r#type.as_deref() == Some("usage_not_included") {
-                                return Err(CodexErr::UsageNotIncluded);
-                            }
-                        }
-                    }
-
-                    if attempt > max_retries {
-                        // On final attempt, surface rich diagnostics for server errors.
-                        // On final attempt, surface rich diagnostics for server errors.
-                        if status.is_server_error() {
-                            let (message, body_excerpt) =
-                                match serde_json::from_str::<ErrorResponse>(&body_text) {
-                                    Ok(ErrorResponse { error }) => {
-                                        let msg = error
-                                            .message
-                                            .unwrap_or_else(|| "server error".to_string());
-                                        (msg, None)
-                                    }
-                                    Err(_) => {
-                                        let mut excerpt = body_text;
-                                        const MAX: usize = 600;
-                                        if excerpt.len() > MAX {
-                                            excerpt.truncate(MAX);
-                                        }
-                                        (
-                                            "server error".to_string(),
-                                            if excerpt.is_empty() {
-                                                None
-                                            } else {
-                                                Some(excerpt)
-                                            },
-                                        )
-                                    }
-                                };
-
-                            // Build a single-line, actionable message for the UI and logs.
-                            let mut msg = format!("server error {status}: {message}");
-                            if let Some(id) = &x_request_id {
-                                msg.push_str(&format!(" (request-id: {id})"));
-                            }
-                            if let Some(excerpt) = &body_excerpt {
-                                msg.push_str(&format!(" | body: {excerpt}"));
-                            }
-
-                            // Log detailed context to the debug logger and close the request log.
-                            if let Ok(logger) = self.debug_logger.lock() {
-                                let _ = logger.append_response_event(
-                                    &request_id,
-                                    "server_error_on_retry_limit",
-                                    &serde_json::json!({
-                                        "status": status.as_u16(),
-                                        "x_request_id": x_request_id,
-                                        "message": message,
-                                        "body_excerpt": body_excerpt,
-                                    }),
-                                );
-                                let _ = logger.end_request_log(&request_id);
-                            }
-
-                            return Err(CodexErr::ServerError(msg));
-                        }
-
-                        return Err(CodexErr::RetryLimit(RetryLimitReachedError {
-                            status,
-                            request_id: None,
-                            retryable: status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS,
-                        }));
-                    }
-
-                    let mut retry_after_delay = retry_after_hint;
-                    if retry_after_delay.is_none() {
-                        if let Some(ErrorResponse { ref error }) = body {
-                            retry_after_delay = try_parse_retry_after(error, now);
-                        }
-                    }
-
-                    let delay = retry_after_delay
-                        .as_ref()
-                        .map(|info| info.delay)
-                        .unwrap_or_else(|| backoff(attempt));
-                    tokio::time::sleep(delay).await;
-                }
-                Err(e) => {
-                    let is_connectivity = e.is_connect() || e.is_timeout() || e.is_request();
-                    if attempt > max_retries {
-                        // Log network error before surfacing.
-                        if let Ok(logger) = self.debug_logger.lock() {
-                            let _ = logger.log_error(&endpoint, &format!("Network error: {}", e), log_tag);
-                        }
-                        if is_connectivity {
-                            let req_id = (!request_id.is_empty()).then(|| request_id.clone());
-                            return Err(CodexErr::Stream(
-                                format!("[transport] network unavailable: {e}"),
-                                None,
-                                req_id,
-                            ));
-                        }
-                        return Err(e.into());
-                    }
-                    let delay = backoff(attempt);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    pub fn get_provider(&self) -> ModelProviderInfo {
-        self.provider.clone()
-    }
-
-    /// Returns the currently configured model slug.
-    #[allow(dead_code)]
-    pub fn get_model(&self) -> String {
-        self.config.model.clone()
-    }
-
-    pub fn model_explicit(&self) -> bool {
-        self.config.model_explicit
-    }
-
-    pub fn model_personality(&self) -> Option<crate::config_types::Personality> {
-        self.config.model_personality
-    }
-
-    /// Returns the currently configured model family.
-    #[allow(dead_code)]
-    pub fn get_model_family(&self) -> ModelFamily {
-        self.config.model_family.clone()
-    }
-
-    #[allow(dead_code)]
-    pub fn get_model_context_window(&self) -> Option<u64> {
-        self.config.model_context_window
-    }
-
-    #[allow(dead_code)]
-    pub fn get_auth_manager(&self) -> Option<Arc<AuthManager>> {
-        self.auth_manager.clone()
-    }
-
-    pub async fn compact_conversation_history(&self, prompt: &Prompt) -> Result<Vec<ResponseItem>> {
-        if prompt.input.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let auth_manager = self.auth_manager.clone();
-        let mut rate_limit_switch_state = crate::account_switching::RateLimitSwitchState::default();
-
-        let model_slug = prompt
-            .model_override
-            .as_deref()
-            .unwrap_or(self.config.model.as_str());
-        let family = prompt
-            .model_family_override
-            .clone()
-            .or_else(|| find_family_for_model(model_slug))
-            .unwrap_or_else(|| self.config.model_family.clone());
-        let session_id = prompt.session_id_override.unwrap_or(self.session_id);
-        let session_id_str = session_id.to_string();
-        let instructions = prompt.get_full_instructions(&family).into_owned();
-        let mut request_id = String::new();
-
-        loop {
-            let base_auth = auth_manager.as_ref().and_then(|m| m.auth());
-            let auth = self.provider.effective_auth(&base_auth).await?;
-            let service_tier = if auth
-                .as_ref()
-                .is_some_and(|auth| auth.mode == AuthMode::ApiKey)
-            {
-                None
-            } else {
-                match self.config.service_tier {
-                    Some(ServiceTier::Fast) => Some("priority".to_string()),
-                    Some(service_tier) => Some(service_tier.to_string()),
-                    None => None,
-                }
-            };
-            let payload = CompactHistoryRequest {
-                model: model_slug,
-                input: &prompt.input,
-                instructions: instructions.clone(),
-                service_tier,
-                prompt_cache_key: Some(session_id_str.as_str()),
-            };
-            let payload_json = serde_json::to_value(&payload)?;
-            let mut request = self
-                .provider
-                .create_compact_request_builder_with_auth(&self.client, &auth)
-                .await?;
-            request = self.apply_requested_model_headers(request, model_slug);
-
-            // Ensure Responses API beta header is present for compact calls. Mirror the
-            // streaming path: use the public "responses=v1" header for the public OpenAI
-            // endpoint and fall back to "responses=experimental" for other providers.
-            let has_beta_header = request
-                .try_clone()
-                .and_then(|builder| builder.build().ok())
-                .map_or(false, |req| req.headers().contains_key("OpenAI-Beta"));
-
-            if !has_beta_header {
-                let beta_value = if self.provider.is_public_openai_responses_endpoint() {
-                    RESPONSES_BETA_HEADER_V1
-                } else {
-                    RESPONSES_BETA_HEADER_EXPERIMENTAL
-                };
-                request = request.header("OpenAI-Beta", beta_value);
-            }
-
-            request = attach_openai_subagent_header(request);
-            request = attach_codex_beta_features_header(request, &self.config);
-            if let Ok(window_id) = HeaderValue::from_str(&self.current_window_id(session_id)) {
-                request = request.header(X_CODEX_WINDOW_ID_HEADER, window_id);
-            }
-
-            request = request
-                .header("conversation_id", session_id_str.clone())
-                .header("session_id", session_id_str.clone())
-                .header("thread_id", session_id_str.clone());
-
-            if let Some(auth) = auth.as_ref()
-                && auth.mode.is_chatgpt()
-                && let Some(account_id) = auth.get_account_id()
-            {
-                request = request.header("chatgpt-account-id", account_id);
-            }
-
-            request = request.json(&payload);
-
-            let header_snapshot = request
-                .try_clone()
-                .and_then(|builder| builder.build().ok())
-                .map(|req| header_map_to_json(req.headers()));
-
-            if request_id.is_empty() {
-                if let Ok(logger) = self.debug_logger.lock() {
-                    let endpoint = self
-                        .provider
-                        .get_compact_url(&auth)
-                        .unwrap_or_else(|| self.provider.get_full_url(&auth));
-                    request_id = logger
-                        .start_request_log(
-                            &endpoint,
-                            &payload_json,
-                            header_snapshot.as_ref(),
-                            Some("compact_remote"),
-                        )
-                        .unwrap_or_default();
-                }
-            }
-
-            let response = request.send().await?;
-            let status = response.status();
-            let body = response.text().await?;
-
-            if status == StatusCode::TOO_MANY_REQUESTS
-                && self.config.auto_switch_accounts_on_rate_limit
-                && auth_manager.is_some()
-                && auth::read_code_api_key_from_env().is_none()
-            {
-                let now = Utc::now();
-                let current_account_id = auth
-                    .as_ref()
-                    .and_then(|current| current.get_account_id())
-                    .or_else(|| {
-                        auth_accounts::get_active_account_id(self.code_home())
-                            .ok()
-                            .flatten()
-                    });
-                if let Some(current_account_id) = current_account_id {
-                    let current_auth_mode = auth
-                        .as_ref()
-                        .map(|a| a.mode)
-                        .unwrap_or(AuthMode::ApiKey);
-                    rate_limit_switch_state.mark_limited(
-                        &current_account_id,
-                        current_auth_mode,
-                        None,
-                    );
-                    if let Ok(Some(next_account_id)) =
-                        crate::account_switching::select_next_account_id(
-                            self.code_home(),
-                            &rate_limit_switch_state,
-                            self.config.api_key_fallback_on_all_accounts_limited,
-                            now,
-                            Some(current_account_id.as_str()),
-                        )
-                    {
-                        tracing::info!(
-                            from_account_id = %current_account_id,
-                            to_account_id = %next_account_id,
-                            "rate limit hit during compact; auto-switching active account"
-                        );
-                        if let Err(err) = auth::activate_account(self.code_home(), &next_account_id) {
-                            tracing::warn!(
-                                from_account_id = %current_account_id,
-                                to_account_id = %next_account_id,
-                                error = %err,
-                                "failed to activate account after rate limit during compact"
-                            );
-                        } else {
-                            if let Some(manager) = auth_manager.as_ref() {
-                                manager.reload();
-                            }
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            if let Ok(logger) = self.debug_logger.lock() {
-                let response_body: serde_json::Value = serde_json::from_str(&body)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw": body }));
-                let _ = logger.append_response_event(
-                    &request_id,
-                    "compact_response",
-                    &serde_json::json!({
-                        "status_code": status.as_u16(),
-                        "body": response_body,
-                    }),
-                );
-                let _ = logger.end_request_log(&request_id);
-            }
-
-            if !status.is_success() {
-                return Err(CodexErr::UnexpectedStatus(UnexpectedResponseError {
-                    status,
-                    body,
-                    request_id: None,
-                }));
-            }
-
-            let CompactHistoryResponse { output } = serde_json::from_str(&body)?;
-            return Ok(output);
-        }
+        result: &std::result::Result<Option<std::result::Result<Message, Error>>, ApiError>,
+        duration: Duration,
+    ) {
+        self.session_telemetry
+            .record_websocket_event(result, duration);
     }
 }
-
-fn attach_codex_beta_features_header(
-    builder: reqwest::RequestBuilder,
-    config: &Config,
-) -> reqwest::RequestBuilder {
-    let Some(value) = codex_beta_features_header_value(config) else {
-        return builder;
-    };
-
-    let has_header = builder
-        .try_clone()
-        .and_then(|builder| builder.build().ok())
-        .map_or(false, |req| req.headers().contains_key("x-codex-beta-features"));
-    if has_header {
-        return builder;
-    }
-
-    builder.header("x-codex-beta-features", value)
-}
-
-fn parse_wrapped_websocket_error_event(payload: &str) -> Option<WrappedWebsocketErrorEvent> {
-    let event: WrappedWebsocketErrorEvent = serde_json::from_str(payload).ok()?;
-    if event.kind != "error" {
-        return None;
-    }
-    Some(event)
-}
-
-fn map_wrapped_websocket_error_event(event: WrappedWebsocketErrorEvent) -> Option<CodexErr> {
-    let status = match event.status.and_then(|value| StatusCode::from_u16(value).ok()) {
-        Some(status) => status,
-        None => {
-            if let Some(error) = event.error {
-                let message = error
-                    .message
-                    .unwrap_or_else(|| "websocket returned an error event".to_string());
-                return Some(CodexErr::Stream(message, None, None));
-            }
-            return Some(CodexErr::Stream(
-                "websocket returned an error event".to_string(),
-                None,
-                None,
-            ));
-        }
-    };
-    if status.is_success() {
-        return None;
-    }
-
-    let body = if let Some(error) = event.error {
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            if error.r#type.as_deref() == Some("usage_limit_reached") {
-                return Some(CodexErr::UsageLimitReached(UsageLimitReachedError {
-                    plan_type: error.plan_type,
-                    resets_in_seconds: error.resets_in_seconds,
-                    rate_limit_reached_type: error.rate_limit_reached_type,
-                }));
-            }
-
-            if error.r#type.as_deref() == Some("usage_not_included") {
-                return Some(CodexErr::UsageNotIncluded);
-            }
-        }
-
-        if is_quota_exceeded_error(&error) {
-            return Some(CodexErr::QuotaExceeded);
-        }
-
-        if is_server_overloaded_error(&error) {
-            return Some(CodexErr::ServerOverloaded);
-        }
-
-        serde_json::json!({
-            "error": {
-                "type": error.r#type,
-                "code": error.code,
-                "param": error.param,
-                "message": error.message,
-                "plan_type": error.plan_type,
-                "resets_in_seconds": error.resets_in_seconds,
-            }
-        })
-        .to_string()
-    } else {
-        serde_json::json!({
-            "error": {
-                "message": "websocket returned an error event"
-            }
-        })
-        .to_string()
-    };
-
-    Some(CodexErr::UnexpectedStatus(UnexpectedResponseError {
-        status,
-        body,
-        request_id: None,
-    }))
-}
-
-fn websocket_connect_is_upgrade_required(error: &WsError) -> bool {
-    matches!(
-        error,
-        WsError::Http(response)
-            if response.status().as_u16() == 426
-    )
-}
-
-fn codex_beta_features_header_value(config: &Config) -> Option<HeaderValue> {
-    let mut enabled: Vec<&'static str> = Vec::new();
-
-    if config.skills_enabled {
-        enabled.push("skills");
-    }
-    if config.tools_web_search_request {
-        enabled.push("web_search_request");
-    }
-
-    let value = enabled.join(",");
-    if value.is_empty() {
-        return None;
-    }
-
-    HeaderValue::from_str(value.as_str()).ok()
-}
-
-fn attach_openai_subagent_header(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    let Some(value) = openai_subagent_header_value() else {
-        return builder;
-    };
-
-    let has_header = builder
-        .try_clone()
-        .and_then(|builder| builder.build().ok())
-        .map_or(false, |req| req.headers().contains_key("x-openai-subagent"));
-    if has_header {
-        return builder;
-    }
-
-    builder.header("x-openai-subagent", value)
-}
-
-fn openai_subagent_header_value() -> Option<HeaderValue> {
-    let subagent = std::env::var(CODE_OPENAI_SUBAGENT_ENV).ok()?;
-    let subagent = subagent.trim();
-    if subagent.is_empty() {
-        return None;
-    }
-    HeaderValue::from_str(subagent).ok()
-}
-
-fn clamp_text_verbosity_for_model(
-    model: &str,
-    requested: TextVerbosityConfig,
-) -> TextVerbosityConfig {
-    let allowed = supported_text_verbosity_for_model(model);
-    if allowed.iter().any(|v| v == &requested) {
-        return requested;
-    }
-
-    if let Some(medium) = allowed.iter().find(|v| matches!(v, TextVerbosityConfig::Medium)) {
-        tracing::debug!(
-            model,
-            requested = ?requested,
-            fallback = ?medium,
-            "text verbosity clamped to supported value for model",
-        );
-        return *medium;
-    }
-
-    let fallback = *allowed.first().unwrap_or(&TextVerbosityConfig::Medium);
-    tracing::debug!(
-        model,
-        requested = ?requested,
-        fallback = ?fallback,
-        "text verbosity clamped to first supported value for model",
-    );
-    fallback
-}
-
-fn supported_text_verbosity_for_model(model: &str) -> &'static [TextVerbosityConfig] {
-    if model.eq_ignore_ascii_case("gpt-5.1-codex-max") {
-        return &[TextVerbosityConfig::Medium];
-    }
-
-    const ALL: &[TextVerbosityConfig] = &[TextVerbosityConfig::Low, TextVerbosityConfig::Medium, TextVerbosityConfig::High];
-    ALL
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct SseEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    response: Option<Value>,
-    item: Option<Value>,
-    delta: Option<String>,
-    // Present on delta events from the Responses API; used to correlate
-    // streaming chunks with the final OutputItemDone.
-    item_id: Option<String>,
-    // Optional ordering metadata from the Responses API; used to filter
-    // duplicates and out‑of‑order reasoning deltas.
-    sequence_number: Option<u64>,
-    output_index: Option<u32>,
-    content_index: Option<u32>,
-    summary_index: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseCompleted {
-    id: String,
-    usage: Option<ResponseCompletedUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseDone {
-    id: Option<String>,
-    usage: Option<ResponseCompletedUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseCompletedUsage {
-    input_tokens: u64,
-    input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
-    output_tokens: u64,
-    output_tokens_details: Option<ResponseCompletedOutputTokensDetails>,
-    total_tokens: u64,
-}
-
-impl From<ResponseCompletedUsage> for TokenUsage {
-    fn from(val: ResponseCompletedUsage) -> Self {
-        let input_tokens_details = val.input_tokens_details;
-        TokenUsage {
-            input_tokens: val.input_tokens,
-            cached_input_tokens: input_tokens_details
-                .as_ref()
-                .map(|d| d.cached_tokens)
-                .unwrap_or(0),
-            cached_input_tokens_reported: input_tokens_details.is_some(),
-            output_tokens: val.output_tokens,
-            reasoning_output_tokens: val
-                .output_tokens_details
-                .map(|d| d.reasoning_tokens)
-                .unwrap_or(0),
-            total_tokens: val.total_tokens,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseCompletedInputTokensDetails {
-    cached_tokens: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseCompletedOutputTokensDetails {
-    reasoning_tokens: u64,
-}
-
-fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponseItem]) {
-    let Some(input_value) = payload_json.get_mut("input") else {
-        return;
-    };
-    let serde_json::Value::Array(items) = input_value else {
-        return;
-    };
-
-    for (value, item) in items.iter_mut().zip(original_items.iter()) {
-        if let ResponseItem::Reasoning { id, .. }
-        | ResponseItem::Message { id: Some(id), .. }
-        | ResponseItem::WebSearchCall { id: Some(id), .. }
-        | ResponseItem::ImageGenerationCall { id, .. }
-        | ResponseItem::FunctionCall { id: Some(id), .. }
-        | ResponseItem::LocalShellCall { id: Some(id), .. }
-        | ResponseItem::CustomToolCall { id: Some(id), .. } = item
-        {
-            if id.is_empty() {
-                continue;
-            }
-
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("id".to_string(), Value::String(id.clone()));
-            }
-        }
-    }
-}
-
-fn parse_rate_limit_snapshot(headers: &HeaderMap) -> Option<RateLimitSnapshotEvent> {
-    let primary_used_percent = parse_header_f64(headers, "x-codex-primary-used-percent")?;
-    let secondary_used_percent = parse_header_f64(headers, "x-codex-secondary-used-percent")?;
-    let primary_to_secondary_ratio_percent =
-        parse_header_f64(headers, "x-codex-primary-over-secondary-limit-percent")?;
-    let primary_window_minutes = parse_header_u64(headers, "x-codex-primary-window-minutes")?;
-    let secondary_window_minutes = parse_header_u64(headers, "x-codex-secondary-window-minutes")?;
-    let primary_reset_after_seconds =
-        parse_header_u64(headers, "x-codex-primary-reset-after-seconds");
-    let secondary_reset_after_seconds =
-        parse_header_u64(headers, "x-codex-secondary-reset-after-seconds");
-
-    Some(RateLimitSnapshotEvent {
-        primary_used_percent,
-        secondary_used_percent,
-        primary_to_secondary_ratio_percent,
-        primary_window_minutes,
-        secondary_window_minutes,
-        primary_reset_after_seconds,
-        secondary_reset_after_seconds,
-        rate_limit_reached_type: None,
-    })
-}
-
-fn format_rate_limit_headers(headers: &HeaderMap) -> String {
-    let mut pairs: Vec<String> = headers
-        .iter()
-        .map(|(name, value)| {
-            let value_str = value.to_str().unwrap_or("<invalid>");
-            format!("{}: {}", name, value_str)
-        })
-        .collect();
-    pairs.sort();
-    pairs.join("\n")
-}
-
-fn parse_header_f64(headers: &HeaderMap, name: &str) -> Option<f64> {
-    parse_header_str(headers, name)?
-        .parse::<f64>()
-        .ok()
-        .filter(|v| v.is_finite())
-}
-
-fn parse_header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
-    parse_header_str(headers, name)?.parse::<u64>().ok()
-}
-
-fn parse_header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name)?.to_str().ok()
-}
-
-fn parse_retry_after_header(value: &str, now: DateTime<Utc>) -> Option<RetryAfter> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let normalized = trimmed
-        .trim_matches(|c: char| matches!(c, '"' | '\'' | '<' | '>'))
-        .trim();
-    if normalized.is_empty() {
-        return None;
-    }
-
-    if let Ok(secs) = normalized.parse::<u64>() {
-        return Some(RetryAfter::from_duration(Duration::from_secs(secs), now));
-    }
-    if let Ok(float_secs) = normalized.parse::<f64>() {
-        if !float_secs.is_sign_negative() {
-            return Some(RetryAfter::from_duration(Duration::from_secs_f64(float_secs), now));
-        }
-    }
-    if let Ok(system_time) = parse_http_date(normalized) {
-        let resume_at: DateTime<Utc> = system_time.into();
-        return Some(RetryAfter::from_resume_at(resume_at, now));
-    }
-    if let Ok(dt) = DateTime::parse_from_rfc3339(normalized) {
-        return Some(RetryAfter::from_resume_at(dt.with_timezone(&Utc), now));
-    }
-    if let Ok(dt) = DateTime::parse_from_rfc2822(normalized) {
-        return Some(RetryAfter::from_resume_at(dt.with_timezone(&Utc), now));
-    }
-    if let Ok(dt) = DateTime::parse_from_str(normalized, "%a, %d %b %Y %H:%M:%S %z") {
-        return Some(RetryAfter::from_resume_at(dt.with_timezone(&Utc), now));
-    }
-
-    None
-}
-
-fn header_map_to_json(headers: &HeaderMap) -> Value {
-    let mut ordered: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, value) in headers.iter() {
-        let entry = ordered.entry(name.as_str().to_string()).or_default();
-        entry.push(value.to_str().unwrap_or_default().to_string());
-    }
-
-    serde_json::to_value(ordered).unwrap_or(Value::Null)
-}
-
-async fn emit_completed_event(
-    completed: ResponseCompleted,
-    tx_event: &mpsc::Sender<Result<ResponseEvent>>,
-    otel_event_manager: Option<&OtelEventManager>,
-    debug_logger: &Arc<Mutex<DebugLogger>>,
-    request_id: &str,
-) {
-    let ResponseCompleted { id, usage } = completed;
-    if let (Some(usage), Some(manager)) = (&usage, otel_event_manager) {
-        manager.sse_event_completed(
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.input_tokens_details.as_ref().map(|d| d.cached_tokens),
-            usage.output_tokens_details.as_ref().map(|d| d.reasoning_tokens),
-            usage.total_tokens,
-        );
-    }
-
-    let event = ResponseEvent::Completed {
-        response_id: id,
-        token_usage: usage.map(Into::into),
-    };
-    let _ = tx_event.send(Ok(event)).await;
-
-    if let Ok(logger) = debug_logger.lock() {
-        let _ = logger.end_request_log(request_id);
-    }
-}
-
-async fn process_sse<S>(
-    stream: S,
-    tx_event: mpsc::Sender<Result<ResponseEvent>>,
-    idle_timeout: Duration,
-    debug_logger: Arc<Mutex<DebugLogger>>,
-    request_id: String,
-    otel_event_manager: Option<OtelEventManager>,
-    checkpoint: Arc<RwLock<StreamCheckpoint>>,
-) where
-    S: Stream<Item = Result<Bytes>> + Unpin,
-{
-    let mut stream = stream.eventsource();
-
-    // If the stream stays completely silent for an extended period treat it as disconnected.
-    // The response id returned from the "complete" message.
-    let mut response_completed: Option<ResponseCompleted> = None;
-    let mut response_error: Option<CodexErr> = None;
-    // Track the current item_id to include with delta events
-    let mut current_item_id: Option<String> = None;
-
-    // Monotonic sequence guards to drop duplicate/out‑of‑order deltas.
-    // Keys are item_id strings.
-    use std::collections::HashMap;
-    // Track last sequence_number per (item_id, output_index[, content_index])
-    // Default indices to 0 when absent for robustness across providers.
-    let mut last_seq_reasoning_summary: HashMap<(String, u32, u32), u64> = HashMap::new();
-    let mut last_seq_reasoning_content: HashMap<(String, u32, u32), u64> = HashMap::new();
-    // Best-effort duplicate text guard when sequence_number is unavailable.
-    let mut last_text_reasoning_summary: HashMap<(String, u32, u32), String> = HashMap::new();
-    let mut last_text_reasoning_content: HashMap<(String, u32, u32), String> = HashMap::new();
-    let mut global_last_seq: Option<u64> = checkpoint.read().ok().and_then(|c| c.last_sequence);
-
-    loop {
-        let next_event = if let Some(manager) = otel_event_manager.as_ref() {
-            manager
-                .log_sse_event(|| timeout(idle_timeout, stream.next()))
-                .await
-        } else {
-            timeout(idle_timeout, stream.next()).await
-        };
-
-        let sse = match next_event {
-            Ok(Some(Ok(sse))) => sse,
-            Ok(Some(Err(e))) => {
-                debug!("SSE Error: {e:#}");
-                let event = CodexErr::Stream(
-                    format!("[transport] {e}"),
-                    None,
-                    Some(request_id.clone()),
-                );
-                let _ = tx_event.send(Err(event)).await;
-                return;
-            }
-            Ok(None) => {
-                match response_completed {
-                    Some(completed) => {
-                        emit_completed_event(
-                            completed,
-                            &tx_event,
-                            otel_event_manager.as_ref(),
-                            &debug_logger,
-                            &request_id,
-                        )
-                        .await;
-                    }
-                    None => {
-                        let error = response_error.unwrap_or(CodexErr::Stream(
-                            "stream closed before response.completed".into(),
-                            None,
-                            Some(request_id.clone()),
-                        ));
-                        if let Some(manager) = otel_event_manager.as_ref() {
-                            manager.see_event_completed_failed(&error);
-                        }
-                        let _ = tx_event.send(Err(error)).await;
-                    }
-                }
-                // Mark the request log as complete
-                if let Ok(logger) = debug_logger.lock() {
-                    let _ = logger.end_request_log(&request_id);
-                }
-                return;
-            }
-            Err(_) => {
-                let _ = tx_event
-                    .send(Err(CodexErr::Stream(
-                        "[idle] timeout waiting for SSE".into(),
-                        None,
-                        Some(request_id.clone()),
-                    )))
-                    .await;
-                return;
-            }
-        };
-
-        let raw = sse.data.clone();
-        trace!("SSE event: {}", raw);
-
-        // Log the raw SSE event data
-        if let Ok(logger) = debug_logger.lock() {
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&sse.data) {
-                let _ = logger.append_response_event(&request_id, "sse_event", &json_value);
-            }
-        }
-
-        let event: SseEvent = match serde_json::from_str(&sse.data) {
-            Ok(event) => event,
-            Err(e) => {
-                // Log parse error with data excerpt, and record it in the debug logger as well.
-                let mut excerpt = sse.data.clone();
-                const MAX: usize = 600;
-                if excerpt.len() > MAX {
-                    excerpt.truncate(MAX);
-                }
-                debug!("Failed to parse SSE event: {e}, data: {excerpt}");
-                if let Ok(logger) = debug_logger.lock() {
-                    let _ = logger.append_response_event(
-                        &request_id,
-                        "sse_parse_error",
-                        &serde_json::json!({
-                            "error": e.to_string(),
-                            "data_excerpt": excerpt,
-                        }),
-                    );
-                }
-                continue;
-            }
-        };
-
-        if let Some(seq) = event.sequence_number {
-            if let Some(last) = global_last_seq {
-                if seq <= last {
-                    continue;
-                }
-            }
-            global_last_seq = Some(seq);
-            if let Ok(mut guard) = checkpoint.write() {
-                guard.last_sequence = Some(seq);
-            }
-        }
-
-        match event.kind.as_str() {
-            // Individual output item finalised. Forward immediately so the
-            // rest of the agent can stream assistant text/functions *live*
-            // instead of waiting for the final `response.completed` envelope.
-            //
-            // IMPORTANT: We used to ignore these events and forward the
-            // duplicated `output` array embedded in the `response.completed`
-            // payload.  That produced two concrete issues:
-            //   1. No real‑time streaming – the user only saw output after the
-            //      entire turn had finished, which broke the "typing" UX and
-            //      made long‑running turns look stalled.
-            //   2. Duplicate `function_call_output` items – both the
-            //      individual *and* the completed array were forwarded, which
-            //      confused the backend and triggered 400
-            //      "previous_response_not_found" errors because the duplicated
-            //      IDs did not match the incremental turn chain.
-            //
-            // The fix is to forward the incremental events *as they come* and
-            // drop the duplicated list inside `response.completed`.
-            "response.output_item.done" => {
-                let Some(item_val) = event.item else { continue };
-                // Special-case: web_search_call completion -> synthesize a completion event
-                if item_val
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "web_search_call")
-                {
-                    let call_id = item_val
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let query = item_val
-                        .get("action")
-                        .and_then(|a| a.get("query"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let ev = ResponseEvent::WebSearchCallCompleted { call_id, query };
-                    if tx_event.send(Ok(ev)).await.is_err() {
-                        return;
-                    }
-                }
-                let Ok(item) = serde_json::from_value::<ResponseItem>(item_val.clone()) else {
-                    debug!("failed to parse ResponseItem from output_item.done");
-                    continue;
-                };
-
-                // Extract item_id if present
-                if let Some(id) = item_val.get("id").and_then(|v| v.as_str()) {
-                    current_item_id = Some(id.to_string());
-                } else {
-                    // Check within the parsed item structure
-                    match &item {
-                        ResponseItem::Message { id, .. }
-                        | ResponseItem::FunctionCall { id, .. }
-                        | ResponseItem::LocalShellCall { id, .. } => {
-                            if let Some(item_id) = id {
-                                current_item_id = Some(item_id.clone());
-                            }
-                        }
-                        ResponseItem::Reasoning { id, .. } => {
-                            current_item_id = Some(id.clone());
-                        }
-                        _ => {}
-                    }
-                }
-
-                let event = ResponseEvent::OutputItemDone { item, sequence_number: event.sequence_number, output_index: event.output_index };
-                if tx_event.send(Ok(event)).await.is_err() {
-                    return;
-                }
-            }
-            "response.output_text.delta" => {
-                if let Some(delta) = event.delta {
-                    // Prefer the explicit item_id from the SSE event; fall back to last seen.
-                    if let Some(ref id) = event.item_id {
-                        current_item_id = Some(id.clone());
-                    }
-                    tracing::debug!("sse.delta output_text id={:?} len={}", current_item_id, delta.len());
-                    let ev = ResponseEvent::OutputTextDelta {
-                        delta,
-                        item_id: event.item_id.or_else(|| current_item_id.clone()),
-                        sequence_number: event.sequence_number,
-                        output_index: event.output_index,
-                    };
-                    if tx_event.send(Ok(ev)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            "response.reasoning_summary_text.delta" => {
-                if let Some(delta) = event.delta {
-                    if let Some(ref id) = event.item_id {
-                        current_item_id = Some(id.clone());
-                    }
-                    // Compose key using item_id + output_index
-                    let out_idx: u32 = event.output_index.unwrap_or(0);
-                    let sum_idx: u32 = event.summary_index.unwrap_or(0);
-                    if let Some(ref id) = current_item_id {
-                        // Drop duplicates/out‑of‑order by sequence_number when available
-                        if let Some(sn) = event.sequence_number {
-                            let last = last_seq_reasoning_summary.entry((id.clone(), out_idx, sum_idx)).or_insert(0);
-                            if *last >= sn { continue; }
-                            *last = sn;
-                        } else {
-                            // Best-effort: drop exact duplicate text for same key when seq is missing
-                            let key = (id.clone(), out_idx, sum_idx);
-                            if last_text_reasoning_summary.get(&key).map_or(false, |prev| prev == &delta) {
-                                continue;
-                            }
-                            last_text_reasoning_summary.insert(key, delta.clone());
-                        }
-                    }
-                    tracing::debug!(
-                        "sse.delta reasoning_summary id={:?} out_idx={} sum_idx={} len={} seq={:?}",
-                        current_item_id, out_idx, sum_idx,
-                        delta.len(),
-                        event.sequence_number
-                    );
-                    let ev = ResponseEvent::ReasoningSummaryDelta {
-                        delta,
-                        item_id: event.item_id.or_else(|| current_item_id.clone()),
-                        sequence_number: event.sequence_number,
-                        output_index: event.output_index,
-                        summary_index: event.summary_index,
-                    };
-                    if tx_event.send(Ok(ev)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            "response.reasoning_text.delta" => {
-                if let Some(delta) = event.delta {
-                    if let Some(ref id) = event.item_id {
-                        current_item_id = Some(id.clone());
-                    }
-                    // Compose key using item_id + output_index + content_index
-                    let out_idx: u32 = event.output_index.unwrap_or(0);
-                    let content_idx: u32 = event.content_index.unwrap_or(0);
-                    if let Some(ref id) = current_item_id {
-                        // Drop duplicates/out‑of‑order by sequence_number when available
-                        if let Some(sn) = event.sequence_number {
-                            let last = last_seq_reasoning_content.entry((id.clone(), out_idx, content_idx)).or_insert(0);
-                            if *last >= sn { continue; }
-                            *last = sn;
-                        } else {
-                            // Best-effort: drop exact duplicate text for same key when seq is missing
-                            let key = (id.clone(), out_idx, content_idx);
-                            if last_text_reasoning_content.get(&key).map_or(false, |prev| prev == &delta) {
-                                continue;
-                            }
-                            last_text_reasoning_content.insert(key, delta.clone());
-                        }
-                    }
-                    tracing::debug!(
-                        "sse.delta reasoning_content id={:?} out_idx={} content_idx={} len={} seq={:?}",
-                        current_item_id, out_idx, content_idx,
-                        delta.len(),
-                        event.sequence_number
-                    );
-                    let ev = ResponseEvent::ReasoningContentDelta {
-                        delta,
-                        item_id: event.item_id.or_else(|| current_item_id.clone()),
-                        sequence_number: event.sequence_number,
-                        output_index: event.output_index,
-                        content_index: event.content_index,
-                    };
-                    if tx_event.send(Ok(ev)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            "response.created" => {
-                if let Some(response) = event.response {
-                    let response_id = response
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                    let response_model = response
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                    let _ = tx_event
-                        .send(Ok(ResponseEvent::Created {
-                            response_id,
-                            response_model,
-                        }))
-                        .await;
-                }
-            }
-            "response.failed" => {
-                if let Some(resp_val) = event.response {
-                    response_error = Some(CodexErr::Stream(
-                        "response.failed event received".to_string(),
-                        None,
-                        Some(request_id.clone()),
-                    ));
-
-                    let error = resp_val.get("error");
-
-                    if let Some(error) = error {
-                        match serde_json::from_value::<Error>(error.clone()) {
-                            Ok(error) => {
-                                if error.r#type.as_deref() == Some("usage_limit_reached") {
-                                    response_error = Some(CodexErr::UsageLimitReached(
-                                        UsageLimitReachedError {
-                                            plan_type: error.plan_type,
-                                            resets_in_seconds: error.resets_in_seconds,
-                                            rate_limit_reached_type: error.rate_limit_reached_type,
-                                        },
-                                    ));
-                                } else if error.r#type.as_deref() == Some("usage_not_included") {
-                                    response_error = Some(CodexErr::UsageNotIncluded);
-                                } else if is_quota_exceeded_error(&error) {
-                                    response_error = Some(CodexErr::QuotaExceeded);
-                                } else if is_server_overloaded_error(&error) {
-                                    response_error = Some(CodexErr::ServerOverloaded);
-                                } else {
-                                    let retry_after = try_parse_retry_after(&error, Utc::now());
-                                    let message = error.message.unwrap_or_default();
-                                    response_error = Some(CodexErr::Stream(
-                                        message,
-                                        retry_after,
-                                        Some(request_id.clone()),
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                debug!("failed to parse ErrorResponse: {e}");
-                            }
-                        }
-                    }
-
-                    if let Some(error) = response_error.take() {
-                        if let Some(manager) = otel_event_manager.as_ref() {
-                            manager.see_event_completed_failed(&error);
-                        }
-                        let _ = tx_event.send(Err(error)).await;
-                        if let Ok(logger) = debug_logger.lock() {
-                            let _ = logger.end_request_log(&request_id);
-                        }
-                        return;
-                    }
-                }
-            }
-            "response.incomplete" => {
-                let reason = event.response.as_ref().and_then(|response| {
-                    response
-                        .get("incomplete_details")
-                        .and_then(|details| details.get("reason"))
-                        .and_then(Value::as_str)
-                });
-                let reason = reason.unwrap_or("unknown");
-                let message = format!("Incomplete response returned, reason: {reason}");
-                let event = CodexErr::Stream(message, None, Some(request_id.clone()));
-                let _ = tx_event.send(Err(event)).await;
-                return;
-            }
-            // Final response completed – includes array of output items & id
-            "response.completed" => {
-                if let Some(resp_val) = event.response {
-                    match serde_json::from_value::<ResponseCompleted>(resp_val) {
-                        Ok(r) => {
-                            response_completed = Some(r);
-                        }
-                        Err(e) => {
-                            debug!("failed to parse ResponseCompleted: {e}");
-                            continue;
-                        }
-                    };
-
-                    if let Some(completed) = response_completed.take() {
-                        emit_completed_event(
-                            completed,
-                            &tx_event,
-                            otel_event_manager.as_ref(),
-                            &debug_logger,
-                            &request_id,
-                        )
-                        .await;
-                        return;
-                    }
-                };
-            }
-            "response.done" => {
-                if let Some(resp_val) = event.response {
-                    match serde_json::from_value::<ResponseDone>(resp_val) {
-                        Ok(r) => {
-                            response_completed = Some(ResponseCompleted {
-                                id: r.id.unwrap_or_default(),
-                                usage: r.usage,
-                            });
-                        }
-                        Err(e) => {
-                            debug!("failed to parse ResponseDone: {e}");
-                            continue;
-                        }
-                    };
-                } else {
-                    response_completed = Some(ResponseCompleted {
-                        id: String::new(),
-                        usage: None,
-                    });
-                }
-
-                if let Some(completed) = response_completed.take() {
-                    emit_completed_event(
-                        completed,
-                        &tx_event,
-                        otel_event_manager.as_ref(),
-                        &debug_logger,
-                        &request_id,
-                    )
-                    .await;
-                    return;
-                }
-            }
-            "response.content_part.done"
-            | "response.function_call_arguments.delta"
-            | "response.custom_tool_call_input.delta"
-            | "response.custom_tool_call_input.done" // also emitted as response.output_item.done
-            | "response.in_progress"
-            | "response.output_item.added"
-            | "response.output_text.done" => {
-                if event.kind == "response.output_item.added" {
-                    if let Some(item) = event.item.as_ref() {
-                        // Detect web_search_call begin and forward a synthetic event upstream.
-                        if let Some(ty) = item.get("type").and_then(|v| v.as_str()) {
-                            if ty == "web_search_call" {
-                                let call_id = item
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let ev = ResponseEvent::WebSearchCallBegin { call_id };
-                                if tx_event.send(Ok(ev)).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "response.reasoning_summary_part.added" => {
-                // Boundary between reasoning summary sections (e.g., titles).
-                let event = ResponseEvent::ReasoningSummaryPartAdded;
-                if tx_event.send(Ok(event)).await.is_err() {
-                    return;
-                }
-            }
-            "response.reasoning_summary_text.done" => {}
-            _ => {}
-        }
-    }
-}
-
-/// used in tests to stream from a text SSE file
-async fn stream_from_fixture(
-    path: impl AsRef<Path>,
-    provider: ModelProviderInfo,
-    otel_event_manager: Option<OtelEventManager>,
-) -> Result<ResponseStream> {
-    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
-    let f = std::fs::File::open(path.as_ref())?;
-    let lines = std::io::BufReader::new(f).lines();
-
-    // insert \n\n after each line for proper SSE parsing
-    let mut content = String::new();
-    for line in lines {
-        content.push_str(&line?);
-        content.push_str("\n\n");
-    }
-
-    let rdr = std::io::Cursor::new(content);
-    let stream = ReaderStream::new(rdr).map_err(CodexErr::Io);
-    // Create a dummy debug logger for testing
-    let debug_logger = Arc::new(Mutex::new(DebugLogger::new(false).unwrap()));
-    tokio::spawn(process_sse(
-        stream,
-        tx_event,
-        provider.stream_idle_timeout(),
-        debug_logger,
-        String::new(), // Empty request_id for test fixture
-        otel_event_manager,
-        Arc::new(RwLock::new(StreamCheckpoint::default())),
-    ));
-    Ok(ResponseStream { rx_event })
-}
-
-// Note: legacy helpers for parsing Retry-After headers and rate-limit messages
-// were removed during merge cleanup. If needed in the future, pick them from
-// upstream and integrate with our error handling path.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model_provider_info::{ModelProviderInfo, WireApi};
-    use std::collections::HashMap;
-    use serde_json::json;
-    use tokio::sync::mpsc;
-    use tokio_test::io::Builder as IoBuilder;
-    use tokio_util::io::ReaderStream;
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
-
-    // ────────────────────────────
-    // Helpers
-    // ────────────────────────────
-
-    fn response_text_item(text: &str) -> ResponseItem {
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![code_protocol::models::ContentItem::InputText {
-                text: text.to_string(),
-            }],
-            end_turn: None,
-            phase: None,
-        }
-    }
-
-    #[test]
-    fn response_completed_usage_marks_cached_input_telemetry_availability() {
-        let without_details: TokenUsage = ResponseCompletedUsage {
-            input_tokens: 100,
-            input_tokens_details: None,
-            output_tokens: 10,
-            output_tokens_details: None,
-            total_tokens: 110,
-        }
-        .into();
-        assert_eq!(without_details.cached_input_tokens, 0);
-        assert!(!without_details.cached_input_tokens_reported);
-        assert_eq!(without_details.cache_hit_rate(), None);
-
-        let with_details: TokenUsage = ResponseCompletedUsage {
-            input_tokens: 100,
-            input_tokens_details: Some(ResponseCompletedInputTokensDetails { cached_tokens: 0 }),
-            output_tokens: 10,
-            output_tokens_details: None,
-            total_tokens: 110,
-        }
-        .into();
-        assert_eq!(with_details.cached_input_tokens, 0);
-        assert!(with_details.cached_input_tokens_reported);
-        assert_eq!(with_details.cache_hit_rate(), Some(0));
-    }
-
-    #[test]
-    fn websocket_incremental_input_requires_matching_request_prefix() {
-        let first = response_text_item("one");
-        let second = response_text_item("two");
-        let payload = json!({
-            "model": "gpt-5.5",
-            "instructions": "be useful",
-            "input": [first.clone()],
-            "stream": true
-        });
-        let previous = responses_request_snapshot(&payload, std::slice::from_ref(&first));
-        let current_payload = json!({
-            "model": "gpt-5.5",
-            "instructions": "be useful",
-            "input": [first.clone(), second.clone()],
-            "stream": true
-        });
-        let current =
-            responses_request_snapshot(&current_payload, &[first.clone(), second.clone()]);
-
-        assert_eq!(
-            incremental_input_for_websocket_request(&previous, &current),
-            Some(vec![second.clone()])
-        );
-
-        let changed_payload = json!({
-            "model": "gpt-5.5",
-            "instructions": "be terse",
-            "input": [first, second],
-            "stream": true
-        });
-        let changed = responses_request_snapshot(&changed_payload, &current.input);
-        assert_eq!(
-            incremental_input_for_websocket_request(&previous, &changed),
-            None
-        );
-    }
-
-    #[test]
-    fn websocket_payload_adds_generate_and_previous_response_fields() {
-        let delta = response_text_item("follow up");
-        let payload = json!({
-            "model": "gpt-5.5",
-            "instructions": "be useful",
-            "input": [],
-            "stream": true,
-            "prompt_cache_key": "session-1"
-        });
-
-        let warmup = build_responses_websocket_payload(&payload, None, None, Some(false))
-            .expect("warmup payload");
-        let warmup_json: Value = serde_json::from_str(&warmup).expect("warmup json");
-        assert_eq!(warmup_json["type"], "response.create");
-        assert_eq!(warmup_json["generate"], false);
-        assert!(warmup_json.get("previous_response_id").is_none());
-
-        let chained = build_responses_websocket_payload(
-            &payload,
-            Some(vec![delta.clone()]),
-            Some("resp_previous".to_string()),
-            None,
-        )
-        .expect("chained payload");
-        let chained_json: Value = serde_json::from_str(&chained).expect("chained json");
-        assert_eq!(chained_json["previous_response_id"], "resp_previous");
-        assert_eq!(
-            chained_json["input"],
-            serde_json::to_value(vec![delta]).expect("delta input json")
-        );
-        assert!(chained_json.get("generate").is_none());
-    }
-
-    #[test]
-    fn unauthorized_outcome_returns_permanent_error_for_permanent_refresh_failure() {
-        let err = RefreshTokenError::permanent("token revoked");
-        let outcome = map_unauthorized_outcome(true, Some(&err))
-            .expect("should produce CodexErr");
-        match outcome {
-            CodexErr::AuthRefreshPermanent(msg) => {
-                assert!(
-                    msg.contains("token revoked"),
-                    "unexpected message: {}",
-                    msg
-                );
-            }
-            other => panic!("unexpected outcome: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn unauthorized_outcome_requires_login_without_auth() {
-        let outcome = map_unauthorized_outcome(false, None)
-            .expect("should require login");
-        match outcome {
-            CodexErr::AuthRefreshPermanent(msg) => {
-                assert_eq!(msg, AUTH_REQUIRED_MESSAGE);
-            }
-            other => panic!("unexpected outcome: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn unauthorized_outcome_allows_retry_for_transient_refresh_error() {
-        let err = RefreshTokenError::transient("server busy");
-        assert!(map_unauthorized_outcome(true, Some(&err)).is_none());
-    }
-
-    #[tokio::test]
-    async fn responses_request_uses_beta_header_for_public_openai() {
-        let provider = ModelProviderInfo {
-            name: "openai".to_string(),
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            env_key: None,
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: None,
-            stream_idle_timeout_ms: None,
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("client");
-
-        let mut builder = provider
-            .create_request_builder(&client, &None)
-            .await
-            .expect("builder");
-        let has_beta = builder
-            .try_clone()
-            .and_then(|b| b.build().ok())
-            .map_or(false, |req| req.headers().contains_key("OpenAI-Beta"));
-        if !has_beta {
-            builder = builder.header("OpenAI-Beta", RESPONSES_BETA_HEADER_V1);
-        }
-        let request = builder
-            .try_clone()
-            .expect("clone request builder")
-            .build()
-            .expect("build request");
-
-        let header_value = request
-            .headers()
-            .get("OpenAI-Beta")
-            .expect("OpenAI-Beta header present");
-        assert_eq!(header_value, RESPONSES_BETA_HEADER_V1);
-    }
-
-    #[tokio::test]
-    async fn responses_request_uses_experimental_for_backend() {
-        let provider = ModelProviderInfo {
-            name: "backend".to_string(),
-            base_url: Some("https://chatgpt.com/backend-api/codex".to_string()),
-            env_key: None,
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: None,
-            stream_idle_timeout_ms: None,
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("client");
-
-        let mut builder = provider
-            .create_request_builder(&client, &None)
-            .await
-            .expect("builder");
-        let has_beta = builder
-            .try_clone()
-            .and_then(|b| b.build().ok())
-            .map_or(false, |req| req.headers().contains_key("OpenAI-Beta"));
-        if !has_beta {
-            builder = builder.header("OpenAI-Beta", RESPONSES_BETA_HEADER_EXPERIMENTAL);
-        }
-        let request = builder
-            .try_clone()
-            .expect("clone request builder")
-            .build()
-            .expect("build request");
-
-        let header_value = request
-            .headers()
-            .get("OpenAI-Beta")
-            .expect("OpenAI-Beta header present");
-        assert_eq!(header_value, RESPONSES_BETA_HEADER_EXPERIMENTAL);
-    }
-
-    #[tokio::test]
-    async fn responses_request_respects_preexisting_beta_header() {
-        let mut headers = HashMap::new();
-        headers.insert("OpenAI-Beta".to_string(), "custom".to_string());
-        let provider = ModelProviderInfo {
-            name: "custom".to_string(),
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            env_key: None,
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: Some(headers),
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: None,
-            stream_idle_timeout_ms: None,
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("client");
-
-        let request = provider
-            .create_request_builder(&client, &None)
-            .await
-            .expect("builder")
-            .try_clone()
-            .expect("clone request builder")
-            .build()
-            .expect("build request");
-
-        let header_value = request
-            .headers()
-            .get("OpenAI-Beta")
-            .expect("OpenAI-Beta header present");
-        assert_eq!(header_value, "custom");
-    }
-
-    /// Runs the SSE parser on pre-chunked byte slices and returns every event
-    /// (including any final `Err` from a stream-closure check).
-    async fn collect_events(
-        chunks: &[&[u8]],
-        provider: ModelProviderInfo,
-    ) -> Vec<Result<ResponseEvent>> {
-        let mut builder = IoBuilder::new();
-        for chunk in chunks {
-            builder.read(chunk);
-        }
-
-        let reader = builder.build();
-        let stream = ReaderStream::new(reader).map_err(CodexErr::Io);
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent>>(16);
-        let debug_logger = Arc::new(Mutex::new(DebugLogger::new(false).unwrap()));
-        let checkpoint = Arc::new(RwLock::new(StreamCheckpoint::default()));
-        tokio::spawn(process_sse(
-            stream,
-            tx,
-            provider.stream_idle_timeout(),
-            debug_logger,
-            String::new(),
-            None,
-            checkpoint,
-        ));
-
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            events.push(ev);
-        }
-        events
-    }
-
-    /// Builds an in-memory SSE stream from JSON fixtures and returns only the
-    /// successfully parsed events (panics on internal channel errors).
-    async fn run_sse(
-        events: Vec<serde_json::Value>,
-        provider: ModelProviderInfo,
-    ) -> Vec<ResponseEvent> {
-        let mut body = String::new();
-        for e in events {
-            let kind = e
-                .get("type")
-                .and_then(|v| v.as_str())
-                .expect("fixture event missing type");
-            if e.as_object().map(|o| o.len() == 1).unwrap_or(false) {
-                body.push_str(&format!("event: {kind}\n\n"));
-            } else {
-                body.push_str(&format!("event: {kind}\ndata: {e}\n\n"));
-            }
-        }
-
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent>>(8);
-        let stream = ReaderStream::new(std::io::Cursor::new(body)).map_err(CodexErr::Io);
-        let debug_logger = Arc::new(Mutex::new(DebugLogger::new(false).unwrap()));
-        let checkpoint = Arc::new(RwLock::new(StreamCheckpoint::default()));
-        tokio::spawn(process_sse(
-            stream,
-            tx,
-            provider.stream_idle_timeout(),
-            debug_logger,
-            String::new(),
-            None,
-            checkpoint,
-        ));
-
-        let mut out = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            out.push(ev.expect("channel closed"));
-        }
-        out
-    }
-
-    // ────────────────────────────
-    // Tests from `implement-test-for-responses-api-sse-parser`
-    // ────────────────────────────
-
-    #[tokio::test]
-    async fn parses_items_and_completed() {
-        let item1 = json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Hello"}]
-            }
-        })
-        .to_string();
-
-        let item2 = json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "World"}]
-            }
-        })
-        .to_string();
-
-        let completed = json!({
-            "type": "response.completed",
-            "response": { "id": "resp1" }
-        })
-        .to_string();
-
-        let sse1 = format!("event: response.output_item.done\ndata: {item1}\n\n");
-        let sse2 = format!("event: response.output_item.done\ndata: {item2}\n\n");
-        let sse3 = format!("event: response.completed\ndata: {completed}\n\n");
-
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(
-            &[sse1.as_bytes(), sse2.as_bytes(), sse3.as_bytes()],
-            provider,
-        )
-        .await;
-
-        assert_eq!(events.len(), 3);
-
-        matches!(
-            &events[0],
-            Ok(ResponseEvent::OutputItemDone {
-                item: ResponseItem::Message { role, .. },
-                ..
-            }) if role == "assistant"
-        );
-
-        matches!(
-            &events[1],
-            Ok(ResponseEvent::OutputItemDone {
-                item: ResponseItem::Message { role, .. },
-                ..
-            }) if role == "assistant"
-        );
-
-        match &events[2] {
-            Ok(ResponseEvent::Completed {
-                response_id,
-                token_usage,
-            }) => {
-                assert_eq!(response_id, "resp1");
-                assert!(token_usage.is_none());
-            }
-            other => panic!("unexpected third event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn error_when_missing_completed() {
-        let item1 = json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Hello"}]
-            }
-        })
-        .to_string();
-
-        let sse1 = format!("event: response.output_item.done\ndata: {item1}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 2);
-
-        matches!(
-            events[0],
-            Ok(ResponseEvent::OutputItemDone { .. })
-        );
-
-        match &events[1] {
-            Err(CodexErr::Stream(msg, _, _)) => {
-                assert_eq!(msg, "stream closed before response.completed")
-            }
-            other => panic!("unexpected second event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn response_done_emits_completed() {
-        let done = json!({
-            "type": "response.done",
-            "response": {
-                "id": "resp_done_1",
-                "usage": {
-                    "input_tokens": 1,
-                    "input_tokens_details": null,
-                    "output_tokens": 2,
-                    "output_tokens_details": null,
-                    "total_tokens": 3
-                }
-            }
-        })
-        .to_string();
-
-        let sse1 = format!("event: response.done\ndata: {done}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Ok(ResponseEvent::Completed {
-                response_id,
-                token_usage,
-            }) => {
-                assert_eq!(response_id, "resp_done_1");
-                assert!(token_usage.is_some());
-            }
-            other => panic!("unexpected done event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn response_completed_does_not_wait_for_stream_close() {
-        let completed = json!({
-            "type": "response.completed",
-            "response": {
-                "id": "resp_ws_1",
-                "usage": {
-                    "input_tokens": 1,
-                    "input_tokens_details": null,
-                    "output_tokens": 2,
-                    "output_tokens_details": null,
-                    "total_tokens": 3
-                }
-            }
-        })
-        .to_string();
-
-        let sse = format!("event: response.completed\ndata: {completed}\n\n");
-        let (tx_bytes, rx_bytes) = mpsc::channel::<Result<Bytes>>(4);
-        tx_bytes
-            .send(Ok(Bytes::from(sse)))
-            .await
-            .expect("seed response.completed chunk");
-        let stream = ReceiverStream::new(rx_bytes);
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent>>(8);
-        let debug_logger = Arc::new(Mutex::new(DebugLogger::new(false).unwrap()));
-        let checkpoint = Arc::new(RwLock::new(StreamCheckpoint::default()));
-
-        tokio::spawn(process_sse(
-            stream,
-            tx,
-            Duration::from_secs(60),
-            debug_logger,
-            String::new(),
-            None,
-            checkpoint,
-        ));
-
-        // Keep sender alive so the stream does not terminate on EOF.
-        let _keep_stream_open = tx_bytes;
-
-        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("parser should emit completion without waiting for EOF")
-            .expect("completion event");
-        match first {
-            Ok(ResponseEvent::Completed { response_id, .. }) => {
-                assert_eq!(response_id, "resp_ws_1");
-            }
-            other => panic!("unexpected first event: {other:?}"),
-        }
-
-        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("channel should close after completion");
-        assert!(second.is_none());
-    }
-
-    #[tokio::test]
-    async fn error_when_error_event() {
-        let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_689bcf18d7f08194bf3440ba62fe05d803fee0cdac429894","object":"response","created_at":1755041560,"status":"failed","background":false,"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more."}, "usage":null,"user":null,"metadata":{}}}"#;
-
-        let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-
-        match &events[0] {
-            Err(CodexErr::Stream(msg, Some(retry), _)) => {
-                assert_eq!(
-                    msg,
-                    "Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more."
-                );
-                assert_eq!(retry.delay, Duration::from_secs_f64(11.054));
-            }
-            other => panic!("unexpected second event: {other:?}"),
-        }
-    }
-
-    // ────────────────────────────
-    // Table-driven test from `main`
-    // ────────────────────────────
-
-    /// Verifies that the adapter produces the right `ResponseEvent` for a
-    /// variety of incoming `type` values.
-    #[tokio::test]
-    async fn table_driven_event_kinds() {
-        struct TestCase {
-            name: &'static str,
-            event: serde_json::Value,
-            expect_first: fn(&ResponseEvent) -> bool,
-            expected_len: usize,
-        }
-
-        fn is_created(ev: &ResponseEvent) -> bool {
-            matches!(ev, ResponseEvent::Created { .. })
-        }
-        fn is_output(ev: &ResponseEvent) -> bool {
-            matches!(ev, ResponseEvent::OutputItemDone { .. })
-        }
-        fn is_completed(ev: &ResponseEvent) -> bool {
-            matches!(ev, ResponseEvent::Completed { .. })
-        }
-
-        let completed = json!({
-            "type": "response.completed",
-            "response": {
-                "id": "c",
-                "usage": {
-                    "input_tokens": 0,
-                    "input_tokens_details": null,
-                    "output_tokens": 0,
-                    "output_tokens_details": null,
-                    "total_tokens": 0
-                },
-                "output": []
-            }
-        });
-
-        let cases = vec![
-            TestCase {
-                name: "created",
-                event: json!({"type": "response.created", "response": {}}),
-                expect_first: is_created,
-                expected_len: 2,
-            },
-            TestCase {
-                name: "output_item.done",
-                event: json!({
-                    "type": "response.output_item.done",
-                    "item": {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "hi"}
-                        ]
-                    }
-                }),
-                expect_first: is_output,
-                expected_len: 2,
-            },
-            TestCase {
-                name: "unknown",
-                event: json!({"type": "response.new_tool_event"}),
-                expect_first: is_completed,
-                expected_len: 1,
-            },
-        ];
-
-        for case in cases {
-            let mut evs = vec![case.event];
-            evs.push(completed.clone());
-
-            let provider = ModelProviderInfo {
-                name: "test".to_string(),
-                base_url: Some("https://test.com".to_string()),
-                env_key: Some("TEST_API_KEY".to_string()),
-                env_key_instructions: None,
-                experimental_bearer_token: None,
-                auth: None,
-                wire_api: WireApi::Responses,
-                query_params: None,
-                http_headers: None,
-                env_http_headers: None,
-                request_max_retries: Some(0),
-                stream_max_retries: Some(0),
-                stream_idle_timeout_ms: Some(1000),
-                websocket_connect_timeout_ms: None,
-                requires_openai_auth: false,
-                openrouter: None,
-            };
-
-            let out = run_sse(evs, provider).await;
-            assert_eq!(out.len(), case.expected_len, "case {}", case.name);
-            assert!(
-                (case.expect_first)(&out[0]),
-                "first event mismatch in case {}",
-                case.name
-            );
-        }
-    }
-
-    fn fixed_now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2025, 11, 7, 12, 0, 0).unwrap()
-    }
-
-    #[test]
-    fn test_try_parse_retry_after_ms() {
-        let now = fixed_now();
-        let err = Error {
-            r#type: None,
-            message: Some("Rate limit reached for gpt-5.1 in organization org- on tokens per min (TPM): Limit 1, Used 1, Requested 19304. Please try again in 28ms. Visit https://platform.openai.com/account/rate-limits to learn more.".to_string()),
-            code: Some("rate_limit_exceeded".to_string()),
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        let retry_after = try_parse_retry_after(&err, now).expect("retry");
-        assert_eq!(retry_after.delay, Duration::from_millis(28));
-        assert!(retry_after.resume_at >= now);
-    }
-
-    #[test]
-    fn test_try_parse_retry_after_seconds() {
-        let now = fixed_now();
-        let err = Error {
-            r#type: None,
-            message: Some("Rate limit reached for gpt-5.1 in organization <ORG> on tokens per min (TPM): Limit 30000, Used 6899, Requested 24050. Please try again in 1.898s. Visit https://platform.openai.com/account/rate-limits to learn more.".to_string()),
-            code: Some("rate_limit_exceeded".to_string()),
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-        let retry_after = try_parse_retry_after(&err, now).expect("retry");
-        assert_eq!(retry_after.delay, Duration::from_secs_f64(1.898));
-    }
-
-    #[test]
-    fn test_try_parse_retry_after_azure() {
-        let now = fixed_now();
-        let err = Error {
-            r#type: None,
-            message: Some("Rate limit exceeded. Retry after 35 seconds.".to_string()),
-            code: Some("rate_limit_exceeded".to_string()),
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-        let retry_after = try_parse_retry_after(&err, now).expect("retry");
-        assert_eq!(retry_after.delay, Duration::from_secs(35));
-    }
-
-    #[test]
-    fn test_try_parse_retry_after_none_when_missing() {
-        let now = fixed_now();
-        let err = Error {
-            r#type: None,
-            message: Some("Some other error".to_string()),
-            code: None,
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        assert!(try_parse_retry_after(&err, now).is_none());
-    }
-
-    #[test]
-    fn parse_retry_after_header_parses_seconds() {
-        let now = fixed_now();
-        let retry = parse_retry_after_header("42", now).expect("header");
-        assert_eq!(retry.delay, Duration::from_secs(42));
-        assert_eq!(retry.resume_at, now + ChronoDuration::seconds(42));
-    }
-
-    #[test]
-    fn parse_retry_after_header_parses_rfc7231_date() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 15, 8, 0, 0).unwrap();
-        let retry = parse_retry_after_header("Tue, 15 Nov 1994 08:12:31 GMT", now).expect("header");
-        assert_eq!(
-            retry.resume_at,
-            Utc.with_ymd_and_hms(1994, 11, 15, 8, 12, 31).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_header_clamps_past_date() {
-        let now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let retry = parse_retry_after_header("Tue, 15 Nov 1994 08:12:31 GMT", now).expect("header");
-        assert_eq!(retry.delay, Duration::ZERO);
-        assert_eq!(retry.resume_at, now);
-    }
-
-    #[test]
-    fn parse_retry_after_header_strips_wrappers() {
-        let now = fixed_now();
-        let retry = parse_retry_after_header(" \"17\" ", now).expect("header");
-        assert_eq!(retry.delay, Duration::from_secs(17));
-    }
-
-    #[test]
-    fn retry_after_prefers_header_over_body_hint() {
-        let now = fixed_now();
-        let header_retry = parse_retry_after_header("5", now);
-        let mut chosen = header_retry.clone();
-        if chosen.is_none() {
-            let err = Error {
-                r#type: None,
-                message: Some(
-                    "Rate limit reached for gpt-5.1. Please try again in 30 seconds.".to_string(),
-                ),
-                code: Some("rate_limit_exceeded".to_string()),
-                param: None,
-                plan_type: None,
-                resets_in_seconds: None,
-                rate_limit_reached_type: None,
-            };
-            chosen = try_parse_retry_after(&err, now);
-        }
-        let retry = chosen.expect("retry");
-        assert_eq!(retry.delay, Duration::from_secs(5));
-    }
-
-    #[test]
-    fn parse_retry_after_header_handles_timezones() {
-        let now = Utc.with_ymd_and_hms(2025, 3, 9, 5, 0, 0).unwrap();
-        let retry = parse_retry_after_header("Sun, 09 Mar 2025 01:30:00 -0500", now).expect("header");
-        assert_eq!(
-            retry.resume_at,
-            Utc.with_ymd_and_hms(2025, 3, 9, 6, 30, 0).unwrap()
-        );
-    }
-
-    #[test]
-    fn quota_error_detected_for_common_statuses() {
-        let error = Error {
-            r#type: Some("invalid_request_error".to_string()),
-            message: Some("You exceeded your current quota".to_string()),
-            code: Some("insufficient_quota".to_string()),
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        for status in [
-            StatusCode::BAD_REQUEST,
-            StatusCode::FORBIDDEN,
-            StatusCode::TOO_MANY_REQUESTS,
-        ] {
-            assert!(is_quota_exceeded_http_error(status, &error), "status {status} should be fatal");
-        }
-
-        assert!(
-            !is_quota_exceeded_http_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
-            "server errors should not map to quota handling"
-        );
-    }
-
-    #[test]
-    fn malformed_quota_body_is_ignored() {
-        let error = Error {
-            r#type: Some("invalid_request_error".to_string()),
-            message: Some("missing code".to_string()),
-            code: None,
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        assert!(!is_quota_exceeded_http_error(StatusCode::BAD_REQUEST, &error));
-    }
-
-    #[test]
-    fn reasoning_summary_rejection_is_detected() {
-        let error_with_param = Error {
-            r#type: Some("invalid_request_error".to_string()),
-            message: Some("Your organization must be verified to generate reasoning summaries.".to_string()),
-            code: Some("unsupported_value".to_string()),
-            param: Some("reasoning.summary".to_string()),
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        assert!(is_reasoning_summary_rejected(&error_with_param));
-
-        let error_by_message = Error {
-            r#type: Some("invalid_request_error".to_string()),
-            message: Some("Your organization must be verified to generate reasoning summaries. If you just verified, it can take up to 15 minutes for access to propagate.".to_string()),
-            code: Some("unsupported_value".to_string()),
-            param: None,
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        assert!(is_reasoning_summary_rejected(&error_by_message));
-
-        // An error with param="reasoning.summary" but a different error code
-        // (e.g., rate_limit_exceeded) should NOT be treated as a rejection.
-        let rate_limit_error = Error {
-            r#type: Some("rate_limit_error".to_string()),
-            message: Some("Rate limit reached for reasoning.summary requests.".to_string()),
-            code: Some("rate_limit_exceeded".to_string()),
-            param: Some("reasoning.summary".to_string()),
-            plan_type: None,
-            resets_in_seconds: None,
-            rate_limit_reached_type: None,
-        };
-
-        assert!(!is_reasoning_summary_rejected(&rate_limit_error));
-    }
-
-    #[tokio::test]
-    async fn quota_exceeded_error_is_fatal() {
-        let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_quota","object":"response","created_at":1759771626,"status":"failed","background":false,"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."},"incomplete_details":null}}"#;
-
-        let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Err(CodexErr::QuotaExceeded) => {}
-            other => panic!("unexpected quota event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn response_failed_usage_limit_maps_to_typed_error() {
-        let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_limit","object":"response","created_at":1759771626,"status":"failed","background":false,"error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","plan_type":"pro","resets_in_seconds":120},"incomplete_details":null}}"#;
-
-        let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Err(CodexErr::UsageLimitReached(err)) => {
-                assert_eq!(err.plan_type.as_deref(), Some("pro"));
-                assert_eq!(err.resets_in_seconds, Some(120));
-            }
-            other => panic!("unexpected usage-limit event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn response_failed_usage_not_included_maps_to_typed_error() {
-        let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_not_included","object":"response","created_at":1759771626,"status":"failed","background":false,"error":{"type":"usage_not_included","message":"Usage is not included for this model."},"incomplete_details":null}}"#;
-
-        let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Err(CodexErr::UsageNotIncluded) => {}
-            other => panic!("unexpected usage-not-included event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn server_overloaded_error_is_typed() {
-        let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_slow_down","object":"response","created_at":1759771626,"status":"failed","background":false,"error":{"code":"slow_down","message":"Server is overloaded. Please retry shortly."},"incomplete_details":null}}"#;
-
-        let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Err(CodexErr::ServerOverloaded) => {}
-            other => panic!("unexpected overloaded event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn response_incomplete_surfaces_stream_error_reason() {
-        let raw_incomplete = r#"{"type":"response.incomplete","sequence_number":4,"response":{"id":"resp_incomplete","object":"response","created_at":1759771626,"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
-
-        let sse1 = format!("event: response.incomplete\ndata: {raw_incomplete}\n\n");
-        let provider = ModelProviderInfo {
-            name: "test".to_string(),
-            base_url: Some("https://test.com".to_string()),
-            env_key: Some("TEST_API_KEY".to_string()),
-            env_key_instructions: None,
-            experimental_bearer_token: None,
-            auth: None,
-            wire_api: WireApi::Responses,
-            query_params: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: Some(0),
-            stream_max_retries: Some(0),
-            stream_idle_timeout_ms: Some(1000),
-            websocket_connect_timeout_ms: None,
-            requires_openai_auth: false,
-            openrouter: None,
-        };
-
-        let events = collect_events(&[sse1.as_bytes()], provider).await;
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Err(CodexErr::Stream(message, None, _)) => {
-                assert_eq!(
-                    message,
-                    "Incomplete response returned, reason: max_output_tokens"
-                );
-            }
-            other => panic!("unexpected incomplete event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn websocket_error_without_status_surfaces_stream_message() {
-        let payload = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The requested model 'gpt-5.3-codex-spark' does not exist."}}"#;
-        let wrapped = parse_wrapped_websocket_error_event(payload)
-            .expect("wrapped websocket error should parse");
-        let mapped =
-            map_wrapped_websocket_error_event(wrapped).expect("error should map without status");
-        match mapped {
-            CodexErr::Stream(message, None, None) => {
-                assert_eq!(
-                    message,
-                    "The requested model 'gpt-5.3-codex-spark' does not exist."
-                );
-            }
-            other => panic!("unexpected mapped websocket error: {other:?}"),
-        }
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;

@@ -82,6 +82,38 @@ pub struct Resource {
     pub meta: Option<serde_json::Value>,
 }
 
+/// Contents returned when reading a resource from an MCP server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(untagged)]
+pub enum ResourceContent {
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Text {
+        /// The URI of this resource.
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        mime_type: Option<String>,
+        text: String,
+        #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        meta: Option<serde_json::Value>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Blob {
+        /// The URI of this resource.
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        mime_type: Option<String>,
+        blob: String,
+        #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        meta: Option<serde_json::Value>,
+    },
+}
+
 /// A template description for resources available on the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -120,7 +152,7 @@ pub struct CallToolResult {
 
 // === Adapter helpers ===
 //
-// These types and conversions intentionally live in `code-protocol` so other crates can convert
+// These types and conversions intentionally live in `codex-protocol` so other crates can convert
 // “wire-shaped” MCP JSON (typically coming from rmcp model structs serialized with serde) into our
 // TS/JsonSchema-friendly protocol types without depending on `mcp-types`.
 

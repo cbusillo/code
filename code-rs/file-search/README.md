@@ -1,4 +1,4 @@
-# code_file_search
+# codex_file_search
 
 Fast fuzzy file search tool for Codex.
 

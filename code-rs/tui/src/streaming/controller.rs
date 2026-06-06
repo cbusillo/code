@@ -1,968 +1,620 @@
-#![allow(dead_code)]
+//! Streams markdown deltas while retaining source for later transcript reflow.
+//!
+//! Streaming has two outputs with different lifetimes. The live viewport needs incremental
+//! `HistoryCell`s so the user sees progress, while finalized transcript history needs raw markdown
+//! source so it can be rendered again after a terminal resize. These controllers keep those outputs
+//! tied together: newline-complete source is rendered into queued live cells, and finalization
+//! returns the accumulated source to the app for consolidation.
+//!
+//! Width changes are handled by re-rendering from source and rebuilding only the not-yet-emitted
+//! queue. Already emitted rows stay emitted until the app-level transcript reflow rebuilds the full
+//! scrollback from finalized cells.
 
-use crate::memory_citation::strip_memory_citations;
-use code_core::config::Config;
+use crate::history_cell::HistoryCell;
+use crate::history_cell::HistoryRenderMode;
+use crate::history_cell::raw_lines_from_source;
+use crate::history_cell::{self};
+use crate::markdown::append_markdown;
+use crate::render::line_utils::prefix_lines;
+use crate::style::proposed_plan_style;
+use ratatui::prelude::Stylize;
 use ratatui::text::Line;
-use ratatui::style::Modifier;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
-use super::HeaderEmitter;
-use super::StreamKind;
 use super::StreamState;
 
-/// Sink for history insertions and animation control.
-pub(crate) trait HistorySink {
-    fn insert_history(&self, lines: Vec<Line<'static>>);
-    fn insert_history_with_kind(&self, id: Option<String>, kind: StreamKind, lines: Vec<Line<'static>>);
-    fn insert_final_answer(&self, id: Option<String>, lines: Vec<Line<'static>>, full_markdown_source: String);
-    fn start_commit_animation(&self);
-    fn stop_commit_animation(&self);
+/// Shared source-retaining stream state for assistant and plan output.
+///
+/// `raw_source` is the markdown source that has crossed a newline boundary and can be rendered
+/// deterministically. `rendered_lines` is the current-width render of that source. `enqueued_len`
+/// tracks how much of that render has been offered to the commit queue, while `emitted_len` tracks
+/// how much has actually reached history cells. Keeping those counters separate lets width changes
+/// rebuild pending output without duplicating lines that are already visible.
+struct StreamCore {
+    state: StreamState,
+    width: Option<usize>,
+    raw_source: String,
+    rendered_lines: Vec<Line<'static>>,
+    enqueued_len: usize,
+    emitted_len: usize,
+    cwd: PathBuf,
+    render_mode: HistoryRenderMode,
 }
 
-/// Concrete sink backed by `AppEventSender`.
-pub(crate) struct AppEventHistorySink(pub(crate) crate::app_event_sender::AppEventSender);
-
-impl HistorySink for AppEventHistorySink {
-    fn insert_history(&self, lines: Vec<Line<'static>>) {
-        tracing::debug!("sink.insert_history lines={}", lines.len());
-        self.0
-            .send(crate::app_event::AppEvent::InsertHistory(lines))
-    }
-    fn insert_history_with_kind(&self, id: Option<String>, kind: StreamKind, lines: Vec<Line<'static>>) {
-        tracing::debug!("sink.insert_history_with_kind kind={:?} id={:?} lines={}", kind, id, lines.len());
-        self.0
-            .send(crate::app_event::AppEvent::InsertHistoryWithKind { id, kind, lines })
-    }
-    fn insert_final_answer(&self, id: Option<String>, lines: Vec<Line<'static>>, full_markdown_source: String) {
-        tracing::debug!("sink.insert_final_answer id={:?} lines={} source_len={}", id, lines.len(), full_markdown_source.len());
-        self.0
-            .send(crate::app_event::AppEvent::InsertFinalAnswer { id, lines, source: full_markdown_source })
-    }
-    fn start_commit_animation(&self) {
-        self.0
-            .send(crate::app_event::AppEvent::StartCommitAnimation)
-    }
-    fn stop_commit_animation(&self) {
-        self.0.send(crate::app_event::AppEvent::StopCommitAnimation)
-    }
-}
-
-type Lines = Vec<Line<'static>>;
-
-/// Controller that manages newline-gated streaming, header emission, and
-/// commit animation across streams.
-pub(crate) struct StreamController {
-    config: Config,
-    header: HeaderEmitter,
-    states: [StreamState; 2],
-    current_stream: Option<StreamKind>,
-    current_stream_id: Option<String>,
-    finishing_after_drain: bool,
-    thinking_placeholder_shown: bool,
-}
-
-impl StreamController {
-    pub(crate) fn new(config: Config) -> Self {
+impl StreamCore {
+    fn new(width: Option<usize>, cwd: &Path, render_mode: HistoryRenderMode) -> Self {
         Self {
-            config,
-            header: HeaderEmitter::new(),
-            states: [StreamState::new_for_kind(StreamKind::Answer), StreamState::new_for_kind(StreamKind::Reasoning)],
-            current_stream: None,
-            current_stream_id: None,
-            finishing_after_drain: false,
-            thinking_placeholder_shown: false,
+            state: StreamState::new(width, cwd),
+            width,
+            raw_source: String::with_capacity(1024),
+            rendered_lines: Vec::with_capacity(64),
+            enqueued_len: 0,
+            emitted_len: 0,
+            cwd: cwd.to_path_buf(),
+            render_mode,
         }
     }
 
-    pub(crate) fn reset_headers_for_new_turn(&mut self) {
-        self.header.reset_for_new_turn();
-    }
-
-    pub(crate) fn is_write_cycle_active(&self) -> bool {
-        self.current_stream.is_some()
-    }
-
-    pub(crate) fn is_current_stream_idle(&self) -> bool {
-        match self.current_stream {
-            Some(kind) => {
-                let state = self.state(kind);
-                state.is_idle() && !state.collector.has_buffered_content()
-            }
-            None => true,
+    fn push_delta(&mut self, delta: &str) -> bool {
+        if !delta.is_empty() {
+            self.state.has_seen_delta = true;
         }
-    }
-    
+        self.state.collector.push_delta(delta);
 
-    pub(crate) fn clear_all(&mut self) {
-        tracing::debug!("clear_all called, current_stream={:?}", self.current_stream);
-        self.states.iter_mut().for_each(|s| s.clear());
-        self.current_stream = None;
-        self.finishing_after_drain = false;
-        self.thinking_placeholder_shown = false;
-        // leave header state unchanged; caller decides when to reset
-    }
-
-    #[inline]
-    fn idx(kind: StreamKind) -> usize {
-        kind as usize
-    }
-    fn state(&self, kind: StreamKind) -> &StreamState {
-        &self.states[Self::idx(kind)]
-    }
-fn state_mut(&mut self, kind: StreamKind) -> &mut StreamState {
-    &mut self.states[Self::idx(kind)]
-}
-
-/// Record the latest provider sequence_number for this stream kind.
-pub(crate) fn set_last_sequence_number(&mut self, kind: StreamKind, seq: Option<u64>) {
-    self.state_mut(kind).last_sequence_number = seq;
-}
-
-    pub(crate) fn preview_source_for_kind(&self, kind: StreamKind) -> Option<String> {
-        if self.current_stream != Some(kind) {
-            return None;
-        }
-        Some(self.state(kind).collector.full_render_source_preview())
-    }
-
-    fn flush_pending_hidden_tags(&mut self, kind: StreamKind) {
-        let tail = {
-            let state = self.state_mut(kind);
-            let tail = state.citation_parser.finish();
-            if !tail.citations.is_empty() {
-                state.citations.extend(tail.citations);
-            }
-            tail.visible_text
-        };
-
-        if !tail.is_empty() {
-            let state = self.state_mut(kind);
-            state.has_seen_delta = true;
-            state.collector.push_delta(&tail);
-        }
-    }
-
-    fn emit_header_if_needed(&mut self, kind: StreamKind, out_lines: &mut Lines) -> bool {
-        let emitted = self.header.maybe_emit(kind, out_lines);
-        if emitted {
-            tracing::debug!("stream: emitted header for {:?}", kind);
-        }
-        emitted
-    }
-
-    /// Optionally append a separate dimmed debug marker line indicating the
-    /// current reasoning summary index (parsed from the stream id like "…#s3").
-    /// This avoids mutating the model content so title detection remains intact.
-    fn maybe_append_reasoning_debug_marker(&self, kind: StreamKind, lines: &mut Vec<Line<'static>>) {
-        // Only when explicitly enabled to avoid noise in normal use.
-        let enabled = match std::env::var("CODEX_DEBUG_REASONING_INDEX") {
-            Ok(val) => !val.is_empty() && val != "0",
-            Err(_) => false,
-        };
-        if !enabled || !matches!(kind, StreamKind::Reasoning) {
-            return;
-        }
-        let id = match self.current_stream_id() { Some(s) => s.clone(), None => return };
-        // Parse trailing #s<idx>
-        let idx = id.split('#').last().and_then(|frag| frag.strip_prefix('s'));
-        if let Some(sidx) = idx {
-            let seq_part = self.state(kind).last_sequence_number.map(|n| format!(" seq{}", n)).unwrap_or_default();
-            let marker = format!("[s{}{}]", sidx, seq_part);
-            let dim = crate::colors::text_dim();
-            lines.push(Line::from(ratatui::text::Span::styled(marker, ratatui::style::Style::default().fg(dim))));
-        }
-    }
-
-    #[inline]
-    fn ensure_single_trailing_blank(_lines: &mut Lines) {
-        // Removed - we don't need to add extra blank lines
-        // The markdown renderer and section breaks already handle spacing
-    }
-    
-    /// Get the current stream kind being processed
-    pub(crate) fn current_stream(&self) -> Option<StreamKind> {
-        self.current_stream
-    }
-    
-    /// Get the current stream ID
-    pub(crate) fn current_stream_id(&self) -> Option<&String> {
-        self.current_stream_id.as_ref()
-    }
-
-    /// Begin a stream, flushing previously completed lines from any other
-    /// active stream to maintain ordering.
-    pub(crate) fn begin_with_id(&mut self, kind: StreamKind, id: Option<String>, sink: &impl HistorySink) {
-        tracing::debug!("stream.begin kind={:?} prev={:?} new_id={:?}", kind, self.current_stream, id);
-        // NOTE (dup‑guard): Historically we cleared `current_stream[_id]` even when
-        // `kind` did not change, which caused the active Answer stream to lose its id.
-        // Downstream, the UI could not find the streaming cell by id on finalization
-        // and appended a new Assistant cell (visible duplicate). Keep state when the
-        // kind is unchanged, and if the id changes mid‑stream, flush under the old id
-        // and adopt the new one so the final can match and replace in‑place.
-        if let Some(current) = self.current_stream {
-            if current != kind {
-                tracing::debug!("Switching from {:?} to {:?}, flushing previous", current, kind);
-                // Synchronously flush completed lines from previous stream.
-                let cfg = self.config.clone();
-                let step = {
-                    let prev_state = self.state_mut(current);
-                    let newly_completed = prev_state.collector.commit_complete_lines(&cfg);
-                    if !newly_completed.is_empty() {
-                        prev_state.enqueue(newly_completed);
-                    }
-                    let result = prev_state.drain_all();
-                    // Clear the previous stream state to ensure no contamination
-                    tracing::debug!("Clearing {:?} stream state", current);
-                    prev_state.clear();
-                    result
-                };
-                if !step.history.is_empty() {
-                    tracing::debug!("stream.flush prev={:?} lines={}", current, step.history.len());
-                    let mut lines: Lines = Vec::new();
-                    self.emit_header_if_needed(current, &mut lines);
-                    lines.extend(step.history);
-                    // Don't add extra blank line - markdown renderer handles spacing
-                    sink.insert_history_with_kind(self.current_stream_id.clone(), current, lines);
-                }
-                // Only clear current stream tracking when actually switching kinds.
-                self.current_stream = None;
-                self.current_stream_id = None;
-            }
-            // If the kind is unchanged, we may still need to handle id transitions.
-            // If the incoming id differs from our current id, flush any buffered
-            // content under the old id and then adopt the new id so downstream
-            // finalize uses a matching identifier.
-            if current == kind {
-                if let Some(ref new_id) = id {
-                    if self.current_stream_id.as_ref() != Some(new_id) {
-                        let cfg = self.config.clone();
-                        let step = {
-                            let prev_state = self.state_mut(current);
-                            let newly_completed = prev_state.collector.commit_complete_lines(&cfg);
-                            if !newly_completed.is_empty() { prev_state.enqueue(newly_completed); }
-                            let result = prev_state.drain_all();
-                            tracing::debug!("Flushing {:?} due to id change {:?} -> {:?}", current, self.current_stream_id, id);
-                            result
-                        };
-                        if !step.history.is_empty() {
-                            let mut lines: Lines = Vec::new();
-                            self.emit_header_if_needed(current, &mut lines);
-                            lines.extend(step.history);
-                            sink.insert_history_with_kind(self.current_stream_id.clone(), current, lines);
-                        }
-                        // Now adopt the new id; do not reset kind.
-                        self.current_stream_id = Some(new_id.clone());
-                    }
-                } else if self.current_stream_id.is_none() {
-                    // If we previously had no id and a None arrives again, keep as None.
-                }
-            }
-        }
-
-        if self.current_stream != Some(kind) {
-            let prev = self.current_stream;
-            self.current_stream = Some(kind);
-            // Always adopt the provided id when starting a new stream
-            self.current_stream_id = id;
-            // Starting a new stream cancels any pending finish-from-previous-stream animation.
-            self.finishing_after_drain = false;
-            if prev.is_some() {
-                self.header.reset_for_stream(kind);
-            }
-            // Emit header immediately for reasoning; for answers, optionally emit immediately.
-            if matches!(kind, StreamKind::Reasoning)
-                || (matches!(kind, StreamKind::Answer) && self.config.tui.stream.answer_header_immediate)
-            {
-                let mut header_lines = Vec::new();
-                if self.emit_header_if_needed(kind, &mut header_lines) {
-                    // Always associate header lines with the active stream id so
-                    // the TUI can enforce strict per-stream ordering.
-                    sink.insert_history_with_kind(self.current_stream_id.clone(), kind, header_lines);
-                    self.thinking_placeholder_shown = true;
-                    // For answers, optionally insert an empty streaming cell with a hidden header so
-                    // the UI can show a body placeholder (ellipsis) before the first text arrives.
-                    if matches!(kind, StreamKind::Answer) && self.config.tui.stream.show_answer_ellipsis {
-                        sink.insert_history_with_kind(self.current_stream_id.clone(), kind, vec![ratatui::text::Line::from("codex")]);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Backwards-compatible entry point without an id.
-    pub(crate) fn begin(&mut self, kind: StreamKind, sink: &impl HistorySink) {
-        self.begin_with_id(kind, None, sink);
-    }
-
-    /// Push a delta; if it contains a newline, commit completed lines and start animation.
-    pub(crate) fn push_and_maybe_commit(&mut self, delta: &str, sink: &impl HistorySink) {
-        let Some(kind) = self.current_stream else {
-            tracing::debug!("push_and_maybe_commit called but no current_stream");
-            return;
-        };
-        let parsed = {
-            let state = self.state_mut(kind);
-            let parsed = state.citation_parser.push_str(delta);
-            if !parsed.citations.is_empty() {
-                state.citations.extend(parsed.citations.clone());
-            }
-            parsed
-        };
-        let visible_delta = parsed.visible_text;
-
-        tracing::debug!(
-            "push_and_maybe_commit for {:?}, raw_len={} visible_len={} contains_nl={}",
-            kind,
-            delta.len(),
-            visible_delta.len(),
-            visible_delta.contains('\n')
-        );
-        let cfg = self.config.clone();
-
-        // Check header flag before borrowing state (used only to avoid double headers)
-        let _just_emitted_header = self.header.consume_header_flag();
-        
-        // Mutate collector and counters in a short scope to avoid long mutable borrows.
+        if delta.contains('\n')
+            && let Some(committed_source) = self.state.collector.commit_complete_source()
         {
-            let state = self.state_mut(kind);
-            if !visible_delta.is_empty() {
-                state.has_seen_delta = true;
-            }
-            state.collector.push_delta(&visible_delta);
-            state.tail_chars_since_commit = state
-                .tail_chars_since_commit
-                .saturating_add(visible_delta.len());
-        }
-        if visible_delta.contains('\n') {
-            let mut newly_completed = self.state_mut(kind).collector.commit_complete_lines(&cfg);
-            // Reduce leading blanks to at most one across commits
-            if !newly_completed.is_empty() {
-                let mut skip_count = 0;
-                while skip_count < newly_completed.len()
-                    && crate::render::line_utils::is_blank_line_trim(&newly_completed[skip_count]) {
-                    skip_count += 1;
-                }
-                if skip_count > 1 {
-                    for _ in 0..(skip_count - 1) {
-                        newly_completed.remove(0);
-                    }
-                }
-            }
-            if !newly_completed.is_empty() {
-                // IMPORTANT: Do not recolor entire Answer lines. We only dim Reasoning lines.
-                // Recoloring the whole Answer line can mask per-span BOLD styling on some
-                // terminals. See regression: inline bold appeared normal due to line FG.
-                let color = match kind {
-                    StreamKind::Reasoning => Some(crate::colors::text_dim()),
-                    StreamKind::Answer => Some(crate::colors::text_bright()),
-                };
-                let mut styled: Vec<Line<'static>> = Vec::with_capacity(newly_completed.len());
-                for mut line in newly_completed {
-                    if let Some(c) = color { line.style = line.style.patch(ratatui::style::Style::default().fg(c)); }
-                    // No per-span overrides needed for Answer: line FG is already bright.
-                    styled.push(line);
-                }
-                let count = styled.len();
-                tracing::debug!("stream.commit {:?} newly_completed_lines={}", kind, count);
-                {
-                    // Add a non-content debug marker line for reasoning
-                    let mut with_marker = styled;
-                    self.maybe_append_reasoning_debug_marker(kind, &mut with_marker);
-                    let state = self.state_mut(kind);
-                    state.enqueue(with_marker);
-                    state.last_commit_instant = Some(std::time::Instant::now());
-                    state.tail_chars_since_commit = 0;
-                }
-                sink.start_commit_animation();
-            }
+            self.raw_source.push_str(&committed_source);
+            self.recompute_render();
+            return self.sync_queue_to_render();
         }
 
-        // Char-threshold soft commit (when no newline has arrived for a while)
-        if !delta.contains('\n') {
-            let threshold = self.config.tui.stream.soft_commit_chars
-                .or(if self.config.tui.stream.responsive { Some(160) } else { None });
-            if let Some(limit) = threshold {
-                let ready = { self.state(kind).tail_chars_since_commit >= limit };
-                if ready {
-                    let relax_list = self.config.tui.stream.relax_list_holdback;
-                    let relax_code = self.config.tui.stream.relax_code_holdback;
-                    let cfg2 = self.config.clone();
-                    let mut newly_completed = {
-                        let state = self.state_mut(kind);
-                        state.collector.commit_soft_lines(&cfg2, relax_list, relax_code)
-                    };
-                    if !newly_completed.is_empty() {
-                        // Apply stream-specific color
-                        let color = match kind {
-                            StreamKind::Reasoning => Some(crate::colors::text_dim()),
-                            StreamKind::Answer => Some(crate::colors::text_bright()),
-                        };
-                        let mut styled: Vec<Line<'static>> = Vec::with_capacity(newly_completed.len());
-                        for mut line in newly_completed.drain(..) {
-                            if let Some(c) = color { line.style = line.style.patch(ratatui::style::Style::default().fg(c)); }
-                            styled.push(line);
-                        }
-                        {
-                            let mut with_marker = styled;
-                            self.maybe_append_reasoning_debug_marker(kind, &mut with_marker);
-                            let state = self.state_mut(kind);
-                            state.enqueue(with_marker);
-                            state.last_commit_instant = Some(std::time::Instant::now());
-                            state.tail_chars_since_commit = 0;
-                        }
-                        sink.start_commit_animation();
-                    }
-                }
-            }
-
-            // Early commit hint for Reasoning titles: if no soft-commit threshold is
-            // configured, opportunistically commit when a new bold-only heading line
-            // appears in the preview. This makes additional section titles visible in
-            // collapsed mode as they stream, instead of waiting until finalization.
-            if self.config.tui.stream.soft_commit_chars.is_none()
-                && self.config.tui.stream.soft_commit_timeout_ms.is_none()
-                && matches!(kind, StreamKind::Reasoning)
-            {
-                let cfg2 = self.config.clone();
-                // Peek at the rendered lines without changing collector state
-                let (committed, saw_heading) = {
-                    let state = self.state(kind);
-                    let committed = state.collector.committed_count();
-                    let preview = state.collector.render_preview_lines(&cfg2);
-                    let mut saw_heading = false;
-                    for l in preview.iter().skip(committed) {
-                        if !l.spans.is_empty()
-                            && l
-                                .spans
-                                .iter()
-                                .all(|s| s.style.add_modifier.contains(Modifier::BOLD)
-                                    || s.content.trim().is_empty())
-                        {
-                            saw_heading = true;
-                            break;
-                        }
-                    }
-                    (committed, saw_heading)
-                };
-                // Only early-commit a heading when we are at a line boundary to
-                // avoid truncating partially streamed titles (e.g., "Summar").
-                let at_boundary = { self.state(kind).collector.ends_with_newline() };
-                if saw_heading && at_boundary {
-                    let relax_list = self.config.tui.stream.relax_list_holdback;
-                    let relax_code = self.config.tui.stream.relax_code_holdback;
-                    let mut newly_completed = {
-                        let state = self.state_mut(kind);
-                        // This advances committed_count; ensure we enqueue the exact lines.
-                        state
-                            .collector
-                            .commit_soft_lines(&cfg2, relax_list, relax_code)
-                    };
-                    if !newly_completed.is_empty() {
-                        let color = Some(crate::colors::text_dim());
-                        let mut styled: Vec<Line<'static>> = Vec::with_capacity(newly_completed.len());
-                        for mut line in newly_completed.drain(..) {
-                            if let Some(c) = color {
-                                line.style = line.style.patch(ratatui::style::Style::default().fg(c));
-                            }
-                            styled.push(line);
-                        }
-                        {
-                            let state = self.state_mut(kind);
-                            state.enqueue(styled);
-                            state.last_commit_instant = Some(std::time::Instant::now());
-                            state.tail_chars_since_commit = 0;
-                        }
-                        sink.start_commit_animation();
-                    }
-                } else {
-                    let _ = committed; // silence unused warning when cfg gates change
-                }
-            }
-        }
-    }
-
-    /// Insert a reasoning section break and commit any newly completed lines.
-    pub(crate) fn insert_reasoning_section_break(&mut self, sink: &impl HistorySink) {
-        // Only insert a section break when we are actively streaming Reasoning
-        // and have a seeded stream id. Without an id, the TUI will drop the
-        // insert per strict ordering rules.
-        if self.current_stream != Some(StreamKind::Reasoning) || self.current_stream_id.is_none() {
-            tracing::debug!("skip section break: no active reasoning stream or missing id");
-            return;
-        }
-        let cfg = self.config.clone();
-        // Scope the mutable borrow of state to collector ops only
-        let mut newly_completed = {
-            let state = self.state_mut(StreamKind::Reasoning);
-        // Insert an explicit section break so upcoming section titles are
-        // rendered on a fresh line. Without this, bold titles that arrive
-        // mid-line can be glued to the previous sentence and fail to be
-        // recognized as titles in collapsed view.
-            state.collector.insert_section_break();
-            state.collector.commit_complete_lines(&cfg)
-        };
-        // Reduce leading blanks to at most one after section breaks
-        if !newly_completed.is_empty() {
-            let mut skip_count = 0;
-            while skip_count < newly_completed.len()
-                && crate::render::line_utils::is_blank_line_trim(&newly_completed[skip_count]) {
-                skip_count += 1;
-            }
-            if skip_count > 1 {
-                for _ in 0..(skip_count - 1) {
-                    newly_completed.remove(0);
-                }
-            }
-        }
-        if !newly_completed.is_empty() {
-            // Reasoning sections use dim text
-            let color = crate::colors::text_dim();
-            let mut styled: Vec<Line<'static>> = Vec::with_capacity(newly_completed.len());
-            for mut line in newly_completed {
-                let spans = line
-                    .spans
-                    .into_iter()
-                    .map(|s| s.style(ratatui::style::Style::default().fg(color)))
-                    .collect();
-                line.spans = spans;
-                styled.push(line);
-            }
-            let mut with_marker = styled;
-            self.maybe_append_reasoning_debug_marker(StreamKind::Reasoning, &mut with_marker);
-            let state = self.state_mut(StreamKind::Reasoning);
-            state.enqueue(with_marker);
-            sink.start_commit_animation();
-        }
-    }
-
-    /// Finalize the active stream. If `flush_immediately` is true, drain and emit now.
-    pub(crate) fn finalize(
-        &mut self,
-        kind: StreamKind,
-        flush_immediately: bool,
-        sink: &impl HistorySink,
-    ) -> bool {
-        if self.current_stream != Some(kind) {
-            return false;
-        }
-        self.flush_pending_hidden_tags(kind);
-        let cfg = self.config.clone();
-        // Capture the full render source BEFORE draining/clearing the collector so
-        // we can rebuild the final Assistant cell without losing any content.
-        let full_source_before_drain = {
-            let state = self.state(kind);
-            state.collector.full_render_source_preview()
-        };
-        // Finalize collector (this clears internal buffers).
-        let remaining = {
-            let state = self.state_mut(kind);
-            state.collector.finalize_and_drain(&cfg)
-        };
-        if flush_immediately {
-            // Collect all output first to avoid emitting headers when there is no content.
-            let mut out_lines: Lines = Vec::new();
-            {
-                let state = self.state_mut(kind);
-                if !remaining.is_empty() {
-                    state.enqueue(remaining);
-                }
-                let step = state.drain_all();
-                out_lines.extend(step.history);
-            }
-            // Build output regardless of whether out_lines is empty so we can still
-            // replace the streaming cell with a re-renderable final cell.
-            let mut lines_with_header: Lines = Vec::new();
-            let emitted_header = self.emit_header_if_needed(kind, &mut lines_with_header);
-            // Reduce leading blanks to at most one
-            let mut skip_count = 0;
-            while skip_count < out_lines.len()
-                && crate::render::line_utils::is_blank_line_trim(&out_lines[skip_count]) {
-                skip_count += 1;
-            }
-            if skip_count > 1 {
-                for _ in 0..(skip_count - 1) {
-                    out_lines.remove(0);
-                }
-            }
-            // Apply stream-specific color to body lines
-            let color = match kind {
-                StreamKind::Reasoning => Some(crate::colors::text_dim()),
-                StreamKind::Answer => Some(crate::colors::text_bright()),
-            };
-            let mut out_lines: Vec<Line<'static>> = out_lines
-                .into_iter()
-                .map(|mut line| {
-                    if let Some(c) = color { line.style = line.style.patch(ratatui::style::Style::default().fg(c)); }
-                    line
-                })
-                .collect();
-
-            // For finalized Reasoning blocks, include a debug marker as a separate line.
-            if matches!(kind, StreamKind::Reasoning) {
-                // Append a FINAL marker variant to distinguish from streaming commits
-                let enabled = match std::env::var("CODEX_DEBUG_REASONING_INDEX") {
-                    Ok(val) => !val.is_empty() && val != "0",
-                    Err(_) => false,
-                };
-                if enabled {
-                    if let Some(id) = self.current_stream_id() {
-                        if let Some(sidx) = id.split('#').last().and_then(|frag| frag.strip_prefix('s')) {
-                            let marker = format!("[s{} final]", sidx);
-                            let dim = crate::colors::text_dim();
-                            out_lines.push(Line::from(ratatui::text::Span::styled(marker, ratatui::style::Style::default().fg(dim))));
-                        }
-                    }
-                }
-            }
-            lines_with_header.extend(out_lines);
-            // Don't add extra blank line - markdown renderer handles spacing
-            if matches!(kind, StreamKind::Answer) {
-                // Use the source captured before draining so we don't lose content
-                // when the collector was cleared by finalize_and_drain.
-                tracing::debug!(
-                    "stream.finalize ANSWER id={:?} header={} out_lines={} source_len={}",
-                    self.current_stream_id,
-                    emitted_header,
-                    lines_with_header.len(),
-                    full_source_before_drain.len()
-                );
-                sink.insert_final_answer(self.current_stream_id.clone(), lines_with_header, full_source_before_drain);
-            } else if !lines_with_header.is_empty() {
-                tracing::debug!(
-                    "stream.finalize REASONING id={:?} header={} out_lines={}",
-                    self.current_stream_id,
-                    emitted_header,
-                    lines_with_header.len()
-                );
-                sink.insert_history_with_kind(self.current_stream_id.clone(), kind, lines_with_header);
-            }
-
-            // Cleanup
-            self.state_mut(kind).clear();
-            // Allow a subsequent block of the same kind in this turn to emit its header.
-            self.header.allow_reemit_for_same_kind_in_turn(kind);
-            // Also clear the per-stream emitted flag so the header can render again.
-            self.header.reset_for_stream(kind);
-            self.current_stream = None;
-            self.current_stream_id = None;
-            self.finishing_after_drain = false;
-            // Ensure any commit animation thread is stopped when we finalize immediately.
-            sink.stop_commit_animation();
-            true
-        } else {
-            if !remaining.is_empty() {
-                let state = self.state_mut(kind);
-                state.enqueue(remaining);
-            }
-            // Don't add spacer - causes extra blank lines
-            // self.state_mut(kind).enqueue(vec![Line::from("")]);
-            self.finishing_after_drain = true;
-            sink.start_commit_animation();
-            false
-        }
-    }
-
-    /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
-    pub(crate) fn on_commit_tick(&mut self, sink: &impl HistorySink) -> bool {
-        let Some(kind) = self.current_stream else {
-            return false;
-        };
-        // Timeout-based soft commit: if no newline arrived and nothing is queued, force a soft commit.
-        let timeout_ms = self.config.tui.stream.soft_commit_timeout_ms
-            .or(if self.config.tui.stream.responsive { Some(400) } else { None });
-        if let Some(ms) = timeout_ms {
-            let queue_empty = self.state(kind).is_idle();
-            let overdue = self
-                .state(kind)
-                .last_commit_instant
-                .map(|t| t.elapsed() >= std::time::Duration::from_millis(ms))
-                .unwrap_or(false);
-            if queue_empty && overdue {
-                let relax_list = self.config.tui.stream.relax_list_holdback;
-                let relax_code = self.config.tui.stream.relax_code_holdback;
-                let cfg2 = self.config.clone();
-                let mut newly_completed = {
-                    let state = self.state_mut(kind);
-                    state.collector.commit_soft_lines(&cfg2, relax_list, relax_code)
-                };
-                if !newly_completed.is_empty() {
-                    let color = match kind {
-                        StreamKind::Reasoning => Some(crate::colors::text_dim()),
-                        StreamKind::Answer => Some(crate::colors::text_bright()),
-                    };
-                    let mut styled: Vec<Line<'static>> = Vec::with_capacity(newly_completed.len());
-                    for mut line in newly_completed.drain(..) {
-                        if let Some(c) = color { line.style = line.style.patch(ratatui::style::Style::default().fg(c)); }
-                        styled.push(line);
-                    }
-                    {
-                        let state = self.state_mut(kind);
-                        state.enqueue(styled);
-                        state.last_commit_instant = Some(std::time::Instant::now());
-                        state.tail_chars_since_commit = 0;
-                    }
-                    sink.start_commit_animation();
-                }
-            }
-        }
-        let step = {
-            let state = self.state_mut(kind);
-            state.step()
-        };
-        if !step.history.is_empty() {
-            let mut lines: Lines = Vec::new();
-            // Emit header if needed for this stream; ignore return value
-            self.emit_header_if_needed(kind, &mut lines);
-            let mut out = lines;
-            let mut history = step.history;
-            // Reduce leading blanks to at most one
-            if !history.is_empty() {
-                let mut skip_count = 0;
-                while skip_count < history.len()
-                    && crate::render::line_utils::is_blank_line_trim(&history[skip_count]) {
-                    skip_count += 1;
-                }
-                if skip_count > 1 {
-                    for _ in 0..(skip_count - 1) {
-                        history.remove(0);
-                    }
-                }
-            }
-            // Apply stream-specific color to body lines while preserving modifiers
-            let color = match kind {
-                StreamKind::Reasoning => Some(crate::colors::text_dim()),
-                StreamKind::Answer => Some(crate::colors::text_bright()),
-            };
-            let mut history: Vec<Line<'static>> = history
-                .into_iter()
-                .map(|mut line| {
-                    if let Some(c) = color { line.style = line.style.patch(ratatui::style::Style::default().fg(c)); }
-                    line
-                })
-                .collect();
-            // Append debug marker to streamed reasoning batches as their own line.
-            self.maybe_append_reasoning_debug_marker(kind, &mut history);
-            out.extend(history);
-            sink.insert_history_with_kind(self.current_stream_id.clone(), kind, out);
-        }
-
-        let is_idle = self.state(kind).is_idle();
-        if is_idle {
-            sink.stop_commit_animation();
-            if self.finishing_after_drain {
-                // Reset and notify
-                self.state_mut(kind).clear();
-                // Allow a subsequent block of the same kind in this turn to emit its header.
-                self.header.allow_reemit_for_same_kind_in_turn(kind);
-                // Also clear the per-stream emitted flag so the header can render again.
-                self.header.reset_for_stream(kind);
-                self.current_stream = None;
-                self.current_stream_id = None;
-                self.finishing_after_drain = false;
-                return true;
-            }
-        }
         false
     }
 
-    /// Apply a full final answer: replace queued content with only the remaining tail,
-    /// then finalize immediately and notify completion.
-    pub(crate) fn apply_final_answer(&mut self, message: &str, sink: &impl HistorySink) -> bool {
-        tracing::debug!("apply_final_answer called with: {:?}...", message.chars().take(100).collect::<String>());
-        self.apply_full_final(StreamKind::Answer, message, true, sink)
-    }
-
-    pub(crate) fn apply_final_reasoning(&mut self, message: &str, sink: &impl HistorySink) -> bool {
-        tracing::debug!("apply_final_reasoning called with: {:?}...", message.chars().take(100).collect::<String>());
-        self.apply_full_final(StreamKind::Reasoning, message, false, sink)
-    }
-
-    fn apply_full_final(
-        &mut self,
-        kind: StreamKind,
-        message: &str,
-        immediate: bool,
-        sink: &impl HistorySink,
-    ) -> bool {
-        tracing::debug!("apply_full_final for {:?}, immediate={}, message_len={}, current_stream={:?}", 
-            kind, immediate, message.len(), self.current_stream);
-        
-        // Check if we're already processing this stream
-        if self.current_stream == Some(kind) {
-            let state = self.state(kind);
-            let has_delta = state.has_seen_delta;
-
-            if has_delta {
-                // Key-based deduplication for Reasoning:
-                // If we have already streamed deltas for this reasoning section
-                // (same stream id within this request), do NOT inject the final
-                // full text again. Finalize the stream using the accumulated
-                // deltas only. This avoids duplicate headings/paragraphs without
-                // relying on string comparisons.
-                if matches!(kind, StreamKind::Reasoning) {
-                    tracing::debug!(
-                        "Dedup: ignoring final {:?} after deltas; finalizing existing content",
-                        kind
-                    );
-                    return self.finalize(kind, immediate, sink);
-                }
-                // For Answer (or empty message), finalize existing streamed content.
-                tracing::debug!(
-                    "Already streaming {:?} via deltas, finalizing without injection",
-                    kind
-                );
-                return self.finalize(kind, immediate, sink);
-            } else if self.finishing_after_drain {
-                // We're already in the process of finishing this stream (animation phase)
-                // This is likely a duplicate event - ignore it
-                tracing::debug!("Already finishing {:?} stream, ignoring duplicate final event", kind);
-                return false;
-            }
-            // else: We have a stream open but no deltas yet - could be a header-only stream
-            // Fall through to inject the message
+    fn finalize_remaining(&mut self) -> Vec<Line<'static>> {
+        let remainder_source = self.state.collector.finalize_and_drain_source();
+        if !remainder_source.is_empty() {
+            self.raw_source.push_str(&remainder_source);
         }
-        
-        // Strict ordering policy: We must already have begun this stream with an id.
-        // Do NOT auto-begin without an id; the caller (ChatWidget) is responsible for
-        // seeding the stream with `begin_with_id(kind, Some(id), ...)` prior to applying
-        // a full final. If this is violated, drop and log.
-        if self.current_stream != Some(kind) {
-            tracing::error!("strict ordering: apply_full_final called without active {:?} stream; missing begin_with_id(id)", kind);
+
+        let rendered = self.render_source(&self.raw_source);
+        if self.emitted_len >= rendered.len() {
+            Vec::new()
+        } else {
+            rendered[self.emitted_len..].to_vec()
+        }
+    }
+
+    fn tick(&mut self) -> Vec<Line<'static>> {
+        let step = self.state.step();
+        self.emitted_len += step.len();
+        step
+    }
+
+    fn tick_batch(&mut self, max_lines: usize) -> Vec<Line<'static>> {
+        if max_lines == 0 {
+            return Vec::new();
+        }
+        let step = self.state.drain_n(max_lines);
+        self.emitted_len += step.len();
+        step
+    }
+
+    fn queued_lines(&self) -> usize {
+        self.state.queued_len()
+    }
+
+    fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.state.oldest_queued_age(now)
+    }
+
+    fn is_idle(&self) -> bool {
+        self.state.is_idle()
+    }
+
+    fn set_width(&mut self, width: Option<usize>) {
+        if self.width == width {
+            return;
+        }
+
+        let had_pending_queue = self.state.queued_len() > 0;
+        self.width = width;
+        self.state.collector.set_width(width);
+        if self.raw_source.is_empty() {
+            return;
+        }
+
+        self.recompute_render();
+        self.emitted_len = self.emitted_len.min(self.rendered_lines.len());
+        if had_pending_queue
+            && self.emitted_len == self.rendered_lines.len()
+            && self.emitted_len > 0
+        {
+            // If wrapped remainder compresses into fewer lines at the new width,
+            // keep at least one line un-emitted so pre-resize pending content is
+            // not skipped permanently.
+            self.emitted_len -= 1;
+        }
+
+        self.state.clear_queue();
+        if self.emitted_len > 0 && !had_pending_queue {
+            self.enqueued_len = self.rendered_lines.len();
+            return;
+        }
+        self.rebuild_queue_from_render();
+    }
+
+    fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        if self.render_mode == render_mode {
+            return;
+        }
+
+        let had_pending_queue = self.state.queued_len() > 0;
+        self.render_mode = render_mode;
+        if self.raw_source.is_empty() {
+            return;
+        }
+
+        self.recompute_render();
+        self.emitted_len = self.emitted_len.min(self.rendered_lines.len());
+        self.state.clear_queue();
+        if self.emitted_len > 0 && !had_pending_queue {
+            self.enqueued_len = self.rendered_lines.len();
+            return;
+        }
+        self.rebuild_queue_from_render();
+    }
+
+    fn clear_queue(&mut self) {
+        self.state.clear_queue();
+        self.enqueued_len = self.emitted_len;
+    }
+
+    fn reset(&mut self) {
+        self.state.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_len = 0;
+        self.emitted_len = 0;
+    }
+
+    fn recompute_render(&mut self) {
+        self.rendered_lines = self.render_source(&self.raw_source);
+    }
+
+    fn render_source(&self, source: &str) -> Vec<Line<'static>> {
+        match self.render_mode {
+            HistoryRenderMode::Rich => {
+                let mut rendered = Vec::new();
+                append_markdown(source, self.width, Some(self.cwd.as_path()), &mut rendered);
+                rendered
+            }
+            HistoryRenderMode::Raw => raw_lines_from_source(source),
+        }
+    }
+
+    /// Append newly rendered lines to the live queue without replaying already queued rows.
+    ///
+    /// Width changes can make the rendered line count smaller than the previous queue boundary; in
+    /// that case the only safe option is rebuilding the queue from `emitted_len`, because slicing
+    /// from the stale `enqueued_len` would skip pending source.
+    fn sync_queue_to_render(&mut self) -> bool {
+        let target_len = self.rendered_lines.len().max(self.emitted_len);
+        if target_len < self.enqueued_len {
+            self.rebuild_queue_from_render();
+            return self.state.queued_len() > 0;
+        }
+
+        if target_len == self.enqueued_len {
             return false;
         }
 
-        {
-            let state = self.state_mut(kind);
-            tracing::debug!("State for {:?}: has_seen_delta={}, committed_count={}, message_empty={}",
-                kind, state.has_seen_delta, 
-                state.collector.committed_count(),
-                message.is_empty());
-            
-            // Inject the full message since we haven't been streaming it
-            if !message.is_empty() {
-                let parsed = strip_memory_citations(message);
-                if !parsed.citations.is_empty() {
-                    state.citations.extend(parsed.citations);
-                }
-                tracing::debug!("Injecting full message into {:?} collector", kind);
-                // normalize to end with newline
-                let mut msg = parsed.visible_text;
-                if !msg.ends_with('\n') {
-                    msg.push('\n');
-                }
+        self.state
+            .enqueue(self.rendered_lines[self.enqueued_len..target_len].to_vec());
+        self.enqueued_len = target_len;
+        true
+    }
 
-                // replace while preserving already committed count
-                let committed = state.collector.committed_count();
-                state
-                    .collector
-                    .replace_with_and_mark_committed(&msg, committed);
-            }
+    /// Rebuild the pending live queue from the current render and current emitted position.
+    ///
+    /// This is used when resize invalidates queued wrapping. It must never enqueue rows before
+    /// `emitted_len`, because those rows have already been inserted into terminal history.
+    fn rebuild_queue_from_render(&mut self) {
+        self.state.clear_queue();
+        let target_len = self.rendered_lines.len().max(self.emitted_len);
+        if self.emitted_len < target_len {
+            self.state
+                .enqueue(self.rendered_lines[self.emitted_len..target_len].to_vec());
+        }
+        self.enqueued_len = target_len;
+    }
+}
+
+/// Controls newline-gated streaming for assistant messages.
+///
+/// The controller emits transient `AgentMessageCell`s for live display and returns raw markdown
+/// source on `finalize` so the app can replace those transient cells with a source-backed
+/// `AgentMarkdownCell`. Callers should use `set_width` on terminal resize; rebuilding the queue
+/// from already emitted cells would duplicate output instead of preserving the stream position.
+pub(crate) struct StreamController {
+    core: StreamCore,
+    header_emitted: bool,
+}
+
+impl StreamController {
+    /// Create a stream controller that renders markdown relative to the given width and cwd.
+    ///
+    /// `width` is the content width available to markdown rendering, not necessarily the full
+    /// terminal width. Passing a stale width after resize will keep queued live output wrapped for
+    /// the old viewport until app-level reflow repairs the finalized transcript.
+    pub(crate) fn new(width: Option<usize>, cwd: &Path, render_mode: HistoryRenderMode) -> Self {
+        Self {
+            core: StreamCore::new(width, cwd, render_mode),
+            header_emitted: false,
+        }
+    }
+
+    /// Push a raw model delta and return whether it produced queued complete lines.
+    ///
+    /// Deltas are committed only through newline boundaries. A `false` return can still mean source
+    /// was buffered; it only means no newly renderable complete line is ready for live emission.
+    pub(crate) fn push(&mut self, delta: &str) -> bool {
+        self.core.push_delta(delta)
+    }
+
+    /// Finish the stream and return the final transient cell plus accumulated markdown source.
+    ///
+    /// The source is `None` only when the stream never accumulated content. Callers that discard the
+    /// returned source cannot later consolidate the transcript into a width-sensitive finalized
+    /// cell.
+    pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
+        let remaining = self.core.finalize_remaining();
+        if self.core.raw_source.is_empty() {
+            self.core.reset();
+            return (None, None);
         }
 
-        self.finalize(kind, immediate, sink)
+        let source = std::mem::take(&mut self.core.raw_source);
+        let out = self.emit(remaining);
+        self.core.reset();
+        (out, Some(source))
+    }
+
+    pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick();
+        (self.emit(step), self.core.is_idle())
+    }
+
+    pub(crate) fn on_commit_tick_batch(
+        &mut self,
+        max_lines: usize,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick_batch(max_lines);
+        (self.emit(step), self.core.is_idle())
+    }
+
+    pub(crate) fn queued_lines(&self) -> usize {
+        self.core.queued_lines()
+    }
+
+    pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.core.oldest_queued_age(now)
+    }
+
+    pub(crate) fn clear_queue(&mut self) {
+        self.core.clear_queue();
+    }
+
+    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+        self.core.set_width(width);
+    }
+
+    pub(crate) fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        self.core.set_render_mode(render_mode);
+    }
+
+    fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
+        if lines.is_empty() {
+            return None;
+        }
+        Some(Box::new(history_cell::AgentMessageCell::new(lines, {
+            let header_emitted = self.header_emitted;
+            self.header_emitted = true;
+            !header_emitted
+        })))
+    }
+}
+
+/// Controls newline-gated streaming for proposed plan markdown.
+///
+/// This follows the same source-retention contract as `StreamController`, but wraps emitted lines
+/// in the proposed-plan header, padding, and style. Finalization must return source for
+/// `ProposedPlanCell`; otherwise a resized finalized plan would keep the transient stream shape.
+pub(crate) struct PlanStreamController {
+    core: StreamCore,
+    header_emitted: bool,
+    top_padding_emitted: bool,
+}
+
+impl PlanStreamController {
+    /// Create a proposed-plan stream controller that renders markdown relative to the given cwd.
+    ///
+    /// The width has the same meaning as in `StreamController`: it is the markdown body width, and
+    /// callers must update it when the terminal width changes.
+    pub(crate) fn new(width: Option<usize>, cwd: &Path, render_mode: HistoryRenderMode) -> Self {
+        Self {
+            core: StreamCore::new(width, cwd, render_mode),
+            header_emitted: false,
+            top_padding_emitted: false,
+        }
+    }
+
+    /// Push a raw proposed-plan delta and return whether it produced queued complete lines.
+    ///
+    /// Source may be buffered even when this returns `false`; callers should continue ticking only
+    /// when queued lines exist.
+    pub(crate) fn push(&mut self, delta: &str) -> bool {
+        self.core.push_delta(delta)
+    }
+
+    /// Finish the plan stream and return the final transient cell plus accumulated markdown source.
+    ///
+    /// The returned source is consumed by app-level consolidation to create the source-backed
+    /// `ProposedPlanCell` used for later resize reflow.
+    pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
+        let remaining = self.core.finalize_remaining();
+        if self.core.raw_source.is_empty() {
+            self.core.reset();
+            return (None, None);
+        }
+
+        let source = std::mem::take(&mut self.core.raw_source);
+        let out = self.emit(remaining, /*include_bottom_padding*/ true);
+        self.core.reset();
+        (out, Some(source))
+    }
+
+    pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick();
+        (
+            self.emit(step, /*include_bottom_padding*/ false),
+            self.core.is_idle(),
+        )
+    }
+
+    pub(crate) fn on_commit_tick_batch(
+        &mut self,
+        max_lines: usize,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick_batch(max_lines);
+        (
+            self.emit(step, /*include_bottom_padding*/ false),
+            self.core.is_idle(),
+        )
+    }
+
+    pub(crate) fn queued_lines(&self) -> usize {
+        self.core.queued_lines()
+    }
+
+    pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.core.oldest_queued_age(now)
+    }
+
+    pub(crate) fn clear_queue(&mut self) {
+        self.core.clear_queue();
+    }
+
+    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+        self.core.set_width(width);
+    }
+
+    pub(crate) fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        self.core.set_render_mode(render_mode);
+    }
+
+    fn emit(
+        &mut self,
+        lines: Vec<Line<'static>>,
+        include_bottom_padding: bool,
+    ) -> Option<Box<dyn HistoryCell>> {
+        if lines.is_empty() && !include_bottom_padding {
+            return None;
+        }
+
+        let mut out_lines: Vec<Line<'static>> = Vec::with_capacity(4);
+        let is_stream_continuation = self.header_emitted;
+        if !self.header_emitted {
+            out_lines.push(vec!["• ".dim(), "Proposed Plan".bold()].into());
+            out_lines.push(Line::from(" "));
+            self.header_emitted = true;
+        }
+
+        let mut plan_lines: Vec<Line<'static>> = Vec::with_capacity(4);
+        if !self.top_padding_emitted {
+            plan_lines.push(Line::from(" "));
+            self.top_padding_emitted = true;
+        }
+        plan_lines.extend(lines);
+        if include_bottom_padding {
+            plan_lines.push(Line::from(" "));
+        }
+
+        let plan_style = proposed_plan_style();
+        let plan_lines = prefix_lines(plan_lines, "  ".into(), "  ".into())
+            .into_iter()
+            .map(|line| line.style(plan_style))
+            .collect::<Vec<_>>();
+        out_lines.extend(plan_lines);
+
+        Some(Box::new(history_cell::new_proposed_plan_stream(
+            out_lines,
+            is_stream_continuation,
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::HistorySink;
-    use super::StreamController;
-    use super::StreamKind;
-    use code_core::config::Config;
-    use code_core::config::ConfigOverrides;
-    use code_core::config::ConfigToml;
-    use ratatui::text::Line;
+    use super::*;
+    use pretty_assertions::assert_eq;
 
-    #[derive(Default)]
-    struct TestSink {
-        final_source: Option<String>,
-        streamed_lines: Vec<String>,
+    fn test_cwd() -> PathBuf {
+        std::env::temp_dir()
     }
 
-    impl HistorySink for std::cell::RefCell<TestSink> {
-        fn insert_history(&self, lines: Vec<Line<'static>>) {
-            self.borrow_mut().streamed_lines.extend(flatten_lines(lines));
-        }
-
-        fn insert_history_with_kind(
-            &self,
-            _id: Option<String>,
-            _kind: StreamKind,
-            lines: Vec<Line<'static>>,
-        ) {
-            self.borrow_mut().streamed_lines.extend(flatten_lines(lines));
-        }
-
-        fn insert_final_answer(
-            &self,
-            _id: Option<String>,
-            _lines: Vec<Line<'static>>,
-            full_markdown_source: String,
-        ) {
-            self.borrow_mut().final_source = Some(full_markdown_source);
-        }
-
-        fn start_commit_animation(&self) {}
-
-        fn stop_commit_animation(&self) {}
+    fn stream_controller(width: Option<usize>) -> StreamController {
+        StreamController::new(width, &test_cwd(), HistoryRenderMode::Rich)
     }
 
-    #[test]
-    fn streamed_answer_hides_memory_citation_tags() {
-        let mut controller = StreamController::new(test_config());
-        let sink = std::cell::RefCell::new(TestSink::default());
-
-        controller.begin_with_id(StreamKind::Answer, Some("answer-1".to_string()), &sink);
-        controller.push_and_maybe_commit("hello <oai-mem-cit", &sink);
-        controller.push_and_maybe_commit("ation>doc1</oai-mem-citation> world\n", &sink);
-        assert!(controller.finalize(StreamKind::Answer, true, &sink));
-
-        let final_source = sink
-            .borrow()
-            .final_source
-            .clone()
-            .expect("final answer source");
-        assert_eq!(final_source, "hello  world\n");
-        assert!(!final_source.contains("<oai-mem-citation>"));
+    fn plan_stream_controller(width: Option<usize>) -> PlanStreamController {
+        PlanStreamController::new(width, &test_cwd(), HistoryRenderMode::Rich)
     }
 
-    #[test]
-    fn final_only_answer_hides_memory_citation_tags() {
-        let mut controller = StreamController::new(test_config());
-        let sink = std::cell::RefCell::new(TestSink::default());
-
-        controller.begin_with_id(StreamKind::Answer, Some("answer-2".to_string()), &sink);
-        assert!(controller.apply_final_answer(
-            "hello <oai-mem-citation>doc2</oai-mem-citation> world",
-            &sink,
-        ));
-
-        let final_source = sink
-            .borrow()
-            .final_source
-            .clone()
-            .expect("final answer source");
-        assert_eq!(final_source, "hello  world\n");
-        assert!(!final_source.contains("<oai-mem-citation>"));
-    }
-
-    fn flatten_lines(lines: Vec<Line<'static>>) -> Vec<String> {
+    fn lines_to_plain_strings(lines: &[Line<'_>]) -> Vec<String> {
         lines
-            .into_iter()
+            .iter()
             .map(|line| {
                 line.spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
+                    .iter()
+                    .map(|span| span.content.clone())
                     .collect::<String>()
             })
             .collect()
     }
 
-    fn test_config() -> Config {
-        Config::load_from_base_config_with_overrides(
-            ConfigToml::default(),
-            ConfigOverrides::default(),
-            std::env::temp_dir(),
-        )
-        .expect("config")
+    fn collect_streamed_lines(deltas: &[&str], width: Option<usize>) -> Vec<String> {
+        let mut ctrl = stream_controller(width);
+        let mut lines = Vec::new();
+        for delta in deltas {
+            ctrl.push(delta);
+            while let (Some(cell), idle) = ctrl.on_commit_tick() {
+                lines.extend(cell.transcript_lines(u16::MAX));
+                if idle {
+                    break;
+                }
+            }
+        }
+        if let (Some(cell), _source) = ctrl.finalize() {
+            lines.extend(cell.transcript_lines(u16::MAX));
+        }
+        lines_to_plain_strings(&lines)
+            .into_iter()
+            .map(|line| line.chars().skip(2).collect::<String>())
+            .collect()
+    }
+
+    fn collect_plan_streamed_lines(deltas: &[&str], width: Option<usize>) -> Vec<String> {
+        let mut ctrl = plan_stream_controller(width);
+        let mut lines = Vec::new();
+        for delta in deltas {
+            ctrl.push(delta);
+            while let (Some(cell), idle) = ctrl.on_commit_tick() {
+                lines.extend(cell.transcript_lines(u16::MAX));
+                if idle {
+                    break;
+                }
+            }
+        }
+        if let (Some(cell), _source) = ctrl.finalize() {
+            lines.extend(cell.transcript_lines(u16::MAX));
+        }
+        lines_to_plain_strings(&lines)
+    }
+
+    #[test]
+    fn controller_set_width_rebuilds_queued_lines() {
+        let mut ctrl = stream_controller(Some(120));
+        let delta = "This is a long line that should wrap into multiple rows when resized.\n";
+        assert!(ctrl.push(delta));
+        assert_eq!(ctrl.queued_lines(), 1);
+
+        ctrl.set_width(Some(24));
+        let (cell, idle) = ctrl.on_commit_tick_batch(usize::MAX);
+        let rendered = lines_to_plain_strings(
+            &cell
+                .expect("expected resized queued lines")
+                .transcript_lines(u16::MAX),
+        );
+
+        assert!(idle);
+        assert!(
+            rendered.len() > 1,
+            "expected resized content to occupy multiple lines, got {rendered:?}",
+        );
+    }
+
+    #[test]
+    fn controller_set_width_no_duplicate_after_emit() {
+        let mut ctrl = stream_controller(Some(120));
+        let line =
+            "This is a long line that definitely wraps when the terminal shrinks to 24 columns.\n";
+        ctrl.push(line);
+        let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
+        assert!(cell.is_some(), "expected emitted cell");
+        assert_eq!(ctrl.queued_lines(), 0);
+
+        ctrl.set_width(Some(24));
+
+        assert_eq!(
+            ctrl.queued_lines(),
+            0,
+            "already-emitted content must not be re-queued after resize",
+        );
+    }
+
+    #[test]
+    fn controller_tick_batch_zero_is_noop() {
+        let mut ctrl = stream_controller(Some(80));
+        assert!(ctrl.push("line one\n"));
+        assert_eq!(ctrl.queued_lines(), 1);
+
+        let (cell, idle) = ctrl.on_commit_tick_batch(/*max_lines*/ 0);
+        assert!(cell.is_none(), "batch size 0 should not emit lines");
+        assert!(!idle, "batch size 0 should not drain queued lines");
+        assert_eq!(
+            ctrl.queued_lines(),
+            1,
+            "queue depth should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn controller_finalize_returns_raw_source_for_consolidation() {
+        let mut ctrl = stream_controller(Some(80));
+        assert!(ctrl.push("hello\n"));
+        let (_cell, source) = ctrl.finalize();
+        assert_eq!(source, Some("hello\n".to_string()));
+    }
+
+    #[test]
+    fn plan_controller_finalize_returns_raw_source_for_consolidation() {
+        let mut ctrl = plan_stream_controller(Some(80));
+        assert!(ctrl.push("- step\n"));
+        let (_cell, source) = ctrl.finalize();
+        assert_eq!(source, Some("- step\n".to_string()));
+    }
+
+    #[test]
+    fn simple_lines_stream_in_order() {
+        let actual = collect_streamed_lines(&["hello\n", "world\n"], Some(80));
+        assert_eq!(actual, vec!["hello".to_string(), "world".to_string()]);
+    }
+
+    #[test]
+    fn plan_lines_stream_in_order() {
+        let actual = collect_plan_streamed_lines(&["- one\n", "- two\n"], Some(80));
+        assert!(
+            actual.iter().any(|line| line.contains("Proposed Plan")),
+            "expected plan header in streamed plan: {actual:?}",
+        );
+        assert!(
+            actual.iter().any(|line| line.contains("one")),
+            "expected plan body in streamed plan: {actual:?}",
+        );
     }
 }

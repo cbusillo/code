@@ -1,48 +1,10 @@
-use std::sync::OnceLock;
-
 use strum::IntoEnumIterator;
 use strum_macros::AsRefStr;
 use strum_macros::EnumIter;
 use strum_macros::EnumString;
 use strum_macros::IntoStaticStr;
 
-const BUILD_PROFILE: Option<&str> = option_env!("CODEX_PROFILE");
-
-fn demo_command_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        let profile_matches = |
-            profile: &str
-        | {
-            let normalized = profile.trim().to_ascii_lowercase();
-            normalized == "perf" || normalized.starts_with("dev")
-        };
-
-        if let Some(profile) = BUILD_PROFILE.or(option_env!("PROFILE")) {
-            if profile_matches(profile) {
-                return true;
-            }
-        }
-
-        if let Ok(exe_path) = std::env::current_exe() {
-            let path = exe_path.to_string_lossy().to_ascii_lowercase();
-            if path.contains("target/dev-fast/")
-                || path.contains("target/dev/")
-                || path.contains("target/perf/")
-            {
-                return true;
-            }
-        }
-
-        cfg!(debug_assertions)
-    })
-}
-
 /// Commands that can be invoked by starting a message with a leading slash.
-///
-/// IMPORTANT: When adding or changing slash commands, also update
-/// `docs/slash-commands.md` at the repo root so users can discover them easily.
-/// This enum is the source of truth for the list and ordering shown in the UI.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]
@@ -50,106 +12,127 @@ fn demo_command_enabled() -> bool {
 pub enum SlashCommand {
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
-    Browser,
-    Chrome,
-    New,
-    Clear,
-    Init,
-    Compact,
-    Undo,
-    Review,
-    Cloud,
-    Copy,
-    Diff,
-    Mention,
-    Cmd,
-    Status,
-    Context,
-    Limits,
-    #[strum(serialize = "update", serialize = "upgrade")]
-    Update,
-    Notifications,
-    Theme,
-    Settings,
     Model,
     Fast,
-    Reasoning,
-    Verbosity,
-    Prompts,
+    Ide,
+    Permissions,
+    Keymap,
+    Vim,
+    #[strum(serialize = "setup-default-sandbox")]
+    ElevateSandbox,
+    #[strum(serialize = "sandbox-add-read-dir")]
+    SandboxReadRoot,
+    Experimental,
+    #[strum(to_string = "approve")]
+    AutoReview,
+    Memories,
     Skills,
-    Perf,
-    Demo,
-    Agents,
-    Auto,
-    Branch,
-    Merge,
-    Push,
-    Validation,
-    Mcp,
-    Resume,
+    Hooks,
+    Review,
     Rename,
-    Login,
-    // Prompt-expanding commands
+    New,
+    Resume,
+    Fork,
+    Init,
+    Compact,
     Plan,
-    Solve,
-    Code,
+    Goal,
+    Collab,
+    Agent,
+    Side,
+    Copy,
+    Raw,
+    Diff,
+    Mention,
+    Status,
+    DebugConfig,
+    Title,
+    Statusline,
+    Theme,
+    Mcp,
+    Apps,
+    Plugins,
     Logout,
     Quit,
     Exit,
-    #[cfg(debug_assertions)]
+    Feedback,
+    Rollout,
+    Ps,
+    #[strum(to_string = "stop", serialize = "clean")]
+    Stop,
+    Clear,
+    Personality,
+    Realtime,
+    Settings,
     TestApproval,
+    #[strum(serialize = "subagents")]
+    MultiAgents,
+    // Debugging commands.
+    #[strum(serialize = "debug-m-drop")]
+    MemoryDrop,
+    #[strum(serialize = "debug-m-update")]
+    MemoryUpdate,
 }
 
 impl SlashCommand {
     /// User-visible description shown in the popup.
     pub fn description(self) -> &'static str {
         match self {
-            SlashCommand::Chrome => "connect to your Chrome browser",
-            SlashCommand::Browser => "open internal browser",
-            SlashCommand::Resume => "resume a past session for this folder",
-            SlashCommand::Rename => "rename the current session",
-            SlashCommand::Plan => "create a comprehensive plan (multiple agents)",
-            SlashCommand::Solve => "solve a challenging problem (multiple agents)",
-            SlashCommand::Code => "perform a coding task (multiple agents)",
-            SlashCommand::Reasoning => "change reasoning effort (minimal/low/medium/high)",
-            SlashCommand::Verbosity => "change text verbosity (high/medium/low)",
+            SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
-            SlashCommand::Init => "create an AGENTS.md file with instructions for Code",
+            SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
-            SlashCommand::Undo => "restore the workspace to the last Code snapshot",
-            SlashCommand::Review => "review your changes for potential issues",
-            SlashCommand::Cloud => "browse, apply, and create cloud tasks",
-            SlashCommand::Quit | SlashCommand::Exit => "exit Code",
+            SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::Rename => "rename the current thread",
+            SlashCommand::Resume => "resume a saved chat",
             SlashCommand::Clear => "clear the terminal and start a new chat",
+            SlashCommand::Fork => "fork the current chat",
+            SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Copy => "copy last response as markdown",
+            SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
-            SlashCommand::Cmd => "run a project command",
+            SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
+            SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Status => "show current session configuration and token usage",
-            SlashCommand::Context => "show request context composition",
-            SlashCommand::Limits => "adjust session limits",
-            SlashCommand::Update => "check for updates and optionally upgrade",
-            SlashCommand::Notifications => "manage notification settings",
-            SlashCommand::Theme => "customize the app theme",
-            SlashCommand::Settings => "manage all settings in one place",
-            SlashCommand::Prompts => "manage custom prompts",
-            SlashCommand::Skills => "manage skills",
-            SlashCommand::Model => "choose your default model",
-            SlashCommand::Fast => "open model settings with the Fast mode toggle",
-            SlashCommand::Agents => "configure agents",
-            SlashCommand::Auto => "work autonomously on long tasks with Auto Drive",
-            SlashCommand::Branch => {
-                "work in an isolated /branch then /merge when done (great for parallel work)"
+            SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
+            SlashCommand::Title => "configure which items appear in the terminal title",
+            SlashCommand::Statusline => "configure which items appear in the status line",
+            SlashCommand::Theme => "choose a syntax highlighting theme",
+            SlashCommand::Ps => "list background terminals",
+            SlashCommand::Stop => "stop all background terminals",
+            SlashCommand::MemoryDrop => "DO NOT USE",
+            SlashCommand::MemoryUpdate => "DO NOT USE",
+            SlashCommand::Model => "choose what model and reasoning effort to use",
+            SlashCommand::Fast => {
+                "toggle Fast mode to enable fastest inference with increased plan usage"
             }
-            SlashCommand::Merge => "merge current worktree branch back to default",
-            SlashCommand::Push => "commit, push, and monitor workflows",
-            SlashCommand::Validation => "control validation harness (status/on/off)",
-            SlashCommand::Mcp => "manage MCP servers",
-            SlashCommand::Perf => "performance tracing (on/off/show/reset)",
-            SlashCommand::Demo => "populate history with demo cells (dev/perf only)",
-            SlashCommand::Login => "manage Code sign-ins (add/select/disconnect)",
-            SlashCommand::Logout => "log out of Code",
-            #[cfg(debug_assertions)]
+            SlashCommand::Ide => {
+                "include current selection, open files, and other context from your IDE"
+            }
+            SlashCommand::Personality => "choose a communication style for Codex",
+            SlashCommand::Realtime => "toggle realtime voice mode (experimental)",
+            SlashCommand::Settings => "configure realtime microphone/speaker",
+            SlashCommand::Plan => "switch to Plan mode",
+            SlashCommand::Goal => "set or view the goal for a long-running task",
+            SlashCommand::Collab => "change collaboration mode (experimental)",
+            SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
+            SlashCommand::Side => "start a side conversation in an ephemeral fork",
+            SlashCommand::Permissions => "choose what Codex is allowed to do",
+            SlashCommand::Keymap => "remap TUI shortcuts",
+            SlashCommand::Vim => "toggle Vim mode for the composer",
+            SlashCommand::ElevateSandbox => "set up elevated agent sandbox",
+            SlashCommand::SandboxReadRoot => {
+                "let sandbox read a directory: /sandbox-add-read-dir <absolute_path>"
+            }
+            SlashCommand::Experimental => "toggle experimental features",
+            SlashCommand::AutoReview => "approve one retry of a recent auto-review denial",
+            SlashCommand::Memories => "configure memory use and generation",
+            SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
+            SlashCommand::Apps => "manage apps",
+            SlashCommand::Plugins => "browse plugins",
+            SlashCommand::Logout => "log out of Codex",
+            SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
         }
     }
@@ -160,62 +143,101 @@ impl SlashCommand {
         self.into()
     }
 
-    /// Returns true if this command should expand into a prompt for the LLM.
-    pub fn is_prompt_expanding(self) -> bool {
+    /// Whether this command supports inline args (for example `/review ...`).
+    pub fn supports_inline_args(self) -> bool {
         matches!(
             self,
-            SlashCommand::Plan | SlashCommand::Solve | SlashCommand::Code
+            SlashCommand::Review
+                | SlashCommand::Rename
+                | SlashCommand::Plan
+                | SlashCommand::Goal
+                | SlashCommand::Fast
+                | SlashCommand::Ide
+                | SlashCommand::Keymap
+                | SlashCommand::Mcp
+                | SlashCommand::Raw
+                | SlashCommand::Side
+                | SlashCommand::Resume
+                | SlashCommand::SandboxReadRoot
         )
     }
 
-    pub fn settings_section_from_args<'a>(&self, args: &'a str) -> Option<&'a str> {
-        if *self != SlashCommand::Settings {
-            return None;
-        }
-        let section = args.split_whitespace().next().unwrap_or("");
-        if section.is_empty() {
-            None
-        } else {
-            Some(section)
-        }
-    }
-
-    /// Returns true if this command requires additional arguments after the command.
-    pub fn requires_arguments(self) -> bool {
+    /// Whether this command remains available inside an active side conversation.
+    pub fn available_in_side_conversation(self) -> bool {
         matches!(
             self,
-            SlashCommand::Plan | SlashCommand::Solve | SlashCommand::Code
+            SlashCommand::Copy
+                | SlashCommand::Raw
+                | SlashCommand::Diff
+                | SlashCommand::Mention
+                | SlashCommand::Status
+                | SlashCommand::Ide
         )
     }
 
-    pub fn is_available(self) -> bool {
+    /// Whether this command can be run while a task is in progress.
+    pub fn available_during_task(self) -> bool {
         match self {
-            SlashCommand::Demo => demo_command_enabled(),
+            SlashCommand::New
+            | SlashCommand::Resume
+            | SlashCommand::Fork
+            | SlashCommand::Init
+            | SlashCommand::Compact
+            | SlashCommand::Model
+            | SlashCommand::Fast
+            | SlashCommand::Personality
+            | SlashCommand::Permissions
+            | SlashCommand::Keymap
+            | SlashCommand::Vim
+            | SlashCommand::ElevateSandbox
+            | SlashCommand::SandboxReadRoot
+            | SlashCommand::Experimental
+            | SlashCommand::Memories
+            | SlashCommand::Review
+            | SlashCommand::Plan
+            | SlashCommand::Clear
+            | SlashCommand::Logout
+            | SlashCommand::MemoryDrop
+            | SlashCommand::MemoryUpdate => false,
+            SlashCommand::Diff
+            | SlashCommand::Copy
+            | SlashCommand::Raw
+            | SlashCommand::Rename
+            | SlashCommand::Mention
+            | SlashCommand::Skills
+            | SlashCommand::Hooks
+            | SlashCommand::Status
+            | SlashCommand::DebugConfig
+            | SlashCommand::Ps
+            | SlashCommand::Stop
+            | SlashCommand::Goal
+            | SlashCommand::Mcp
+            | SlashCommand::Apps
+            | SlashCommand::Plugins
+            | SlashCommand::Title
+            | SlashCommand::Statusline
+            | SlashCommand::AutoReview
+            | SlashCommand::Feedback
+            | SlashCommand::Ide
+            | SlashCommand::Quit
+            | SlashCommand::Exit
+            | SlashCommand::Side => true,
+            SlashCommand::Rollout => true,
+            SlashCommand::TestApproval => true,
+            SlashCommand::Realtime => true,
+            SlashCommand::Settings => true,
+            SlashCommand::Collab => true,
+            SlashCommand::Agent | SlashCommand::MultiAgents => true,
+            SlashCommand::Theme => false,
+        }
+    }
+
+    fn is_visible(self) -> bool {
+        match self {
+            SlashCommand::SandboxReadRoot => cfg!(target_os = "windows"),
+            SlashCommand::Copy => !cfg!(target_os = "android"),
+            SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
             _ => true,
-        }
-    }
-
-    /// Expands a prompt-expanding command into a full prompt for the LLM.
-    /// Returns None if the command is not a prompt-expanding command.
-    pub fn expand_prompt(self, args: &str) -> Option<String> {
-        if !self.is_prompt_expanding() {
-            return None;
-        }
-
-        // Use the slash_commands module from core to generate the prompts
-        // Note: We pass None for agents here as the TUI doesn't have access to the session config
-        // The actual agents will be determined when the agent tool is invoked
-        match self {
-            SlashCommand::Plan => Some(code_core::slash_commands::format_plan_command(
-                args, None, None,
-            )),
-            SlashCommand::Solve => Some(code_core::slash_commands::format_solve_command(
-                args, None, None,
-            )),
-            SlashCommand::Code => Some(code_core::slash_commands::format_code_command(
-                args, None, None,
-            )),
-            _ => None,
         }
     }
 }
@@ -223,152 +245,45 @@ impl SlashCommand {
 /// Return all built-in commands in a Vec paired with their command string.
 pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
     SlashCommand::iter()
-        .filter(|c| c.is_available())
+        .filter(|command| command.is_visible())
         .map(|c| (c.command(), c))
         .collect()
 }
 
-/// Process a message that might contain a slash command.
-/// Returns either the expanded prompt (for prompt-expanding commands) or the original message.
-pub fn process_slash_command_message(message: &str) -> ProcessedCommand {
-    let trimmed = message.trim();
-
-    if trimmed.is_empty() {
-        return ProcessedCommand::NotCommand(message.to_string());
-    }
-
-    let has_slash = trimmed.starts_with('/');
-    let command_portion = if has_slash { &trimmed[1..] } else { trimmed };
-    let mut parts = command_portion.splitn(2, |c: char| c.is_whitespace());
-    let command_str = parts.next().unwrap_or("");
-    let args_raw = parts.next().map(|s| s.trim()).unwrap_or("");
-    let canonical_command = command_str.to_ascii_lowercase();
-
-    if !has_slash && matches!(canonical_command.as_str(), "quit" | "exit") {
-        if !has_slash && !args_raw.is_empty() {
-            return ProcessedCommand::NotCommand(message.to_string());
-        }
-
-        let command_text = if args_raw.is_empty() {
-            format!("/{}", SlashCommand::Quit.command())
-        } else {
-            format!("/{} {}", SlashCommand::Quit.command(), args_raw)
-        };
-
-        return ProcessedCommand::RegularCommand(SlashCommand::Quit, command_text);
-    }
-
-    if !has_slash {
-        return ProcessedCommand::NotCommand(message.to_string());
-    }
-
-    // Try to parse the command
-    if let Ok(command) = canonical_command.parse::<SlashCommand>() {
-        if !command.is_available() {
-            let command_name = command.command();
-            let message = match command {
-                SlashCommand::Demo => {
-                    format!("Error: /{command_name} is only available in dev or perf builds.")
-                }
-                _ => format!("Error: /{command_name} is not available in this build."),
-            };
-            return ProcessedCommand::Error(message);
-        }
-
-        // Check if it's a prompt-expanding command
-        if command.is_prompt_expanding() {
-            if args_raw.is_empty() && command.requires_arguments() {
-                return ProcessedCommand::Error(format!(
-                    "Error: /{} requires a task description. Usage: /{} <task>",
-                    command.command(),
-                    command.command()
-                ));
-            }
-
-            if let Some(expanded) = command.expand_prompt(args_raw) {
-                return ProcessedCommand::ExpandedPrompt(expanded);
-            }
-        }
-
-        let command_text = if args_raw.is_empty() {
-            format!("/{}", command.command())
-        } else {
-            format!("/{} {}", command.command(), args_raw)
-        };
-
-        // It's a regular command, return it as-is with the canonical text
-        ProcessedCommand::RegularCommand(command, command_text)
-    } else {
-        // Unknown command
-        ProcessedCommand::NotCommand(message.to_string())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ProcessedCommand {
-    /// The message was expanded from a prompt-expanding slash command
-    ExpandedPrompt(String),
-    /// A regular slash command that should be handled by the TUI. The `String`
-    /// contains the canonical command text (with leading slash and trimmed args).
-    RegularCommand(SlashCommand, String),
-    /// Not a slash command, just a regular message
-    #[allow(dead_code)]
-    NotCommand(String),
-    /// Error processing the command
-    Error(String),
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::str::FromStr;
+
+    use super::SlashCommand;
 
     #[test]
-    fn plan_command_with_newline_arguments_is_recognized() {
-        let msg = "/plan\nBuild a release plan\n- tighten scope";
-        match process_slash_command_message(msg) {
-            ProcessedCommand::ExpandedPrompt(prompt) => {
-                assert!(prompt.contains("Build a release plan"));
-                assert!(prompt.contains("tighten scope"));
-            }
-            other => panic!("expected ExpandedPrompt, got {:?}", other),
-        }
+    fn stop_command_is_canonical_name() {
+        assert_eq!(SlashCommand::Stop.command(), "stop");
     }
 
     #[test]
-    fn auto_command_with_newline_arguments_is_regular_command() {
-        let msg = "/auto\ninspect the failing build";
-        match process_slash_command_message(msg) {
-            ProcessedCommand::RegularCommand(SlashCommand::Auto, command_text) => {
-                assert!(command_text.contains("inspect the failing build"));
-            }
-            other => panic!("expected RegularCommand, got {:?}", other),
-        }
+    fn clean_alias_parses_to_stop_command() {
+        assert_eq!(SlashCommand::from_str("clean"), Ok(SlashCommand::Stop));
     }
 
     #[test]
-    fn fast_command_is_regular_command() {
-        match process_slash_command_message("/fast") {
-            ProcessedCommand::RegularCommand(SlashCommand::Fast, command_text) => {
-                assert_eq!(command_text, "/fast");
-            }
-            other => panic!("expected RegularCommand, got {:?}", other),
-        }
+    fn certain_commands_are_available_during_task() {
+        assert!(SlashCommand::Goal.available_during_task());
+        assert!(SlashCommand::Ide.available_during_task());
+        assert!(SlashCommand::Title.available_during_task());
+        assert!(SlashCommand::Statusline.available_during_task());
+        assert!(SlashCommand::Raw.available_during_task());
+        assert!(SlashCommand::Raw.available_in_side_conversation());
+        assert!(SlashCommand::Raw.supports_inline_args());
     }
 
     #[test]
-    fn upstream_compat_commands_are_regular_commands() {
-        for (input, expected) in [
-            ("/exit", SlashCommand::Exit),
-            ("/clear", SlashCommand::Clear),
-            ("/copy", SlashCommand::Copy),
-        ] {
-            match process_slash_command_message(input) {
-                ProcessedCommand::RegularCommand(command, command_text) => {
-                    assert_eq!(command, expected);
-                    assert_eq!(command_text, input);
-                }
-                other => panic!("expected RegularCommand for {input}, got {:?}", other),
-            }
-        }
+    fn auto_review_command_is_approve() {
+        assert_eq!(SlashCommand::AutoReview.command(), "approve");
+        assert_eq!(
+            SlashCommand::from_str("approve"),
+            Ok(SlashCommand::AutoReview)
+        );
     }
 }

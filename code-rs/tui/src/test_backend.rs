@@ -1,30 +1,3 @@
-//! VT100-based test backend for ratatui
-//!
-//! This module provides a minimal VT100Backend implementation that wraps
-//! a vt100::Parser to emulate a terminal for testing purposes.
-//!
-//! ## Usage
-//!
-//! This backend is only available when the `test-helpers` feature is enabled:
-//!
-//! ```rust,ignore
-//! use code_tui::test_backend::VT100Backend;
-//! use ratatui::Terminal;
-//!
-//! let backend = VT100Backend::new(80, 24);
-//! let mut terminal = Terminal::new(backend)?;
-//! terminal.draw(|frame| {
-//!     // render widgets
-//! })?;
-//! let output = terminal.backend().to_string();
-//! ```
-//!
-//! ## Implementation Notes
-//!
-//! This implementation is derived from codex-rs/tui/src/test_backend.rs and requires
-//! the `unstable-backend-writer` feature in ratatui to access the CrosstermBackend's
-//! internal writer.
-
 use std::fmt::{self};
 use std::io::Write;
 use std::io::{self};
@@ -38,10 +11,8 @@ use ratatui::buffer::Cell;
 use ratatui::layout::Position;
 use ratatui::layout::Size;
 
-/// VT100-backed terminal emulator for testing
-///
 /// This wraps a CrosstermBackend and a vt100::Parser to mock
-/// a "real" terminal without requiring an actual TTY.
+/// a "real" terminal.
 ///
 /// Importantly, this wrapper avoids calling any crossterm methods
 /// which write to stdout regardless of the writer. This includes:
@@ -54,6 +25,7 @@ pub struct VT100Backend {
 impl VT100Backend {
     /// Creates a new `TestBackend` with the specified width and height.
     pub fn new(width: u16, height: u16) -> Self {
+        crossterm::style::force_color_output(true);
         Self {
             crossterm_backend: CrosstermBackend::new(vt100::Parser::new(height, width, 0)),
         }
@@ -121,19 +93,12 @@ impl Backend for VT100Backend {
 
     fn size(&self) -> io::Result<Size> {
         let (rows, cols) = self.vt100().screen().size();
-        Ok(Size {
-            width: cols,
-            height: rows,
-        })
+        Ok(Size::new(cols, rows))
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
-        let (rows, cols) = self.vt100().screen().size();
         Ok(WindowSize {
-            columns_rows: Size {
-                width: cols,
-                height: rows,
-            },
+            columns_rows: self.vt100().screen().size().into(),
             // Arbitrary size, we don't rely on this in testing.
             pixels: Size {
                 width: 640,

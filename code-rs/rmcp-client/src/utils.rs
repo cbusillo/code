@@ -1,75 +1,60 @@
-use std::collections::HashMap;
-use std::env;
-use std::time::Duration;
-
-use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use mcp_types::CallToolResult;
+use codex_config::types::McpServerEnvVar;
 use reqwest::ClientBuilder;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
-use rmcp::model::CallToolResult as RmcpCallToolResult;
-use rmcp::service::ServiceError;
-use serde_json::Value;
-use tokio::time;
+use std::collections::HashMap;
+use std::env;
+use std::ffi::OsString;
 
-pub(crate) async fn run_with_timeout<F, T>(
-    fut: F,
-    timeout: Option<Duration>,
-    label: &str,
-) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T, ServiceError>>,
-{
-    if let Some(duration) = timeout {
-        let result = time::timeout(duration, fut)
-            .await
-            .with_context(|| anyhow!("timed out awaiting {label} after {duration:?}"))?;
-        result.map_err(|err| anyhow!("{label} failed: {err}"))
-    } else {
-        fut.await.map_err(|err| anyhow!("{label} failed: {err}"))
+pub(crate) fn create_env_for_mcp_server(
+    extra_env: Option<HashMap<OsString, OsString>>,
+    env_vars: &[McpServerEnvVar],
+) -> Result<HashMap<OsString, OsString>> {
+    let additional_env_vars = local_stdio_env_var_names(env_vars)?;
+    let env = DEFAULT_ENV_VARS
+        .iter()
+        .copied()
+        .chain(additional_env_vars)
+        .filter_map(|var| env::var_os(var).map(|value| (OsString::from(var), value)))
+        .chain(extra_env.unwrap_or_default())
+        .collect();
+    Ok(env)
+}
+
+pub(crate) fn create_env_overlay_for_remote_mcp_server(
+    extra_env: Option<HashMap<OsString, OsString>>,
+    env_vars: &[McpServerEnvVar],
+) -> HashMap<OsString, OsString> {
+    // Remote stdio should inherit PATH/HOME/etc. from the executor side, not
+    // from the orchestrator process. Only forward variables explicitly named
+    // by the MCP config plus literal env overrides from that config.
+    env_vars
+        .iter()
+        .filter(|var| !var.is_remote_source())
+        .filter_map(|var| env::var_os(var.name()).map(|value| (OsString::from(var.name()), value)))
+        .chain(extra_env.unwrap_or_default())
+        .collect()
+}
+
+pub(crate) fn remote_mcp_env_var_names(env_vars: &[McpServerEnvVar]) -> Vec<String> {
+    env_vars
+        .iter()
+        .filter(|var| var.is_remote_source())
+        .map(|var| var.name().to_string())
+        .collect()
+}
+
+fn local_stdio_env_var_names(env_vars: &[McpServerEnvVar]) -> Result<impl Iterator<Item = &str>> {
+    if let Some(remote_var) = env_vars.iter().find(|var| var.is_remote_source()) {
+        return Err(anyhow!(
+            "env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
+            remote_var.name()
+        ));
     }
-}
-
-pub(crate) fn convert_call_tool_result(result: RmcpCallToolResult) -> Result<CallToolResult> {
-    let mut value = serde_json::to_value(result)?;
-    if let Some(obj) = value.as_object_mut()
-        && (obj.get("content").is_none()
-            || obj.get("content").is_some_and(serde_json::Value::is_null))
-    {
-        obj.insert("content".to_string(), Value::Array(Vec::new()));
-    }
-    serde_json::from_value(value).context("failed to convert call tool result")
-}
-
-/// Convert from mcp-types to Rust SDK types.
-///
-/// The Rust SDK types are the same as our mcp-types crate because they are both
-/// derived from the same MCP specification.
-/// As a result, it should be safe to convert directly from one to the other.
-pub(crate) fn convert_to_rmcp<T, U>(value: T) -> Result<U>
-where
-    T: serde::Serialize,
-    U: serde::de::DeserializeOwned,
-{
-    let json = serde_json::to_value(value)?;
-    serde_json::from_value(json).map_err(|err| anyhow!(err))
-}
-
-/// Convert from Rust SDK types to mcp-types.
-///
-/// The Rust SDK types are the same as our mcp-types crate because they are both
-/// derived from the same MCP specification.
-/// As a result, it should be safe to convert directly from one to the other.
-pub(crate) fn convert_to_mcp<T, U>(value: T) -> Result<U>
-where
-    T: serde::Serialize,
-    U: serde::de::DeserializeOwned,
-{
-    let json = serde_json::to_value(value)?;
-    serde_json::from_value(json).map_err(|err| anyhow!(err))
+    Ok(env_vars.iter().map(McpServerEnvVar::name))
 }
 
 pub(crate) fn build_default_headers(
@@ -78,27 +63,52 @@ pub(crate) fn build_default_headers(
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
 
-    if let Some(http_headers) = http_headers {
-        for (name, value) in http_headers {
-            headers.insert(
-                HeaderName::from_bytes(name.as_bytes())?,
-                HeaderValue::from_str(&value)?,
-            );
+    if let Some(static_headers) = http_headers {
+        for (name, value) in static_headers {
+            let header_name = match HeaderName::from_bytes(name.as_bytes()) {
+                Ok(name) => name,
+                Err(err) => {
+                    tracing::warn!("invalid HTTP header name `{name}`: {err}");
+                    continue;
+                }
+            };
+            let header_value = match HeaderValue::from_str(value.as_str()) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!("invalid HTTP header value for `{name}`: {err}");
+                    continue;
+                }
+            };
+            headers.insert(header_name, header_value);
         }
     }
 
-    if let Some(env_http_headers) = env_http_headers {
-        for (name, env_var) in env_http_headers {
-            let Some(value) = env::var_os(&env_var) else {
-                continue;
-            };
-            let value = value
-                .into_string()
-                .map_err(|_| anyhow!("environment variable `{env_var}` was not valid UTF-8"))?;
-            headers.insert(
-                HeaderName::from_bytes(name.as_bytes())?,
-                HeaderValue::from_str(&value)?,
-            );
+    if let Some(env_headers) = env_http_headers {
+        for (name, env_var) in env_headers {
+            if let Ok(value) = env::var(&env_var) {
+                if value.trim().is_empty() {
+                    continue;
+                }
+
+                let header_name = match HeaderName::from_bytes(name.as_bytes()) {
+                    Ok(name) => name,
+                    Err(err) => {
+                        tracing::warn!("invalid HTTP header name `{name}`: {err}");
+                        continue;
+                    }
+                };
+
+                let header_value = match HeaderValue::from_str(value.as_str()) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::warn!(
+                            "invalid HTTP header value read from {env_var} for `{name}`: {err}"
+                        );
+                        continue;
+                    }
+                };
+                headers.insert(header_name, header_value);
+            }
         }
     }
 
@@ -114,16 +124,6 @@ pub(crate) fn apply_default_headers(
     } else {
         builder.default_headers(default_headers.clone())
     }
-}
-
-pub(crate) fn create_env_for_mcp_server(
-    extra_env: Option<HashMap<String, String>>,
-) -> HashMap<String, String> {
-    DEFAULT_ENV_VARS
-        .iter()
-        .filter_map(|var| env::var(var).ok().map(|value| (var.to_string(), value)))
-        .chain(extra_env.unwrap_or_default())
-        .collect()
 }
 
 #[cfg(unix)]
@@ -142,67 +142,167 @@ pub(crate) const DEFAULT_ENV_VARS: &[&str] = &[
 ];
 
 #[cfg(windows)]
-pub(crate) const DEFAULT_ENV_VARS: &[&str] = &[
-    "PATH",
-    "PATHEXT",
-    "USERNAME",
-    "USERDOMAIN",
-    "USERPROFILE",
-    "TEMP",
-    "TMP",
-];
+pub(crate) const DEFAULT_ENV_VARS: &[&str] =
+    codex_protocol::shell_environment::WINDOWS_CORE_ENV_VARS;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcp_types::ContentBlock;
     use pretty_assertions::assert_eq;
-    use rmcp::model::CallToolResult as RmcpCallToolResult;
-    use serde_json::json;
+
+    use serial_test::serial;
+    use std::ffi::OsStr;
+
+    struct EnvVarGuard {
+        key: String,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &str, value: impl AsRef<OsStr>) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value.as_ref());
+            }
+            Self {
+                key: key.to_string(),
+                original,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                unsafe {
+                    std::env::set_var(&self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(&self.key);
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn create_env_honors_overrides() {
         let value = "custom".to_string();
-        let env = create_env_for_mcp_server(Some(HashMap::from([("TZ".into(), value.clone())])));
-        assert_eq!(env.get("TZ"), Some(&value));
+        let expected = OsString::from(&value);
+        let env = create_env_for_mcp_server(
+            Some(HashMap::from([(OsString::from("TZ"), expected.clone())])),
+            &[],
+        )
+        .expect("local MCP env should build");
+        assert_eq!(env.get(OsStr::new("TZ")), Some(&expected));
     }
 
     #[test]
-    fn convert_call_tool_result_defaults_missing_content() -> Result<()> {
-        let structured_content = json!({ "key": "value" });
-        let rmcp_result = RmcpCallToolResult {
-            content: vec![],
-            structured_content: Some(structured_content.clone()),
-            is_error: Some(true),
-            meta: None,
-        };
-
-        let result = convert_call_tool_result(rmcp_result)?;
-
-        assert!(result.content.is_empty());
-        assert_eq!(result.structured_content, Some(structured_content));
-        assert_eq!(result.is_error, Some(true));
-
-        Ok(())
+    #[serial(extra_rmcp_env)]
+    fn create_env_includes_additional_whitelisted_variables() {
+        let custom_var = "EXTRA_RMCP_ENV";
+        let value = "from-env";
+        let expected = OsString::from(value);
+        let _guard = EnvVarGuard::set(custom_var, value);
+        let env = create_env_for_mcp_server(/*extra_env*/ None, &[custom_var.into()])
+            .expect("local MCP env should build");
+        assert_eq!(env.get(OsStr::new(custom_var)), Some(&expected));
     }
 
     #[test]
-    fn convert_call_tool_result_preserves_existing_content() -> Result<()> {
-        let rmcp_result = RmcpCallToolResult::success(vec![rmcp::model::Content::text("hello")]);
+    #[serial(extra_rmcp_env)]
+    fn create_remote_env_overlay_only_forwards_explicit_variables() {
+        let default_var = DEFAULT_ENV_VARS[0];
+        let custom_var = "EXTRA_REMOTE_RMCP_ENV";
+        let custom_value = OsString::from("from-env");
+        let _default_guard = EnvVarGuard::set(default_var, "from-default");
+        let _custom_guard = EnvVarGuard::set(custom_var, &custom_value);
 
-        let result = convert_call_tool_result(rmcp_result)?;
+        let env =
+            create_env_overlay_for_remote_mcp_server(/*extra_env*/ None, &[custom_var.into()]);
 
-        assert_eq!(result.content.len(), 1);
-        match &result.content[0] {
-            ContentBlock::TextContent(text_content) => {
-                assert_eq!(text_content.text, "hello");
-                assert_eq!(text_content.r#type, "text");
-            }
-            other => panic!("expected text content got {other:?}"),
-        }
-        assert_eq!(result.structured_content, None);
-        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            env,
+            HashMap::from([(OsString::from(custom_var), custom_value)])
+        );
+    }
 
-        Ok(())
+    #[test]
+    #[serial(extra_rmcp_env)]
+    fn create_remote_env_overlay_does_not_copy_remote_source_variables() {
+        let remote_var = "REMOTE_ONLY_RMCP_ENV";
+        let local_var = "LOCAL_RMCP_ENV";
+        let local_value = OsString::from("from-local-env");
+        let _remote_guard = EnvVarGuard::set(remote_var, "should-not-be-copied");
+        let _local_guard = EnvVarGuard::set(local_var, &local_value);
+
+        let env = create_env_overlay_for_remote_mcp_server(
+            /*extra_env*/ None,
+            &[
+                McpServerEnvVar::Config {
+                    name: remote_var.to_string(),
+                    source: Some("remote".to_string()),
+                },
+                McpServerEnvVar::Config {
+                    name: local_var.to_string(),
+                    source: Some("local".to_string()),
+                },
+            ],
+        );
+
+        assert_eq!(
+            env,
+            HashMap::from([(OsString::from(local_var), local_value)])
+        );
+    }
+
+    #[test]
+    fn remote_mcp_env_var_names_returns_remote_source_names() {
+        let names = remote_mcp_env_var_names(&[
+            "LEGACY".into(),
+            McpServerEnvVar::Config {
+                name: "LOCAL".to_string(),
+                source: Some("local".to_string()),
+            },
+            McpServerEnvVar::Config {
+                name: "REMOTE".to_string(),
+                source: Some("remote".to_string()),
+            },
+        ]);
+
+        assert_eq!(names, vec!["REMOTE".to_string()]);
+    }
+
+    #[test]
+    fn create_local_env_rejects_remote_source_variables() {
+        let err = create_env_for_mcp_server(
+            /*extra_env*/ None,
+            &[McpServerEnvVar::Config {
+                name: "REMOTE".to_string(),
+                source: Some("remote".to_string()),
+            }],
+        )
+        .expect_err("remote source should require remote stdio");
+
+        assert!(
+            err.to_string().contains("requires remote MCP stdio"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial(extra_rmcp_env)]
+    fn create_env_preserves_path_when_it_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw_path = std::ffi::OsStr::from_bytes(b"/tmp/codex-\xFF/bin");
+        let expected = raw_path.to_os_string();
+        let _guard = EnvVarGuard::set("PATH", raw_path);
+
+        let env =
+            create_env_for_mcp_server(/*extra_env*/ None, &[]).expect("local MCP env should build");
+
+        assert_eq!(env.get(OsStr::new("PATH")), Some(&expected));
     }
 }

@@ -1,14 +1,25 @@
+#[cfg(unix)]
+use std::ffi::OsString;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
 /// This is designed to be called pre-main() (using `#[ctor::ctor]`) to perform
 /// various process hardening steps, such as
 /// - disabling core dumps
 /// - disabling ptrace attach on Linux and macOS.
-/// - removing dangerous environment variables such as LD_PRELOAD and DYLD_*
+/// - removing dangerous or noisy environment variables such as LD_PRELOAD,
+///   DYLD_*, and macOS malloc stack-logging controls
 pub fn pre_main_hardening() {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pre_main_hardening_linux();
 
     #[cfg(target_os = "macos")]
     pre_main_hardening_macos();
+
+    // On FreeBSD and OpenBSD, apply similar hardening to Linux/macOS:
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+    pre_main_hardening_bsd();
 
     #[cfg(windows)]
     pre_main_hardening_windows();
@@ -20,7 +31,14 @@ const PRCTL_FAILED_EXIT_CODE: i32 = 5;
 #[cfg(target_os = "macos")]
 const PTRACE_DENY_ATTACH_FAILED_EXIT_CODE: i32 = 6;
 
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
 const SET_RLIMIT_CORE_FAILED_EXIT_CODE: i32 = 7;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -40,21 +58,26 @@ pub(crate) fn pre_main_hardening_linux() {
 
     // Official Codex releases are MUSL-linked, which means that variables such
     // as LD_PRELOAD are ignored anyway, but just to be sure, clear them here.
-    let ld_keys: Vec<String> = std::env::vars()
-        .filter_map(|(key, _)| {
-            if key.starts_with("LD_") {
-                Some(key)
-            } else {
-                None
-            }
-        })
-        .collect();
+    remove_env_vars_with_prefix(b"LD_");
+}
 
-    for key in ld_keys {
-        unsafe {
-            std::env::remove_var(key);
-        }
+/// Mark the current Linux process non-dumpable so same-user processes cannot attach with ptrace.
+#[cfg(target_os = "linux")]
+pub fn disable_process_dumping() -> std::io::Result<()> {
+    let ret_code = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    if ret_code == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+pub(crate) fn pre_main_hardening_bsd() {
+    // FreeBSD/OpenBSD: set RLIMIT_CORE to 0 and clear LD_* env vars
+    set_core_file_size_limit_to_zero();
+
+    remove_env_vars_with_prefix(b"LD_");
 }
 
 #[cfg(target_os = "macos")]
@@ -74,21 +97,13 @@ pub(crate) fn pre_main_hardening_macos() {
 
     // Remove all DYLD_ environment variables, which can be used to subvert
     // library loading.
-    let dyld_keys: Vec<String> = std::env::vars()
-        .filter_map(|(key, _)| {
-            if key.starts_with("DYLD_") {
-                Some(key)
-            } else {
-                None
-            }
-        })
-        .collect();
+    remove_env_vars_with_prefix(b"DYLD_");
 
-    for key in dyld_keys {
-        unsafe {
-            std::env::remove_var(key);
-        }
-    }
+    // Remove macOS malloc stack-logging controls so allocator diagnostics from
+    // Codex or inherited child processes do not get sprayed into the TUI:
+    // https://github.com/openai/codex/issues/11555
+    remove_env_vars_with_prefix(b"MallocStackLogging");
+    remove_env_vars_with_prefix(b"MallocLogFile");
 }
 
 #[cfg(unix)]
@@ -111,4 +126,75 @@ fn set_core_file_size_limit_to_zero() {
 #[cfg(windows)]
 pub(crate) fn pre_main_hardening_windows() {
     // TODO(mbolin): Perform the appropriate configuration for Windows.
+}
+
+#[cfg(unix)]
+fn remove_env_vars_with_prefix(prefix: &[u8]) {
+    for key in env_keys_with_prefix(std::env::vars_os(), prefix) {
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn env_keys_with_prefix<I>(vars: I, prefix: &[u8]) -> Vec<OsString>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    vars.into_iter()
+        .filter_map(|(key, _)| {
+            key.as_os_str()
+                .as_bytes()
+                .starts_with(prefix)
+                .then_some(key)
+        })
+        .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn env_keys_with_prefix_handles_non_utf8_entries() {
+        // RÖDBURK
+        let non_utf8_key1 = OsStr::from_bytes(b"R\xD6DBURK").to_os_string();
+        assert!(non_utf8_key1.clone().into_string().is_err());
+        let non_utf8_key2 = OsString::from_vec(vec![b'L', b'D', b'_', 0xF0]);
+        assert!(non_utf8_key2.clone().into_string().is_err());
+
+        let non_utf8_value = OsString::from_vec(vec![0xF0, 0x9F, 0x92, 0xA9]);
+
+        let keys = env_keys_with_prefix(
+            vec![
+                (non_utf8_key1, non_utf8_value.clone()),
+                (non_utf8_key2.clone(), non_utf8_value),
+            ],
+            b"LD_",
+        );
+        assert_eq!(
+            keys,
+            vec![non_utf8_key2],
+            "non-UTF-8 env entries with LD_ prefix should be retained"
+        );
+    }
+
+    #[test]
+    fn env_keys_with_prefix_filters_only_matching_keys() {
+        let ld_test_var = OsStr::from_bytes(b"LD_TEST");
+        let vars = vec![
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+            (ld_test_var.to_os_string(), OsString::from("1")),
+            (OsString::from("DYLD_FOO"), OsString::from("bar")),
+        ];
+
+        let keys = env_keys_with_prefix(vars, b"LD_");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].as_os_str(), ld_test_var);
+    }
 }

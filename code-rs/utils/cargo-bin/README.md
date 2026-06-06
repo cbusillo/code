@@ -18,4 +18,3 @@ Function behavior:
 Background:
 - https://bazel.build/docs/runfiles
 - https://bazel.build/docs/runfiles#runfiles-manifest
-

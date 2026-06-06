@@ -28,16 +28,6 @@ pub fn format_with_separators(n: i64) -> String {
     formatter().format(&Decimal::from(n)).to_string()
 }
 
-/// Format a u64 with locale-aware digit separators.
-///
-/// This is a convenience wrapper for the many token-count call sites that use
-/// unsigned counters.
-pub fn format_with_separators_u64(n: u64) -> String {
-    // Token counts should never exceed i64::MAX in practice; clamp defensively.
-    let clamped = n.min(i64::MAX as u64) as i64;
-    format_with_separators(clamped)
-}
-
 fn format_with_separators_with_formatter(n: i64, formatter: &DecimalFormatter) -> String {
     formatter.format(&Decimal::from(n)).to_string()
 }

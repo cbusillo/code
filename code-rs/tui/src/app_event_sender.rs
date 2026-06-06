@@ -1,202 +1,132 @@
-use std::sync::mpsc::Sender;
+//! Convenience sender for app events and common outbound TUI commands.
+//!
+//! This wraps the raw channel so call sites can submit typed `AppCommand`s
+//! without duplicating event construction or session logging behavior.
 
-use crate::app_event::{AppEvent, BackgroundPlacement};
-use crate::chatwidget::BackgroundOrderTicket;
+use std::path::PathBuf;
+
+use crate::app_command::AppCommand;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
+use codex_app_server_protocol::FileChangeApprovalDecision;
+use codex_app_server_protocol::McpServerElicitationAction;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
+use codex_app_server_protocol::ReviewTarget;
+use codex_app_server_protocol::ThreadRealtimeAudioChunk;
+use codex_app_server_protocol::ToolRequestUserInputResponse;
+use codex_protocol::ThreadId;
+use codex_protocol::request_permissions::RequestPermissionsResponse;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::app_event::AppEvent;
 use crate::session_log;
-use code_core::protocol::OrderMeta;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AppEventSender {
-    // High‑priority events (input, resize, redraw scheduling) are routed here.
-    high_tx: Sender<AppEvent>,
-    // Bulk/streaming events (history inserts, commit ticks, file search, etc.).
-    bulk_tx: Sender<AppEvent>,
+    pub app_event_tx: UnboundedSender<AppEvent>,
 }
 
 impl AppEventSender {
-    /// Create a sender that splits events by priority across two channels.
-    pub(crate) fn new_dual(high_tx: Sender<AppEvent>, bulk_tx: Sender<AppEvent>) -> Self {
-        Self { high_tx, bulk_tx }
-    }
-    /// Backward‑compatible constructor for tests/fixtures that expect a single
-    /// channel. Routes both high‑priority and bulk events to the same sender.
-    #[allow(dead_code)]
-    pub(crate) fn new(app_event_tx: Sender<AppEvent>) -> Self {
-        Self { high_tx: app_event_tx.clone(), bulk_tx: app_event_tx }
+    pub(crate) fn new(app_event_tx: UnboundedSender<AppEvent>) -> Self {
+        Self { app_event_tx }
     }
 
     /// Send an event to the app event channel. If it fails, we swallow the
     /// error and log it.
     pub(crate) fn send(&self, event: AppEvent) {
-        let _ = self.send_with_result(event);
-    }
-
-    /// Send an event while surfacing whether the channel was still connected.
-    /// Returns `true` if the event was delivered, `false` if the channel was
-    /// disconnected (already logged).
-    pub(crate) fn send_with_result(&self, event: AppEvent) -> bool {
         // Record inbound events for high-fidelity session replay.
         // Avoid double-logging Ops; those are logged at the point of submission.
         if !matches!(event, AppEvent::CodexOp(_)) {
             session_log::log_inbound_app_event(&event);
         }
-        let is_high = matches!(
-            event,
-            AppEvent::KeyEvent(_)
-                | AppEvent::MouseEvent(_)
-                | AppEvent::Paste(_)
-                | AppEvent::RequestRedraw
-                | AppEvent::RemoteInboxApprovalDecision { .. }
-                | AppEvent::RemoteInboxNewSession { .. }
-                | AppEvent::RemoteInboxPauseCurrentTurn { .. }
-                | AppEvent::RemoteInboxRequestUserInputAnswer { .. }
-                | AppEvent::RemoteInboxReply { .. }
-                | AppEvent::Redraw
-                | AppEvent::ExitRequest
-                | AppEvent::ClearUi
-                | AppEvent::SetTerminalTitle { .. }
-                | AppEvent::EmitTuiNotification { .. }
-                | AppEvent::AutoCoordinatorCountdown { .. }
-        );
-
-        let tx = if is_high { &self.high_tx } else { &self.bulk_tx };
-        match tx.send(event) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!("failed to send event: {e}");
-                false
-            }
+        if let Err(e) = self.app_event_tx.send(event) {
+            tracing::error!("failed to send event: {e}");
         }
     }
 
-    pub(crate) fn send_background_event_with_placement_and_order(
+    pub(crate) fn interrupt(&self) {
+        self.send(AppEvent::CodexOp(AppCommand::interrupt()));
+    }
+
+    pub(crate) fn compact(&self) {
+        self.send(AppEvent::CodexOp(AppCommand::compact()));
+    }
+
+    pub(crate) fn set_thread_name(&self, name: String) {
+        self.send(AppEvent::CodexOp(AppCommand::set_thread_name(name)));
+    }
+
+    pub(crate) fn review(&self, target: ReviewTarget) {
+        self.send(AppEvent::CodexOp(AppCommand::review(target)));
+    }
+
+    pub(crate) fn list_skills(&self, cwds: Vec<PathBuf>, force_reload: bool) {
+        self.send(AppEvent::CodexOp(AppCommand::list_skills(
+            cwds,
+            force_reload,
+        )));
+    }
+
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    pub(crate) fn realtime_conversation_audio(&self, frame: ThreadRealtimeAudioChunk) {
+        self.send(AppEvent::CodexOp(AppCommand::realtime_conversation_audio(
+            frame,
+        )));
+    }
+
+    pub(crate) fn user_input_answer(&self, id: String, response: ToolRequestUserInputResponse) {
+        self.send(AppEvent::CodexOp(AppCommand::user_input_answer(
+            id, response,
+        )));
+    }
+
+    pub(crate) fn exec_approval(
         &self,
-        message: impl Into<String>,
-        placement: BackgroundPlacement,
-        order: Option<OrderMeta>,
+        thread_id: ThreadId,
+        id: String,
+        decision: CommandExecutionApprovalDecision,
     ) {
-        self.send(AppEvent::InsertBackgroundEvent {
-            message: message.into(),
-            placement,
-            order,
+        self.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::exec_approval(id, /*turn_id*/ None, decision),
         });
     }
 
-    pub(crate) fn send_background_event_with_ticket(
+    pub(crate) fn request_permissions_response(
         &self,
-        ticket: &BackgroundOrderTicket,
-        message: impl Into<String>,
+        thread_id: ThreadId,
+        id: String,
+        response: RequestPermissionsResponse,
     ) {
-        let order = ticket.next_order();
-        self.send_background_event_with_placement_and_order(
-            message,
-            BackgroundPlacement::Tail,
-            Some(order),
-        );
-    }
-
-    pub(crate) fn send_background_before_next_output_with_ticket(
-        &self,
-        ticket: &BackgroundOrderTicket,
-        message: impl Into<String>,
-    ) {
-        let order = ticket.next_order();
-        self.send_background_event_with_placement_and_order(
-            message,
-            BackgroundPlacement::BeforeNextOutput,
-            Some(order),
-        );
-    }
-
-    pub(crate) fn send_background_event_with_order(
-        &self,
-        message: impl Into<String>,
-        order: OrderMeta,
-    ) {
-        self.send_background_event_with_placement_and_order(
-            message,
-            BackgroundPlacement::Tail,
-            Some(order),
-        );
-    }
-
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc::channel;
-    use std::time::Duration;
-    use tokio::sync::oneshot;
-
-    #[test]
-    fn auto_coordinator_countdown_bypasses_bulk_backlog() {
-        let (high_tx, high_rx) = channel();
-        let (bulk_tx, bulk_rx) = channel();
-        let sender = AppEventSender::new_dual(high_tx, bulk_tx);
-
-        for idx in 0..64 {
-            sender.send(AppEvent::AutoCoordinatorAction {
-                message: format!("bulk-{idx}"),
-            });
-        }
-
-        sender.send(AppEvent::AutoCoordinatorCountdown {
-            countdown_id: 99,
-            seconds_left: 9,
+        self.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::request_permissions_response(id, response),
         });
-
-        let prioritized = high_rx
-            .recv_timeout(Duration::from_millis(50))
-            .expect("countdown event should bypass bulk backlog");
-        assert!(matches!(
-            prioritized,
-            AppEvent::AutoCoordinatorCountdown {
-                countdown_id: 99,
-                seconds_left: 9
-            }
-        ));
-
-        assert!(matches!(
-            bulk_rx.try_recv(),
-            Ok(AppEvent::AutoCoordinatorAction { .. })
-        ));
     }
 
-    #[test]
-    fn remote_inbox_new_session_bypasses_bulk_backlog() {
-        let (high_tx, high_rx) = channel();
-        let (bulk_tx, bulk_rx) = channel();
-        let sender = AppEventSender::new_dual(high_tx, bulk_tx);
-
-        for idx in 0..64 {
-            sender.send(AppEvent::AutoCoordinatorAction {
-                message: format!("bulk-{idx}"),
-            });
-        }
-
-        let (response_tx, _response_rx) = oneshot::channel();
-        sender.send(AppEvent::RemoteInboxNewSession {
-            command_id: "cmd-1".to_string(),
-            issued_by: Some("remote-user".to_string()),
-            response_tx: crate::app_event::Redacted(response_tx),
+    pub(crate) fn patch_approval(
+        &self,
+        thread_id: ThreadId,
+        id: String,
+        decision: FileChangeApprovalDecision,
+    ) {
+        self.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::patch_approval(id, decision),
         });
+    }
 
-        let prioritized = high_rx
-            .recv_timeout(Duration::from_millis(50))
-            .expect("new session event should bypass bulk backlog");
-        assert!(matches!(
-            prioritized,
-            AppEvent::RemoteInboxNewSession {
-                command_id,
-                issued_by,
-                ..
-            } if command_id == "cmd-1" && issued_by.as_deref() == Some("remote-user")
-        ));
-
-        assert!(matches!(
-            bulk_rx.try_recv(),
-            Ok(AppEvent::AutoCoordinatorAction { .. })
-        ));
+    pub(crate) fn resolve_elicitation(
+        &self,
+        thread_id: ThreadId,
+        server_name: String,
+        request_id: AppServerRequestId,
+        decision: McpServerElicitationAction,
+        content: Option<serde_json::Value>,
+        meta: Option<serde_json::Value>,
+    ) {
+        self.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::resolve_elicitation(server_name, request_id, decision, content, meta),
+        });
     }
 }

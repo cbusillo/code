@@ -303,10 +303,18 @@ fi
 echo "Cache bucket: ${CACHE_KEY} (${CACHE_KEY_SOURCE})"
 
 CLI_PACKAGE="$(sed -En 's/^name[[:space:]]*=[[:space:]]*"(.*)"/\1/p' cli/Cargo.toml | head -n1)"
+CLI_BIN="$(awk -F'"' 'BEGIN{inbin=0} /^\[\[bin\]\]/{inbin=1; next} inbin && /^[[:space:]]*name[[:space:]]*=/{print $2; exit}' cli/Cargo.toml)"
+if [ -z "${CLI_BIN}" ]; then
+  case "${WORKSPACE_DIR}" in
+    code-rs) CLI_BIN="code" ;;
+    codex-rs) CLI_BIN="codex" ;;
+    *) CLI_BIN="${CLI_PACKAGE}" ;;
+  esac
+fi
 TUI_PACKAGE="$(sed -En 's/^name[[:space:]]*=[[:space:]]*"(.*)"/\1/p' tui/Cargo.toml | head -n1)"
 EXEC_PACKAGE="$(sed -En 's/^name[[:space:]]*=[[:space:]]*"(.*)"/\1/p' exec/Cargo.toml | head -n1)"
-CRATE_PREFIX="${CLI_PACKAGE%%-*}"
-EXEC_BIN="$(awk 'BEGIN{inbin=0} /^\[\[bin\]\]/{inbin=1; next} inbin && /^name[[:space:]]*=/{gsub(/.*"/,"",$0); gsub(/"/,"",$0); print; exit}' exec/Cargo.toml)"
+CRATE_PREFIX="${CLI_BIN}"
+EXEC_BIN="$(awk -F'"' 'BEGIN{inbin=0} /^\[\[bin\]\]/{inbin=1; next} inbin && /^[[:space:]]*name[[:space:]]*=/{print $2; exit}' exec/Cargo.toml)"
 if [ -z "${EXEC_BIN}" ]; then
   EXEC_BIN="${EXEC_PACKAGE}"
 fi

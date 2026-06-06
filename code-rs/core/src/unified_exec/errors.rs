@@ -1,23 +1,40 @@
-#![allow(dead_code)]
+use codex_protocol::exec_output::ExecToolCallOutput;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum UnifiedExecError {
-    #[error("Failed to create unified exec session: {pty_error}")]
-    CreateSession {
-        #[source]
-        pty_error: anyhow::Error,
-    },
-    #[error("Unknown session id {session_id}")]
-    UnknownSessionId { session_id: i32 },
+    #[error("Failed to create unified exec process: {message}")]
+    CreateProcess { message: String },
+    #[error("Unified exec process failed: {message}")]
+    ProcessFailed { message: String },
+    // The model is trained on `session_id`, but internally we track a `process_id`.
+    #[error("Unknown process id {process_id}")]
+    UnknownProcessId { process_id: i32 },
     #[error("failed to write to stdin")]
     WriteToStdin,
+    #[error(
+        "stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
+    )]
+    StdinClosed,
     #[error("missing command line for unified exec request")]
     MissingCommandLine,
+    #[error("Command denied by sandbox: {message}")]
+    SandboxDenied {
+        message: String,
+        output: ExecToolCallOutput,
+    },
 }
 
 impl UnifiedExecError {
-    pub(crate) fn create_session(error: anyhow::Error) -> Self {
-        Self::CreateSession { pty_error: error }
+    pub(crate) fn create_process(message: String) -> Self {
+        Self::CreateProcess { message }
+    }
+
+    pub(crate) fn process_failed(message: String) -> Self {
+        Self::ProcessFailed { message }
+    }
+
+    pub(crate) fn sandbox_denied(message: String, output: ExecToolCallOutput) -> Self {
+        Self::SandboxDenied { message, output }
     }
 }

@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use semver::Version;
 use serde_json::Value as JsonValue;
 use std::collections::VecDeque;
 use std::io;
@@ -10,10 +11,13 @@ use crate::pull::PullEvent;
 use crate::pull::PullProgressReporter;
 use crate::url::base_url_to_host_root;
 use crate::url::is_openai_compatible_base_url;
-use code_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
-use code_core::ModelProviderInfo;
-use code_core::WireApi;
-use code_core::config::Config;
+use codex_core::config::Config;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
+#[cfg(test)]
+use codex_model_provider_info::WireApi;
+#[cfg(test)]
+use codex_model_provider_info::create_oss_provider_with_base_url;
 
 const OLLAMA_CONNECTION_ERROR: &str = "No running Ollama server detected. Start it with: `ollama serve` (after installing). Install instructions: https://github.com/ollama/ollama?tab=readme-ov-file#ollama";
 
@@ -34,11 +38,11 @@ impl OllamaClient {
         // account.
         let provider = config
             .model_providers
-            .get(BUILT_IN_OSS_MODEL_PROVIDER_ID)
+            .get(OLLAMA_OSS_PROVIDER_ID)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("Built-in provider {BUILT_IN_OSS_MODEL_PROVIDER_ID} not found",),
+                    format!("Built-in provider {OLLAMA_OSS_PROVIDER_ID} not found",),
                 )
             })?;
 
@@ -47,20 +51,18 @@ impl OllamaClient {
 
     #[cfg(test)]
     async fn try_from_provider_with_base_url(base_url: &str) -> io::Result<Self> {
-        let provider = code_core::create_oss_provider_with_base_url(base_url);
+        let provider = create_oss_provider_with_base_url(base_url, WireApi::Responses);
         Self::try_from_provider(&provider).await
     }
 
     /// Build a client from a provider definition and verify the server is reachable.
-    async fn try_from_provider(provider: &ModelProviderInfo) -> io::Result<Self> {
+    pub(crate) async fn try_from_provider(provider: &ModelProviderInfo) -> io::Result<Self> {
         #![expect(clippy::expect_used)]
         let base_url = provider
             .base_url
             .as_ref()
             .expect("oss provider must have a base_url");
-        let uses_openai_compat = is_openai_compatible_base_url(base_url)
-            || matches!(provider.wire_api, WireApi::Chat)
-                && is_openai_compatible_base_url(base_url);
+        let uses_openai_compat = is_openai_compatible_base_url(base_url);
         let host_root = base_url_to_host_root(base_url);
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
@@ -124,6 +126,32 @@ impl OllamaClient {
         Ok(names)
     }
 
+    /// Query the server for its version string, returning `None` when unavailable.
+    pub async fn fetch_version(&self) -> io::Result<Option<Version>> {
+        let version_url = format!("{}/api/version", self.host_root.trim_end_matches('/'));
+        let resp = self
+            .client
+            .get(version_url)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let val = resp.json::<JsonValue>().await.map_err(io::Error::other)?;
+        let Some(version_str) = val.get("version").and_then(|v| v.as_str()).map(str::trim) else {
+            return Ok(None);
+        };
+        let normalized = version_str.trim_start_matches('v');
+        match Version::parse(normalized) {
+            Ok(version) => Ok(Some(version)),
+            Err(err) => {
+                tracing::warn!("Failed to parse Ollama version `{version_str}`: {err}");
+                Ok(None)
+            }
+        }
+    }
+
     /// Start a model pull and emit streaming events. The returned stream ends when
     /// a Success event is observed or the server closes the connection.
     pub async fn pull_model_stream(
@@ -166,9 +194,8 @@ impl OllamaClient {
                                         yield PullEvent::Error(err_msg.to_string());
                                         return;
                                     }
-                                    if let Some(status) = value.get("status").and_then(|s| s.as_str()) {
-                                        if status == "success" { yield PullEvent::Success; return; }
-                                    }
+                                    if let Some(status) = value.get("status").and_then(|s| s.as_str())
+                                        && status == "success" { yield PullEvent::Success; return; }
                                 }
                             }
                         }
@@ -218,64 +245,6 @@ impl OllamaClient {
         ))
     }
 
-    /// Query Ollama for model metadata and attempt to extract the maximum
-    /// context length supported by the given model. Returns Ok(Some(n)) when
-    /// detected, Ok(None) when the server responds but no recognizable field
-    /// is present, and Err on transport errors.
-    pub async fn fetch_model_max_context(&self, model: &str) -> io::Result<Option<u64>> {
-        // Always use the native endpoint for model metadata.
-        let url = format!("{}/api/show", self.host_root.trim_end_matches('/'));
-        let resp = self
-            .client
-            .post(url)
-            .json(&serde_json::json!({ "model": model }))
-            .send()
-            .await
-            .map_err(io::Error::other)?;
-        if !resp.status().is_success() {
-            return Ok(None);
-        }
-
-        let val = resp.json::<JsonValue>().await.map_err(io::Error::other)?;
-
-        // Try a few known locations/keys that different Ollama versions expose.
-        // Prefer numeric values; fall back to parsing strings if needed.
-        fn get_u64(v: &JsonValue, key: &str) -> Option<u64> {
-            v.get(key)
-                .and_then(|x| x.as_u64())
-                .or_else(|| v.get(key).and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()))
-        }
-
-        // 1) Top-level `details.context_length` (observed in newer builds)
-        if let Some(details) = val.get("details").and_then(|d| d.as_object()) {
-            if let Some(n) = get_u64(&JsonValue::Object(details.clone()), "context_length") {
-                return Ok(Some(n));
-            }
-        }
-
-        // 2) `model_info.context_length` (some builds)
-        if let Some(model_info) = val.get("model_info").and_then(|d| d.as_object()) {
-            if let Some(n) = get_u64(&JsonValue::Object(model_info.clone()), "context_length") {
-                return Ok(Some(n));
-            }
-            // Some variants may use `ctx` or `num_ctx` in model_info
-            if let Some(n) = get_u64(&JsonValue::Object(model_info.clone()), "num_ctx")
-                .or_else(|| get_u64(&JsonValue::Object(model_info.clone()), "ctx"))
-            {
-                return Ok(Some(n));
-            }
-        }
-
-        // 3) A few other top-level fallbacks that have been seen in the wild
-        if let Some(n) = get_u64(&val, "context_length")
-            .or_else(|| get_u64(&val, "num_ctx"))
-            .or_else(|| get_u64(&val, "ctx"))
-        {
-            return Ok(Some(n));
-        }
-
-        Ok(None)
-    }
     /// Low-level constructor given a raw host root, e.g. "http://localhost:11434".
     #[cfg(test)]
     fn from_host_root(host_root: impl Into<String>) -> Self {
@@ -294,14 +263,15 @@ impl OllamaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     // Happy-path tests using a mock HTTP server; skip if sandbox network is disabled.
     #[tokio::test]
     async fn test_fetch_models_happy_path() {
-        if std::env::var(code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
             tracing::info!(
                 "{} is set; skipping test_fetch_models_happy_path",
-                code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
             );
             return;
         }
@@ -328,11 +298,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_version() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+            tracing::info!(
+                "{} is set; skipping test_fetch_version",
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+            );
+            return;
+        }
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/tags"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                serde_json::json!({ "models": [] }).to_string(),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/version"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                serde_json::json!({ "version": "0.14.1" }).to_string(),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = OllamaClient::try_from_provider_with_base_url(server.uri().as_str())
+            .await
+            .expect("client");
+
+        let version = client.fetch_version().await.expect("version fetch");
+        assert_eq!(version, Some(Version::new(0, 14, 1)));
+    }
+
+    #[tokio::test]
     async fn test_probe_server_happy_path_openai_compat_and_native() {
-        if std::env::var(code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
             tracing::info!(
                 "{} set; skipping test_probe_server_happy_path_openai_compat_and_native",
-                code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
             );
             return;
         }
@@ -366,10 +372,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_oss_provider_ok_when_server_running() {
-        if std::env::var(code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
             tracing::info!(
                 "{} set; skipping test_try_from_oss_provider_ok_when_server_running",
-                code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
             );
             return;
         }
@@ -390,10 +396,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_oss_provider_err_when_server_missing() {
-        if std::env::var(code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
             tracing::info!(
                 "{} set; skipping test_try_from_oss_provider_err_when_server_missing",
-                code_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
             );
             return;
         }

@@ -1,75 +1,90 @@
-use crate::chatwidget::BackgroundOrderTicket;
-use crate::user_approval_widget::ApprovalRequest;
-use code_core::protocol::ReviewDecision;
+use crate::app::app_server_requests::ResolvedAppServerRequest;
+use crate::bottom_pane::ApprovalRequest;
+use crate::bottom_pane::McpServerElicitationFormRequest;
+use crate::render::renderable::Renderable;
+use codex_app_server_protocol::ToolRequestUserInputParams;
 use crossterm::event::KeyEvent;
-use std::any::Any;
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 
-use super::ChatComposer;
-use super::BottomPane;
 use super::CancellationEvent;
 
-/// Type to use for a method that may require a redraw of the UI.
-pub(crate) enum ConditionalUpdate {
-    #[allow(dead_code)]
-    NeedsRedraw,
-    NoRedraw,
+/// Reason an active bottom-pane view finished.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ViewCompletion {
+    Accepted,
+    Cancelled,
 }
 
 /// Trait implemented by every view that can be shown in the bottom pane.
-pub(crate) trait BottomPaneView<'a> {
+pub(crate) trait BottomPaneView: Renderable {
     /// Handle a key event while the view is active. A redraw is always
     /// scheduled after this call.
-    fn handle_key_event(&mut self, _pane: &mut BottomPane<'a>, _key_event: KeyEvent) {}
+    fn handle_key_event(&mut self, _key_event: KeyEvent) {}
 
     /// Return `true` if the view has finished and should be removed.
     fn is_complete(&self) -> bool {
         false
     }
 
-    /// Handle Ctrl-C while this view is active.
-    fn on_ctrl_c(&mut self, _pane: &mut BottomPane<'a>) -> CancellationEvent {
-        CancellationEvent::Ignored
+    /// Return the completion reason once the view has finished.
+    fn completion(&self) -> Option<ViewCompletion> {
+        None
     }
 
-    /// Return the desired height of the view.
-    fn desired_height(&self, width: u16) -> u16;
-
-    /// Render the view: this will be displayed in place of the composer.
-    fn render(&self, area: Rect, buf: &mut Buffer);
-
-    /// Render the view when the caller maintains a persistent composer instance.
-    /// Default implementation falls back to `render` for views that do not need
-    /// direct access to the composer.
-    fn render_with_composer(
-        &self,
-        area: Rect,
-        buf: &mut Buffer,
-        composer: &ChatComposer,
-    ) {
-        let _ = composer;
-        self.render(area, buf);
+    /// Return true when this view should be removed after a child view is accepted.
+    fn dismiss_after_child_accept(&self) -> bool {
+        false
     }
 
-    /// Allow read-only downcasting for views that expose additional APIs.
+    /// Clear any pending child-flow cleanup marker after a child view is cancelled.
+    fn clear_dismiss_after_child_accept(&mut self) {}
+
+    /// Stable identifier for views that need external refreshes while open.
+    fn view_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Actual item index for list-based views that want to preserve selection
+    /// across external refreshes.
+    fn selected_index(&self) -> Option<usize> {
+        None
+    }
+
+    /// Active tab id for tabbed list-based views.
     #[allow(dead_code)]
-    fn as_any(&self) -> Option<&dyn Any> {
+    fn active_tab_id(&self) -> Option<&str> {
         None
     }
 
-    /// Update the status indicator text.
-    fn update_status_text(&mut self, _text: String) -> ConditionalUpdate {
-        ConditionalUpdate::NoRedraw
+    /// Handle Ctrl-C while this view is active.
+    fn on_ctrl_c(&mut self) -> CancellationEvent {
+        CancellationEvent::NotHandled
     }
 
-    /// Allow downcasting for views that expose additional APIs.
-    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
-        None
+    /// Return true if Esc should be routed through `handle_key_event` instead
+    /// of the `on_ctrl_c` cancellation path.
+    fn prefer_esc_to_handle_key_event(&self) -> bool {
+        false
     }
 
-    /// Called when task completes to check if the view should be hidden.
-    fn should_hide_when_task_is_done(&mut self) -> bool {
+    /// Optional paste handler. Return true if the view modified its state and
+    /// needs a redraw.
+    fn handle_paste(&mut self, _pasted: String) -> bool {
+        false
+    }
+
+    /// Flush any pending paste-burst state. Return true if state changed.
+    ///
+    /// This lets a modal that reuses `ChatComposer` participate in the same
+    /// time-based paste burst flushing as the primary composer.
+    fn flush_paste_burst_if_due(&mut self) -> bool {
+        false
+    }
+
+    /// Whether the view is currently holding paste-burst transient state.
+    ///
+    /// When `true`, the bottom pane will schedule a short delayed redraw to
+    /// give the burst time window a chance to flush.
+    fn is_in_paste_burst(&self) -> bool {
         false
     }
 
@@ -78,34 +93,46 @@ pub(crate) trait BottomPaneView<'a> {
     fn try_consume_approval_request(
         &mut self,
         request: ApprovalRequest,
-        ticket: BackgroundOrderTicket,
-    ) -> Option<(ApprovalRequest, BackgroundOrderTicket)> {
-        Some((request, ticket))
+    ) -> Option<ApprovalRequest> {
+        Some(request)
     }
 
-    /// Resolve a pending approval from a non-keyboard source.
-    fn resolve_approval_decision(
+    /// Try to handle request_user_input; return the original value if not
+    /// consumed.
+    fn try_consume_user_input_request(
         &mut self,
-        _approval_id: &str,
-        _decision: ReviewDecision,
-    ) -> bool {
+        request: ToolRequestUserInputParams,
+    ) -> Option<ToolRequestUserInputParams> {
+        Some(request)
+    }
+
+    /// Try to handle a supported MCP server elicitation form request; return the original value if
+    /// not consumed.
+    fn try_consume_mcp_server_elicitation_request(
+        &mut self,
+        request: McpServerElicitationFormRequest,
+    ) -> Option<McpServerElicitationFormRequest> {
+        Some(request)
+    }
+
+    /// Dismiss a request that was resolved by another client.
+    ///
+    /// Returns `true` when the view changed state.
+    fn dismiss_app_server_request(&mut self, _request: &ResolvedAppServerRequest) -> bool {
         false
     }
 
-    /// Handle pasted text while this view is active. Return whether a redraw
-    /// is needed. Default: ignore paste.
-    fn handle_paste(&mut self, _text: String) -> ConditionalUpdate {
-        ConditionalUpdate::NoRedraw
+    /// Whether this view means the session is blocked waiting for the user.
+    ///
+    /// Views that return `true` surface an "Action Required" terminal title
+    /// instead of the normal working spinner so terminal tabs clearly show that
+    /// Codex needs user input.
+    fn terminal_title_requires_action(&self) -> bool {
+        false
     }
 
-    /// Handle pasted text when a persistent composer is available.
-    /// Default implementation forwards to `handle_paste` to preserve
-    /// existing behaviour for views that do not interact with the composer.
-    fn handle_paste_with_composer(
-        &mut self,
-        _composer: &mut ChatComposer,
-        text: String,
-    ) -> ConditionalUpdate {
-        self.handle_paste(text)
+    /// Return the next time-based redraw this view needs while it is active.
+    fn next_frame_delay(&self) -> Option<std::time::Duration> {
+        None
     }
 }

@@ -19,10 +19,65 @@
     },
     "AppConfig": {
       "properties": {
-        "disabled_reason": {
+        "default_tools_approval_mode": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AppDisabledReason"
+              "$ref": "#/definitions/AppToolApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default_tools_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "destructive_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "open_world_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppToolsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppToolApproval": {
+      "enum": [
+        "auto",
+        "prompt",
+        "approve"
+      ],
+      "type": "string"
+    },
+    "AppToolConfig": {
+      "properties": {
+        "approval_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppToolApproval"
             },
             {
               "type": "null"
@@ -30,20 +85,57 @@
           ]
         },
         "enabled": {
-          "default": true,
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
     },
-    "AppDisabledReason": {
+    "AppToolsConfig": {
+      "type": "object"
+    },
+    "ApprovalsReviewer": {
+      "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
       "enum": [
-        "unknown",
-        "user"
+        "user",
+        "auto_review",
+        "guardian_subagent"
       ],
       "type": "string"
     },
     "AppsConfig": {
+      "properties": {
+        "_default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppsDefaultConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "AppsDefaultConfig": {
+      "properties": {
+        "destructive_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "open_world_enabled": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "AskForApproval": {
@@ -60,7 +152,7 @@
         {
           "additionalProperties": false,
           "properties": {
-            "reject": {
+            "granular": {
               "properties": {
                 "mcp_elicitations": {
                   "type": "boolean"
@@ -89,9 +181,9 @@
             }
           },
           "required": [
-            "reject"
+            "granular"
           ],
-          "title": "RejectAskForApproval",
+          "title": "GranularAskForApproval",
           "type": "object"
         }
       ]
@@ -118,6 +210,17 @@
               "type": "null"
             }
           ]
+        },
+        "approvals_reviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "[UNSTABLE] Optional default for where approval requests are routed for review."
         },
         "compact_prompt": {
           "type": [
@@ -246,6 +349,12 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "service_tier": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "tools": {
@@ -485,6 +594,17 @@
             }
           ]
         },
+        "approvals_reviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "[UNSTABLE] Optional profile-level override for where approval requests are routed for review. If omitted, the enclosing config default is used."
+        },
         "chatgpt_base_url": {
           "type": [
             "string",
@@ -527,6 +647,22 @@
           "anyOf": [
             {
               "$ref": "#/definitions/Verbosity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "service_tier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ToolsV2"
             },
             {
               "type": "null"

@@ -1,128 +1,163 @@
 [package]
-edition = "2024"
-name = "code-tui"
-version = { workspace = true }
+name = "codex-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+autobins = false
 
 [[bin]]
-name = "code-tui"
+name = "codex-tui"
 path = "src/main.rs"
 
-[lib]
-name = "code_tui"
-path = "src/lib.rs"
+[[bin]]
+name = "md-events"
+path = "src/bin/md-events.rs"
 
-[features]
-default = ["code-fork"]
-# Gate verbose debug logging inside the TUI implementation.
-debug-logs = []
-dev-faults = ["code-auto-drive-core/dev-faults"]
-# Fork-specific extensions layered on top of upstream history rendering.
-code-fork = []
-test-helpers = ["code-auto-drive-core/test-helpers"]
+[lib]
+name = "codex_tui"
+path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow = "1"
-base64 = "0.22.1"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-code-ansi-escape = { path = "../ansi-escape" }
-code-arg0 = { path = "../arg0" }
-code-browser = { path = "../browser" }
-code-common = { path = "../common", features = [
-    "cli",
-    "elapsed",
-    "sandbox_summary",
-] }
-code-core = { path = "../core" }
-code-file-search = { path = "../file-search" }
-code-git-tooling = { path = "../git-tooling" }
-code-login = { path = "../login" }
-code-ollama = { path = "../ollama" }
-code-protocol = { path = "../protocol" }
-code-version = { path = "../code-version" }
-code-cloud-tasks-client = { path = "../cloud-tasks-client", features = ["mock"] }
-code-auto-drive-diagnostics = { path = "../code-auto-drive-diagnostics" }
-code-auto-drive-core = { workspace = true }
-color-eyre = "0.6.3"
-crossterm = { version = "0.28.1", features = ["bracketed-paste"] }
-diffy = "0.4.2"
-image = { version = "^0.25.6", default-features = false, features = ["jpeg", "png"] }
-lazy_static = "1"
-libc = "0.2"
-mcp-types = { workspace = true }
-once_cell = "1"
-path-clean = "1.0.1"
-rand = "0.9"
-ratatui = { version = "0.29.0", features = [
+anyhow = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+codex-ansi-escape = { workspace = true }
+codex-app-server-client = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+codex-arg0 = { workspace = true }
+codex-install-context = { workspace = true }
+codex-chatgpt = { workspace = true }
+codex-cloud-requirements = { workspace = true }
+codex-config = { workspace = true }
+codex-connectors = { workspace = true }
+codex-core-plugins = { workspace = true }
+codex-core-skills = { workspace = true }
+codex-exec-server = { workspace = true }
+codex-features = { workspace = true }
+codex-feedback = { workspace = true }
+codex-file-search = { workspace = true }
+codex-git-utils = { workspace = true }
+codex-login = { workspace = true }
+codex-message-history = { workspace = true }
+codex-model-provider = { workspace = true }
+codex-model-provider-info = { workspace = true }
+codex-models-manager = { workspace = true }
+codex-otel = { workspace = true }
+codex-plugin = { workspace = true }
+codex-protocol = { workspace = true }
+codex-realtime-webrtc = { workspace = true }
+codex-rollout = { workspace = true }
+codex-shell-command = { workspace = true }
+codex-state = { workspace = true }
+codex-terminal-detection = { workspace = true }
+codex-utils-approval-presets = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
+codex-utils-cli = { workspace = true }
+codex-utils-elapsed = { workspace = true }
+codex-utils-fuzzy-match = { workspace = true }
+codex-utils-oss = { workspace = true }
+codex-utils-path = { workspace = true }
+codex-utils-plugins = { workspace = true }
+codex-utils-sandbox-summary = { workspace = true }
+codex-utils-sleep-inhibitor = { workspace = true }
+codex-utils-string = { workspace = true }
+color-eyre = { workspace = true }
+crossterm = { workspace = true, features = ["bracketed-paste", "event-stream"] }
+derive_more = { workspace = true, features = ["is_variant"] }
+diffy = { workspace = true }
+dirs = { workspace = true }
+dunce = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
+itertools = { workspace = true }
+lazy_static = { workspace = true }
+pathdiff = { workspace = true }
+pulldown-cmark = { workspace = true }
+rand = { workspace = true }
+ratatui = { workspace = true, features = [
     "scrolling-regions",
+    "unstable-backend-writer",
     "unstable-rendered-line-info",
     "unstable-widget-ref",
-    "underline-color",
-    "unstable-backend-writer",
 ] }
-ratatui-image = "8.0.0"
-regex-lite = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-shlex = "1.3.0"
-sha2 = { workspace = true }
-tempfile = "3"
-arboard = { workspace = true }
-strum = "0.27.2"
-strum_macros = "0.27.2"
-supports-color = "3.0.2"
-textwrap = "0.16.2"
-tokio = { version = "1", features = [
+ratatui-macros = { workspace = true }
+regex-lite = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+rmcp = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+shlex = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+supports-color = { workspace = true }
+tempfile = { workspace = true }
+textwrap = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
     "io-std",
     "macros",
     "process",
     "rt-multi-thread",
     "signal",
+    "test-util",
+    "time",
 ] }
-tokio-tungstenite = { version = "0.23", default-features = true, features = ["rustls-tls-webpki-roots"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = { version = "0.1.41", features = ["log"] }
-tracing-appender = "0.2.3"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-tui-input = "0.14.0"
-tui-markdown = "=0.3.3"
-unicode-segmentation = "1.12.0"
-unicode-width = "0.1"
-url = "2"
-uuid = "1"
-futures = "0.3"
-fs2 = "0.4"
-syntect = { version = "5", features = ["yaml-load", "plist-load", "parsing", "default-syntaxes"] }
-which = "6"
-urlencoding = "2.1"
-pulldown-cmark = "0.13"
-portable-pty = "0.9.0"
-thiserror = "1"
-time = { workspace = true, features = ["formatting", "macros", "local-offset"] }
-# vt100 0.16+ depends on unicode-width 0.2.1 which conflicts with ratatui 0.29.x.
-# Stick to 0.15.x until ratatui upgrades.
-vt100 = "0.15.0"
+tokio-stream = { workspace = true, features = ["sync"] }
+toml = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+syntect = "5"
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+webbrowser = { workspace = true }
+uuid = { workspace = true }
+
+codex-windows-sandbox = { workspace = true }
+tokio-util = { workspace = true, features = ["time"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.15"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
-signal-hook = "0.3"
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+which = { workspace = true }
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+winsplit = "0.1"
+
+# Clipboard support via `arboard` is not available on Android/Termux.
+# Only include it for non-Android targets so the crate builds on Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = { workspace = true }
 
 
 [dev-dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-filetime = { workspace = true }
-indoc = "2.0"
-insta = "1.43.1"
-pretty_assertions = "1"
-rand = "0.9"
-strip-ansi-escapes = "0.1"
-serde_bytes = "0.11"
-toml = { workspace = true }
-code-tui = { path = ".", features = ["test-helpers"] }
-[build-dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+codex-cli = { workspace = true }
+codex-mcp = { workspace = true }
+codex-utils-cargo-bin = { workspace = true }
+codex-utils-pty = { workspace = true }
+assert_matches = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+insta = { workspace = true }
+pretty_assertions = { workspace = true }
+rand = { workspace = true }
+serial_test = { workspace = true }
+vt100 = { workspace = true }
+uuid = { workspace = true }
