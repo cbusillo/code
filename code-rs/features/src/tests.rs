@@ -67,6 +67,14 @@ fn image_detail_original_is_removed_and_disabled_by_default() {
 }
 
 #[test]
+fn skills_feature_key_is_accepted_as_removed_noop() {
+    let mut features = Features::with_defaults();
+    features.apply_map(&BTreeMap::from([("skills".to_string(), true)]));
+
+    assert_eq!(features.enabled(Feature::ShellTool), true);
+}
+
+#[test]
 fn code_mode_only_requires_code_mode() {
     let mut features = Features::with_defaults();
     features.enable(Feature::CodeModeOnly);

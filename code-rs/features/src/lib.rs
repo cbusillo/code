@@ -422,6 +422,9 @@ impl Features {
                 "image_detail_original" => {
                     continue;
                 }
+                "skills" => {
+                    continue;
+                }
                 "use_legacy_landlock" => {
                     self.record_legacy_usage_force(
                         "features.use_legacy_landlock",
