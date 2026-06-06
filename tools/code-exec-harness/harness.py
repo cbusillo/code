@@ -149,6 +149,18 @@ def contains_text(value: Any, needle: str) -> bool:
     return False
 
 
+def matches_json_fragment(value: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(value, dict):
+            return False
+        return all(key in value and matches_json_fragment(value[key], child) for key, child in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(value, list) or len(expected) > len(value):
+            return False
+        return all(matches_json_fragment(actual, child) for actual, child in zip(value, expected))
+    return value == expected
+
+
 def count_text(value: Any, needle: str) -> int:
     if isinstance(value, str):
         return value.count(needle)
@@ -1056,6 +1068,16 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
             if isinstance(event, dict)
         ):
             failures.append(f"no command event matched {assertion!r}")
+    for assertion in expect.get("events", []):
+        if not isinstance(assertion, dict):
+            failures.append("events expectation entries must be objects")
+            continue
+        if not any(
+            matches_json_fragment(event, assertion)
+            for event in summary.get("events", [])
+            if isinstance(event, dict)
+        ):
+            failures.append(f"no event matched {assertion!r}")
     event_counts = expect.get("event_count")
     actual_event_counts = collect_event_counts(summary.get("events", []))
     if isinstance(event_counts, dict):
