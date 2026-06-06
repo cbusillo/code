@@ -1,10 +1,22 @@
 # Codex-Base Every Code Feature Inventory
 
-This inventory supports [#386](https://github.com/cbusillo/code/issues/386).
-It compares the last pre-substrate Every Code Rust workspace commit
-`fa0c33944f` with the Codex-base `code-rs` workspace after PR #391
-(`114ba08163`). The goal is to decide what to port, what to replace with a
-Codex-native surface, and what can be dropped.
+This inventory supports [#386](https://github.com/cbusillo/code/issues/386) and
+is now gated by [#397](https://github.com/cbusillo/code/issues/397). It compares
+the practical pre-#390 Every Code Rust workspace anchor `fa0c33944f` with the
+Codex-base `code-rs` workspace after PR #391 (`114ba08163`). The companion
+[Codex fork parity ledger](codex-fork-parity-ledger.md) compares the same anchor
+against current `origin/main` for deleted fixtures, tests, and behavior probes.
+
+Operationally, #397 owns the short-term parity gate: missing Every Code behavior
+must be classified there before broad feature ports resume under #386. This
+inventory remains the broader domain map for deciding what to port, what to
+replace with a Codex-native surface, and what can be dropped.
+
+Current `main` should be treated as a provisional Codex CLI fork baseline until
+the parity ledger in [codex-fork-parity-ledger.md](codex-fork-parity-ledger.md)
+has classified the removed Every Code fixtures, tests, and behavior probes. Do
+not treat a missing old feature as intentionally retired unless that ledger or a
+linked issue says so.
 
 `code-rs` is now the editable Codex-base Every Code product workspace.
 `codex-rs` remains the read-only `openai/codex:main` mirror. Do not re-add
