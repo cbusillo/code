@@ -53,6 +53,7 @@ const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
     "apps",
     "memories",
     "plugins",
+    "remote_plugin",
     "remote_control",
     "tool_search",
     "tool_suggest",

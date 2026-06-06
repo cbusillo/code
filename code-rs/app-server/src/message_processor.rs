@@ -54,6 +54,9 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::RemoteControlConnectionStatus;
+use codex_app_server_protocol::RemoteControlEnableResponse;
+use codex_app_server_protocol::RemoteControlStatusReadResponse;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::experimental_required_message;
 use codex_arg0::Arg0DispatchPaths;
@@ -1082,6 +1085,18 @@ impl MessageProcessor {
                     .experimental_feature_list(params)
                     .await
             }
+            ClientRequest::RemoteControlStatusRead { .. } => Ok(Some(RemoteControlStatusReadResponse {
+                status: RemoteControlConnectionStatus::Disabled,
+                environment_id: None,
+            }
+            .into())),
+            // Desktop probes remote control during startup. Keep this as a harmless
+            // compatibility response until Every Code wires a real remote-control backend.
+            ClientRequest::RemoteControlEnable { .. } => Ok(Some(RemoteControlEnableResponse {
+                status: RemoteControlConnectionStatus::Disabled,
+                environment_id: None,
+            }
+            .into())),
             ClientRequest::CollaborationModeList { params, .. } => {
                 self.catalog_processor.collaboration_mode_list(params).await
             }

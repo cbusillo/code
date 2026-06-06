@@ -2727,6 +2727,7 @@ fn plugin_list_params_serializes_marketplace_kind_filter() {
                 PluginListMarketplaceKind::Local,
                 PluginListMarketplaceKind::WorkspaceDirectory,
                 PluginListMarketplaceKind::SharedWithMe,
+                PluginListMarketplaceKind::Vertical,
             ]),
         })
         .unwrap(),
@@ -2736,8 +2737,24 @@ fn plugin_list_params_serializes_marketplace_kind_filter() {
                 "local",
                 "workspace-directory",
                 "shared-with-me",
+                "vertical",
             ],
         }),
+    );
+}
+
+#[test]
+fn plugin_list_params_deserializes_vertical_marketplace_kind() {
+    assert_eq!(
+        serde_json::from_value::<PluginListParams>(json!({
+            "cwds": null,
+            "marketplaceKinds": ["vertical"],
+        }))
+        .unwrap(),
+        PluginListParams {
+            cwds: None,
+            marketplace_kinds: Some(vec![PluginListMarketplaceKind::Vertical]),
+        },
     );
 }
 

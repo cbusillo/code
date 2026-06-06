@@ -137,6 +137,10 @@ pub enum PluginListMarketplaceKind {
     #[serde(rename = "shared-with-me")]
     #[ts(rename = "shared-with-me")]
     SharedWithMe,
+    /// Legacy Desktop catalog filter accepted for startup compatibility.
+    #[serde(rename = "vertical")]
+    #[ts(rename = "vertical")]
+    Vertical,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
