@@ -11,6 +11,12 @@ Code Bridge is an Every Code overlay, not a Desktop compatibility mutation.
 Future bridge behavior should be additive and validated through bridge-specific
 fixtures before it touches app-server or TUI presentation code.
 
+When Codex CLI already has a similar app-server, protocol, or command surface,
+prefer aligning Every Code behavior with that Codex shape instead of making the
+Codex-facing surface mirror the old Every Code bridge commands. Preserve Every
+Code features, fixes, and fixtures through the smallest additive overlay needed
+for behavior that Codex does not already cover.
+
 Code Bridge `control` events must use a distinct transport or namespace from
 Codex Desktop remote-control requests. Fake bridge fixtures must prove that
 bridge control delivery does not route through Desktop remote-control status,
@@ -56,7 +62,9 @@ after local-page fixtures prove the lifecycle boundary.
 ## Validation Order
 
 1. Add fake bridge metadata/server fixtures that prove discovery, stale heartbeat
-   detection, subscription normalization, and control request/result matching.
+   detection, subscription normalization, and control request/result matching,
+   while first proving Code Bridge-shaped control does not enter the Codex
+   Desktop remote-control JSON-RPC path.
 2. Port the local navigation probe to the new overlay boundary using a local HTTP
    server and no external network.
 3. Add TUI snapshot coverage only after event schema and storage are stable.
