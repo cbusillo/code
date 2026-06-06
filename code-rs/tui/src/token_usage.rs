@@ -34,6 +34,16 @@ impl TokenUsage {
         (self.non_cached_input() + self.output_tokens.max(0)).max(0)
     }
 
+    pub(crate) fn prompt_cache_hit_rate_percent(&self) -> Option<i64> {
+        let input = self.input_tokens.max(0);
+        let cached = self.cached_input();
+        if input == 0 || cached == 0 {
+            return None;
+        }
+
+        Some(((cached as f64 / input as f64) * 100.0).clamp(0.0, 100.0).round() as i64)
+    }
+
     pub(crate) fn tokens_in_context_window(&self) -> i64 {
         self.total_tokens
     }
