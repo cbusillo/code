@@ -1,30 +1,32 @@
 [package]
-edition = "2024"
-name = "code-mcp-server"
-version = { workspace = true }
+name = "codex-mcp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [[bin]]
-name = "code-mcp-server"
+name = "codex-mcp-server"
 path = "src/main.rs"
 
 [lib]
-name = "code_mcp_server"
+name = "codex_mcp_server"
 path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-agent-client-protocol = { version = "0.4.3", features = ["unstable"] }
-code-arg0 = { workspace = true }
-code-common = { workspace = true, features = ["cli"] }
-code-core = { workspace = true }
-code-protocol = { workspace = true }
-code-app-server-protocol = { workspace = true }
-code-utils-json-to-toml = { workspace = true }
-code-app-server = { workspace = true }
-mcp-types = { workspace = true }
+codex-arg0 = { workspace = true }
+codex-config = { workspace = true }
+codex-core = { workspace = true }
+codex-exec-server = { workspace = true }
+codex-login = { workspace = true }
+codex-protocol = { workspace = true }
+codex-utils-cli = { workspace = true }
+codex-utils-json-to-toml = { workspace = true }
+rmcp = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -38,7 +40,13 @@ tokio = { workspace = true, features = [
 ] }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
-uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]
+codex-utils-absolute-path = { workspace = true }
+codex-shell-command = { workspace = true }
+core_test_support = { workspace = true }
+mcp_test_support = { workspace = true }
+os_info = { workspace = true }
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

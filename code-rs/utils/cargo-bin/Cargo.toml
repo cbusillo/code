@@ -12,3 +12,6 @@ assert_cmd = { workspace = true }
 runfiles = { workspace = true }
 thiserror = { workspace = true }
 
+[lib]
+test = false
+doctest = false

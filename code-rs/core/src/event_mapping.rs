@@ -1,339 +1,213 @@
-use crate::protocol::AgentMessageEvent;
-use crate::protocol::AgentReasoningEvent;
-use crate::protocol::AgentReasoningRawContentEvent;
-use crate::protocol::BrowserSnapshotEvent;
-use crate::protocol::EnvironmentContextDeltaEvent;
-use crate::protocol::EnvironmentContextFullEvent;
-use crate::protocol::EventMsg;
-use crate::protocol::WebSearchCompleteEvent;
-use code_protocol::models::ContentItem;
-use code_protocol::models::ReasoningItemContent;
-use code_protocol::models::ReasoningItemReasoningSummary;
-use code_protocol::models::ResponseItem;
-use code_protocol::models::WebSearchAction;
-use code_protocol::protocol::BROWSER_SNAPSHOT_CLOSE_TAG;
-use code_protocol::protocol::BROWSER_SNAPSHOT_OPEN_TAG;
-use code_protocol::protocol::ENVIRONMENT_CONTEXT_CLOSE_TAG;
-use code_protocol::protocol::ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG;
-use code_protocol::protocol::ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG;
-use code_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
-use serde_json::Value as JsonValue;
+use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::ReasoningItem;
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::UserMessageItem;
+use codex_protocol::items::WebSearchItem;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::models::WebSearchAction;
+use codex_protocol::models::is_image_close_tag_text;
+use codex_protocol::models::is_image_open_tag_text;
+use codex_protocol::models::is_local_image_close_tag_text;
+use codex_protocol::models::is_local_image_open_tag_text;
+use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
+use codex_protocol::protocol::REALTIME_CONVERSATION_OPEN_TAG;
+use codex_protocol::user_input::UserInput;
+use tracing::warn;
+use uuid::Uuid;
 
-/// Convert a `ResponseItem` into zero or more `EventMsg` values that the UI can render.
+use crate::context::is_contextual_user_fragment;
+use crate::context::parse_visible_hook_prompt_message;
+use crate::web_search::web_search_action_detail;
+
+const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
+    "<permissions instructions>",
+    "<model_switch>",
+    COLLABORATION_MODE_OPEN_TAG,
+    REALTIME_CONVERSATION_OPEN_TAG,
+    "<personality_spec>",
+];
+
+pub(crate) fn is_contextual_user_message_content(message: &[ContentItem]) -> bool {
+    message.iter().any(is_contextual_user_fragment)
+}
+
+/// Returns true when a developer message contains any rollback-trimmable contextual fragment.
 ///
-/// When `show_raw_agent_reasoning` is false, raw reasoning content events are omitted.
-#[allow(dead_code)]
-pub(crate) fn map_response_item_to_event_messages(
-    item: &ResponseItem,
-    show_raw_agent_reasoning: bool,
-) -> Vec<EventMsg> {
-    match item {
-        ResponseItem::Message { role, content, .. } => {
-            // Do not surface system messages as user events.
-            if role == "system" {
-                return Vec::new();
-            }
+/// `build_initial_context` can bundle these fragments together with persistent developer text in a
+/// single developer message, so callers that care about invalidating a stored reference baseline
+/// should pair this with `has_non_contextual_dev_message_content`.
+pub(crate) fn is_contextual_dev_message_content(message: &[ContentItem]) -> bool {
+    message.iter().any(is_contextual_dev_fragment)
+}
 
-            let mut events: Vec<EventMsg> = Vec::new();
+/// Returns true when a developer message contains any fragment that is not part of the
+/// rollback-trimmable contextual prefix set.
+pub(crate) fn has_non_contextual_dev_message_content(message: &[ContentItem]) -> bool {
+    message
+        .iter()
+        .any(|content_item| !is_contextual_dev_fragment(content_item))
+}
 
-            for content_item in content.iter() {
-                match content_item {
-                    ContentItem::InputText { text } => {
-                        if let Some(snapshot) = extract_tagged_json(text, ENVIRONMENT_CONTEXT_OPEN_TAG, ENVIRONMENT_CONTEXT_CLOSE_TAG)
-                            .and_then(parse_json)
-                        {
-                            events.push(EventMsg::EnvironmentContextFull(
-                                EnvironmentContextFullEvent {
-                                    snapshot,
-                                    sequence: None,
-                                },
-                            ));
-                            continue;
-                        }
+fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
+    let ContentItem::InputText { text } = content_item else {
+        return false;
+    };
 
-                        if let Some(delta) = extract_tagged_json(
-                            text,
-                            ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG,
-                            ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG,
-                        )
-                        .and_then(parse_json)
-                        {
-                            let base_fingerprint = delta
-                                .get("base_fingerprint")
-                                .and_then(|value| value.as_str())
-                                .map(|value| value.to_string());
-                            events.push(EventMsg::EnvironmentContextDelta(
-                                EnvironmentContextDeltaEvent {
-                                    base_fingerprint,
-                                    sequence: None,
-                                    delta,
-                                },
-                            ));
-                            continue;
-                        }
+    let trimmed = text.trim_start();
+    CONTEXTUAL_DEVELOPER_PREFIXES.iter().any(|prefix| {
+        trimmed
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+    })
+}
 
-                        if let Some(snapshot) = extract_tagged_json(
-                            text,
-                            BROWSER_SNAPSHOT_OPEN_TAG,
-                            BROWSER_SNAPSHOT_CLOSE_TAG,
-                        )
-                        .and_then(parse_json)
-                        {
-                            let url = snapshot
-                                .get("url")
-                                .and_then(|value| value.as_str())
-                                .map(|value| value.to_string());
-                            let captured_at = snapshot
-                                .get("captured_at")
-                                .and_then(|value| value.as_str())
-                                .map(|value| value.to_string());
-                            events.push(EventMsg::BrowserSnapshot(BrowserSnapshotEvent {
-                                snapshot,
-                                url,
-                                captured_at,
-                            }));
-                            continue;
-                        }
-                    }
-                    ContentItem::InputImage { .. } => {}
-                    ContentItem::OutputText { text } => {
-                        events.push(EventMsg::AgentMessage(AgentMessageEvent {
-                            message: text.clone(),
-                        }));
-                    }
+fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
+    if is_contextual_user_message_content(message) {
+        return None;
+    }
+
+    let mut content: Vec<UserInput> = Vec::new();
+
+    for (idx, content_item) in message.iter().enumerate() {
+        match content_item {
+            ContentItem::InputText { text } => {
+                if (is_local_image_open_tag_text(text) || is_image_open_tag_text(text))
+                    && (matches!(message.get(idx + 1), Some(ContentItem::InputImage { .. })))
+                    || (idx > 0
+                        && (is_local_image_close_tag_text(text) || is_image_close_tag_text(text))
+                        && matches!(message.get(idx - 1), Some(ContentItem::InputImage { .. })))
+                {
+                    continue;
                 }
-            }
-
-            events
-        }
-
-        ResponseItem::CompactionSummary { .. } | ResponseItem::ContextCompaction { .. } => {
-            Vec::new()
-        }
-
-        ResponseItem::Reasoning {
-            summary, content, ..
-        } => {
-            let mut events = Vec::new();
-            for ReasoningItemReasoningSummary::SummaryText { text } in summary {
-                events.push(EventMsg::AgentReasoning(AgentReasoningEvent {
+                content.push(UserInput::Text {
                     text: text.clone(),
-                }));
+                    // Model input content does not carry UI element ranges.
+                    text_elements: Vec::new(),
+                });
             }
-            if let Some(items) = content.as_ref().filter(|_| show_raw_agent_reasoning) {
-                for c in items {
-                    let text = match c {
-                        ReasoningItemContent::ReasoningText { text }
-                        | ReasoningItemContent::Text { text } => text,
-                    };
-                    events.push(EventMsg::AgentReasoningRawContent(
-                        AgentReasoningRawContentEvent { text: text.clone() },
-                    ));
-                }
+            ContentItem::InputImage { image_url, .. } => {
+                content.push(UserInput::Image {
+                    image_url: image_url.clone(),
+                });
             }
-            events
+            ContentItem::OutputText { text } => {
+                warn!("Output text in user message: {}", text);
+            }
         }
+    }
 
-        ResponseItem::WebSearchCall { id, action, .. } => match action {
-            Some(WebSearchAction::Search { query, queries }) => {
-                let call_id = id.clone().unwrap_or_else(|| "".to_string());
-                let query = web_search_query(query, queries);
-                vec![EventMsg::WebSearchComplete(WebSearchCompleteEvent { call_id, query })]
+    Some(UserMessageItem::new(&content))
+}
+
+fn parse_agent_message(
+    id: Option<&String>,
+    message: &[ContentItem],
+    phase: Option<MessagePhase>,
+) -> AgentMessageItem {
+    let mut content: Vec<AgentMessageContent> = Vec::new();
+    for content_item in message.iter() {
+        match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                content.push(AgentMessageContent::Text { text: text.clone() });
             }
-            _ => Vec::new(),
+            _ => {
+                warn!(
+                    "Unexpected content item in agent message: {:?}",
+                    content_item
+                );
+            }
+        }
+    }
+    let id = id.cloned().unwrap_or_else(|| Uuid::new_v4().to_string());
+    AgentMessageItem {
+        id,
+        content,
+        phase,
+        memory_citation: None,
+    }
+}
+
+pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+    match item {
+        ResponseItem::Message {
+            role,
+            content,
+            id,
+            phase,
+            ..
+        } => match role.as_str() {
+            "user" => parse_visible_hook_prompt_message(id.as_ref(), content)
+                .map(TurnItem::HookPrompt)
+                .or_else(|| parse_user_message(content).map(TurnItem::UserMessage)),
+            "assistant" => Some(TurnItem::AgentMessage(parse_agent_message(
+                id.as_ref(),
+                content,
+                phase.clone(),
+            ))),
+            "system" => None,
+            _ => None,
         },
-
-        // Variants that require side effects are handled by higher layers and do not emit events here.
-        ResponseItem::FunctionCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::GhostSnapshot { .. }
-        | ResponseItem::Other => Vec::new(),
-    }
-}
-
-fn extract_tagged_json<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
-    let start = text.find(open)? + open.len();
-    let end = text[start..].find(close)? + start;
-    let json_slice = text.get(start..end)?;
-    let trimmed = json_slice.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed)
-}
-
-fn parse_json(fragment: &str) -> Option<JsonValue> {
-    serde_json::from_str(fragment).ok()
-}
-
-fn web_search_query(query: &Option<String>, queries: &Option<Vec<String>>) -> Option<String> {
-    if let Some(value) = query.clone().filter(|q| !q.is_empty()) {
-        return Some(value);
-    }
-
-    let items = queries.as_ref();
-    let first = items
-        .and_then(|queries| queries.first())
-        .cloned()
-        .unwrap_or_default();
-    if first.is_empty() {
-        return None;
-    }
-    if items.is_some_and(|queries| queries.len() > 1) {
-        Some(format!("{first} ..."))
-    } else {
-        Some(first)
+        ResponseItem::Reasoning {
+            id,
+            summary,
+            content,
+            ..
+        } => {
+            let summary_text = summary
+                .iter()
+                .map(|entry| match entry {
+                    ReasoningItemReasoningSummary::SummaryText { text } => text.clone(),
+                })
+                .collect();
+            let raw_content = content
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|entry| match entry {
+                    ReasoningItemContent::ReasoningText { text }
+                    | ReasoningItemContent::Text { text } => text,
+                })
+                .collect();
+            Some(TurnItem::Reasoning(ReasoningItem {
+                id: id.clone(),
+                summary_text,
+                raw_content,
+            }))
+        }
+        ResponseItem::WebSearchCall { id, action, .. } => {
+            let (action, query) = match action {
+                Some(action) => (action.clone(), web_search_action_detail(action)),
+                None => (WebSearchAction::Other, String::new()),
+            };
+            Some(TurnItem::WebSearch(WebSearchItem {
+                id: id.clone().unwrap_or_default(),
+                query,
+                action,
+            }))
+        }
+        ResponseItem::ImageGenerationCall {
+            id,
+            status,
+            revised_prompt,
+            result,
+        } => Some(TurnItem::ImageGeneration(
+            codex_protocol::items::ImageGenerationItem {
+                id: id.clone(),
+                status: status.clone(),
+                revised_prompt: revised_prompt.clone(),
+                result: result.clone(),
+                saved_path: None,
+            },
+        )),
+        _ => None,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::map_response_item_to_event_messages;
-    use crate::protocol::BrowserSnapshotEvent;
-    use crate::protocol::EnvironmentContextDeltaEvent;
-    use crate::protocol::EnvironmentContextFullEvent;
-    use crate::protocol::EventMsg;
-    use code_protocol::models::ContentItem;
-    use code_protocol::models::ResponseItem;
-    use code_protocol::protocol::BROWSER_SNAPSHOT_CLOSE_TAG;
-    use code_protocol::protocol::BROWSER_SNAPSHOT_OPEN_TAG;
-    use code_protocol::protocol::ENVIRONMENT_CONTEXT_CLOSE_TAG;
-    use code_protocol::protocol::ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG;
-    use code_protocol::protocol::ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG;
-    use code_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
-    use serde_json::json;
-
-    #[test]
-    fn maps_user_message_with_text_and_two_images() {
-        let img1 = "https://example.com/one.png".to_string();
-        let img2 = "https://example.com/two.jpg".to_string();
-
-        let item = ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![
-                ContentItem::InputText {
-                    text: "Hello world".to_string(),
-                },
-                ContentItem::InputImage {
-                    image_url: img1.clone(),
-                },
-                ContentItem::InputImage {
-                    image_url: img2.clone(),
-                },
-            ], end_turn: None, phase: None};
-
-        let events = map_response_item_to_event_messages(&item, false);
-        // No UI event is emitted for raw user input in this fork
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn maps_environment_context_full_message() {
-        let payload = json!({
-            "version": 1,
-            "cwd": "/repo",
-            "git_branch": "feature/ctx",
-        });
-        let item = ResponseItem::Message {
-            id: Some("env-1".into()),
-            role: "user".into(),
-            content: vec![ContentItem::InputText {
-                text: format!(
-                    "{}\n{}\n{}",
-                    ENVIRONMENT_CONTEXT_OPEN_TAG,
-                    serde_json::to_string_pretty(&payload).unwrap(),
-                    ENVIRONMENT_CONTEXT_CLOSE_TAG
-                ),
-            }], end_turn: None, phase: None};
-
-        let events = map_response_item_to_event_messages(&item, false);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            EventMsg::EnvironmentContextFull(EnvironmentContextFullEvent { snapshot, sequence }) => {
-                assert_eq!(snapshot, &payload);
-                assert_eq!(*sequence, None);
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn maps_environment_context_delta_message() {
-        let payload = json!({
-            "version": 1,
-            "base_fingerprint": "fp-123",
-            "changes": {
-                "git_branch": "ctx-ui",
-            }
-        });
-
-        let item = ResponseItem::Message {
-            id: Some("env-2".into()),
-            role: "user".into(),
-            content: vec![ContentItem::InputText {
-                text: format!(
-                    "{}\n{}\n{}",
-                    ENVIRONMENT_CONTEXT_DELTA_OPEN_TAG,
-                    serde_json::to_string_pretty(&payload).unwrap(),
-                    ENVIRONMENT_CONTEXT_DELTA_CLOSE_TAG
-                ),
-            }], end_turn: None, phase: None};
-
-        let events = map_response_item_to_event_messages(&item, false);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            EventMsg::EnvironmentContextDelta(EnvironmentContextDeltaEvent {
-                delta,
-                base_fingerprint,
-                sequence,
-            }) => {
-                assert_eq!(delta, &payload);
-                assert_eq!(base_fingerprint.as_deref(), Some("fp-123"));
-                assert!(sequence.is_none());
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn maps_browser_snapshot_message() {
-        let payload = json!({
-            "url": "https://example.com",
-            "captured_at": "2025-11-05T09:30:00Z",
-            "hash": "abc123",
-        });
-        let item = ResponseItem::Message {
-            id: Some("env-browser".into()),
-            role: "user".into(),
-            content: vec![ContentItem::InputText {
-                text: format!(
-                    "{}\n{}\n{}",
-                    BROWSER_SNAPSHOT_OPEN_TAG,
-                    serde_json::to_string_pretty(&payload).unwrap(),
-                    BROWSER_SNAPSHOT_CLOSE_TAG
-                ),
-            }], end_turn: None, phase: None};
-
-        let events = map_response_item_to_event_messages(&item, false);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            EventMsg::BrowserSnapshot(BrowserSnapshotEvent {
-                snapshot,
-                url,
-                captured_at,
-            }) => {
-                assert_eq!(snapshot, &payload);
-                assert_eq!(url.as_deref(), Some("https://example.com"));
-                assert_eq!(captured_at.as_deref(), Some("2025-11-05T09:30:00Z"));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-}
+#[path = "event_mapping_tests.rs"]
+mod tests;

@@ -3,413 +3,724 @@
 // alternate‑screen mode starts; that file opts‑out locally via `allow`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![deny(clippy::disallowed_methods)]
+use crate::legacy_core::check_execpolicy_for_warnings;
+use crate::legacy_core::config::Config;
+use crate::legacy_core::config::ConfigBuilder;
+use crate::legacy_core::config::ConfigOverrides;
+use crate::legacy_core::config::find_codex_home;
+use crate::legacy_core::config::load_config_as_toml_with_cli_overrides;
+use crate::legacy_core::config::resolve_oss_provider;
+use crate::legacy_core::format_exec_policy_error_with_source;
+use crate::legacy_core::windows_sandbox::WindowsSandboxLevelExt;
+use crate::session_resume::ResolveCwdOutcome;
+use crate::session_resume::resolve_cwd_for_resume_or_fork;
+use additional_dirs::add_dir_warning_message;
 use app::App;
-use code_common::model_presets::{
-    all_model_presets,
-    ModelPreset,
-    HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG,
-    HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG,
-    HIDE_GPT_5_2_MIGRATION_PROMPT_CONFIG,
-};
-use code_core::config_edit::{self, CONFIG_KEY_EFFORT, CONFIG_KEY_MODEL};
-use code_core::config_types::Notice;
-use code_core::config_types::ReasoningEffort;
-use code_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
-use code_core::config::set_cached_terminal_background;
-use code_core::config::Config;
-use code_core::config::ConfigOverrides;
-use code_core::config::ConfigToml;
-use code_core::config::find_code_home;
-use code_core::config::load_config_as_toml;
-use code_core::config::load_config_as_toml_with_cli_overrides;
-use code_core::protocol::AskForApproval;
-use code_core::protocol::SandboxPolicy;
-use code_core::config_types::CachedTerminalBackground;
-use code_core::config_types::ThemeColors;
-use code_core::config_types::ThemeConfig;
-use code_core::config_types::ThemeName;
-use regex_lite::Regex;
-use code_login::AuthMode;
-use code_login::CodexAuth;
-use model_migration::{migration_copy_for_key, run_model_migration_prompt, ModelMigrationOutcome};
-use code_ollama::DEFAULT_OSS_MODEL;
-use code_protocol::config_types::SandboxMode;
+pub use app::AppExitInfo;
+pub use app::ExitReason;
+use app_server_session::AppServerSession;
+use codex_app_server_client::AppServerClient;
+use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+use codex_app_server_client::InProcessAppServerClient;
+use codex_app_server_client::InProcessClientStartArgs;
+use codex_app_server_client::RemoteAppServerClient;
+use codex_app_server_client::RemoteAppServerConnectArgs;
+use codex_app_server_protocol::Account as AppServerAccount;
+use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AuthMode as AppServerAuthMode;
+use codex_app_server_protocol::ConfigWarningNotification;
+use codex_app_server_protocol::Thread as AppServerThread;
+use codex_app_server_protocol::ThreadListCwdFilter;
+use codex_app_server_protocol::ThreadListParams;
+use codex_app_server_protocol::ThreadSortKey as AppServerThreadSortKey;
+use codex_app_server_protocol::ThreadSourceKind;
+use codex_cloud_requirements::cloud_requirements_loader_for_storage;
+use codex_config::CloudRequirementsLoader;
+use codex_config::ConfigLoadError;
+use codex_config::LoaderOverrides;
+use codex_config::format_config_error_with_source;
+use codex_exec_server::EnvironmentManager;
+use codex_exec_server::EnvironmentManagerArgs;
+use codex_exec_server::ExecServerRuntimePaths;
+use codex_login::AuthConfig;
+use codex_login::default_client::set_default_client_residency_requirement;
+use codex_login::enforce_login_restrictions;
+use codex_protocol::ThreadId;
+use codex_protocol::config_types::AltScreenMode;
+use codex_protocol::config_types::SandboxMode;
+use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_rollout::StateDbHandle;
+use codex_rollout::state_db;
+use codex_state::log_db;
+use codex_terminal_detection::terminal_info;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
+use codex_utils_oss::ensure_oss_provider_ready;
+use codex_utils_oss::get_default_model_for_oss_provider;
+use color_eyre::eyre::WrapErr;
+use cwd_prompt::CwdPromptAction;
 use std::fs::OpenOptions;
-use std::io;
-use std::backtrace::Backtrace;
-use std::path::{Path, PathBuf};
-use std::sync::Once;
-use std::sync::OnceLock;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+pub use token_usage::TokenUsage;
+use tracing::Level;
+use tracing::error;
+use tracing::warn;
 use tracing_appender::non_blocking;
-use tracing_appender::rolling;
-use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::prelude::*;
+use url::Url;
 use uuid::Uuid;
 
+pub(crate) use codex_app_server_client::legacy_core;
+
+mod additional_dirs;
 mod app;
+mod app_backtrack;
+mod app_command;
 mod app_event;
 mod app_event_sender;
-mod account_label;
-mod bottom_pane;
-mod chrome_launch;
-mod chatwidget;
-mod citation_regex;
-mod cloud_tasks_service;
-mod cli;
-mod common;
-mod colors;
-pub mod card_theme;
-mod diff_render;
-mod exec_command;
-mod external_editor;
-mod file_search;
-pub mod gradient_background;
-mod get_git_diff;
-mod glitch_animation;
-mod auto_drive_strings;
-mod auto_drive_style;
-mod header_wave;
-mod history_cell;
-mod history;
-mod insert_history;
-pub mod live_wrap;
-mod markdown;
-mod markdown_render;
-mod markdown_renderer;
-mod memory_citation;
-mod remote_inbox;
-mod remote_model_presets;
-mod markdown_stream;
-mod syntax_highlight;
-pub mod onboarding;
-pub mod public_widgets;
-mod render;
-mod model_migration;
-// mod scroll_view; // Orphaned after trait-based HistoryCell migration
-mod session_log;
-mod shimmer;
-mod slash_command;
-mod rate_limits_view;
-pub mod resume;
-mod streaming;
-mod sanitize;
-mod layout_consts;
-mod terminal_info;
-// mod text_block; // Orphaned after trait-based HistoryCell migration
-mod text_formatting;
-mod text_processing;
-mod theme;
-mod thread_spawner;
-mod util {
-    pub mod buffer;
-    pub mod list_window;
+mod app_server_approval_conversions;
+mod app_server_session;
+mod approval_events;
+mod ascii_animation;
+#[cfg(not(target_os = "linux"))]
+mod audio_device;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod audio_device {
+    use crate::app_event::RealtimeAudioDeviceKind;
+
+    pub(crate) fn list_realtime_audio_device_names(
+        kind: RealtimeAudioDeviceKind,
+    ) -> Result<Vec<String>, String> {
+        Err(format!(
+            "Failed to load realtime {} devices: voice input is unavailable in this build",
+            kind.noun()
+        ))
+    }
 }
-mod spinner;
-mod tui;
-#[cfg(feature = "code-fork")]
-mod tui_event_extensions;
-#[cfg(feature = "code-fork")]
-mod foundation;
-mod ui_consts;
-mod user_approval_widget;
-mod height_manager;
+mod bottom_pane;
+mod branch_summary;
+mod chatwidget;
+mod cli;
 mod clipboard_copy;
 mod clipboard_paste;
-mod greeting;
-// Upstream introduced a standalone status indicator widget. Our fork renders
-// status within the composer title; keep the module private unless tests need it.
+mod collaboration_modes;
+mod color;
+pub(crate) mod custom_terminal;
+pub use custom_terminal::Terminal;
+mod auto_review_denials;
+mod cwd_prompt;
+mod debug_config;
+mod diff_model;
+mod diff_render;
+mod exec_cell;
+mod exec_command;
+mod external_agent_config_migration;
+mod external_agent_config_migration_startup;
+mod external_editor;
+mod file_search;
+mod frames;
+mod get_git_diff;
+mod goal_display;
+mod history_cell;
+mod ide_context;
+pub(crate) mod insert_history;
+pub use insert_history::insert_history_lines;
+mod key_hint;
+mod keymap;
+mod keymap_setup;
+mod line_truncation;
+pub(crate) mod live_wrap;
+pub use live_wrap::RowBuilder;
+mod local_chatgpt_auth;
+mod markdown;
+mod markdown_render;
+mod markdown_stream;
+mod mention_codec;
+mod model_catalog;
+mod model_migration;
+mod motion;
+mod multi_agents;
+mod notifications;
+#[cfg(any(not(debug_assertions), test))]
+mod npm_registry;
+pub(crate) mod onboarding;
+mod oss_selection;
+mod pager_overlay;
+mod permission_compat;
+pub(crate) mod public_widgets;
+mod render;
+mod resize_reflow_cap;
+mod resume_picker;
+mod selection_list;
+mod session_log;
+mod session_resume;
+mod session_state;
+mod shimmer;
+mod skills_helpers;
+mod slash_command;
+mod status;
 mod status_indicator_widget;
-#[cfg(target_os = "macos")]
-mod agent_install_helpers;
-
-// Internal vt100-based replay tests live as a separate source file to keep them
-// close to the widget code. Include them in unit tests.
+mod streaming;
+mod style;
+mod terminal_palette;
+mod terminal_probe;
+mod terminal_title;
+mod text_formatting;
+mod theme_picker;
+mod token_usage;
+mod tooltips;
+mod transcript_reflow;
+mod tui;
+mod ui_consts;
+pub(crate) mod update_action;
+pub use update_action::UpdateAction;
+#[cfg(not(debug_assertions))]
+pub use update_action::get_update_action;
+mod update_prompt;
+#[cfg(any(not(debug_assertions), test))]
+mod update_versions;
 mod updates;
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod test_backend;
+mod version;
+#[cfg(not(target_os = "linux"))]
+mod voice;
+mod width;
+mod workspace_command;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod voice {
+    use crate::app_event_sender::AppEventSender;
+    use crate::legacy_core::config::Config;
+    use codex_app_server_protocol::ThreadRealtimeAudioChunk;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU16;
 
+    pub struct VoiceCapture;
+
+    pub(crate) struct RecordingMeterState;
+
+    pub(crate) struct RealtimeAudioPlayer;
+
+    impl VoiceCapture {
+        pub fn start_realtime(_config: &Config, _tx: AppEventSender) -> Result<Self, String> {
+            Err("voice input is unavailable in this build".to_string())
+        }
+
+        pub fn stop(self) {}
+
+        pub fn stopped_flag(&self) -> Arc<AtomicBool> {
+            Arc::new(AtomicBool::new(true))
+        }
+
+        pub fn last_peak_arc(&self) -> Arc<AtomicU16> {
+            Arc::new(AtomicU16::new(0))
+        }
+    }
+
+    impl RecordingMeterState {
+        pub(crate) fn new() -> Self {
+            Self
+        }
+
+        pub(crate) fn next_text(&mut self, _peak: u16) -> String {
+            "⠤⠤⠤⠤".to_string()
+        }
+    }
+
+    impl RealtimeAudioPlayer {
+        pub(crate) fn start(_config: &Config) -> Result<Self, String> {
+            Err("voice output is unavailable in this build".to_string())
+        }
+
+        pub(crate) fn enqueue_frame(
+            &self,
+            _frame: &ThreadRealtimeAudioChunk,
+        ) -> Result<(), String> {
+            Err("voice output is unavailable in this build".to_string())
+        }
+
+        pub(crate) fn clear(&self) {}
+    }
+}
+
+mod wrapping;
+
+#[cfg(test)]
+pub(crate) mod test_backend;
+#[cfg(test)]
+pub(crate) mod test_support;
+
+use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
+use crate::onboarding::onboarding_screen::run_onboarding_app;
+use crate::tui::Tui;
 pub use cli::Cli;
-pub use self::markdown_render::render_markdown_text;
-pub use public_widgets::composer_input::{ComposerAction, ComposerInput};
+use codex_arg0::Arg0DispatchPaths;
+pub use markdown_render::render_markdown_text;
+pub use public_widgets::composer_input::ComposerAction;
+pub use public_widgets::composer_input::ComposerInput;
+// (tests access modules directly within the crate)
 
-const TUI_LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
-const TUI_LOG_BACKUPS: usize = 2;
-
-fn rotate_log_file(log_dir: &Path, file_name: &str) {
-    let path = log_dir.join(file_name);
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return;
-    };
-    if meta.len() <= TUI_LOG_MAX_BYTES {
-        return;
-    }
-    if TUI_LOG_BACKUPS == 0 {
-        let _ = std::fs::remove_file(&path);
-        return;
-    }
-
-    let oldest = log_dir.join(format!("{file_name}.{TUI_LOG_BACKUPS}"));
-    let _ = std::fs::remove_file(&oldest);
-
-    if TUI_LOG_BACKUPS > 1 {
-        for idx in (1..TUI_LOG_BACKUPS).rev() {
-            let from = log_dir.join(format!("{file_name}.{idx}"));
-            let to = log_dir.join(format!("{file_name}.{}", idx + 1));
-            let _ = std::fs::rename(&from, &to);
-        }
-    }
-
-    let rotated = log_dir.join(format!("{file_name}.1"));
-    if std::fs::rename(&path, rotated).is_err() {
-        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
-            let _ = file.set_len(0);
-        }
-    }
+#[allow(clippy::too_many_arguments)]
+async fn start_embedded_app_server(
+    arg0_paths: Arg0DispatchPaths,
+    config: Config,
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    loader_overrides: LoaderOverrides,
+    cloud_requirements: CloudRequirementsLoader,
+    feedback: codex_feedback::CodexFeedback,
+    log_db: Option<log_db::LogDbLayer>,
+    state_db: Option<StateDbHandle>,
+    environment_manager: Arc<EnvironmentManager>,
+) -> color_eyre::Result<InProcessAppServerClient> {
+    start_embedded_app_server_with(
+        arg0_paths,
+        config,
+        cli_kv_overrides,
+        loader_overrides,
+        cloud_requirements,
+        feedback,
+        log_db,
+        state_db,
+        environment_manager,
+        InProcessAppServerClient::start,
+    )
+    .await
 }
 
-#[cfg(feature = "test-helpers")]
-pub mod test_helpers {
-    pub use crate::chatwidget::smoke_helpers::AutoContinueModeFixture;
-    pub use crate::chatwidget::smoke_helpers::ChatWidgetHarness;
-    pub use crate::chatwidget::smoke_helpers::LayoutMetrics;
-    #[cfg(test)]
-    pub use crate::test_backend::VT100Backend;
-
-    use crate::app_event::AppEvent;
-    use code_core::history::state::HistoryRecord;
-    use std::time::Duration;
-
-    use std::io::Write;
-
-    /// Render successive frames of the chat widget into a VT100-backed terminal.
-    /// Each entry in `frames` specifies the `(width, height)` for that capture.
-    /// Returns a vector of screen dumps, one per frame.
-    pub fn render_chat_widget_frames_to_vt100(
-        harness: &mut ChatWidgetHarness,
-        frames: &[(u16, u16)],
-    ) -> Vec<String> {
-        use crate::test_backend::VT100Backend;
-
-        frames
-            .iter()
-            .map(|&(width, height)| {
-                harness.flush_into_widget();
-
-                let backend = VT100Backend::new(width, height);
-                let mut terminal = ratatui::Terminal::new(backend).expect("create terminal");
-
-                terminal
-                    .draw(|frame| {
-                        let area = frame.area();
-                        let chat_widget = harness.chat();
-                        frame.render_widget_ref(&*chat_widget, area);
-                    })
-                    .expect("draw");
-
-                terminal.backend_mut().flush().expect("flush");
-
-                let screen = terminal.backend().vt100().screen();
-                let (rows, cols) = screen.size();
-                let snapshot = screen
-                    .rows(0, cols)
-                    .take(rows.into())
-                    .map(|row| row.trim_end().to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                snapshot
-            })
-            .collect()
-    }
-
-    /// Convenience helper to capture a single VT100 frame at the provided size.
-    pub fn render_chat_widget_to_vt100(
-        harness: &mut ChatWidgetHarness,
-        width: u16,
-        height: u16,
-    ) -> String {
-        render_chat_widget_frames_to_vt100(harness, &[(width, height)])
-            .into_iter()
-            .next()
-            .unwrap_or_default()
-    }
-
-    pub fn assert_has_terminal_chunk_containing(
-        harness: &mut ChatWidgetHarness,
-        needle: &str,
-    ) {
-        let events = harness.poll_until(
-            |events| {
-                events.iter().any(|event| {
-                    match event {
-                        AppEvent::TerminalChunk { chunk, .. } => {
-                            String::from_utf8_lossy(chunk).contains(needle)
-                        }
-                        _ => false,
-                    }
-                })
-            },
-            Duration::from_millis(200),
-        );
-        crate::chatwidget::smoke_helpers::assert_has_terminal_chunk_containing(&events, needle);
-    }
-
-    pub fn assert_has_background_event_containing(
-        harness: &mut ChatWidgetHarness,
-        needle: &str,
-    ) {
-        let events = harness.poll_until(
-            |events| {
-                events.iter().any(|event| {
-                    match event {
-                        AppEvent::InsertBackgroundEvent { message, .. } => {
-                            message.contains(needle)
-                        }
-                        _ => false,
-                    }
-                })
-            },
-            Duration::from_millis(200),
-        );
-        crate::chatwidget::smoke_helpers::assert_has_background_event_containing(&events, needle);
-    }
-
-    pub fn assert_has_codex_event(harness: &mut ChatWidgetHarness) {
-        let events = harness.poll_until(
-            |events| events
-                .iter()
-                .any(|event| matches!(event, AppEvent::CodexEvent(_))),
-            Duration::from_millis(200),
-        );
-        crate::chatwidget::smoke_helpers::assert_has_codex_event(&events);
-    }
-
-    pub fn layout_metrics(harness: &ChatWidgetHarness) -> LayoutMetrics {
-        harness.layout_metrics()
-    }
-
-    pub fn assert_has_insert_history(harness: &mut ChatWidgetHarness) {
-        let events = harness.poll_until(
-            |events| {
-                events.iter().any(|event| {
-                    matches!(
-                        event,
-                        AppEvent::InsertHistory(_)
-                            | AppEvent::InsertHistoryWithKind { .. }
-                            | AppEvent::InsertFinalAnswer { .. }
-                    )
-                })
-            },
-            Duration::from_millis(200),
-        );
-        crate::chatwidget::smoke_helpers::assert_has_insert_history(&events);
-    }
-
-    pub fn assert_no_events(harness: &mut ChatWidgetHarness) {
-        let events = harness.poll_until(
-            |events| !events.is_empty(),
-            Duration::from_millis(100),
-        );
-        crate::chatwidget::smoke_helpers::assert_no_events(&events);
-    }
-
-    pub fn history_records(harness: &mut ChatWidgetHarness) -> Vec<HistoryRecord> {
-        harness.history_records()
-    }
-
-    pub fn set_standard_terminal_mode(harness: &mut ChatWidgetHarness, enabled: bool) {
-        harness.set_standard_terminal_mode(enabled);
-    }
-
-    pub fn force_scroll_offset(harness: &mut ChatWidgetHarness, offset: u16) {
-        harness.force_scroll_offset(offset);
-    }
-
-    pub fn scroll_offset(harness: &ChatWidgetHarness) -> u16 {
-        harness.scroll_offset()
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppServerTarget {
+    Embedded,
+    Remote {
+        websocket_url: String,
+        auth_token: Option<String>,
+    },
 }
 
-fn theme_configured_in_config_file(code_home: &std::path::Path) -> bool {
-    let config_path = code_home.join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(&config_path) else {
+fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
+    let Some(host) = parsed.host_str() else {
         return false;
     };
-
-    let table_pattern = Regex::new(r"(?m)^\s*\[tui\.theme\]").expect("valid regex");
-    if table_pattern.is_match(&contents) {
+    if parsed.port().is_some() {
         return true;
     }
 
-    let inline_pattern = Regex::new(r"(?m)^\s*tui\.theme\s*=").expect("valid regex");
-    inline_pattern.is_match(&contents)
+    let Some((_, rest)) = addr.split_once("://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_and_port)| host_and_port);
+    let explicit_default_port = match parsed.scheme() {
+        "ws" => 80,
+        "wss" => 443,
+        _ => return false,
+    };
+    let expected_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    host_and_port == format!("{expected_host}:{explicit_default_port}")
 }
-// (tests access modules directly within the crate)
 
-#[derive(Debug)]
-pub struct ExitSummary {
-    pub token_usage: code_core::protocol::TokenUsage,
-    pub session_id: Option<Uuid>,
-}
-
-fn empty_exit_summary() -> ExitSummary {
-    ExitSummary {
-        token_usage: code_core::protocol::TokenUsage::default(),
-        session_id: None,
+fn websocket_url_supports_auth_token(parsed: &Url) -> bool {
+    match (parsed.scheme(), parsed.host()) {
+        ("wss", Some(_)) => true,
+        ("ws", Some(url::Host::Domain(domain))) => domain.eq_ignore_ascii_case("localhost"),
+        ("ws", Some(url::Host::Ipv4(addr))) => addr.is_loopback(),
+        ("ws", Some(url::Host::Ipv6(addr))) => addr.is_loopback(),
+        _ => false,
     }
 }
 
-fn derive_resume_command_name(arg0: Option<std::ffi::OsString>) -> String {
-    if let Some(raw) = arg0 {
-        if let Some(name) = std::path::Path::new(&raw)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-        {
-            return name.to_string();
+pub fn normalize_remote_addr(addr: &str) -> color_eyre::Result<String> {
+    let parsed = match Url::parse(addr) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            color_eyre::eyre::bail!(
+                "invalid remote address `{addr}`; expected `ws://host:port` or `wss://host:port`"
+            );
         }
-
-        let lossy = raw.to_string_lossy();
-        if !lossy.is_empty() {
-            return lossy.into_owned();
-        }
+    };
+    if matches!(parsed.scheme(), "ws" | "wss")
+        && parsed.host_str().is_some()
+        && remote_addr_has_explicit_port(addr, &parsed)
+        && parsed.path() == "/"
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        return Ok(parsed.to_string());
     }
 
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .map(str::to_owned)
+    color_eyre::eyre::bail!(
+        "invalid remote address `{addr}`; expected `ws://host:port` or `wss://host:port`"
+    );
+}
+
+fn validate_remote_auth_token_transport(websocket_url: &str) -> color_eyre::Result<()> {
+    let parsed = Url::parse(websocket_url).map_err(color_eyre::Report::new)?;
+    if websocket_url_supports_auth_token(&parsed) {
+        return Ok(());
+    }
+
+    color_eyre::eyre::bail!(
+        "remote auth tokens require `wss://` or loopback `ws://` URLs; got `{websocket_url}`"
+    )
+}
+
+async fn connect_remote_app_server(
+    websocket_url: String,
+    auth_token: Option<String>,
+) -> color_eyre::Result<AppServerClient> {
+    let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+        websocket_url,
+        auth_token,
+        client_name: "codex-tui".to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        experimental_api: true,
+        opt_out_notification_methods: Vec::new(),
+        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await
+    .wrap_err("failed to connect to remote app server")?;
+    Ok(AppServerClient::Remote(app_server))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_app_server(
+    target: &AppServerTarget,
+    arg0_paths: Arg0DispatchPaths,
+    config: Config,
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    loader_overrides: LoaderOverrides,
+    cloud_requirements: CloudRequirementsLoader,
+    feedback: codex_feedback::CodexFeedback,
+    log_db: Option<log_db::LogDbLayer>,
+    state_db: Option<StateDbHandle>,
+    environment_manager: Arc<EnvironmentManager>,
+) -> color_eyre::Result<AppServerClient> {
+    match target {
+        AppServerTarget::Embedded => start_embedded_app_server(
+            arg0_paths,
+            config,
+            cli_kv_overrides,
+            loader_overrides,
+            cloud_requirements,
+            feedback,
+            log_db,
+            state_db,
+            environment_manager,
+        )
+        .await
+        .map(AppServerClient::InProcess),
+        AppServerTarget::Remote {
+            websocket_url,
+            auth_token,
+        } => connect_remote_app_server(websocket_url.clone(), auth_token.clone()).await,
+    }
+}
+
+pub(crate) async fn start_app_server_for_picker(
+    config: &Config,
+    target: &AppServerTarget,
+    state_db: Option<StateDbHandle>,
+    environment_manager: Arc<EnvironmentManager>,
+) -> color_eyre::Result<AppServerSession> {
+    let app_server = start_app_server(
+        target,
+        Arg0DispatchPaths::default(),
+        config.clone(),
+        Vec::new(),
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        codex_feedback::CodexFeedback::new(),
+        /*log_db*/ None,
+        state_db,
+        environment_manager,
+    )
+    .await?;
+    Ok(AppServerSession::new(app_server))
+}
+
+#[cfg(test)]
+pub(crate) async fn start_embedded_app_server_for_picker(
+    config: &Config,
+) -> color_eyre::Result<AppServerSession> {
+    let state_db = state_db::init(config).await;
+    start_app_server_for_picker(
+        config,
+        &AppServerTarget::Embedded,
+        state_db,
+        Arc::new(EnvironmentManager::default_for_tests()),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_embedded_app_server_with<F, Fut>(
+    arg0_paths: Arg0DispatchPaths,
+    config: Config,
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    loader_overrides: LoaderOverrides,
+    cloud_requirements: CloudRequirementsLoader,
+    feedback: codex_feedback::CodexFeedback,
+    log_db: Option<log_db::LogDbLayer>,
+    state_db: Option<StateDbHandle>,
+    environment_manager: Arc<EnvironmentManager>,
+    start_client: F,
+) -> color_eyre::Result<InProcessAppServerClient>
+where
+    F: FnOnce(InProcessClientStartArgs) -> Fut,
+    Fut: Future<Output = std::io::Result<InProcessAppServerClient>>,
+{
+    let config_warnings = config
+        .startup_warnings
+        .iter()
+        .map(|warning| ConfigWarningNotification {
+            summary: warning.clone(),
+            details: None,
+            path: None,
+            range: None,
         })
-        .unwrap_or_else(|| "code".to_string())
+        .collect();
+    let client = start_client(InProcessClientStartArgs {
+        arg0_paths,
+        config: Arc::new(config),
+        cli_overrides: cli_kv_overrides,
+        loader_overrides,
+        cloud_requirements,
+        feedback,
+        log_db,
+        state_db,
+        environment_manager,
+        config_warnings,
+        session_source: serde_json::from_value(serde_json::json!("cli"))
+            .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
+        enable_codex_api_key_env: false,
+        client_name: "codex-tui".to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        experimental_api: true,
+        opt_out_notification_methods: Vec::new(),
+        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await
+    .wrap_err("failed to start embedded app server")?;
+    Ok(client)
 }
 
-pub fn resume_command_name() -> &'static str {
-    static COMMAND: OnceLock<String> = OnceLock::new();
-    COMMAND
-        .get_or_init(|| derive_resume_command_name(std::env::args_os().next()))
-        .as_str()
+async fn shutdown_app_server_if_present(app_server: Option<AppServerSession>) {
+    if let Some(app_server) = app_server
+        && let Err(err) = app_server.shutdown().await
+    {
+        warn!(%err, "Failed to shut down temporary embedded app server");
+    }
+}
+
+fn session_target_from_app_server_thread(
+    thread: AppServerThread,
+) -> Option<resume_picker::SessionTarget> {
+    match ThreadId::from_string(&thread.id) {
+        Ok(thread_id) => Some(resume_picker::SessionTarget {
+            path: thread.path,
+            thread_id,
+        }),
+        Err(err) => {
+            warn!(
+                thread_id = thread.id,
+                %err,
+                "Ignoring app-server thread with invalid thread id during TUI session lookup"
+            );
+            None
+        }
+    }
+}
+
+async fn lookup_session_target_by_name_with_app_server(
+    app_server: &mut AppServerSession,
+    name: &str,
+) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+    let mut cursor = None;
+    loop {
+        let response = app_server
+            .thread_list(ThreadListParams {
+                cursor: cursor.clone(),
+                limit: Some(100),
+                sort_key: Some(AppServerThreadSortKey::UpdatedAt),
+                sort_direction: None,
+                model_providers: None,
+                source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
+                archived: Some(false),
+                cwd: None,
+                use_state_db_only: false,
+                search_term: Some(name.to_string()),
+            })
+            .await?;
+        if let Some(thread) = response
+            .data
+            .into_iter()
+            .find(|thread| thread.name.as_deref() == Some(name))
+        {
+            return Ok(session_target_from_app_server_thread(thread));
+        }
+        if response.next_cursor.is_none() {
+            return Ok(None);
+        }
+        cursor = response.next_cursor;
+    }
+}
+
+async fn lookup_session_target_with_app_server(
+    app_server: &mut AppServerSession,
+    id_or_name: &str,
+) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+    if Uuid::parse_str(id_or_name).is_ok() {
+        let thread_id = match ThreadId::from_string(id_or_name) {
+            Ok(thread_id) => thread_id,
+            Err(err) => {
+                warn!(
+                    session = id_or_name,
+                    %err,
+                    "Failed to parse session id during TUI lookup"
+                );
+                return Ok(None);
+            }
+        };
+        return match app_server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await
+        {
+            Ok(thread) => Ok(session_target_from_app_server_thread(thread)),
+            Err(err) => {
+                warn!(
+                    session = id_or_name,
+                    %err,
+                    "thread/read failed during TUI session lookup"
+                );
+                Ok(None)
+            }
+        };
+    }
+
+    lookup_session_target_by_name_with_app_server(app_server, id_or_name).await
+}
+
+async fn lookup_latest_session_target_with_app_server(
+    app_server: &mut AppServerSession,
+    config: &Config,
+    cwd_filter: Option<&Path>,
+    include_non_interactive: bool,
+) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+    let response = app_server
+        .thread_list(latest_session_lookup_params(
+            app_server.is_remote(),
+            config,
+            cwd_filter,
+            include_non_interactive,
+        ))
+        .await?;
+    Ok(response
+        .data
+        .into_iter()
+        .find_map(session_target_from_app_server_thread))
+}
+
+fn latest_session_lookup_params(
+    is_remote: bool,
+    config: &Config,
+    cwd_filter: Option<&Path>,
+    include_non_interactive: bool,
+) -> ThreadListParams {
+    ThreadListParams {
+        cursor: None,
+        limit: Some(1),
+        sort_key: Some(AppServerThreadSortKey::UpdatedAt),
+        sort_direction: None,
+        model_providers: if is_remote {
+            None
+        } else {
+            Some(vec![config.model_provider_id.clone()])
+        },
+        source_kinds: (!include_non_interactive)
+            .then_some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
+        archived: Some(false),
+        cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
+        use_state_db_only: false,
+        search_term: None,
+    }
+}
+
+fn config_cwd_for_app_server_target(
+    cwd: Option<&Path>,
+    app_server_target: &AppServerTarget,
+    environment_manager: &EnvironmentManager,
+) -> std::io::Result<Option<AbsolutePathBuf>> {
+    if environment_manager
+        .default_environment()
+        .is_some_and(|environment| environment.is_remote())
+        || matches!(app_server_target, AppServerTarget::Remote { .. })
+    {
+        return Ok(None);
+    }
+
+    let cwd = match cwd {
+        Some(path) => {
+            AbsolutePathBuf::from_absolute_path(canonicalize_existing_preserving_symlinks(path)?)
+        }
+        None => AbsolutePathBuf::current_dir(),
+    }?;
+    Ok(Some(cwd))
+}
+
+fn latest_session_cwd_filter<'a>(
+    remote_mode: bool,
+    remote_cwd_override: Option<&'a Path>,
+    config: &'a Config,
+    show_all: bool,
+) -> Option<&'a Path> {
+    if show_all {
+        return None;
+    }
+
+    if remote_mode {
+        remote_cwd_override
+    } else {
+        Some(config.cwd.as_path())
+    }
 }
 
 pub async fn run_main(
     mut cli: Cli,
-    code_linux_sandbox_exe: Option<PathBuf>,
-) -> std::io::Result<ExitSummary> {
-    cli.finalize_defaults();
-
-    let (sandbox_mode, approval_policy) = if cli.full_auto {
-        (
-            Some(SandboxMode::WorkspaceWrite),
-            Some(AskForApproval::OnFailure),
-        )
-    } else if cli.dangerously_bypass_approvals_and_sandbox {
+    arg0_paths: Arg0DispatchPaths,
+    loader_overrides: LoaderOverrides,
+    remote: Option<String>,
+    remote_auth_token: Option<String>,
+) -> std::io::Result<AppExitInfo> {
+    let remote_url = remote;
+    if let (Some(websocket_url), Some(_)) = (remote_url.as_deref(), remote_auth_token.as_ref()) {
+        validate_remote_auth_token_transport(websocket_url).map_err(std::io::Error::other)?;
+    }
+    let app_server_target = remote_url
+        .clone()
+        .map(|websocket_url| AppServerTarget::Remote {
+            websocket_url,
+            auth_token: remote_auth_token.clone(),
+        })
+        .unwrap_or(AppServerTarget::Embedded);
+    let remote_cwd_override = cli
+        .cwd
+        .clone()
+        .filter(|_| matches!(app_server_target, AppServerTarget::Remote { .. }));
+    let (sandbox_mode, approval_policy) = if cli.dangerously_bypass_approvals_and_sandbox {
         (
             Some(SandboxMode::DangerFullAccess),
-            Some(AskForApproval::Never),
+            Some(AskForApproval::Never.to_core()),
         )
     } else {
         (
@@ -418,52 +729,20 @@ pub async fn run_main(
         )
     };
 
+    // Map the legacy --search flag to the canonical web_search mode.
+    if cli.web_search {
+        cli.config_overrides
+            .raw_overrides
+            .push("web_search=\"live\"".to_string());
+    }
+
     // When using `--oss`, let the bootstrapper pick the model (defaulting to
     // gpt-oss:20b) and ensure it is present locally. Also, force the built‑in
+    let raw_overrides = cli.config_overrides.raw_overrides.clone();
     // `oss` model provider.
-    let model = if let Some(model) = &cli.model {
-        Some(model.clone())
-    } else if cli.oss {
-        Some(DEFAULT_OSS_MODEL.to_owned())
-    } else {
-        None // No model specified, will use the default.
-    };
-
-    let model_provider_override = if cli.oss {
-        Some(BUILT_IN_OSS_MODEL_PROVIDER_ID.to_owned())
-    } else {
-        None
-    };
-
-    // canonicalize the cwd
-    let cwd = cli.cwd.clone().map(|p| p.canonicalize().unwrap_or(p));
-
-    let overrides = ConfigOverrides {
-        model,
-        review_model: None,
-        approval_policy,
-        sandbox_mode,
-        cwd,
-        model_provider: model_provider_override,
-        config_profile: cli.config_profile.clone(),
-        code_linux_sandbox_exe,
-        base_instructions: None,
-        include_plan_tool: Some(true),
-        include_apply_patch_tool: None,
-        include_view_image_tool: None,
-        disable_response_storage: cli.oss.then_some(true),
-        show_raw_agent_reasoning: cli.oss.then_some(true),
-        debug: Some(cli.debug),
-        tools_web_search_request: Some(cli.web_search),
-        mcp_servers: None,
-        experimental_client_tools: None,
-        dynamic_tools: None,
-        compact_prompt_override: cli.compact_prompt_override.clone(),
-        compact_prompt_override_file: cli.compact_prompt_file.clone(),
-    };
-
-    // Parse `-c` overrides from the CLI.
-    let cli_kv_overrides = match cli.config_overrides.parse_overrides() {
+    let overrides_cli = codex_utils_cli::CliConfigOverrides { raw_overrides };
+    let cli_kv_overrides = match overrides_cli.parse_overrides() {
+        // Parse `-c` overrides from the CLI.
         Ok(v) => v,
         #[allow(clippy::print_stderr)]
         Err(e) => {
@@ -471,441 +750,791 @@ pub async fn run_main(
             std::process::exit(1);
         }
     };
-    let theme_override_in_cli = cli_kv_overrides
-        .iter()
-        .any(|(path, _)| path.starts_with("tui.theme"));
 
-    let code_home = match find_code_home() {
-        Ok(code_home) => code_home,
-        #[allow(clippy::print_stderr)]
+    // we load config.toml here to determine project state.
+    #[allow(clippy::print_stderr)]
+    let codex_home = match find_codex_home() {
+        Ok(codex_home) => codex_home.to_path_buf(),
         Err(err) => {
             eprintln!("Error finding codex home: {err}");
             std::process::exit(1);
         }
     };
 
-    code_core::config::migrate_legacy_log_dirs(&code_home);
+    let environment_manager = Arc::new(
+        EnvironmentManager::new(EnvironmentManagerArgs::new(
+            ExecServerRuntimePaths::from_optional_paths(
+                arg0_paths.codex_self_exe.clone(),
+                arg0_paths.codex_linux_sandbox_exe.clone(),
+            )?,
+        ))
+        .await,
+    );
+    let cwd = cli.cwd.clone();
+    let config_cwd =
+        config_cwd_for_app_server_target(cwd.as_deref(), &app_server_target, &environment_manager)?;
 
-    let housekeeping_home = code_home.clone();
-    let housekeeping_stop = Arc::new(AtomicBool::new(false));
-    let housekeeping_stop_worker = Arc::clone(&housekeeping_stop);
-    let housekeeping_handle = thread_spawner::spawn_lightweight("housekeeping", move || {
-        const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(30 * 60);
-        const HOUSEKEEPING_POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-        let mut next_run_at = Instant::now();
-        while !housekeeping_stop_worker.load(Ordering::Relaxed) {
-            let now = Instant::now();
-            if now >= next_run_at {
-                if let Err(err) = code_core::run_housekeeping_if_due(&housekeeping_home) {
-                    tracing::warn!("code home housekeeping failed: {err}");
-                }
-                next_run_at = now + HOUSEKEEPING_INTERVAL;
-            }
-
-            std::thread::sleep(HOUSEKEEPING_POLL_INTERVAL);
-        }
-    });
-
-    let workspace_write_network_access_explicit = {
-        let cli_override = cli_kv_overrides
-            .iter()
-            .any(|(path, _)| path == "sandbox_workspace_write.network_access");
-
-        if cli_override {
-            true
-        } else {
-            match load_config_as_toml(&code_home) {
-                Ok(raw) => raw
-                    .get("sandbox_workspace_write")
-                    .and_then(|value| value.as_table())
-                    .map_or(false, |table| table.contains_key("network_access")),
-                Err(_) => false,
-            }
-        }
-    };
-
-    let mut config = {
-        // Load configuration and support CLI overrides.
-
-        #[allow(clippy::print_stderr)]
-        match Config::load_with_cli_overrides(cli_kv_overrides.clone(), overrides.clone()) {
-            Ok(config) => config,
-            Err(err) => {
-                eprintln!("Error loading configuration: {err}");
-                std::process::exit(1);
-            }
-        }
-    };
-
-    config.demo_developer_message = cli.demo_developer_message.clone();
-
-    let cli_model_override = cli.model.is_some()
-        || cli_kv_overrides
-            .iter()
-            .any(|(path, _)| path == "model" || path.ends_with(".model"));
-    if !cli_model_override && !cli.oss {
-        let auth_mode = if config.using_chatgpt_auth {
-            AuthMode::ChatGPT
-        } else {
-            AuthMode::ApiKey
-        };
-        if let Some(plan) = determine_migration_plan(&config, auth_mode) {
-            let should_auto_accept = auth_mode.is_chatgpt()
-                && (plan.hide_key != code_common::model_presets::HIDE_GPT_5_2_CODEX_MIGRATION_PROMPT_CONFIG
-                    || (plan.current.id.eq_ignore_ascii_case("gpt-5.1-codex")
-                        && plan
-                            .target
-                            .id
-                            .eq_ignore_ascii_case("gpt-5.2-codex")));
-
-            if should_auto_accept {
-                if let Err(err) = persist_migration_acceptance(
-                    &code_home,
-                    cli.config_profile.as_deref(),
-                    plan,
-                )
-                .await
-                {
-                    tracing::warn!("failed to persist migration acceptance: {err}");
-                } else {
-                    match Config::load_with_cli_overrides(
-                        cli_kv_overrides.clone(),
-                        overrides.clone(),
-                    ) {
-                        Ok(updated) => {
-                            config = updated;
-                            config.demo_developer_message = cli.demo_developer_message.clone();
-                        }
-                        Err(err) => {
-                            eprintln!("Error reloading configuration: {err}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            } else {
-                let copy = migration_copy_for_key(plan.hide_key);
-                match run_model_migration_prompt(&copy)? {
-                    ModelMigrationOutcome::Accepted => {
-                        if let Err(err) = persist_migration_acceptance(
-                            &code_home,
-                            cli.config_profile.as_deref(),
-                            plan,
-                        )
-                        .await
-                        {
-                            tracing::warn!("failed to persist migration acceptance: {err}");
-                        } else {
-                            match Config::load_with_cli_overrides(
-                                cli_kv_overrides.clone(),
-                                overrides.clone(),
-                            ) {
-                                Ok(updated) => {
-                                    config = updated;
-                                    config.demo_developer_message = cli.demo_developer_message.clone();
-                                }
-                                Err(err) => {
-                                    eprintln!("Error reloading configuration: {err}");
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                    }
-                    ModelMigrationOutcome::Rejected => {
-                        let hide_key = plan.hide_key;
-                        if let Err(err) = persist_notice_hide(
-                            &code_home,
-                            cli.config_profile.as_deref(),
-                            hide_key,
-                        )
-                        .await
-                        {
-                            tracing::warn!("failed to persist migration opt-out: {err}");
-                        }
-                        set_notice_flag(&mut config.notices, hide_key);
-                    }
-                    ModelMigrationOutcome::Exit => {
-                        return Ok(empty_exit_summary());
-                    }
-                }
-            }
-        }
-    }
-
-    let startup_footer_notice = None;
-
-    // we load config.toml here to determine project state.
     #[allow(clippy::print_stderr)]
-    let (config_toml, theme_set_in_config_file) = {
-        let theme_set_in_config_file = theme_configured_in_config_file(&code_home);
-
-        match load_config_as_toml_with_cli_overrides(&code_home, cli_kv_overrides.clone()) {
-            Ok(config_toml) => (config_toml, theme_set_in_config_file),
-            Err(err) => {
+    let config_toml = match load_config_as_toml_with_cli_overrides(
+        &codex_home,
+        config_cwd.as_ref(),
+        cli_kv_overrides.clone(),
+    )
+    .await
+    {
+        Ok(config_toml) => config_toml,
+        Err(err) => {
+            let config_error = err
+                .get_ref()
+                .and_then(|err| err.downcast_ref::<ConfigLoadError>())
+                .map(ConfigLoadError::config_error);
+            if let Some(config_error) = config_error {
+                eprintln!(
+                    "Error loading config.toml:\n{}",
+                    format_config_error_with_source(config_error)
+                );
+            } else {
                 eprintln!("Error loading config.toml: {err}");
-                std::process::exit(1);
             }
+            std::process::exit(1);
         }
     };
 
-    let theme_configured_explicitly = theme_set_in_config_file || theme_override_in_cli;
+    let chatgpt_base_url = config_toml
+        .chatgpt_base_url
+        .clone()
+        .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
+    let cloud_requirements = cloud_requirements_loader_for_storage(
+        codex_home.to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        config_toml.cli_auth_credentials_store.unwrap_or_default(),
+        chatgpt_base_url,
+    )
+    .await;
 
-    let should_show_trust_screen = determine_repo_trust_state(
-        &mut config,
-        &config_toml,
-        approval_policy,
-        sandbox_mode,
-        cli.config_profile.clone(),
-        workspace_write_network_access_explicit,
-    )?;
+    let model_provider_override = if cli.oss {
+        let resolved = resolve_oss_provider(
+            cli.oss_provider.as_deref(),
+            &config_toml,
+            cli.config_profile.clone(),
+        );
 
-    let log_dir = code_core::config::log_dir(&config)?;
-    std::fs::create_dir_all(&log_dir)?;
-
-    let (env_layer, _log_guard) = if cli.debug {
-        rotate_log_file(&log_dir, "codex-tui.log");
-        // Open (or create) your log file, appending to it.
-        let mut log_file_opts = OpenOptions::new();
-        log_file_opts.create(true).append(true);
-
-        // Ensure the file is only readable and writable by the current user.
-        // Doing the equivalent to `chmod 600` on Windows is quite a bit more code
-        // and requires the Windows API crates, so we can reconsider that when
-        // Code CLI is officially supported on Windows.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            log_file_opts.mode(0o600);
+        if let Some(provider) = resolved {
+            Some(provider)
+        } else {
+            // No provider configured, prompt the user
+            let provider = oss_selection::select_oss_provider(&codex_home).await?;
+            if provider == "__CANCELLED__" {
+                return Err(std::io::Error::other(
+                    "OSS provider selection was cancelled by user",
+                ));
+            }
+            Some(provider)
         }
-
-        let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
-
-        // Wrap file in non‑blocking writer.
-        let (log_writer, log_guard) = non_blocking(log_file);
-
-        let default_filter = "code_core=info,code_tui=info,code_browser=warn,code_auto_drive_core=info";
-
-        // use RUST_LOG env var, defaulting based on debug flag.
-        let env_filter = || {
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter))
-        };
-
-        let env_layer = tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-            .with_ansi(false)
-            .with_writer(log_writer)
-            .with_filter(env_filter());
-
-        (Some(env_layer), Some(log_guard))
-    } else {
-        (None, None)
-    };
-
-    let critical_dir = log_dir.clone();
-    let critical_appender = rolling::daily(&critical_dir, "critical.log");
-    let (critical_writer, _critical_guard) = non_blocking(critical_appender);
-
-    let critical_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_ansi(false)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_writer(critical_writer)
-        .with_filter(LevelFilter::ERROR);
-
-    let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        code_core::otel_init::build_provider(&config, env!("CARGO_PKG_VERSION"))
-    })) {
-        Ok(Ok(otel)) => otel,
-        Ok(Err(_)) | Err(_) => None,
-    };
-    let otel_logger_layer = otel.as_ref().map(|provider| provider.logger_layer());
-
-    let _ = tracing_subscriber::registry()
-        .with(env_layer)
-        .with(critical_layer)
-        .with(otel_logger_layer)
-        .try_init();
-
-    if cli.oss {
-        code_ollama::ensure_oss_ready(&config)
-            .await
-            .map_err(|e| std::io::Error::other(format!("OSS setup failed: {e}")))?;
-    }
-
-    let latest_upgrade_version = if crate::updates::upgrade_ui_enabled() {
-        updates::get_upgrade_version(&config)
     } else {
         None
     };
 
-    let run_result = run_ratatui_app(
-        cli,
-        config,
-        should_show_trust_screen,
-        startup_footer_notice,
-        latest_upgrade_version,
-        theme_configured_explicitly,
-    );
-
-    housekeeping_stop.store(true, Ordering::Relaxed);
-    if let Some(handle) = housekeeping_handle {
-        if let Err(err) = handle.join() {
-            tracing::warn!("code home housekeeping task panicked: {err:?}");
-        }
+    // When using `--oss`, let the bootstrapper pick the model based on selected provider
+    let model = if let Some(model) = &cli.model {
+        Some(model.clone())
+    } else if cli.oss {
+        // Use the provider from model_provider_override
+        model_provider_override
+            .as_ref()
+            .and_then(|provider_id| get_default_model_for_oss_provider(provider_id))
+            .map(std::borrow::ToOwned::to_owned)
     } else {
-        tracing::warn!("housekeeping thread spawn skipped: background thread limit reached");
+        None // No model specified, will use the default.
+    };
+
+    let additional_dirs = cli.add_dir.clone();
+
+    let overrides = ConfigOverrides {
+        model,
+        approval_policy,
+        sandbox_mode,
+        cwd: if matches!(app_server_target, AppServerTarget::Remote { .. }) {
+            None
+        } else {
+            cwd
+        },
+        model_provider: model_provider_override.clone(),
+        config_profile: cli.config_profile.clone(),
+        codex_self_exe: arg0_paths.codex_self_exe.clone(),
+        codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
+        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
+        show_raw_agent_reasoning: cli.oss.then_some(true),
+        additional_writable_roots: additional_dirs,
+        ..Default::default()
+    };
+
+    let mut config = load_config_or_exit(
+        cli_kv_overrides.clone(),
+        overrides.clone(),
+        cloud_requirements.clone(),
+    )
+    .await;
+
+    let state_db = match &app_server_target {
+        AppServerTarget::Embedded => state_db::init(&config).await,
+        AppServerTarget::Remote { .. } => state_db::get_state_db(&config).await,
+    };
+
+    let effective_toml = config.config_layer_stack.effective_config();
+    match effective_toml.try_into() {
+        Ok(config_toml) => {
+            match crate::legacy_core::personality_migration::maybe_migrate_personality(
+                &config.codex_home,
+                &config_toml,
+                state_db.clone(),
+            )
+            .await
+            {
+                Ok(
+                    crate::legacy_core::personality_migration::PersonalityMigrationStatus::Applied,
+                ) => {
+                    config = load_config_or_exit(
+                        cli_kv_overrides.clone(),
+                        overrides.clone(),
+                        cloud_requirements.clone(),
+                    )
+                    .await;
+                }
+                Ok(
+                    crate::legacy_core::personality_migration::PersonalityMigrationStatus::SkippedMarker
+                    | crate::legacy_core::personality_migration::PersonalityMigrationStatus::SkippedExplicitPersonality
+                    | crate::legacy_core::personality_migration::PersonalityMigrationStatus::SkippedNoSessions,
+                ) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to run personality migration");
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to deserialize config for personality migration");
+        }
     }
 
-    run_result.map_err(|err| std::io::Error::other(err.to_string()))
-}
-
-pub(crate) fn install_unified_panic_hook() {
-    static PANIC_HOOK_ONCE: Once = Once::new();
-
-    PANIC_HOOK_ONCE.call_once(|| {
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let current_thread = std::thread::current();
-            let thread_name = current_thread.name().unwrap_or("unnamed");
-            let thread_id = format!("{:?}", current_thread.id());
-            let backtrace = Backtrace::force_capture().to_string();
-
-            let location = info
-                .location()
-                .map(|location| (location.file(), location.line(), location.column()));
-
-            session_log::log_panic(
-                &info.to_string(),
-                thread_name,
-                &thread_id,
-                location,
-                &backtrace,
+    #[allow(clippy::print_stderr)]
+    match check_execpolicy_for_warnings(&config.config_layer_stack).await {
+        Ok(None) => {}
+        Ok(Some(err)) | Err(err) => {
+            eprintln!(
+                "Error loading rules:\n{}",
+                format_exec_policy_error_with_source(&err)
             );
-
-            if let Some(location) = info.location() {
-                tracing::error!(
-                    thread_name,
-                    thread_id,
-                    file = location.file(),
-                    line = location.line(),
-                    column = location.column(),
-                    panic = %info,
-                    backtrace = %backtrace,
-                    session_log_path = session_log::log_path().as_ref().map(|path| path.display().to_string()),
-                    "panic captured"
-                );
-            } else {
-                tracing::error!(
-                    thread_name,
-                    thread_id,
-                    panic = %info,
-                    backtrace = %backtrace,
-                    session_log_path = session_log::log_path().as_ref().map(|path| path.display().to_string()),
-                    "panic captured"
-                );
-            }
-
-            if let Err(err) = crate::tui::restore() {
-                tracing::warn!("failed to restore terminal after panic: {err}");
-            }
-
-            prev_hook(info);
             std::process::exit(1);
-        }));
-    });
+        }
+    }
+
+    set_default_client_residency_requirement(config.enforce_residency.value());
+
+    if let Some(warning) = add_dir_warning_message(
+        &cli.add_dir,
+        &config.permissions.permission_profile(),
+        config.cwd.as_path(),
+    ) {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("Error adding directories: {warning}");
+            std::process::exit(1);
+        }
+    }
+
+    if matches!(app_server_target, AppServerTarget::Embedded) {
+        #[allow(clippy::print_stderr)]
+        if let Err(err) = enforce_login_restrictions(&AuthConfig {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            forced_login_method: config.forced_login_method,
+            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+            chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+        })
+        .await
+        {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
+
+    let log_dir = crate::legacy_core::config::log_dir(&config)?;
+    std::fs::create_dir_all(&log_dir)?;
+    // Open (or create) your log file, appending to it.
+    let mut log_file_opts = OpenOptions::new();
+    log_file_opts.create(true).append(true);
+
+    // Ensure the file is only readable and writable by the current user.
+    // Doing the equivalent to `chmod 600` on Windows is quite a bit more code
+    // and requires the Windows API crates, so we can reconsider that when
+    // Codex CLI is officially supported on Windows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        log_file_opts.mode(0o600);
+    }
+
+    let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
+
+    // Wrap file in non‑blocking writer.
+    let (non_blocking, _guard) = non_blocking(log_file);
+
+    // use RUST_LOG env var, default to info for codex crates.
+    let env_filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("codex_core=info,codex_tui=info,codex_rmcp_client=info")
+        })
+    };
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        // `with_target(true)` is the default, but we previously disabled it for file output.
+        // Keep it enabled so we can selectively enable targets via `RUST_LOG=...` and then
+        // grep for a specific module/target while troubleshooting.
+        .with_target(true)
+        .with_ansi(false)
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::NEW
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+        )
+        .with_filter(env_filter());
+
+    let feedback = codex_feedback::CodexFeedback::new();
+    let feedback_layer = feedback.logger_layer();
+    let feedback_metadata_layer = feedback.metadata_layer();
+
+    if cli.oss && model_provider_override.is_some() {
+        // We're in the oss section, so provider_id should be Some
+        // Let's handle None case gracefully though just in case
+        let provider_id = match model_provider_override.as_ref() {
+            Some(id) => id,
+            None => {
+                error!("OSS provider unexpectedly not set when oss flag is used");
+                return Err(std::io::Error::other(
+                    "OSS provider not set but oss flag was used",
+                ));
+            }
+        };
+        ensure_oss_provider_ready(provider_id, &config).await?;
+    }
+
+    let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::legacy_core::otel_init::build_provider(
+            &config,
+            env!("CARGO_PKG_VERSION"),
+            /*service_name_override*/ None,
+            /*default_analytics_enabled*/ true,
+        )
+    })) {
+        Ok(Ok(otel)) => otel,
+        Ok(Err(e)) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("Could not create otel exporter: {e}");
+            }
+            None
+        }
+        Err(_) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("Could not create otel exporter: panicked during initialization");
+            }
+            None
+        }
+    };
+
+    let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
+
+    let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
+
+    let log_db = state_db.clone().map(log_db::start);
+    let log_db_layer = log_db
+        .clone()
+        .map(|layer| layer.with_filter(Targets::new().with_default(Level::TRACE)));
+
+    let _ = tracing_subscriber::registry()
+        .with(file_layer)
+        .with(feedback_layer)
+        .with(feedback_metadata_layer)
+        .with(log_db_layer)
+        .with(otel_logger_layer)
+        .with(otel_tracing_layer)
+        .try_init();
+
+    run_ratatui_app(
+        cli,
+        arg0_paths,
+        loader_overrides,
+        app_server_target,
+        remote_cwd_override,
+        config,
+        overrides,
+        cli_kv_overrides,
+        cloud_requirements,
+        feedback,
+        log_db,
+        state_db,
+        remote_url,
+        remote_auth_token,
+        environment_manager,
+    )
+    .await
+    .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
-fn run_ratatui_app(
+#[allow(clippy::too_many_arguments)]
+async fn run_ratatui_app(
     cli: Cli,
-    mut config: Config,
-    should_show_trust_screen: bool,
-    startup_footer_notice: Option<String>,
-    latest_upgrade_version: Option<String>,
-    theme_configured_explicitly: bool,
-) -> color_eyre::Result<ExitSummary> {
+    arg0_paths: Arg0DispatchPaths,
+    loader_overrides: LoaderOverrides,
+    app_server_target: AppServerTarget,
+    remote_cwd_override: Option<PathBuf>,
+    initial_config: Config,
+    overrides: ConfigOverrides,
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    mut cloud_requirements: CloudRequirementsLoader,
+    feedback: codex_feedback::CodexFeedback,
+    log_db: Option<log_db::LogDbLayer>,
+    state_db: Option<StateDbHandle>,
+    remote_url: Option<String>,
+    remote_auth_token: Option<String>,
+    environment_manager: Arc<EnvironmentManager>,
+) -> color_eyre::Result<AppExitInfo> {
+    let remote_mode = matches!(&app_server_target, AppServerTarget::Remote { .. });
     color_eyre::install()?;
-    install_unified_panic_hook();
-    maybe_apply_terminal_theme_detection(&mut config, theme_configured_explicitly);
 
-    let (mut terminal, terminal_info) = tui::init(&config)?;
-    if config.tui.alternate_screen {
-        terminal.clear()?;
-    } else {
-        // Start in standard terminal mode: leave alt screen and DO NOT clear
-        // the normal buffer. We want prior shell history to remain intact and
-        // new chat output to append inline into scrollback. Ensure line wrap is
-        // enabled and cursor is left where the shell put it.
-        let _ = tui::leave_alt_screen_only();
-        let _ = ratatui::crossterm::execute!(
-            std::io::stdout(),
-            ratatui::crossterm::terminal::EnableLineWrap
-        );
+    tooltips::announcement::prewarm();
+
+    // Forward panic reports through tracing so they appear in the UI status
+    // line, but do not swallow the default/color-eyre panic handler.
+    // Chain to the previous hook so users still get a rich panic report
+    // (including backtraces) after we restore the terminal.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        prev_hook(info);
+    }));
+    let mut terminal = tui::init()?;
+    terminal.clear()?;
+
+    let mut tui = Tui::new(terminal);
+    let mut terminal_restore_guard = TerminalRestoreGuard::new();
+
+    #[cfg(not(debug_assertions))]
+    {
+        use crate::update_prompt::UpdatePromptOutcome;
+
+        let skip_update_prompt = cli.prompt.as_ref().is_some_and(|prompt| !prompt.is_empty());
+        if !skip_update_prompt {
+            match update_prompt::run_update_prompt_if_needed(&mut tui, &initial_config).await? {
+                UpdatePromptOutcome::Continue => {}
+                UpdatePromptOutcome::RunUpdate(action) => {
+                    terminal_restore_guard.restore()?;
+                    return Ok(AppExitInfo {
+                        token_usage: crate::token_usage::TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: Some(action),
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                }
+            }
+        }
     }
 
     // Initialize high-fidelity session event logging if enabled.
-    session_log::maybe_init(&config);
+    session_log::maybe_init(&initial_config);
+
+    let mut app_server = Some(
+        match start_app_server(
+            &app_server_target,
+            arg0_paths.clone(),
+            initial_config.clone(),
+            cli_kv_overrides.clone(),
+            loader_overrides.clone(),
+            cloud_requirements.clone(),
+            feedback.clone(),
+            log_db.clone(),
+            state_db.clone(),
+            environment_manager.clone(),
+        )
+        .await
+        {
+            Ok(app_server) => AppServerSession::new(app_server)
+                .with_remote_cwd_override(remote_cwd_override.clone()),
+            Err(err) => {
+                terminal_restore_guard.restore_silently();
+                session_log::log_session_end();
+                return Err(err);
+            }
+        },
+    );
+
+    let should_show_trust_screen_flag = !remote_mode && should_show_trust_screen(&initial_config);
+    let mut trust_decision_was_made = false;
+    let login_status = if initial_config.model_provider.requires_openai_auth {
+        let Some(app_server) = app_server.as_mut() else {
+            unreachable!("app server should exist when auth is required");
+        };
+        get_login_status(app_server, &initial_config).await?
+    } else {
+        LoginStatus::NotAuthenticated
+    };
+    let should_show_onboarding =
+        should_show_onboarding(login_status, &initial_config, should_show_trust_screen_flag);
+
+    let config = if should_show_onboarding {
+        let show_login_screen = should_show_login_screen(login_status, &initial_config);
+        let onboarding_result = run_onboarding_app(
+            OnboardingScreenArgs {
+                show_login_screen,
+                show_trust_screen: should_show_trust_screen_flag,
+                login_status,
+                app_server_request_handle: app_server
+                    .as_ref()
+                    .map(AppServerSession::request_handle),
+                config: initial_config.clone(),
+            },
+            if show_login_screen {
+                app_server.as_mut()
+            } else {
+                None
+            },
+            &mut tui,
+        )
+        .await?;
+        if onboarding_result.should_exit {
+            shutdown_app_server_if_present(app_server.take()).await;
+            terminal_restore_guard.restore_silently();
+            session_log::log_session_end();
+            let _ = tui.terminal.clear();
+            return Ok(AppExitInfo {
+                token_usage: crate::token_usage::TokenUsage::default(),
+                thread_id: None,
+                thread_name: None,
+                update_action: None,
+                exit_reason: ExitReason::UserRequested,
+            });
+        }
+        trust_decision_was_made = onboarding_result.directory_trust_decision.is_some();
+        // If this onboarding run included the login step, always refresh cloud requirements and
+        // rebuild config. This avoids missing newly available cloud requirements due to login
+        // status detection edge cases.
+        if show_login_screen && !remote_mode {
+            cloud_requirements = cloud_requirements_loader_for_storage(
+                initial_config.codex_home.to_path_buf(),
+                /*enable_codex_api_key_env*/ false,
+                initial_config.cli_auth_credentials_store_mode,
+                initial_config.chatgpt_base_url.clone(),
+            )
+            .await;
+        }
+
+        // If the user made an explicit trust decision, or we showed the login flow, reload config
+        // so current process state reflects persisted trust/auth changes.
+        if onboarding_result.directory_trust_decision.is_some()
+            || (show_login_screen && !remote_mode)
+        {
+            load_config_or_exit(
+                cli_kv_overrides.clone(),
+                overrides.clone(),
+                cloud_requirements.clone(),
+            )
+            .await
+        } else {
+            initial_config
+        }
+    } else {
+        initial_config
+    };
+
+    let mut missing_session_exit = |id_str: &str, action: &str| {
+        error!("Error finding conversation path: {id_str}");
+        terminal_restore_guard.restore_silently();
+        session_log::log_session_end();
+        let _ = tui.terminal.clear();
+        Ok(AppExitInfo {
+            token_usage: crate::token_usage::TokenUsage::default(),
+            thread_id: None,
+            thread_name: None,
+            update_action: None,
+            exit_reason: ExitReason::Fatal(format!(
+                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
+            )),
+        })
+    };
+
+    let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
+    let session_selection = if use_fork {
+        if let Some(id_str) = cli.fork_session_id.as_deref() {
+            let Some(startup_app_server) = app_server.as_mut() else {
+                unreachable!("app server should be initialized for --fork <id>");
+            };
+            match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
+                Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
+                None => {
+                    shutdown_app_server_if_present(app_server.take()).await;
+                    return missing_session_exit(id_str, "fork");
+                }
+            }
+        } else if cli.fork_last {
+            let filter_cwd = latest_session_cwd_filter(
+                remote_mode,
+                remote_cwd_override.as_deref(),
+                &config,
+                cli.fork_show_all,
+            );
+            let Some(app_server) = app_server.as_mut() else {
+                unreachable!("app server should be initialized for --fork --last");
+            };
+            match lookup_latest_session_target_with_app_server(
+                app_server, &config, filter_cwd, /*include_non_interactive*/ false,
+            )
+            .await?
+            {
+                Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
+                None => resume_picker::SessionSelection::StartFresh,
+            }
+        } else if cli.fork_picker {
+            let Some(app_server) = app_server.take() else {
+                unreachable!("app server should be initialized for --fork picker");
+            };
+            match resume_picker::run_fork_picker_with_app_server(
+                &mut tui,
+                &config,
+                cli.fork_show_all,
+                app_server,
+            )
+            .await?
+            {
+                resume_picker::SessionSelection::Exit => {
+                    terminal_restore_guard.restore_silently();
+                    session_log::log_session_end();
+                    return Ok(AppExitInfo {
+                        token_usage: crate::token_usage::TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: None,
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                }
+                other => other,
+            }
+        } else {
+            resume_picker::SessionSelection::StartFresh
+        }
+    } else if let Some(id_str) = cli.resume_session_id.as_deref() {
+        let Some(startup_app_server) = app_server.as_mut() else {
+            unreachable!("app server should be initialized for --resume <id>");
+        };
+        match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
+            Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
+            None => {
+                shutdown_app_server_if_present(app_server.take()).await;
+                return missing_session_exit(id_str, "resume");
+            }
+        }
+    } else if cli.resume_last {
+        let filter_cwd = latest_session_cwd_filter(
+            remote_mode,
+            remote_cwd_override.as_deref(),
+            &config,
+            cli.resume_show_all,
+        );
+        let Some(app_server) = app_server.as_mut() else {
+            unreachable!("app server should be initialized for --resume --last");
+        };
+        match lookup_latest_session_target_with_app_server(
+            app_server,
+            &config,
+            filter_cwd,
+            cli.resume_include_non_interactive,
+        )
+        .await?
+        {
+            Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
+            None => resume_picker::SessionSelection::StartFresh,
+        }
+    } else if cli.resume_picker {
+        let Some(app_server) = app_server.take() else {
+            unreachable!("app server should be initialized for --resume picker");
+        };
+        match resume_picker::run_resume_picker_with_app_server(
+            &mut tui,
+            &config,
+            cli.resume_show_all,
+            cli.resume_include_non_interactive,
+            app_server,
+        )
+        .await?
+        {
+            resume_picker::SessionSelection::Exit => {
+                terminal_restore_guard.restore_silently();
+                session_log::log_session_end();
+                return Ok(AppExitInfo {
+                    token_usage: crate::token_usage::TokenUsage::default(),
+                    thread_id: None,
+                    thread_name: None,
+                    update_action: None,
+                    exit_reason: ExitReason::UserRequested,
+                });
+            }
+            other => other,
+        }
+    } else {
+        resume_picker::SessionSelection::StartFresh
+    };
+
+    let current_cwd = config.cwd.clone();
+    let allow_prompt = !remote_mode && cli.cwd.is_none();
+    let action_and_target_session_if_resume_or_fork = match &session_selection {
+        resume_picker::SessionSelection::Resume(target_session) => {
+            Some((CwdPromptAction::Resume, target_session))
+        }
+        resume_picker::SessionSelection::Fork(target_session) => {
+            Some((CwdPromptAction::Fork, target_session))
+        }
+        _ => None,
+    };
+    let fallback_cwd = match action_and_target_session_if_resume_or_fork {
+        Some((action, target_session)) => {
+            if remote_mode {
+                Some(current_cwd.to_path_buf())
+            } else {
+                match resolve_cwd_for_resume_or_fork(
+                    &mut tui,
+                    state_db.as_deref(),
+                    &current_cwd,
+                    target_session.thread_id,
+                    target_session.path.as_deref(),
+                    action,
+                    allow_prompt,
+                )
+                .await?
+                {
+                    ResolveCwdOutcome::Continue(cwd) => cwd,
+                    ResolveCwdOutcome::Exit => {
+                        terminal_restore_guard.restore_silently();
+                        session_log::log_session_end();
+                        return Ok(AppExitInfo {
+                            token_usage: crate::token_usage::TokenUsage::default(),
+                            thread_id: None,
+                            thread_name: None,
+                            update_action: None,
+                            exit_reason: ExitReason::UserRequested,
+                        });
+                    }
+                }
+            }
+        }
+        None => None,
+    };
+
+    let picker_cancelled_without_selection = matches!(
+        session_selection,
+        resume_picker::SessionSelection::StartFresh
+    ) && (cli.resume_picker || cli.fork_picker);
+
+    let mut config = match &session_selection {
+        resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
+            load_config_or_exit_with_fallback_cwd(
+                cli_kv_overrides.clone(),
+                overrides.clone(),
+                cloud_requirements.clone(),
+                fallback_cwd,
+            )
+            .await
+        }
+        resume_picker::SessionSelection::StartFresh if picker_cancelled_without_selection => {
+            load_config_or_exit(
+                cli_kv_overrides.clone(),
+                overrides.clone(),
+                cloud_requirements.clone(),
+            )
+            .await
+        }
+        _ => config,
+    };
+
+    // Configure syntax highlighting theme from the final config — onboarding
+    // and resume/fork can both reload config with a different tui_theme, so
+    // this must happen after the last possible reload.
+    if let Some(w) = crate::render::highlight::set_theme_override(
+        config.tui_theme.clone(),
+        find_codex_home().ok().map(AbsolutePathBuf::into_path_buf),
+    ) {
+        config.startup_warnings.push(w);
+    }
+
+    set_default_client_residency_requirement(config.enforce_residency.value());
+    let active_profile = config.active_profile.clone();
+    let should_show_trust_screen = should_show_trust_screen(&config);
+    let should_prompt_windows_sandbox_nux_at_startup = cfg!(target_os = "windows")
+        && trust_decision_was_made
+        && WindowsSandboxLevel::from_config(&config) == WindowsSandboxLevel::Disabled;
 
     let Cli {
         prompt,
-        images,
-        debug,
-        order,
-        timing,
-        resume_picker,
-        resume_last: _,
-        resume_session_id: _,
+        shared,
+        no_alt_screen,
         ..
     } = cli;
-    let mut app = App::new(
-        config.clone(),
+    let images = shared.into_inner().images;
+
+    let use_alt_screen = determine_alt_screen_mode(no_alt_screen, config.tui_alternate_screen);
+    tui.set_alt_screen_enabled(use_alt_screen);
+    let app_server = match app_server {
+        Some(app_server) => app_server,
+        None => match start_app_server(
+            &app_server_target,
+            arg0_paths,
+            config.clone(),
+            cli_kv_overrides.clone(),
+            loader_overrides,
+            cloud_requirements.clone(),
+            feedback.clone(),
+            log_db.clone(),
+            state_db.clone(),
+            environment_manager.clone(),
+        )
+        .await
+        {
+            Ok(app_server) => AppServerSession::new(app_server)
+                .with_remote_cwd_override(remote_cwd_override.clone()),
+            Err(err) => {
+                terminal_restore_guard.restore_silently();
+                session_log::log_session_end();
+                return Err(err);
+            }
+        },
+    };
+
+    let app_result = App::run(
+        &mut tui,
+        app_server,
+        config,
+        cli_kv_overrides.clone(),
+        overrides.clone(),
+        active_profile,
         prompt,
         images,
-        should_show_trust_screen,
-        debug,
-        order,
-        terminal_info,
-        timing,
-        resume_picker,
-        startup_footer_notice,
-        latest_upgrade_version,
-    );
+        session_selection,
+        feedback,
+        should_show_trust_screen, // Proxy to: is it a first run in this directory?
+        should_show_trust_screen_flag, // Preserve the startup-time trust NUX signal before onboarding
+        should_prompt_windows_sandbox_nux_at_startup,
+        remote_url,
+        remote_auth_token,
+        state_db,
+        environment_manager,
+    )
+    .await;
 
-    let app_result = app.run(&mut terminal);
-    let session_id = app.session_id();
-    let usage = app.token_usage();
-
-    // Optionally print timing summary to stderr after restoring the terminal.
-    let timing_summary = app.perf_summary();
-
-    restore();
-
-    // After restoring the terminal, clean up any worktrees created by this process.
-    cleanup_session_worktrees_and_print(&config.code_home);
+    terminal_restore_guard.restore_silently();
     // Mark the end of the recorded session.
     session_log::log_session_end();
-    if let Some(summary) = timing_summary {
-        print_timing_summary(&summary);
-    }
-
-    #[cfg(unix)]
-    let sigterm_triggered = app.sigterm_triggered();
-    #[cfg(unix)]
-    app.clear_sigterm_guard();
-    drop(app);
-    #[cfg(unix)]
-    if sigterm_triggered {
-        unsafe {
-            libc::raise(libc::SIGTERM);
-        }
-    }
-
     // ignore error when collecting usage – report underlying error instead
-    app_result.map(|_| ExitSummary {
-        token_usage: usage,
-        session_id,
-    })
+    app_result
 }
 
 #[expect(
@@ -913,558 +1542,876 @@ fn run_ratatui_app(
     reason = "TUI should no longer be displayed, so we can write to stderr."
 )]
 fn restore() {
-    if let Err(err) = tui::restore() {
+    if let Err(err) = tui::restore_after_exit() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
     }
 }
 
-#[allow(clippy::print_stderr)]
-fn print_timing_summary(summary: &str) {
-    eprintln!("\n== Timing Summary ==\n{}", summary);
+struct TerminalRestoreGuard {
+    active: bool,
 }
 
-#[allow(clippy::print_stdout, clippy::print_stderr)]
-fn cleanup_session_worktrees_and_print(code_home: &Path) {
-    match code_core::cleanup_current_session_worktrees(code_home) {
-        Ok(outcome) if outcome.worktrees_removed > 0 => {
-            eprintln!(
-                "Cleaned {} worktree(s) from this session, reclaiming {} bytes.",
-                outcome.worktrees_removed,
-                outcome.worktree_bytes_reclaimed
-            );
+impl TerminalRestoreGuard {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    fn restore(&mut self) -> color_eyre::Result<()> {
+        if self.active {
+            crate::tui::restore_after_exit()?;
+            self.active = false;
         }
-        Ok(outcome) if outcome.errors > 0 => {
-            eprintln!(
-                "Worktree cleanup completed with {} error(s); stale entries may be retried by housekeeping.",
-                outcome.errors
-            );
-        }
-        Ok(_) => {}
-        Err(err) => {
-            eprintln!("Worktree cleanup failed: {err}");
+        Ok(())
+    }
+
+    fn restore_silently(&mut self) {
+        if self.active {
+            restore();
+            self.active = false;
         }
     }
 }
 
-fn maybe_apply_terminal_theme_detection(config: &mut Config, theme_configured_explicitly: bool) {
-    if theme_configured_explicitly {
-        tracing::info!(
-            "Terminal theme autodetect skipped due to explicit theme configuration"
-        );
-        return;
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.restore_silently();
     }
+}
 
-    let theme = &mut config.tui.theme;
-
-    let autodetect_disabled = std::env::var("CODE_DISABLE_THEME_AUTODETECT")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
-        .unwrap_or(false);
-    if autodetect_disabled {
-        tracing::info!("Terminal theme autodetect disabled via CODE_DISABLE_THEME_AUTODETECT");
-        return;
-    }
-
-    if theme.name != ThemeName::LightPhoton {
-        return;
-    }
-
-    if theme.label.is_some() || theme.is_dark.is_some() {
-        return;
-    }
-
-    if theme.colors != ThemeColors::default() {
-        return;
-    }
-
-    let term = std::env::var("TERM").ok().filter(|value| !value.is_empty());
-    let term_program = std::env::var("TERM_PROGRAM").ok().filter(|value| !value.is_empty());
-    let term_program_version =
-        std::env::var("TERM_PROGRAM_VERSION").ok().filter(|value| !value.is_empty());
-    let colorfgbg = std::env::var("COLORFGBG").ok().filter(|value| !value.is_empty());
-
-    if let Some(cached) = config.tui.cached_terminal_background.as_ref() {
-        if cached_background_matches_env(
-            cached,
-            &term,
-            &term_program,
-            &term_program_version,
-            &colorfgbg,
-        ) {
-            tracing::debug!(
-                source = cached.source.as_deref().unwrap_or("cached"),
-                "Using cached terminal background detection result",
-            );
-            apply_detected_theme(theme, cached.is_dark);
-            return;
-        }
-    }
-
-    match crate::terminal_info::detect_dark_terminal_background() {
-        Some(detection) => {
-            apply_detected_theme(theme, detection.is_dark);
-
-            let source = match detection.source {
-                crate::terminal_info::TerminalBackgroundSource::Osc11 => "osc-11",
-                crate::terminal_info::TerminalBackgroundSource::ColorFgBg => "colorfgbg",
-            };
-
-            let cache = CachedTerminalBackground {
-                is_dark: detection.is_dark,
-                term,
-                term_program,
-                term_program_version,
-                colorfgbg,
-                source: Some(source.to_string()),
-                rgb: detection
-                    .rgb
-                    .map(|(r, g, b)| format!("{:02x}{:02x}{:02x}", r, g, b)),
-            };
-
-            config.tui.cached_terminal_background = Some(cache.clone());
-            if let Err(err) = set_cached_terminal_background(&config.code_home, &cache) {
-                tracing::warn!("Failed to persist terminal background autodetect result: {err}");
+/// Determine whether to use the terminal's alternate screen buffer.
+///
+/// The alternate screen buffer provides a cleaner fullscreen experience without polluting
+/// the terminal's scrollback history. However, it conflicts with terminal multiplexers like
+/// Zellij that strictly follow the xterm spec, which disallows scrollback in alternate screen
+/// buffers. Zellij intentionally disables scrollback in alternate screen mode (see
+/// https://github.com/zellij-org/zellij/pull/1032) and offers no configuration option to
+/// change this behavior.
+///
+/// This function implements a pragmatic workaround:
+/// - If `--no-alt-screen` is explicitly passed, always disable alternate screen
+/// - Otherwise, respect the `tui.alternate_screen` config setting:
+///   - `always`: Use alternate screen everywhere (original behavior)
+///   - `never`: Inline mode only, preserves scrollback
+///   - `auto` (default): Auto-detect the terminal multiplexer and disable alternate screen
+///     only in Zellij, enabling it everywhere else
+fn determine_alt_screen_mode(no_alt_screen: bool, tui_alternate_screen: AltScreenMode) -> bool {
+    if no_alt_screen {
+        false
+    } else {
+        match tui_alternate_screen {
+            AltScreenMode::Always => true,
+            AltScreenMode::Never => false,
+            AltScreenMode::Auto => {
+                let terminal_info = terminal_info();
+                !matches!(
+                    terminal_info.multiplexer,
+                    Some(codex_terminal_detection::Multiplexer::Zellij {})
+                )
             }
         }
-        None => {
-            tracing::debug!(
-                "Terminal theme autodetect unavailable; using configured default theme"
-            );
-        }
     }
 }
 
-#[derive(Clone, Copy)]
-struct MigrationPlan {
-    current: &'static ModelPreset,
-    target: &'static ModelPreset,
-    hide_key: &'static str,
-    new_effort: Option<ReasoningEffort>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginStatus {
+    AuthMode(AppServerAuthMode),
+    NotAuthenticated,
 }
 
-fn determine_migration_plan(config: &Config, auth_mode: AuthMode) -> Option<MigrationPlan> {
-    let current_slug = config.model.to_ascii_lowercase();
-    let presets = all_model_presets();
-    let current = find_migration_preset(presets, &current_slug)?;
-    let upgrade = current.upgrade.as_ref()?;
-    if notice_hidden(&config.notices, upgrade.migration_config_key.as_str()) {
-        return None;
+/// Determines the user's authentication mode using a lightweight account read
+/// rather than a full `bootstrap`, avoiding the model-list fetch and
+/// rate-limit round-trip that `bootstrap` would trigger.
+async fn get_login_status(
+    app_server: &mut AppServerSession,
+    config: &Config,
+) -> color_eyre::Result<LoginStatus> {
+    if !config.model_provider.requires_openai_auth {
+        return Ok(LoginStatus::NotAuthenticated);
     }
-    let target = presets
-        .iter()
-        .find(|preset| preset.id.eq_ignore_ascii_case(&upgrade.id))?;
-    if !auth_allows_target(auth_mode, target) {
-        return None;
-    }
-    let new_effort = None;
-    Some(MigrationPlan {
-        current,
-        target,
-        hide_key: upgrade.migration_config_key.as_str(),
-        new_effort,
+
+    let account = app_server.read_account().await?;
+    Ok(match account.account {
+        Some(AppServerAccount::ApiKey {}) => LoginStatus::AuthMode(AppServerAuthMode::ApiKey),
+        Some(AppServerAccount::Chatgpt { .. }) => LoginStatus::AuthMode(AppServerAuthMode::Chatgpt),
+        Some(AppServerAccount::AmazonBedrock {}) => LoginStatus::NotAuthenticated,
+        None => LoginStatus::NotAuthenticated,
     })
 }
 
-fn find_migration_preset<'a>(presets: &'a [ModelPreset], slug_lower: &str) -> Option<&'a ModelPreset> {
-    let slug_no_prefix = slug_lower
-        .rsplit_once(':')
-        .map(|(_, rest)| rest)
-        .unwrap_or(slug_lower);
-    let slug_no_prefix = slug_no_prefix
-        .rsplit_once('/')
-        .map(|(_, rest)| rest)
-        .unwrap_or(slug_no_prefix);
-    let slug_no_test = slug_no_prefix.strip_prefix("test-").unwrap_or(slug_no_prefix);
+async fn load_config_or_exit(
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    overrides: ConfigOverrides,
+    cloud_requirements: CloudRequirementsLoader,
+) -> Config {
+    load_config_or_exit_with_fallback_cwd(
+        cli_kv_overrides,
+        overrides,
+        cloud_requirements,
+        /*fallback_cwd*/ None,
+    )
+    .await
+}
 
-    if let Some(preset) = presets.iter().find(|preset| {
-        preset.id.eq_ignore_ascii_case(slug_no_test)
-            || preset.model.eq_ignore_ascii_case(slug_no_test)
-            || preset.display_name.eq_ignore_ascii_case(slug_no_test)
-    }) {
-        return Some(preset);
-    }
-
-    let mut best: Option<&ModelPreset> = None;
-    let mut best_len = 0usize;
-    for preset in presets.iter() {
-        for candidate in [&preset.id, &preset.model, &preset.display_name] {
-            let candidate_lower = candidate.to_ascii_lowercase();
-            if slug_no_test.starts_with(candidate_lower.as_str()) {
-                let candidate_len = candidate.len();
-                if candidate_len > best_len {
-                    best = Some(preset);
-                    best_len = candidate_len;
-                }
-                break;
-            }
+async fn load_config_or_exit_with_fallback_cwd(
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    overrides: ConfigOverrides,
+    cloud_requirements: CloudRequirementsLoader,
+    fallback_cwd: Option<PathBuf>,
+) -> Config {
+    #[allow(clippy::print_stderr)]
+    match ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .harness_overrides(overrides)
+        .cloud_requirements(cloud_requirements)
+        .fallback_cwd(fallback_cwd)
+        .build()
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("Error loading configuration: {err}");
+            std::process::exit(1);
         }
     }
-
-    best
 }
 
-const NOTICE_TABLE: &str = "notice";
-
-async fn persist_migration_acceptance(
-    code_home: &Path,
-    profile: Option<&str>,
-    plan: MigrationPlan,
-) -> io::Result<()> {
-    let mut pending: Vec<(Vec<&str>, String)> = Vec::new();
-    pending.push((vec![CONFIG_KEY_MODEL], plan.target.model.to_string()));
-
-    if let Some(effort) = plan.new_effort {
-        pending.push((
-            vec![CONFIG_KEY_EFFORT],
-            reasoning_effort_to_str(effort).to_string(),
-        ));
-    }
-
-    pending.push((vec![NOTICE_TABLE, plan.hide_key], "true".to_string()));
-
-    let overrides: Vec<(&[&str], &str)> = pending
-        .iter()
-        .map(|(path, value)| (path.as_slice(), value.as_str()))
-        .collect();
-
-    config_edit::persist_overrides(code_home, profile, &overrides)
-        .await
-        .map_err(|err| io::Error::other(err.to_string()))
+/// Determine if the user has decided whether to trust the current directory.
+fn should_show_trust_screen(config: &Config) -> bool {
+    config.active_project.trust_level.is_none()
 }
 
-async fn persist_notice_hide(
-    code_home: &Path,
-    profile: Option<&str>,
-    hide_key: &'static str,
-) -> io::Result<()> {
-    let notice_path = [NOTICE_TABLE, hide_key];
-    let overrides = [(&notice_path[..], "true")];
-    config_edit::persist_overrides(code_home, profile, &overrides)
-        .await
-        .map_err(|err| io::Error::other(err.to_string()))
-}
-
-fn set_notice_flag(notices: &mut Notice, key: &str) {
-    if key == HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt5_1_migration_prompt = Some(true);
-    } else if key == HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt_5_1_codex_max_migration_prompt = Some(true);
-    } else if key == HIDE_GPT_5_2_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt5_2_migration_prompt = Some(true);
-    } else if key == code_common::model_presets::HIDE_GPT_5_2_CODEX_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt5_2_codex_migration_prompt = Some(true);
-    }
-}
-
-fn notice_hidden(notices: &Notice, key: &str) -> bool {
-    if key == HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt5_1_migration_prompt.unwrap_or(false)
-    } else if key == HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt_5_1_codex_max_migration_prompt.unwrap_or(false)
-    } else if key == HIDE_GPT_5_2_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt5_2_migration_prompt.unwrap_or(false)
-    } else if key == code_common::model_presets::HIDE_GPT_5_2_CODEX_MIGRATION_PROMPT_CONFIG {
-        notices.hide_gpt5_2_codex_migration_prompt.unwrap_or(false)
-    } else {
-        false
-    }
-}
-
-fn auth_allows_target(auth_mode: AuthMode, target: &ModelPreset) -> bool {
-    !(matches!(auth_mode, AuthMode::ApiKey) && target.id.eq_ignore_ascii_case("gpt-5.2-codex"))
-}
-
-fn reasoning_effort_to_str(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::Minimal => "minimal",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::XHigh => "xhigh",
-        ReasoningEffort::None => "none",
-    }
-}
-
-fn apply_detected_theme(theme: &mut ThemeConfig, is_dark: bool) {
-    if is_dark {
-        theme.name = ThemeName::DarkCarbonNight;
-        tracing::info!(
-            "Detected dark terminal background; switching default theme to Dark - Carbon Night"
-        );
-    } else {
-        tracing::info!(
-            "Detected light terminal background; keeping default Light - Photon theme"
-        );
-    }
-}
-
-fn cached_background_matches_env(
-    cached: &CachedTerminalBackground,
-    term: &Option<String>,
-    term_program: &Option<String>,
-    term_program_version: &Option<String>,
-    colorfgbg: &Option<String>,
+fn should_show_onboarding(
+    login_status: LoginStatus,
+    config: &Config,
+    show_trust_screen: bool,
 ) -> bool {
-    fn matches(expected: &Option<String>, actual: &Option<String>) -> bool {
-        match expected {
-            Some(expected) => actual.as_ref().map(|value| value == expected).unwrap_or(false),
-            None => true,
-        }
+    if show_trust_screen {
+        return true;
     }
 
-    matches(&cached.term, term)
-        && matches(&cached.term_program, term_program)
-        && matches(&cached.term_program_version, term_program_version)
-        && matches(&cached.colorfgbg, colorfgbg)
+    should_show_login_screen(login_status, config)
 }
 
-/// Minimal login status indicator for onboarding flow.
-#[derive(Debug, Clone, Copy)]
-pub enum LoginStatus {
-    NotAuthenticated,
-    AuthMode(AuthMode),
-}
-
-/// Determine current login status based on auth.json presence.
-pub fn get_login_status(config: &Config) -> LoginStatus {
-    let code_home = config.code_home.clone();
-    match CodexAuth::from_code_home(&code_home, AuthMode::ChatGPT, &config.responses_originator_header) {
-        Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode),
-        _ => LoginStatus::NotAuthenticated,
-    }
-}
-
-/// Determine if user has configured a sandbox / approval policy,
-/// or if the current cwd project is trusted, and updates the config
-/// accordingly.
-fn determine_repo_trust_state(
-    config: &mut Config,
-    config_toml: &ConfigToml,
-    approval_policy_overide: Option<AskForApproval>,
-    sandbox_mode_override: Option<SandboxMode>,
-    config_profile_override: Option<String>,
-    workspace_write_network_access_explicit: bool,
-) -> std::io::Result<bool> {
-    let config_profile = config_toml.get_config_profile(config_profile_override)?;
-
-    // If this project has explicit per-project overrides for approval and/or sandbox,
-    // honor them and skip the trust screen entirely.
-    let proj_key = config.cwd.to_string_lossy().to_string();
-    let has_per_project_overrides = config_toml
-        .projects
-        .as_ref()
-        .and_then(|m| m.get(&proj_key))
-        .map(|p| p.approval_policy.is_some() || p.sandbox_mode.is_some())
-        .unwrap_or(false);
-    if has_per_project_overrides {
-        return Ok(false);
+fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
+    // Only show the login screen for providers that actually require OpenAI auth
+    // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
+    if !config.model_provider.requires_openai_auth {
+        return false;
     }
 
-    if approval_policy_overide.is_some() || sandbox_mode_override.is_some() {
-        // if the user has overridden either approval policy or sandbox mode,
-        // skip the trust flow
-        Ok(false)
-    } else if config_profile.approval_policy.is_some() {
-        // if the user has specified settings in a config profile, skip the trust flow
-        // todo: profile sandbox mode?
-        Ok(false)
-    } else if config_toml.approval_policy.is_some() || config_toml.sandbox_mode.is_some() {
-        // if the user has specified either approval policy or sandbox mode in config.toml
-        // skip the trust flow
-        Ok(false)
-    } else if config_toml.is_cwd_trusted(&config.cwd) {
-        // If the current cwd project is trusted and no explicit config has been set,
-        // default to fully trusted, non‑interactive execution to match expected behavior.
-        // This restores the previous semantics before the recent trust‑flow refactor.
-        if let Some(workspace_write) = config_toml.sandbox_workspace_write.as_ref() {
-            // Honor explicit sandbox WorkspaceWrite protections (like allow_git_writes = false)
-            // even when the project is marked as trusted.
-            if !workspace_write.allow_git_writes {
-                // Maintain the historical networking behaviour from DangerFullAccess: allow outbound
-                // network even when we pivot into WorkspaceWrite solely to protect `.git`.
-                let network_access = if workspace_write.network_access {
-                    true
-                } else if workspace_write_network_access_explicit {
-                    false
-                } else {
-                    true
-                };
-                config.approval_policy = AskForApproval::Never;
-                config.sandbox_policy = SandboxPolicy::WorkspaceWrite {
-                    writable_roots: workspace_write.writable_roots.clone(),
-                    network_access,
-                    exclude_tmpdir_env_var: workspace_write.exclude_tmpdir_env_var,
-                    exclude_slash_tmp: workspace_write.exclude_slash_tmp,
-                    allow_git_writes: workspace_write.allow_git_writes,
-                };
-                return Ok(false);
-            }
-        }
-
-        config.approval_policy = AskForApproval::Never;
-        config.sandbox_policy = SandboxPolicy::DangerFullAccess;
-        Ok(false)
-    } else {
-        // if none of the above conditions are met (and no per‑project overrides), show the trust screen
-        Ok(true)
-    }
+    login_status == LoginStatus::NotAuthenticated
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use code_core::config::ProjectConfig;
-    use code_core::config_types::SandboxWorkspaceWrite;
-    use code_core::protocol::AskForApproval;
-    use std::collections::HashMap;
+    use crate::legacy_core::config::ConfigBuilder;
+    use crate::legacy_core::config::ConfigOverrides;
+    use codex_app_server_protocol::AskForApproval;
+    use codex_app_server_protocol::ClientRequest;
+    use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::ThreadStartParams;
+    use codex_app_server_protocol::ThreadStartResponse;
+    use codex_config::config_toml::ProjectConfig;
+    use pretty_assertions::assert_eq;
+    use serial_test::serial;
     use tempfile::TempDir;
 
-    fn make_trusted_config(
-        sandbox_workspace_write: Option<SandboxWorkspaceWrite>,
-    ) -> std::io::Result<(Config, ConfigToml)> {
-        let code_home = TempDir::new()?;
-        let workspace = TempDir::new()?;
+    async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
+        ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .build()
+            .await
+    }
 
-        let mut config_toml = ConfigToml::default();
-        config_toml.sandbox_workspace_write = sandbox_workspace_write;
+    async fn start_test_embedded_app_server(
+        config: Config,
+    ) -> color_eyre::Result<InProcessAppServerClient> {
+        let state_db = state_db::init(&config).await;
+        start_embedded_app_server(
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            CloudRequirementsLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            state_db,
+            Arc::new(EnvironmentManager::default_for_tests()),
+        )
+        .await
+    }
 
-        let mut projects = HashMap::new();
-        projects.insert(
-            workspace.path().to_string_lossy().to_string(),
-            ProjectConfig {
-                trust_level: Some("trusted".to_string()),
-                approval_policy: None,
-                sandbox_mode: None,
-                always_allow_commands: None,
-                hooks: vec![],
-                commands: vec![],
-            },
-        );
-        config_toml.projects = Some(projects);
-
-        let overrides = ConfigOverrides {
-            cwd: Some(workspace.path().to_path_buf()),
-            compact_prompt_override: None,
-            compact_prompt_override_file: None,
-            ..Default::default()
+    #[test]
+    fn session_target_display_label_falls_back_to_thread_id() {
+        let thread_id = ThreadId::new();
+        let target = crate::resume_picker::SessionTarget {
+            path: None,
+            thread_id,
         };
 
-        let config = Config::load_from_base_config_with_overrides(
-            config_toml.clone(),
-            overrides,
-            code_home.path().to_path_buf(),
-        )?;
-
-        Ok((config, config_toml))
+        assert_eq!(target.display_label(), format!("thread {thread_id}"));
     }
 
     #[test]
-    fn trusted_workspace_honors_allow_git_writes_override() -> std::io::Result<()> {
-        let (mut config, config_toml) = make_trusted_config(Some(SandboxWorkspaceWrite {
-            allow_git_writes: false,
-            ..Default::default()
-        }))?;
+    fn normalize_remote_addr_accepts_websocket_url() {
+        assert_eq!(
+            normalize_remote_addr("ws://127.0.0.1:4500").expect("ws URL should normalize"),
+            "ws://127.0.0.1:4500/"
+        );
+    }
 
-        let show_trust = determine_repo_trust_state(
-            &mut config,
-            &config_toml,
-            None,
-            None,
-            None,
-            false,
-        )?;
-        assert!(!show_trust);
+    #[test]
+    fn normalize_remote_addr_accepts_secure_websocket_url() {
+        assert_eq!(
+            normalize_remote_addr("wss://example.com:443").expect("wss URL should normalize"),
+            "wss://example.com/"
+        );
+    }
 
-        match &config.sandbox_policy {
-            SandboxPolicy::WorkspaceWrite {
-                allow_git_writes,
-                network_access,
-                ..
-            } => {
-                assert!(!allow_git_writes);
-                assert!(*network_access, "trusted WorkspaceWrite should retain network access");
-            }
-            other => panic!("expected workspace-write sandbox, got {other:?}"),
+    #[test]
+    fn normalize_remote_addr_rejects_websocket_url_without_explicit_port() {
+        for addr in [
+            "ws://127.0.0.1",
+            "wss://example.com",
+            "ws://user:pass@127.0.0.1",
+        ] {
+            let err = normalize_remote_addr(addr)
+                .expect_err("websocket URLs without an explicit port should be rejected");
+            assert!(
+                err.to_string()
+                    .contains("expected `ws://host:port` or `wss://host:port`")
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_remote_addr_rejects_invalid_input() {
+        let err = normalize_remote_addr("https://127.0.0.1:4500")
+            .expect_err("https URLs should be rejected");
+        assert!(
+            err.to_string()
+                .contains("expected `ws://host:port` or `wss://host:port`")
+        );
+    }
+
+    #[test]
+    fn normalize_remote_addr_rejects_host_port_shortcut() {
+        let err =
+            normalize_remote_addr("127.0.0.1:4500").expect_err("host:port should be rejected");
+        assert!(
+            err.to_string()
+                .contains("expected `ws://host:port` or `wss://host:port`")
+        );
+    }
+
+    #[test]
+    fn remote_auth_token_transport_accepts_loopback_ws() {
+        validate_remote_auth_token_transport("ws://127.0.0.1:4500/")
+            .expect("loopback ws should be allowed for auth tokens");
+        validate_remote_auth_token_transport("ws://localhost:4500/")
+            .expect("localhost ws should be allowed for auth tokens");
+        validate_remote_auth_token_transport("ws://[::1]:4500/")
+            .expect("ipv6 loopback ws should be allowed for auth tokens");
+    }
+
+    #[test]
+    fn remote_auth_token_transport_accepts_secure_wss() {
+        validate_remote_auth_token_transport("wss://example.com:443/")
+            .expect("wss should be allowed for auth tokens");
+    }
+
+    #[test]
+    fn remote_auth_token_transport_rejects_non_loopback_ws() {
+        let err = validate_remote_auth_token_transport("ws://example.com:4500/")
+            .expect_err("non-loopback ws should be rejected for auth tokens");
+        assert!(
+            err.to_string()
+                .contains("remote auth tokens require `wss://` or loopback `ws://` URLs")
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let cwd = temp_dir.path().join("project");
+
+        let params = latest_session_lookup_params(
+            /*is_remote*/ false,
+            &config,
+            Some(cwd.as_path()),
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(params.model_providers, Some(vec![config.model_provider_id]));
+        assert_eq!(
+            params.cwd,
+            Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latest_session_lookup_params_omit_local_filters_for_remote_sessions()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+
+        let params = latest_session_lookup_params(
+            /*is_remote*/ true, &config, /*cwd_filter*/ None,
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(params.model_providers, None);
+        assert_eq!(params.cwd, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latest_session_lookup_params_keep_explicit_cwd_filter_for_remote_sessions()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let cwd = Path::new("repo/on/server");
+
+        let params = latest_session_lookup_params(
+            /*is_remote*/ true,
+            &config,
+            Some(cwd),
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(params.model_providers, None);
+        assert_eq!(
+            params.cwd,
+            Some(ThreadListCwdFilter::One(String::from("repo/on/server")))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latest_session_cwd_filter_respects_scope_options() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let remote_cwd = Path::new("repo/on/server");
+
+        let local_filter = latest_session_cwd_filter(
+            /*remote_mode*/ false, /*remote_cwd_override*/ None, &config,
+            /*show_all*/ false,
+        );
+        let show_all_filter = latest_session_cwd_filter(
+            /*remote_mode*/ false, /*remote_cwd_override*/ None, &config,
+            /*show_all*/ true,
+        );
+        let remote_filter = latest_session_cwd_filter(
+            /*remote_mode*/ true,
+            Some(remote_cwd),
+            &config,
+            /*show_all*/ false,
+        );
+
+        assert_eq!(local_filter, Some(config.cwd.as_path()));
+        assert_eq!(show_all_filter, None);
+        assert_eq!(remote_filter, Some(remote_cwd));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre::Result<()> {
+        fn write_session_rollout(
+            codex_home: &Path,
+            filename_ts: &str,
+            meta_rfc3339: &str,
+            preview: &str,
+            model_provider: &str,
+            cwd: &Path,
+        ) -> color_eyre::Result<ThreadId> {
+            let uuid = Uuid::new_v4();
+            let uuid_str = uuid.to_string();
+            let thread_id = ThreadId::from_string(&uuid_str)?;
+            let year = &filename_ts[0..4];
+            let month = &filename_ts[5..7];
+            let day = &filename_ts[8..10];
+            let rollout_path = codex_home
+                .join("sessions")
+                .join(year)
+                .join(month)
+                .join(day)
+                .join(format!("rollout-{filename_ts}-{uuid_str}.jsonl"));
+            let parent = rollout_path.parent().ok_or_else(|| {
+                color_eyre::eyre::eyre!("rollout path is missing a parent directory")
+            })?;
+            std::fs::create_dir_all(parent)?;
+
+            let session_meta = codex_protocol::protocol::SessionMeta {
+                id: thread_id,
+                timestamp: meta_rfc3339.to_string(),
+                cwd: cwd.to_path_buf(),
+                originator: "codex".to_string(),
+                cli_version: "0.0.0".to_string(),
+                source: codex_protocol::protocol::SessionSource::Cli,
+                model_provider: Some(model_provider.to_string()),
+                ..Default::default()
+            };
+            let session_meta = serde_json::to_value(codex_protocol::protocol::SessionMetaLine {
+                meta: session_meta,
+                git: None,
+            })?;
+            let lines = [
+                serde_json::json!({
+                    "timestamp": meta_rfc3339,
+                    "type": "session_meta",
+                    "payload": session_meta,
+                })
+                .to_string(),
+                serde_json::json!({
+                    "timestamp": meta_rfc3339,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": preview}],
+                    },
+                })
+                .to_string(),
+                serde_json::json!({
+                    "timestamp": meta_rfc3339,
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": preview,
+                        "kind": "plain",
+                    },
+                })
+                .to_string(),
+            ];
+            std::fs::write(&rollout_path, lines.join("\n") + "\n")?;
+            let updated_at =
+                chrono::DateTime::parse_from_rfc3339(meta_rfc3339)?.with_timezone(&chrono::Utc);
+            let times = std::fs::FileTimes::new().set_modified(updated_at.into());
+            OpenOptions::new()
+                .append(true)
+                .open(rollout_path)?
+                .set_times(times)?;
+
+            Ok(thread_id)
         }
 
-        assert!(matches!(config.approval_policy, AskForApproval::Never));
+        let temp_dir = TempDir::new()?;
+        let project_cwd = temp_dir.path().join("project");
+        let other_cwd = temp_dir.path().join("other-project");
+        std::fs::create_dir_all(&project_cwd)?;
+        std::fs::create_dir_all(&other_cwd)?;
 
-        Ok(())
-    }
-
-    #[test]
-    fn trusted_workspace_default_stays_danger_full_access() -> std::io::Result<()> {
-        let (mut config, config_toml) = make_trusted_config(None)?;
-
-        let show_trust = determine_repo_trust_state(
-            &mut config,
-            &config_toml,
-            None,
-            None,
-            None,
-            false,
-        )?;
-        assert!(!show_trust);
-
-        assert!(matches!(config.sandbox_policy, SandboxPolicy::DangerFullAccess));
-        assert!(matches!(config.approval_policy, AskForApproval::Never));
-
-        Ok(())
-    }
-
-    #[test]
-    fn trusted_workspace_respects_explicit_network_disable() -> std::io::Result<()> {
-        let (mut config, config_toml) = make_trusted_config(Some(SandboxWorkspaceWrite {
-            allow_git_writes: false,
-            network_access: false,
-            ..Default::default()
-        }))?;
-
-        let show_trust = determine_repo_trust_state(
-            &mut config,
-            &config_toml,
-            None,
-            None,
-            None,
-            true,
-        )?;
-        assert!(!show_trust);
-
-        match &config.sandbox_policy {
-            SandboxPolicy::WorkspaceWrite {
-                allow_git_writes,
-                network_access,
-                ..
-            } => {
-                assert!(!allow_git_writes);
-                assert!(!network_access, "explicit opt-out should disable network access");
-            }
-            other => panic!("expected workspace-write sandbox, got {other:?}"),
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn resume_command_uses_invocation_basename() {
-        let derived = derive_resume_command_name(Some(std::ffi::OsString::from(
-            "/usr/local/bin/coder",
-        )));
-        assert_eq!(derived, "coder");
-    }
-
-    #[test]
-    fn resume_command_falls_back_to_current_exe() {
-        let expected = std::env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.file_name()
-                    .and_then(|value| value.to_str())
-                    .map(str::to_owned)
+        let config = ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(project_cwd.clone()),
+                ..Default::default()
             })
-            .unwrap_or_else(|| "code".to_string());
+            .build()
+            .await?;
+        let model_provider = config.model_provider_id.as_str();
+        let project_thread_id = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T10-00-00",
+            "2025-01-02T10:00:00Z",
+            "older project session",
+            model_provider,
+            &project_cwd,
+        )?;
+        let other_thread_id = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T12-00-00",
+            "2025-01-02T12:00:00Z",
+            "newer other project session",
+            model_provider,
+            &other_cwd,
+        )?;
 
-        assert_eq!(derive_resume_command_name(None), expected);
+        let mut app_server =
+            AppServerSession::new(codex_app_server_client::AppServerClient::InProcess(
+                start_test_embedded_app_server(config.clone()).await?,
+            ));
+        let filter_cwd = latest_session_cwd_filter(
+            /*remote_mode*/ false, /*remote_cwd_override*/ None, &config,
+            /*show_all*/ false,
+        );
+        let scoped_target = lookup_latest_session_target_with_app_server(
+            &mut app_server,
+            &config,
+            filter_cwd,
+            /*include_non_interactive*/ false,
+        )
+        .await?
+        .expect("expected project-scoped fork --last target");
+        let show_all_filter_cwd = latest_session_cwd_filter(
+            /*remote_mode*/ false, /*remote_cwd_override*/ None, &config,
+            /*show_all*/ true,
+        );
+        let show_all_target = lookup_latest_session_target_with_app_server(
+            &mut app_server,
+            &config,
+            show_all_filter_cwd,
+            /*include_non_interactive*/ false,
+        )
+        .await?
+        .expect("expected global fork --last target");
+        app_server.shutdown().await?;
+
+        assert_eq!(scoped_target.thread_id, project_thread_id);
+        assert_eq!(show_all_target.thread_id, other_thread_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_cwd_for_app_server_target_omits_cwd_for_remote_sessions() -> std::io::Result<()>
+    {
+        let remote_only_cwd = if cfg!(windows) {
+            Path::new(r"C:\definitely\not\local\to\this\test")
+        } else {
+            Path::new("/definitely/not/local/to/this/test")
+        };
+        let target = AppServerTarget::Remote {
+            websocket_url: "ws://127.0.0.1:1234/".to_string(),
+            auth_token: None,
+        };
+        let environment_manager = EnvironmentManager::default_for_tests();
+
+        let config_cwd =
+            config_cwd_for_app_server_target(Some(remote_only_cwd), &target, &environment_manager)?;
+
+        assert_eq!(config_cwd, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_cwd_for_app_server_target_canonicalizes_embedded_cli_cwd() -> std::io::Result<()>
+    {
+        let temp_dir = TempDir::new()?;
+        let target = AppServerTarget::Embedded;
+        let environment_manager = EnvironmentManager::default_for_tests();
+
+        let config_cwd =
+            config_cwd_for_app_server_target(Some(temp_dir.path()), &target, &environment_manager)?;
+
+        assert_eq!(
+            config_cwd,
+            Some(AbsolutePathBuf::from_absolute_path(dunce::canonicalize(
+                temp_dir.path()
+            )?)?)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_cwd_for_app_server_target_errors_for_missing_embedded_cli_cwd()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let missing = temp_dir.path().join("missing");
+        let target = AppServerTarget::Embedded;
+        let environment_manager = EnvironmentManager::default_for_tests();
+
+        let err = config_cwd_for_app_server_target(Some(&missing), &target, &environment_manager)
+            .expect_err("missing embedded cwd should fail");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_cwd_for_app_server_target_omits_cwd_for_remote_exec_server()
+    -> std::io::Result<()> {
+        let remote_only_cwd = if cfg!(windows) {
+            Path::new(r"C:\definitely\not\local\to\this\test")
+        } else {
+            Path::new("/definitely/not/local/to/this/test")
+        };
+        let target = AppServerTarget::Embedded;
+        let environment_manager = EnvironmentManager::create_for_tests(
+            Some("ws://127.0.0.1:8765".to_string()),
+            ExecServerRuntimePaths::new(
+                std::env::current_exe().expect("current exe"),
+                /*codex_linux_sandbox_exe*/ None,
+            )?,
+        )
+        .await;
+
+        let config_cwd =
+            config_cwd_for_app_server_target(Some(remote_only_cwd), &target, &environment_manager)?;
+
+        assert_eq!(config_cwd, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn windows_shows_trust_prompt_without_sandbox() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config.active_project = ProjectConfig { trust_level: None };
+        config.set_windows_sandbox_enabled(/*value*/ false);
+
+        let should_show = should_show_trust_screen(&config);
+        assert!(
+            should_show,
+            "Trust prompt should be shown when project trust is undecided"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn embedded_app_server_supports_thread_start_rpc() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let app_server = start_test_embedded_app_server(config).await?;
+        let response: ThreadStartResponse = app_server
+            .request_typed(ClientRequest::ThreadStart {
+                request_id: RequestId::Integer(1),
+                params: ThreadStartParams {
+                    ephemeral: Some(true),
+                    ..ThreadStartParams::default()
+                },
+            })
+            .await
+            .expect("thread/start should succeed");
+        assert!(!response.thread.id.is_empty());
+
+        app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lookup_session_target_by_name_uses_backend_title_search() -> color_eyre::Result<()> {
+        Box::pin(async {
+            let temp_dir = TempDir::new()?;
+            let config = build_config(&temp_dir).await?;
+            let thread_id = ThreadId::new();
+            let rollout_path = temp_dir
+                .path()
+                .join("sessions/2025/02/01")
+                .join(format!("rollout-2025-02-01T10-00-00-{thread_id}.jsonl"));
+            let rollout_dir = rollout_path.parent().expect("rollout parent");
+            std::fs::create_dir_all(rollout_dir)?;
+            std::fs::write(&rollout_path, "")?;
+
+            let state_runtime = codex_state::StateRuntime::init(
+                config.codex_home.to_path_buf(),
+                config.model_provider_id.clone(),
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+            state_runtime
+                .mark_backfill_complete(/*last_watermark*/ None)
+                .await
+                .map_err(std::io::Error::other)?;
+
+            let session_cwd = temp_dir.path().join("project");
+            std::fs::create_dir_all(&session_cwd)?;
+            let created_at = chrono::DateTime::parse_from_rfc3339("2025-02-01T10:00:00Z")
+                .expect("timestamp should parse")
+                .with_timezone(&chrono::Utc);
+            let mut builder = codex_state::ThreadMetadataBuilder::new(
+                thread_id,
+                rollout_path.clone(),
+                created_at,
+                serde_json::from_value(serde_json::json!("cli"))
+                    .expect("cli session source should deserialize"),
+            );
+            builder.cwd = session_cwd;
+            let mut metadata = builder.build(config.model_provider_id.as_str());
+            metadata.title = "saved-session".to_string();
+            metadata.first_user_message = Some("preview text".to_string());
+            state_runtime
+                .upsert_thread(&metadata)
+                .await
+                .map_err(std::io::Error::other)?;
+
+            let mut app_server =
+                AppServerSession::new(codex_app_server_client::AppServerClient::InProcess(
+                    start_test_embedded_app_server(config).await?,
+                ));
+            let target =
+                lookup_session_target_by_name_with_app_server(&mut app_server, "saved-session")
+                    .await?;
+            let target = target.expect("name lookup should find the saved thread");
+            assert_eq!(target.path, Some(rollout_path));
+            assert_eq!(target.thread_id, thread_id);
+
+            app_server.shutdown().await?;
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn embedded_app_server_start_failure_is_returned() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let result = start_embedded_app_server_with(
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            CloudRequirementsLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            /*state_db*/ None,
+            Arc::new(EnvironmentManager::default_for_tests()),
+            |_args| async { Err(std::io::Error::other("boom")) },
+        )
+        .await;
+        let err = match result {
+            Ok(_) => panic!("startup failure should be returned"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("failed to start embedded app server"),
+            "error should preserve the embedded app server startup context"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    #[serial]
+    async fn windows_shows_trust_prompt_with_sandbox() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config.active_project = ProjectConfig { trust_level: None };
+        config.set_windows_sandbox_enabled(/*value*/ true);
+
+        let should_show = should_show_trust_screen(&config);
+        if cfg!(target_os = "windows") {
+            assert!(
+                should_show,
+                "Windows trust prompt should be shown on native Windows with sandbox enabled"
+            );
+        } else {
+            assert!(
+                should_show,
+                "Non-Windows should still show trust prompt when project is untrusted"
+            );
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn untrusted_project_skips_trust_prompt() -> std::io::Result<()> {
+        use codex_protocol::config_types::TrustLevel;
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config.active_project = ProjectConfig {
+            trust_level: Some(TrustLevel::Untrusted),
+        };
+
+        let should_show = should_show_trust_screen(&config);
+        assert!(
+            !should_show,
+            "Trust prompt should not be shown for projects explicitly marked as untrusted"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_rebuild_changes_trust_defaults_with_cwd() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let codex_home = temp_dir.path().to_path_buf();
+        let trusted = temp_dir.path().join("trusted");
+        let untrusted = temp_dir.path().join("untrusted");
+        std::fs::create_dir_all(&trusted)?;
+        std::fs::create_dir_all(&untrusted)?;
+
+        // TOML keys need escaped backslashes on Windows paths.
+        let trusted_display = trusted.display().to_string().replace('\\', "\\\\");
+        let untrusted_display = untrusted.display().to_string().replace('\\', "\\\\");
+        let config_toml = format!(
+            r#"[projects."{trusted_display}"]
+trust_level = "trusted"
+
+[projects."{untrusted_display}"]
+trust_level = "untrusted"
+"#
+        );
+        std::fs::write(temp_dir.path().join("config.toml"), config_toml)?;
+
+        let trusted_overrides = ConfigOverrides {
+            cwd: Some(trusted.clone()),
+            ..Default::default()
+        };
+        let trusted_config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .codex_home(codex_home.clone())
+            .harness_overrides(trusted_overrides.clone())
+            .build()
+            .await?;
+        assert_eq!(
+            AskForApproval::from(trusted_config.permissions.approval_policy.value()),
+            AskForApproval::OnRequest
+        );
+
+        let untrusted_overrides = ConfigOverrides {
+            cwd: Some(untrusted),
+            ..trusted_overrides
+        };
+        let untrusted_config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .codex_home(codex_home)
+            .harness_overrides(untrusted_overrides)
+            .build()
+            .await?;
+        assert_eq!(
+            AskForApproval::from(untrusted_config.permissions.approval_policy.value()),
+            AskForApproval::UnlessTrusted
+        );
+        Ok(())
+    }
+
+    /// Regression: theme must be configured from the *final* config.
+    ///
+    /// `run_ratatui_app` can reload config during onboarding and again
+    /// during session resume/fork.  The syntax theme override (stored in
+    /// a `OnceLock`) must use the final config's `tui_theme`, not the
+    /// initial one — otherwise users resuming a thread in a project with
+    /// a different theme get the wrong highlighting.
+    ///
+    /// We verify the invariant indirectly: `validate_theme_name` (the
+    /// pure validation core of `set_theme_override`) must be called with
+    /// the *final* config's theme, and its warning must land in the
+    /// final config's `startup_warnings`.
+    #[tokio::test]
+    async fn theme_warning_uses_final_config() -> std::io::Result<()> {
+        use crate::render::highlight::validate_theme_name;
+
+        let temp_dir = TempDir::new()?;
+
+        // initial_config has a valid theme — no warning.
+        let initial_config = build_config(&temp_dir).await?;
+        assert!(initial_config.tui_theme.is_none());
+
+        // Simulate resume/fork reload: the final config has an invalid theme.
+        let mut config = build_config(&temp_dir).await?;
+        config.tui_theme = Some("bogus-theme".into());
+
+        // Theme override must use the final config (not initial_config).
+        // This mirrors the real call site in run_ratatui_app.
+        if let Some(w) = validate_theme_name(config.tui_theme.as_deref(), Some(temp_dir.path())) {
+            config.startup_warnings.push(w);
+        }
+
+        assert_eq!(
+            config.startup_warnings.len(),
+            1,
+            "warning from final config's invalid theme should be present"
+        );
+        assert!(
+            config.startup_warnings[0].contains("bogus-theme"),
+            "warning should reference the final config's theme name"
+        );
+        Ok(())
     }
 }

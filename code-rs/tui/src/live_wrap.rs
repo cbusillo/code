@@ -7,12 +7,11 @@ pub struct Row {
     pub text: String,
     /// True if this row ends with an explicit line break (as opposed to a hard wrap).
     pub explicit_break: bool,
-    width: usize,
 }
 
 impl Row {
     pub fn width(&self) -> usize {
-        self.width
+        self.text.width()
     }
 }
 
@@ -25,15 +24,6 @@ pub struct RowBuilder {
     current_line: String,
     /// Output rows built so far for the current logical line and previous ones.
     rows: Vec<Row>,
-}
-
-fn make_row(text: String, explicit_break: bool) -> Row {
-    let width = UnicodeWidthStr::width(text.as_str());
-    Row {
-        text,
-        explicit_break,
-        width,
-    }
 }
 
 impl RowBuilder {
@@ -76,7 +66,7 @@ impl RowBuilder {
                 if start < i {
                     self.current_line.push_str(&fragment[start..i]);
                 }
-                self.flush_current_line(true);
+                self.flush_current_line(/*explicit_break*/ true);
                 start = i + ch.len_utf8();
             }
         }
@@ -88,12 +78,7 @@ impl RowBuilder {
 
     /// Mark the end of the current logical line (equivalent to pushing a '\n').
     pub fn end_line(&mut self) {
-        self.flush_current_line(true);
-    }
-
-    /// Drain and return all produced rows.
-    pub fn drain_rows(&mut self) -> Vec<Row> {
-        std::mem::take(&mut self.rows)
+        self.flush_current_line(/*explicit_break*/ true);
     }
 
     /// Return a snapshot of produced rows (non-draining).
@@ -105,7 +90,10 @@ impl RowBuilder {
     pub fn display_rows(&self) -> Vec<Row> {
         let mut out = self.rows.clone();
         if !self.current_line.is_empty() {
-            out.push(make_row(self.current_line.clone(), false));
+            out.push(Row {
+                text: self.current_line.clone(),
+                explicit_break: false,
+            });
         }
         out
     }
@@ -134,12 +122,18 @@ impl RowBuilder {
         if explicit_break {
             if self.current_line.is_empty() {
                 // We ended on a boundary previously; add an empty explicit row.
-                self.rows.push(make_row(String::new(), true));
+                self.rows.push(Row {
+                    text: String::new(),
+                    explicit_break: true,
+                });
             } else {
                 // There is leftover content that did not wrap yet; push it now with the explicit flag.
                 let mut s = String::new();
                 std::mem::swap(&mut s, &mut self.current_line);
-                self.rows.push(make_row(s, true));
+                self.rows.push(Row {
+                    text: s,
+                    explicit_break: true,
+                });
             }
         }
         // Reset current line buffer for next logical line.
@@ -159,7 +153,10 @@ impl RowBuilder {
                 if let Some((i, ch)) = self.current_line.char_indices().next() {
                     let len = i + ch.len_utf8();
                     let p = self.current_line[..len].to_string();
-                    self.rows.push(make_row(p, false));
+                    self.rows.push(Row {
+                        text: p,
+                        explicit_break: false,
+                    });
                     self.current_line = self.current_line[len..].to_string();
                     continue;
                 }
@@ -170,7 +167,10 @@ impl RowBuilder {
                 break;
             } else {
                 // Emit wrapped prefix as a non-explicit row and continue with the remainder.
-                self.rows.push(make_row(prefix, false));
+                self.rows.push(Row {
+                    text: prefix,
+                    explicit_break: false,
+                });
                 self.current_line = suffix.to_string();
             }
         }
@@ -201,3 +201,85 @@ pub fn take_prefix_by_width(text: &str, max_cols: usize) -> (String, &str, usize
     (prefix, suffix, cols)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn rows_do_not_exceed_width_ascii() {
+        let mut rb = RowBuilder::new(/*target_width*/ 10);
+        rb.push_fragment("hello whirl this is a test");
+        let rows = rb.rows().to_vec();
+        assert_eq!(
+            rows,
+            vec![
+                Row {
+                    text: "hello whir".to_string(),
+                    explicit_break: false
+                },
+                Row {
+                    text: "l this is ".to_string(),
+                    explicit_break: false
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn rows_do_not_exceed_width_emoji_cjk() {
+        // 😀 is width 2; 你/好 are width 2.
+        let mut rb = RowBuilder::new(/*target_width*/ 6);
+        rb.push_fragment("😀😀 你好");
+        let rows = rb.rows().to_vec();
+        // At width 6, we expect the first row to fit exactly two emojis and a space
+        // (2 + 2 + 1 = 5) plus one more column for the first CJK char (2 would overflow),
+        // so only the two emojis and the space fit; the rest remains buffered.
+        assert_eq!(
+            rows,
+            vec![Row {
+                text: "😀😀 ".to_string(),
+                explicit_break: false
+            }]
+        );
+    }
+
+    #[test]
+    fn fragmentation_invariance_long_token() {
+        let s = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 26 chars
+        let mut rb_all = RowBuilder::new(/*target_width*/ 7);
+        rb_all.push_fragment(s);
+        let all_rows = rb_all.rows().to_vec();
+
+        let mut rb_chunks = RowBuilder::new(/*target_width*/ 7);
+        for i in (0..s.len()).step_by(3) {
+            let end = (i + 3).min(s.len());
+            rb_chunks.push_fragment(&s[i..end]);
+        }
+        let chunk_rows = rb_chunks.rows().to_vec();
+
+        assert_eq!(all_rows, chunk_rows);
+    }
+
+    #[test]
+    fn newline_splits_rows() {
+        let mut rb = RowBuilder::new(/*target_width*/ 10);
+        rb.push_fragment("hello\nworld");
+        let rows = rb.display_rows();
+        assert!(rows.iter().any(|r| r.explicit_break));
+        assert_eq!(rows[0].text, "hello");
+        // Second row should begin with 'world'
+        assert!(rows.iter().any(|r| r.text.starts_with("world")));
+    }
+
+    #[test]
+    fn rewrap_on_width_change() {
+        let mut rb = RowBuilder::new(/*target_width*/ 10);
+        rb.push_fragment("abcdefghijK");
+        assert!(!rb.rows().is_empty());
+        rb.set_width(/*width*/ 5);
+        for r in rb.rows() {
+            assert!(r.width() <= 5);
+        }
+    }
+}

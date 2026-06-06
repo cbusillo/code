@@ -1,3 +1,4 @@
+use codex_client::build_reqwest_client_with_custom_ca;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ pub async fn autodetect_environment_id(
 ) -> anyhow::Result<AutodetectSelection> {
     // 1) Try repo-specific environments based on local git origins (GitHub only, like VSCode)
     let origins = get_git_origins();
-    crate::append_debug_log(format!("env: git origins: {origins:?}"));
+    crate::append_error_log(format!("env: git origins: {origins:?}"));
     let mut by_repo_envs: Vec<CodeEnvironment> = Vec::new();
     for origin in &origins {
         if let Some((owner, repo)) = parse_owner_repo(origin) {
@@ -43,16 +44,16 @@ pub async fn autodetect_environment_id(
                     base_url, "github", owner, repo
                 )
             };
-            crate::append_debug_log(format!("env: GET {url}"));
+            crate::append_error_log(format!("env: GET {url}"));
             match get_json::<Vec<CodeEnvironment>>(&url, headers).await {
                 Ok(mut list) => {
-                    crate::append_debug_log(format!(
+                    crate::append_error_log(format!(
                         "env: by-repo returned {} env(s) for {owner}/{repo}",
                         list.len(),
                     ));
                     by_repo_envs.append(&mut list);
                 }
-                Err(e) => crate::append_debug_log(format!(
+                Err(e) => crate::append_error_log(format!(
                     "env: by-repo fetch failed for {owner}/{repo}: {e}"
                 )),
             }
@@ -71,9 +72,9 @@ pub async fn autodetect_environment_id(
     } else {
         format!("{base_url}/api/codex/environments")
     };
-    crate::append_debug_log(format!("env: GET {list_url}"));
+    crate::append_error_log(format!("env: GET {list_url}"));
     // Fetch and log the full environments JSON for debugging
-    let http = reqwest::Client::builder().build()?;
+    let http = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let res = http.get(&list_url).headers(headers.clone()).send().await?;
     let status = res.status();
     let ct = res
@@ -83,13 +84,13 @@ pub async fn autodetect_environment_id(
         .unwrap_or("")
         .to_string();
     let body = res.text().await.unwrap_or_default();
-    crate::append_debug_log(format!("env: status={status} content-type={ct}"));
+    crate::append_error_log(format!("env: status={status} content-type={ct}"));
     match serde_json::from_str::<serde_json::Value>(&body) {
         Ok(v) => {
             let pretty = serde_json::to_string_pretty(&v).unwrap_or(body.clone());
-            crate::append_debug_log(format!("env: /environments JSON (pretty):\n{pretty}"));
+            crate::append_error_log(format!("env: /environments JSON (pretty):\n{pretty}"));
         }
-        Err(_) => crate::append_debug_log(format!("env: /environments (raw):\n{body}")),
+        Err(_) => crate::append_error_log(format!("env: /environments (raw):\n{body}")),
     }
     if !status.is_success() {
         anyhow::bail!("GET {list_url} failed: {status}; content-type={ct}; body={body}");
@@ -119,16 +120,16 @@ fn pick_environment_row(
             .iter()
             .find(|e| e.label.as_deref().unwrap_or("").to_lowercase() == lc)
         {
-            crate::append_debug_log(format!("env: matched by label: {label} -> {}", e.id));
+            crate::append_error_log(format!("env: matched by label: {label} -> {}", e.id));
             return Some(e.clone());
         }
     }
     if envs.len() == 1 {
-        crate::append_debug_log("env: single environment available; selecting it");
+        crate::append_error_log("env: single environment available; selecting it");
         return Some(envs[0].clone());
     }
     if let Some(e) = envs.iter().find(|e| e.is_pinned.unwrap_or(false)) {
-        crate::append_debug_log(format!("env: selecting pinned environment: {}", e.id));
+        crate::append_error_log(format!("env: selecting pinned environment: {}", e.id));
         return Some(e.clone());
     }
     // Highest task_count as heuristic
@@ -137,7 +138,7 @@ fn pick_environment_row(
         .max_by_key(|e| e.task_count.unwrap_or(0))
         .or_else(|| envs.first())
     {
-        crate::append_debug_log(format!("env: selecting by task_count/first: {}", e.id));
+        crate::append_error_log(format!("env: selecting by task_count/first: {}", e.id));
         return Some(e.clone());
     }
     None
@@ -147,7 +148,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     headers: &HeaderMap,
 ) -> anyhow::Result<T> {
-    let http = reqwest::Client::builder().build()?;
+    let http = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let res = http.get(url).headers(headers.clone()).send().await?;
     let status = res.status();
     let ct = res
@@ -157,7 +158,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
         .unwrap_or("")
         .to_string();
     let body = res.text().await.unwrap_or_default();
-    crate::append_debug_log(format!("env: status={status} content-type={ct}"));
+    crate::append_error_log(format!("env: status={status} content-type={ct}"));
     if !status.is_success() {
         anyhow::bail!("GET {url} failed: {status}; content-type={ct}; body={body}");
     }
@@ -228,7 +229,7 @@ fn parse_owner_repo(url: &str) -> Option<(String, String)> {
         let mut parts = rest.splitn(2, '/');
         let owner = parts.next()?.to_string();
         let repo = parts.next()?.to_string();
-        crate::append_debug_log(format!("env: parsed SSH GitHub origin => {owner}/{repo}"));
+        crate::append_error_log(format!("env: parsed SSH GitHub origin => {owner}/{repo}"));
         return Some((owner, repo));
     }
     // HTTPS or git protocol
@@ -243,7 +244,7 @@ fn parse_owner_repo(url: &str) -> Option<(String, String)> {
             let mut parts = rest.splitn(2, '/');
             let owner = parts.next()?.to_string();
             let repo = parts.next()?.to_string();
-            crate::append_debug_log(format!("env: parsed HTTP GitHub origin => {owner}/{repo}"));
+            crate::append_error_log(format!("env: parsed HTTP GitHub origin => {owner}/{repo}"));
             return Some((owner, repo));
         }
     }

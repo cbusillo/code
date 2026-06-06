@@ -1,11 +1,13 @@
 [package]
-edition = "2024"
-name = "code-apply-patch"
-version = { workspace = true }
+name = "codex-apply-patch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [lib]
-name = "code_apply_patch"
+name = "codex_apply_patch"
 path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 name = "apply_patch"
@@ -16,12 +18,17 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+codex-exec-server = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
 similar = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tree-sitter = { workspace = true }
 tree-sitter-bash = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+assert_matches = { workspace = true }
+codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }

@@ -11,7 +11,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TS, Hash)]
 #[ts(type = "string")]
 pub struct ThreadId {
-    uuid: Uuid,
+    pub(crate) uuid: Uuid,
 }
 
 impl ThreadId {
@@ -47,12 +47,6 @@ impl TryFrom<String> for ThreadId {
 impl From<ThreadId> for String {
     fn from(value: ThreadId) -> Self {
         value.to_string()
-    }
-}
-
-impl From<ThreadId> for Uuid {
-    fn from(value: ThreadId) -> Self {
-        value.uuid
     }
 }
 

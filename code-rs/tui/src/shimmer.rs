@@ -7,6 +7,10 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
+use crate::color::blend;
+use crate::terminal_palette::default_bg;
+use crate::terminal_palette::default_fg;
+
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
 fn elapsed_since_start() -> Duration {
@@ -22,17 +26,18 @@ pub(crate) fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
     // Use time-based sweep synchronized to process start.
     let padding = 10usize;
     let period = chars.len() + padding * 2;
-    let sweep_seconds = 2.5f32;
+    let sweep_seconds = 2.0f32;
     let pos_f =
         (elapsed_since_start().as_secs_f32() % sweep_seconds) / sweep_seconds * (period as f32);
     let pos = pos_f as usize;
-    // Prefer our unified terminal capability detection so Windows Terminal and
-    // other modern emulators that support truecolor aren't mistakenly treated
-    // as 256‑color only (which breaks smooth gradients).
-    let has_true_color = crate::theme::has_truecolor_terminal();
-    let band_half_width = 3.0;
+    let has_true_color = supports_color::on_cached(supports_color::Stream::Stdout)
+        .map(|level| level.has_16m)
+        .unwrap_or(false);
+    let band_half_width = 5.0;
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(chars.len());
+    let base_color = default_fg().unwrap_or((128, 128, 128));
+    let highlight_color = default_bg().unwrap_or((255, 255, 255));
     for (i, ch) in chars.iter().enumerate() {
         let i_pos = i as isize + padding as isize;
         let pos = pos as isize;
@@ -44,34 +49,32 @@ pub(crate) fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
         } else {
             0.0
         };
-        let brightness = 0.4 + 0.6 * t;
-        let level = (brightness * 255.0).clamp(0.0, 255.0) as u8;
         let style = if has_true_color {
+            let highlight = t.clamp(0.0, 1.0);
+            let (r, g, b) = blend(highlight_color, base_color, highlight * 0.9);
             // Allow custom RGB colors, as the implementation is thoughtfully
             // adjusting the level of the default foreground color.
             #[allow(clippy::disallowed_methods)]
             {
                 Style::default()
-                    .fg(Color::Rgb(level, level, level))
+                    .fg(Color::Rgb(r, g, b))
                     .add_modifier(Modifier::BOLD)
             }
         } else {
-            Style::default()
-                .fg(color_for_level(level))
-                .add_modifier(Modifier::BOLD)
+            color_for_level(t)
         };
         spans.push(Span::styled(ch.to_string(), style));
     }
     spans
 }
 
-fn color_for_level(level: u8) -> Color {
-    // For shimmer effect, we map brightness levels to theme colors
-    if level < 128 {
-        crate::colors::text_dim()
-    } else if level < 192 {
-        crate::colors::text()
+fn color_for_level(intensity: f32) -> Style {
+    // Tune fallback styling so the shimmer band reads even without RGB support.
+    if intensity < 0.2 {
+        Style::default().add_modifier(Modifier::DIM)
+    } else if intensity < 0.6 {
+        Style::default()
     } else {
-        crate::colors::text_bright()
+        Style::default().add_modifier(Modifier::BOLD)
     }
 }

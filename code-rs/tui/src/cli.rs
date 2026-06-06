@@ -1,130 +1,137 @@
-use clap::ArgAction;
+use clap::Args;
+use clap::FromArgMatches;
 use clap::Parser;
-use code_common::ApprovalModeCliArg;
-use code_common::CliConfigOverrides;
-use std::path::PathBuf;
+use codex_utils_cli::ApprovalModeCliArg;
+use codex_utils_cli::CliConfigOverrides;
+use codex_utils_cli::SharedCliOptions;
 
 #[derive(Parser, Debug)]
 #[command(version)]
 pub struct Cli {
     /// Optional user prompt to start the session.
-    #[arg(value_name = "PROMPT")]
+    #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
 
-    /// Optional image(s) to attach to the initial prompt.
-    #[arg(
-        long = "image",
-        short = 'i',
-        value_name = "FILE",
-        value_delimiter = ','
-    )]
-    pub images: Vec<PathBuf>,
+    // Internal controls set by the top-level `codex resume` subcommand.
+    // These are not exposed as user flags on the base `codex` command.
+    #[clap(skip)]
+    pub resume_picker: bool,
 
-    /// Model the agent should use.
-    #[arg(long, short = 'm')]
-    pub model: Option<String>,
+    #[clap(skip)]
+    pub resume_last: bool,
 
-    /// Convenience flag to select the local open source model provider.
-    /// Equivalent to -c model_provider=oss; verifies a local Ollama server is
-    /// running.
-    #[arg(long = "oss", default_value_t = false)]
-    pub oss: bool,
+    /// Internal: resume a specific recorded session by id (UUID). Set by the
+    /// top-level `codex resume <SESSION_ID>` wrapper; not exposed as a public flag.
+    #[clap(skip)]
+    pub resume_session_id: Option<String>,
 
-    /// Configuration profile from config.toml to specify default options.
-    #[arg(long = "profile", short = 'p')]
-    pub config_profile: Option<String>,
+    /// Internal: show all sessions (disables cwd filtering and shows CWD column).
+    #[clap(skip)]
+    pub resume_show_all: bool,
 
-    /// Select the sandbox policy to use when executing model-generated shell
-    /// commands.
-    #[arg(long = "sandbox", short = 's')]
-    pub sandbox_mode: Option<code_common::SandboxModeCliArg>,
+    /// Internal: include non-interactive sessions in resume listings.
+    #[clap(skip)]
+    pub resume_include_non_interactive: bool,
+
+    // Internal controls set by the top-level `codex fork` subcommand.
+    // These are not exposed as user flags on the base `codex` command.
+    #[clap(skip)]
+    pub fork_picker: bool,
+
+    #[clap(skip)]
+    pub fork_last: bool,
+
+    /// Internal: fork a specific recorded session by id (UUID). Set by the
+    /// top-level `codex fork <SESSION_ID>` wrapper; not exposed as a public flag.
+    #[clap(skip)]
+    pub fork_session_id: Option<String>,
+
+    /// Internal: show all sessions (disables cwd filtering and shows CWD column).
+    #[clap(skip)]
+    pub fork_show_all: bool,
+
+    #[clap(flatten)]
+    pub shared: TuiSharedCliOptions,
 
     /// Configure when the model requires human approval before executing a command.
     #[arg(long = "ask-for-approval", short = 'a')]
     pub approval_policy: Option<ApprovalModeCliArg>,
 
-    /// Convenience alias for low-friction sandboxed automatic execution (-a on-failure, --sandbox workspace-write).
-    #[arg(long = "full-auto", default_value_t = false)]
-    pub full_auto: bool,
-
-    /// Skip all confirmation prompts and execute commands without sandboxing.
-    /// EXTREMELY DANGEROUS. Intended solely for running in environments that are externally sandboxed.
-    #[arg(
-        long = "dangerously-bypass-approvals-and-sandbox",
-        alias = "yolo",
-        default_value_t = false,
-        conflicts_with_all = ["approval_policy", "full_auto"]
-    )]
-    pub dangerously_bypass_approvals_and_sandbox: bool,
-
-    /// Tell the agent to use the specified directory as its working root.
-    #[clap(long = "cd", short = 'C', value_name = "DIR")]
-    pub cwd: Option<PathBuf>,
-
-    /// Enable web search support. Enabled by default; use --no-search to disable.
-    #[arg(long = "search", action = ArgAction::SetTrue)]
-    pub enable_web_search: bool,
-
-    /// Disable web search support explicitly.
-    #[arg(long = "no-search", action = ArgAction::SetTrue, hide = true)]
-    pub disable_web_search: bool,
-
-    /// Effective web search toggle after applying flags.
-    #[clap(skip)]
+    /// Enable live web search. When enabled, the native Responses `web_search` tool is available to the model (no per‑call approval).
+    #[arg(long = "search", default_value_t = false)]
     pub web_search: bool,
 
-    /// Enable debug logging of all LLM requests and responses to files.
-    #[clap(long = "debug", short = 'd', default_value_t = false)]
-    pub debug: bool,
-
-    /// Override the compaction prompt text for this session.
-    #[arg(long = "compact-prompt", value_name = "TEXT")]
-    pub compact_prompt_override: Option<String>,
-
-    /// Read the compaction prompt text from a file.
-    #[arg(long = "compact-prompt-file", value_name = "FILE")]
-    pub compact_prompt_file: Option<PathBuf>,
-
-    /// Show per-cell ordering overlays (request index, order key, window/position) to debug
-    /// event ordering. Off by default.
-    #[arg(long = "order", default_value_t = false)]
-    pub order: bool,
-
-    /// Enable lightweight in-app timing and print a summary report on exit.
-    /// This records render/measurement hotspots while the UI runs and writes a
-    /// short report to stderr when the program exits.
-    #[arg(long = "timing", default_value_t = false)]
-    pub timing: bool,
+    /// Disable alternate screen mode
+    ///
+    /// Runs the TUI in inline mode, preserving terminal scrollback history. This is useful
+    /// in terminal multiplexers like Zellij that follow the xterm spec strictly and disable
+    /// scrollback in alternate screen buffers.
+    #[arg(long = "no-alt-screen", default_value_t = false)]
+    pub no_alt_screen: bool,
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
-
-    /// Optional developer-role message to prepend to every turn for demos.
-    /// Set by the multitool root CLI via `--demo`.
-    #[clap(skip)]
-    pub demo_developer_message: Option<String>,
-
-    /// Start in resume picker mode when true (used by `code resume`).
-    #[clap(skip)]
-    pub resume_picker: bool,
-
-    /// Resume the most recent session automatically when true.
-    #[clap(skip)]
-    pub resume_last: bool,
-
-    /// Resume a specific session id when provided.
-    #[clap(skip)]
-    pub resume_session_id: Option<String>,
 }
 
-impl Cli {
-    pub fn finalize_defaults(&mut self) {
-        self.web_search = if self.disable_web_search {
-            false
-        } else if self.enable_web_search {
-            true
-        } else {
-            true
-        };
+impl std::ops::Deref for Cli {
+    type Target = SharedCliOptions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared.0
     }
+}
+
+impl std::ops::DerefMut for Cli {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.shared.0
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TuiSharedCliOptions(SharedCliOptions);
+
+impl TuiSharedCliOptions {
+    pub fn into_inner(self) -> SharedCliOptions {
+        self.0
+    }
+}
+
+impl std::ops::Deref for TuiSharedCliOptions {
+    type Target = SharedCliOptions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for TuiSharedCliOptions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Args for TuiSharedCliOptions {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        mark_tui_args(SharedCliOptions::augment_args(cmd))
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        mark_tui_args(SharedCliOptions::augment_args_for_update(cmd))
+    }
+}
+
+impl FromArgMatches for TuiSharedCliOptions {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        SharedCliOptions::from_arg_matches(matches).map(Self)
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        self.0.update_from_arg_matches(matches)
+    }
+}
+
+fn mark_tui_args(cmd: clap::Command) -> clap::Command {
+    cmd.mut_arg("dangerously_bypass_approvals_and_sandbox", |arg| {
+        arg.conflicts_with("approval_policy")
+    })
 }

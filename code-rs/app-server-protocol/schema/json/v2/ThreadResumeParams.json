@@ -1,6 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "AbsolutePathBuf": {
+      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+      "type": "string"
+    },
+    "ApprovalsReviewer": {
+      "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
+      "enum": [
+        "user",
+        "auto_review",
+        "guardian_subagent"
+      ],
+      "type": "string"
+    },
     "AskForApproval": {
       "oneOf": [
         {
@@ -15,7 +28,7 @@
         {
           "additionalProperties": false,
           "properties": {
-            "reject": {
+            "granular": {
               "properties": {
                 "mcp_elicitations": {
                   "type": "boolean"
@@ -44,9 +57,9 @@
             }
           },
           "required": [
-            "reject"
+            "granular"
           ],
-          "title": "RejectAskForApproval",
+          "title": "GranularAskForApproval",
           "type": "object"
         }
       ]
@@ -75,6 +88,16 @@
         },
         {
           "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "image_url": {
               "type": "string"
             },
@@ -183,42 +206,6 @@
         }
       ]
     },
-    "FunctionCallOutputPayload": {
-      "description": "The payload we send back to OpenAI when reporting a tool call result.\n\n`body` serializes directly as the wire value for `function_call_output.output`. `success` remains internal metadata for downstream handling.",
-      "properties": {
-        "body": {
-          "$ref": "#/definitions/FunctionCallOutputBody"
-        },
-        "success": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "body"
-      ],
-      "type": "object"
-    },
-    "GhostCommit": {
-      "description": "Details of a ghost commit created from a repository state.",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "parent": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
     "ImageDetail": {
       "enum": [
         "auto",
@@ -311,6 +298,65 @@
         }
       ]
     },
+    "PermissionProfileModificationParams": {
+      "oneOf": [
+        {
+          "description": "Additional concrete directory that should be writable.",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "type": {
+              "enum": [
+                "additionalWritableRoot"
+              ],
+              "title": "AdditionalWritableRootPermissionProfileModificationParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "title": "AdditionalWritableRootPermissionProfileModificationParams",
+          "type": "object"
+        }
+      ]
+    },
+    "PermissionProfileSelectionParams": {
+      "oneOf": [
+        {
+          "description": "Select a named built-in or user-defined profile and optionally apply bounded modifications that Codex knows how to validate.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "modifications": {
+              "items": {
+                "$ref": "#/definitions/PermissionProfileModificationParams"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "profile"
+              ],
+              "title": "ProfilePermissionProfileSelectionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "title": "ProfilePermissionProfileSelectionParams",
+          "type": "object"
+        }
+      ]
+    },
     "Personality": {
       "enum": [
         "none",
@@ -397,12 +443,6 @@
               },
               "type": "array"
             },
-            "end_turn": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
             "id": {
               "type": [
                 "string",
@@ -457,10 +497,6 @@
                 "null"
               ]
             },
-            "id": {
-              "type": "string",
-              "writeOnly": true
-            },
             "summary": {
               "items": {
                 "$ref": "#/definitions/ReasoningItemReasoningSummary"
@@ -476,7 +512,6 @@
             }
           },
           "required": [
-            "id",
             "summary",
             "type"
           ],
@@ -610,7 +645,7 @@
               "type": "string"
             },
             "output": {
-              "$ref": "#/definitions/FunctionCallOutputPayload"
+              "$ref": "#/definitions/FunctionCallOutputBody"
             },
             "type": {
               "enum": [
@@ -681,7 +716,7 @@
               ]
             },
             "output": {
-              "$ref": "#/definitions/FunctionCallOutputPayload"
+              "$ref": "#/definitions/FunctionCallOutputBody"
             },
             "type": {
               "enum": [
@@ -739,7 +774,7 @@
             "action": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/WebSearchAction"
+                  "$ref": "#/definitions/ResponsesApiWebSearchAction"
                 },
                 {
                   "type": "null"
@@ -809,34 +844,14 @@
         },
         {
           "properties": {
-            "ghost_commit": {
-              "$ref": "#/definitions/GhostCommit"
-            },
-            "type": {
-              "enum": [
-                "ghost_snapshot"
-              ],
-              "title": "GhostSnapshotResponseItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "ghost_commit",
-            "type"
-          ],
-          "title": "GhostSnapshotResponseItem",
-          "type": "object"
-        },
-        {
-          "properties": {
             "encrypted_content": {
               "type": "string"
             },
             "type": {
               "enum": [
-                "compaction_summary"
+                "compaction"
               ],
-              "title": "CompactionSummaryResponseItemType",
+              "title": "CompactionResponseItemType",
               "type": "string"
             }
           },
@@ -844,7 +859,7 @@
             "encrypted_content",
             "type"
           ],
-          "title": "CompactionSummaryResponseItem",
+          "title": "CompactionResponseItem",
           "type": "object"
         },
         {
@@ -887,15 +902,7 @@
         }
       ]
     },
-    "SandboxMode": {
-      "enum": [
-        "read-only",
-        "workspace-write",
-        "danger-full-access"
-      ],
-      "type": "string"
-    },
-    "WebSearchAction": {
+    "ResponsesApiWebSearchAction": {
       "oneOf": [
         {
           "properties": {
@@ -918,14 +925,14 @@
               "enum": [
                 "search"
               ],
-              "title": "SearchWebSearchActionType",
+              "title": "SearchResponsesApiWebSearchActionType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "SearchWebSearchAction",
+          "title": "SearchResponsesApiWebSearchAction",
           "type": "object"
         },
         {
@@ -934,7 +941,7 @@
               "enum": [
                 "open_page"
               ],
-              "title": "OpenPageWebSearchActionType",
+              "title": "OpenPageResponsesApiWebSearchActionType",
               "type": "string"
             },
             "url": {
@@ -947,7 +954,7 @@
           "required": [
             "type"
           ],
-          "title": "OpenPageWebSearchAction",
+          "title": "OpenPageResponsesApiWebSearchAction",
           "type": "object"
         },
         {
@@ -962,7 +969,7 @@
               "enum": [
                 "find_in_page"
               ],
-              "title": "FindInPageWebSearchActionType",
+              "title": "FindInPageResponsesApiWebSearchActionType",
               "type": "string"
             },
             "url": {
@@ -975,7 +982,7 @@
           "required": [
             "type"
           ],
-          "title": "FindInPageWebSearchAction",
+          "title": "FindInPageResponsesApiWebSearchAction",
           "type": "object"
         },
         {
@@ -984,17 +991,25 @@
               "enum": [
                 "other"
               ],
-              "title": "OtherWebSearchActionType",
+              "title": "OtherResponsesApiWebSearchActionType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "OtherWebSearchAction",
+          "title": "OtherResponsesApiWebSearchAction",
           "type": "object"
         }
       ]
+    },
+    "SandboxMode": {
+      "enum": [
+        "read-only",
+        "workspace-write",
+        "danger-full-access"
+      ],
+      "type": "string"
     }
   },
   "description": "There are three ways to resume a thread: 1. By thread_id: load the thread from disk by thread_id and resume it. 2. By history: instantiate the thread from memory and resume it. 3. By path: load the thread from disk by path and resume it.\n\nThe precedence is: history > path > thread_id. If using history or path, the thread_id param will be ignored.\n\nPrefer using thread_id whenever possible.",
@@ -1008,6 +1023,17 @@
           "type": "null"
         }
       ]
+    },
+    "approvalsReviewer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ApprovalsReviewer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Override where approval requests are routed for review on this thread and subsequent turns."
     },
     "baseInstructions": {
       "type": [
@@ -1065,6 +1091,12 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "serviceTier": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "threadId": {

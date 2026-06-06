@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::fs::{self};
+use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -12,6 +13,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use clap::Parser;
+use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::HOST;
@@ -26,7 +28,9 @@ use tiny_http::Response;
 use tiny_http::Server;
 use tiny_http::StatusCode;
 
+mod dump;
 mod read_api_key;
+use dump::ExchangeDumper;
 use read_api_key::read_auth_header_from_stdin;
 
 /// CLI arguments for the proxy.
@@ -44,6 +48,14 @@ pub struct Args {
     /// Enable HTTP shutdown endpoint at GET /shutdown
     #[arg(long)]
     pub http_shutdown: bool,
+
+    /// Absolute URL the proxy should forward requests to (defaults to OpenAI).
+    #[arg(long, default_value = "https://api.openai.com/v1/responses")]
+    pub upstream_url: String,
+
+    /// Directory where request/response dumps should be written as JSON.
+    #[arg(long, value_name = "DIR")]
+    pub dump_dir: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -52,9 +64,34 @@ struct ServerInfo {
     pid: u32,
 }
 
+struct ForwardConfig {
+    upstream_url: Url,
+    host_header: HeaderValue,
+}
+
 /// Entry point for the library main, for parity with other crates.
 pub fn run_main(args: Args) -> Result<()> {
     let auth_header = read_auth_header_from_stdin()?;
+
+    let upstream_url = Url::parse(&args.upstream_url).context("parsing --upstream-url")?;
+    let host = match (upstream_url.host_str(), upstream_url.port()) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (Some(host), None) => host.to_string(),
+        _ => return Err(anyhow!("upstream URL must include a host")),
+    };
+    let host_header =
+        HeaderValue::from_str(&host).context("constructing Host header from upstream URL")?;
+
+    let forward_config = Arc::new(ForwardConfig {
+        upstream_url,
+        host_header,
+    });
+    let dump_dir = args
+        .dump_dir
+        .map(ExchangeDumper::new)
+        .transpose()
+        .context("creating --dump-dir")?
+        .map(Arc::new);
 
     let (listener, bound_addr) = bind_listener(args.port)?;
     if let Some(path) = args.server_info.as_ref() {
@@ -75,21 +112,24 @@ pub fn run_main(args: Args) -> Result<()> {
     let http_shutdown = args.http_shutdown;
     for request in server.incoming_requests() {
         let client = client.clone();
-        if let Err(err) = std::thread::Builder::new()
-            .name("responses-api-proxy-worker".to_string())
-            .spawn(move || {
+        let forward_config = forward_config.clone();
+        let dump_dir = dump_dir.clone();
+        std::thread::spawn(move || {
             if http_shutdown && request.method() == &Method::Get && request.url() == "/shutdown" {
                 let _ = request.respond(Response::new_empty(StatusCode(200)));
                 std::process::exit(0);
             }
 
-            if let Err(e) = forward_request(&client, auth_header, request) {
+            if let Err(e) = forward_request(
+                &client,
+                auth_header,
+                &forward_config,
+                dump_dir.as_deref(),
+                request,
+            ) {
                 eprintln!("forwarding error: {e}");
             }
-        })
-        {
-            eprintln!("failed to spawn request handler: {err}");
-        }
+        });
     }
 
     Err(anyhow!("server stopped unexpectedly"))
@@ -120,7 +160,13 @@ fn write_server_info(path: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-fn forward_request(client: &Client, auth_header: &'static str, mut req: Request) -> Result<()> {
+fn forward_request(
+    client: &Client,
+    auth_header: &'static str,
+    config: &ForwardConfig,
+    dump_dir: Option<&ExchangeDumper>,
+    mut req: Request,
+) -> Result<()> {
     // Only allow POST /v1/responses exactly, no query string.
     let method = req.method().clone();
     let url_path = req.url().to_string();
@@ -134,8 +180,18 @@ fn forward_request(client: &Client, auth_header: &'static str, mut req: Request)
 
     // Read request body
     let mut body = Vec::new();
-    let mut reader = req.as_reader();
-    std::io::Read::read_to_end(&mut reader, &mut body)?;
+    let reader = req.as_reader();
+    reader.read_to_end(&mut body)?;
+
+    let exchange_dump = dump_dir.and_then(|dump_dir| {
+        dump_dir
+            .dump_request(&method, &url_path, req.headers(), &body)
+            .map_err(|err| {
+                eprintln!("responses-api-proxy failed to dump request: {err}");
+                err
+            })
+            .ok()
+    });
 
     // Build headers for upstream, forwarding everything from the incoming
     // request except Authorization (we replace it below).
@@ -162,11 +218,10 @@ fn forward_request(client: &Client, auth_header: &'static str, mut req: Request)
     auth_header_value.set_sensitive(true);
     headers.insert(AUTHORIZATION, auth_header_value);
 
-    headers.insert(HOST, HeaderValue::from_static("api.openai.com"));
+    headers.insert(HOST, config.host_header.clone());
 
-    let upstream = "https://api.openai.com/v1/responses";
     let upstream_resp = client
-        .post(upstream)
+        .post(config.upstream_url.clone())
         .headers(headers)
         .body(body)
         .send()
@@ -200,10 +255,17 @@ fn forward_request(client: &Client, auth_header: &'static str, mut req: Request)
         }
     });
 
+    let response_body: Box<dyn Read + Send> = if let Some(exchange_dump) = exchange_dump {
+        let headers = upstream_resp.headers().clone();
+        Box::new(exchange_dump.tee_response_body(status.as_u16(), &headers, upstream_resp))
+    } else {
+        Box::new(upstream_resp)
+    };
+
     let response = Response::new(
         StatusCode(status.as_u16()),
         response_headers,
-        upstream_resp,
+        response_body,
         content_length,
         None,
     );

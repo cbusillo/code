@@ -1,20 +1,26 @@
 [package]
-edition = "2024"
-name = "code-arg0"
-version = { workspace = true }
+name = "codex-arg0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [lib]
-name = "code_arg0"
+name = "codex_arg0"
 path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-code-apply-patch = { workspace = true }
-code-core = { workspace = true }
-code-linux-sandbox = { workspace = true }
+codex-apply-patch = { workspace = true }
+codex-exec-server = { workspace = true }
+codex-linux-sandbox = { workspace = true }
+codex-sandboxing = { workspace = true }
+codex-shell-escalation = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
+codex-utils-home-dir = { workspace = true }
 dotenvy = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

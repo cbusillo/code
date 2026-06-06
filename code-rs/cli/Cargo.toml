@@ -1,55 +1,62 @@
 [package]
-edition = "2024"
-name = "code-cli"
-version = { workspace = true }
+name = "codex-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "code"
 path = "src/main.rs"
 
 [lib]
-name = "code_cli"
+name = "codex_cli"
 path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
-code-app-server = { workspace = true }
-code-arg0 = { workspace = true }
-code-chatgpt = { workspace = true }
-code-common = { workspace = true, features = ["cli"] }
-code-core = { workspace = true }
-code-exec = { workspace = true }
-code-login = { workspace = true }
-code-mcp-server = { workspace = true }
-code-process-hardening = { workspace = true }
-code-protocol = { workspace = true }
-code-app-server-protocol = { workspace = true }
-code-protocol-ts = { workspace = true }
-code-responses-api-proxy = { workspace = true }
-code-tui = { workspace = true }
-code-version = { path = "../code-version" }
-code-cloud-tasks = { workspace = true }
-ctor = { workspace = true }
-futures = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
-regex = "1"
-tar = "0.4"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
-tempfile = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
-which = { workspace = true }
+codex-app-server = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+codex-app-server-test-client = { workspace = true }
+codex-arg0 = { workspace = true }
+codex-chatgpt = { workspace = true }
+codex-cloud-tasks = { path = "../cloud-tasks" }
+codex-utils-cli = { workspace = true }
+codex-config = { workspace = true }
+codex-core = { workspace = true }
+codex-core-plugins = { workspace = true }
+codex-exec = { workspace = true }
+codex-exec-server = { workspace = true }
+codex-execpolicy = { workspace = true }
+codex-features = { workspace = true }
+codex-login = { workspace = true }
+codex-memories-write = { workspace = true }
+codex-mcp = { workspace = true }
+codex-mcp-server = { workspace = true }
+codex-models-manager = { workspace = true }
+codex-protocol = { workspace = true }
+codex-responses-api-proxy = { workspace = true }
+codex-rmcp-client = { workspace = true }
+codex-rollout-trace = { workspace = true }
+codex-sandboxing = { workspace = true }
+codex-state = { workspace = true }
+codex-stdio-to-uds = { workspace = true }
+codex-terminal-detection = { workspace = true }
+codex-tui = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
+codex-utils-path = { workspace = true }
+libc = { workspace = true }
 owo-colors = { workspace = true }
+regex-lite = { workspace = true }
 serde_json = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-sha2 = { workspace = true }
 supports-color = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = [
     "io-std",
     "macros",
@@ -57,9 +64,18 @@ tokio = { workspace = true, features = [
     "rt-multi-thread",
     "signal",
 ] }
-tokio-tungstenite = { version = "0.23", default-features = true, features = ["rustls-tls-webpki-roots"] }
-tracing = { workspace = true, features = ["log"] }
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
 
 [dev-dependencies]
-filetime = { workspace = true }
+assert_cmd = { workspace = true }
+assert_matches = { workspace = true }
+codex-utils-cargo-bin = { workspace = true }
+predicates = { workspace = true }
+pretty_assertions = { workspace = true }
+sqlx = { workspace = true }

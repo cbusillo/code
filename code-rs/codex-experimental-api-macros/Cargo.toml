@@ -6,6 +6,8 @@ license.workspace = true
 
 [lib]
 proc-macro = true
+test = false
+doctest = false
 
 [dependencies]
 proc-macro2 = "1"
@@ -14,4 +16,3 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 
 [lints]
 workspace = true
-

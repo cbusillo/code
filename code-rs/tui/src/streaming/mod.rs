@@ -1,162 +1,123 @@
-use crate::markdown_stream::AnimatedLineStreamer;
+//! Streaming primitives used by the TUI transcript pipeline.
+//!
+//! `StreamState` owns newline-gated markdown collection and a FIFO queue of committed render lines.
+//! Higher-level modules build on top of this state:
+//! - `controller` adapts queued lines into `HistoryCell` emission rules for message and plan streams.
+//! - `chunking` computes adaptive drain plans from queue pressure.
+//! - `commit_tick` binds policy decisions to concrete controller drains.
+//!
+//! The key invariant is queue ordering. All drains pop from the front, and enqueue records an
+//! arrival timestamp so policy code can reason about oldest queued age without peeking into text.
+
+use std::collections::VecDeque;
+use std::path::Path;
+use std::time::Duration;
+use std::time::Instant;
+
+use ratatui::text::Line;
+
 use crate::markdown_stream::MarkdownStreamCollector;
-use crate::memory_citation::MemoryCitationParser;
+pub(crate) mod chunking;
+pub(crate) mod commit_tick;
 pub(crate) mod controller;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum StreamKind {
-    Answer,
-    Reasoning,
+struct QueuedLine {
+    line: Line<'static>,
+    enqueued_at: Instant,
 }
 
+/// Holds in-flight markdown stream state and queued committed lines.
 pub(crate) struct StreamState {
     pub(crate) collector: MarkdownStreamCollector,
-    pub(crate) streamer: AnimatedLineStreamer,
-    pub(crate) citation_parser: MemoryCitationParser,
-    pub(crate) citations: Vec<String>,
+    queued_lines: VecDeque<QueuedLine>,
     pub(crate) has_seen_delta: bool,
-    pub(crate) last_commit_instant: Option<std::time::Instant>,
-    pub(crate) tail_chars_since_commit: usize,
-    pub(crate) last_sequence_number: Option<u64>,
 }
 
 impl StreamState {
-    pub(crate) fn new_for_kind(kind: StreamKind) -> Self {
-        // Bold the first sentence for assistant answers; reasoning stays normal.
-        let collector = match kind {
-            StreamKind::Answer => MarkdownStreamCollector::new_with_bold_first(),
-            StreamKind::Reasoning => MarkdownStreamCollector::new(),
-        };
-        Self {
-            collector,
-            streamer: AnimatedLineStreamer::new(),
-            citation_parser: MemoryCitationParser::default(),
-            citations: Vec::new(),
-            has_seen_delta: false,
-            last_commit_instant: None,
-            tail_chars_since_commit: 0,
-            last_sequence_number: None,
-        }
-    }
-    pub(crate) fn clear(&mut self) {
-        // Preserve bold_first_sentence setting in collector
-        self.collector.clear();
-        self.streamer.clear();
-        self.citation_parser.clear();
-        self.citations.clear();
-        self.has_seen_delta = false;
-        self.last_commit_instant = None;
-        self.tail_chars_since_commit = 0;
-        self.last_sequence_number = None;
-    }
-    pub(crate) fn step(&mut self) -> crate::markdown_stream::StepResult {
-        self.streamer.step()
-    }
-    pub(crate) fn drain_all(&mut self) -> crate::markdown_stream::StepResult {
-        self.streamer.drain_all()
-    }
-    pub(crate) fn is_idle(&self) -> bool {
-        self.streamer.is_idle()
-    }
-    pub(crate) fn enqueue(&mut self, lines: Vec<ratatui::text::Line<'static>>) {
-        self.streamer.enqueue(lines)
-    }
-}
-
-pub(crate) struct HeaderEmitter {
-    reasoning_emitted_this_turn: bool,
-    answer_emitted_this_turn: bool,
-    reasoning_emitted_in_stream: bool,
-    answer_emitted_in_stream: bool,
-    just_emitted_header: bool,
-}
-
-impl HeaderEmitter {
-    pub(crate) fn new() -> Self {
-        Self {
-            reasoning_emitted_this_turn: false,
-            answer_emitted_this_turn: false,
-            reasoning_emitted_in_stream: false,
-            answer_emitted_in_stream: false,
-            just_emitted_header: false,
-        }
-    }
-
-    pub(crate) fn reset_for_new_turn(&mut self) {
-        self.reasoning_emitted_this_turn = false;
-        self.answer_emitted_this_turn = false;
-        self.reasoning_emitted_in_stream = false;
-        self.answer_emitted_in_stream = false;
-        self.just_emitted_header = false;
-    }
-
-    pub(crate) fn reset_for_stream(&mut self, kind: StreamKind) {
-        match kind {
-            StreamKind::Reasoning => self.reasoning_emitted_in_stream = false,
-            StreamKind::Answer => self.answer_emitted_in_stream = false,
-        }
-        self.just_emitted_header = false;
-    }
-
-    pub(crate) fn has_emitted_for_stream(&self, kind: StreamKind) -> bool {
-        match kind {
-            StreamKind::Reasoning => self.reasoning_emitted_in_stream,
-            StreamKind::Answer => self.answer_emitted_in_stream,
-        }
-    }
-
-    /// Allow emitting the header again for the same kind within the current turn.
+    /// Create stream state whose markdown collector renders local file links relative to `cwd`.
     ///
-    /// This is used when a stream (e.g., Answer) is finalized and a subsequent
-    /// block of the same kind is started within the same turn. Without this,
-    /// only the first block would render a header.
-    pub(crate) fn allow_reemit_for_same_kind_in_turn(&mut self, kind: StreamKind) {
-        match kind {
-            StreamKind::Reasoning => self.reasoning_emitted_this_turn = false,
-            StreamKind::Answer => self.answer_emitted_this_turn = false,
+    /// Controllers are expected to pass the session cwd here once and keep it stable for the
+    /// lifetime of the active stream.
+    pub(crate) fn new(width: Option<usize>, cwd: &Path) -> Self {
+        Self {
+            collector: MarkdownStreamCollector::new(width, cwd),
+            queued_lines: VecDeque::new(),
+            has_seen_delta: false,
         }
+    }
+    /// Resets collector and queue state for the next stream lifecycle.
+    pub(crate) fn clear(&mut self) {
+        self.collector.clear();
+        self.queued_lines.clear();
+        self.has_seen_delta = false;
+    }
+    /// Drains one queued line from the front of the queue.
+    pub(crate) fn step(&mut self) -> Vec<Line<'static>> {
+        self.queued_lines
+            .pop_front()
+            .map(|queued| queued.line)
+            .into_iter()
+            .collect()
+    }
+    /// Drains up to `max_lines` queued lines from the front of the queue.
+    ///
+    /// Callers that pass very large values still get bounded behavior because this method clamps to
+    /// the currently available queue length.
+    pub(crate) fn drain_n(&mut self, max_lines: usize) -> Vec<Line<'static>> {
+        let end = max_lines.min(self.queued_lines.len());
+        self.queued_lines
+            .drain(..end)
+            .map(|queued| queued.line)
+            .collect()
+    }
+    /// Clears queued lines while keeping collector/turn lifecycle state intact.
+    pub(crate) fn clear_queue(&mut self) {
+        self.queued_lines.clear();
+    }
+    /// Returns whether no lines are queued for commit.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.queued_lines.is_empty()
+    }
+    /// Returns the current queue depth.
+    pub(crate) fn queued_len(&self) -> usize {
+        self.queued_lines.len()
+    }
+    /// Returns the age of the oldest queued line.
+    pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.queued_lines
+            .front()
+            .map(|queued| now.saturating_duration_since(queued.enqueued_at))
+    }
+    /// Appends committed lines to the queue with a shared enqueue timestamp.
+    pub(crate) fn enqueue(&mut self, lines: Vec<Line<'static>>) {
+        let now = Instant::now();
+        self.queued_lines
+            .extend(lines.into_iter().map(|line| QueuedLine {
+                line,
+                enqueued_at: now,
+            }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
+
+    fn test_cwd() -> PathBuf {
+        // These tests only need a stable absolute cwd; using temp_dir() avoids baking Unix- or
+        // Windows-specific root semantics into the fixtures.
+        std::env::temp_dir()
     }
 
-    pub(crate) fn maybe_emit(
-        &mut self,
-        kind: StreamKind,
-        _out_lines: &mut Vec<ratatui::text::Line<'static>>,
-    ) -> bool {
-        let already_emitted_this_turn = match kind {
-            StreamKind::Reasoning => self.reasoning_emitted_this_turn,
-            StreamKind::Answer => self.answer_emitted_this_turn,
-        };
-        let already_emitted_in_stream = self.has_emitted_for_stream(kind);
-        if !already_emitted_in_stream && !already_emitted_this_turn {
-            // Do not render a visible header line for either stream kind.
-            // We still mark the header as emitted to preserve per-turn gating
-            // and stream state, but the UI should not show the "codex" prefix
-            // on streaming assistant messages.
-            match kind {
-                StreamKind::Reasoning => {
-                    self.reasoning_emitted_in_stream = true;
-                    self.reasoning_emitted_this_turn = true;
-                    // Reset opposite header so it may be emitted again this turn
-                    self.answer_emitted_this_turn = false;
-                }
-                StreamKind::Answer => {
-                    self.answer_emitted_in_stream = true;
-                    self.answer_emitted_this_turn = true;
-                    // Reset opposite header so it may be emitted again this turn
-                    self.reasoning_emitted_this_turn = false;
-                }
-            }
-            self.just_emitted_header = true;
-            true
-        } else {
-            self.just_emitted_header = false;
-            false
-        }
-    }
-    
-    pub(crate) fn consume_header_flag(&mut self) -> bool {
-        let was_just_emitted = self.just_emitted_header;
-        self.just_emitted_header = false;
-        was_just_emitted
+    #[test]
+    fn drain_n_clamps_to_available_lines() {
+        let mut state = StreamState::new(/*width*/ None, &test_cwd());
+        state.enqueue(vec![Line::from("one")]);
+
+        let drained = state.drain_n(/*max_lines*/ 8);
+        assert_eq!(drained, vec![Line::from("one")]);
+        assert!(state.is_idle());
     }
 }

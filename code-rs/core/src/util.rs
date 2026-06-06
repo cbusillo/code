@@ -1,248 +1,139 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use std::sync::Arc;
-
+use codex_protocol::ThreadId;
 use rand::Rng;
-use reqwest;
-use shlex::try_join;
-use tokio::sync::Notify;
-use tracing::debug;
+use tracing::error;
 
-use crate::config::Config;
+use codex_shell_command::parse_command::shlex_join;
 
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
 
-pub(crate) fn backoff(attempt: u64) -> Duration {
+/// Emit structured feedback metadata as key/value pairs.
+///
+/// This logs a tracing event with `target: "feedback_tags"`. If
+/// `codex_feedback::CodexFeedback::metadata_layer()` is installed, these fields are captured and
+/// later attached as tags when feedback is uploaded.
+///
+/// Values are wrapped with [`tracing::field::DebugValue`], so the expression only needs to
+/// implement [`std::fmt::Debug`].
+///
+/// Example:
+///
+/// ```rust
+/// codex_core::feedback_tags!(model = "gpt-5", cached = true);
+/// codex_core::feedback_tags!(provider = provider_id, request_id = request_id);
+/// ```
+#[macro_export]
+macro_rules! feedback_tags {
+    ($( $key:ident = $value:expr ),+ $(,)?) => {
+        ::tracing::info!(
+            target: "feedback_tags",
+            $( $key = ::tracing::field::debug(&$value) ),+
+        );
+    };
+}
+
+struct Auth401FeedbackSnapshot<'a> {
+    request_id: &'a str,
+    cf_ray: &'a str,
+    error: &'a str,
+    error_code: &'a str,
+}
+
+impl<'a> Auth401FeedbackSnapshot<'a> {
+    fn from_optional_fields(
+        request_id: Option<&'a str>,
+        cf_ray: Option<&'a str>,
+        error: Option<&'a str>,
+        error_code: Option<&'a str>,
+    ) -> Self {
+        Self {
+            request_id: request_id.unwrap_or(""),
+            cf_ray: cf_ray.unwrap_or(""),
+            error: error.unwrap_or(""),
+            error_code: error_code.unwrap_or(""),
+        }
+    }
+}
+
+pub(crate) fn emit_feedback_auth_recovery_tags(
+    auth_recovery_mode: &str,
+    auth_recovery_phase: &str,
+    auth_recovery_outcome: &str,
+    auth_request_id: Option<&str>,
+    auth_cf_ray: Option<&str>,
+    auth_error: Option<&str>,
+    auth_error_code: Option<&str>,
+) {
+    let auth_401 = Auth401FeedbackSnapshot::from_optional_fields(
+        auth_request_id,
+        auth_cf_ray,
+        auth_error,
+        auth_error_code,
+    );
+    feedback_tags!(
+        auth_recovery_mode = auth_recovery_mode,
+        auth_recovery_phase = auth_recovery_phase,
+        auth_recovery_outcome = auth_recovery_outcome,
+        auth_401_request_id = auth_401.request_id,
+        auth_401_cf_ray = auth_401.cf_ray,
+        auth_401_error = auth_401.error,
+        auth_401_error_code = auth_401.error_code
+    );
+}
+
+pub fn backoff(attempt: u64) -> Duration {
     let exp = BACKOFF_FACTOR.powi(attempt.saturating_sub(1) as i32);
     let base = (INITIAL_DELAY_MS as f64 * exp) as u64;
     let jitter = rand::rng().random_range(0.9..1.1);
     Duration::from_millis((base as f64 * jitter) as u64)
 }
 
-/// Blocks until the given endpoint responds, pausing between attempts with
-/// exponential backoff (capped). Used to pause retries while the user is
-/// offline so we resume immediately once connectivity returns.
-pub(crate) async fn wait_for_connectivity(probe_url: &str) {
-    // Cap individual waits to avoid very long sleeps while still backing off.
-    const MAX_DELAY: Duration = Duration::from_secs(30);
-    let client = reqwest::Client::new();
-    let mut attempt: u64 = 1;
-    loop {
-        // Treat any HTTP response as proof that DNS + TLS + routing are back.
-        // Servers like api.openai.com respond 4xx/421 to bare HEADs, so do
-        // not gate on status here.
-        if client.head(probe_url).send().await.is_ok() {
-            return;
-        }
-
-        let delay = backoff(attempt).min(MAX_DELAY);
-        attempt = attempt.saturating_add(1);
-        tokio::time::sleep(delay).await;
+pub(crate) fn error_or_panic(message: impl std::string::ToString) {
+    if cfg!(debug_assertions) {
+        panic!("{}", message.to_string());
+    } else {
+        error!("{}", message.to_string());
     }
 }
 
-pub fn escape_command(command: &[String]) -> String {
-    try_join(command.iter().map(|s| s.as_str())).unwrap_or_else(|_| command.join(" "))
-}
-
-pub fn extract_shell_script(command: &[String]) -> Option<(usize, &str)> {
-    match command {
-        [script] => Some((0, script.as_str())),
-        [first, second, third]
-            if is_shell_like_executable(first)
-                && matches!(second.as_str(), "-lc" | "-c") =>
-        {
-            Some((2, third.as_str()))
-        }
-        _ => None,
+pub fn resolve_path(base: &Path, path: &PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path.clone()
+    } else {
+        base.join(path)
     }
 }
 
-pub fn strip_bash_lc_and_escape(command: &[String]) -> String {
-    extract_shell_script(command)
-        .map(|(_, script)| strip_shell_wrapper_for_display(script))
-        .unwrap_or_else(|| escape_command(command))
-}
-
-fn strip_shell_wrapper_for_display(script: &str) -> String {
-    unwrap_profile_wrapper(script).unwrap_or(script).to_string()
-}
-
-fn unwrap_profile_wrapper(script: &str) -> Option<&str> {
-    let script = script.strip_prefix("set +m; ").unwrap_or(script);
-    let body = script.strip_prefix("source ")?;
-    let (rc_path, wrapped) = body.split_once(" && ")?;
-    if !looks_like_shell_rc_path(rc_path) {
-        return None;
+/// Trim a thread name and return `None` if it is empty after trimming.
+pub fn normalize_thread_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
-
-    wrapped
-        .strip_prefix('(')
-        .and_then(|inner| inner.strip_suffix(')'))
-        .or_else(|| {
-            wrapped
-                .strip_prefix("{\n")
-                .and_then(|inner| inner.strip_suffix("\n}"))
-        })
 }
 
-fn looks_like_shell_rc_path(path: &str) -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
-        return false;
-    };
-    let home = Path::new(&home);
-    path == home.join(".bashrc").to_string_lossy() || path == home.join(".zshrc").to_string_lossy()
-}
-
-pub(crate) fn is_shell_like_executable(token: &str) -> bool {
-    let trimmed = token.trim_matches('"').trim_matches('\'');
-    let name = Path::new(trimmed)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(trimmed)
-        .to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "bash"
-            | "bash.exe"
-            | "sh"
-            | "sh.exe"
-            | "zsh"
-            | "zsh.exe"
-            | "dash"
-            | "dash.exe"
-            | "ksh"
-            | "ksh.exe"
-            | "busybox"
-    )
-}
-
-#[allow(dead_code)]
-pub fn notify_on_sigint() -> Arc<Notify> {
-    let notify = Arc::new(Notify::new());
-
-    tokio::spawn({
-        let notify = Arc::clone(&notify);
-        async move {
-            loop {
-                tokio::signal::ctrl_c().await.ok();
-                debug!("Keyboard interrupt");
-                notify.notify_waiters();
-            }
+pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+    let resume_target = thread_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| thread_id.map(|thread_id| thread_id.to_string()));
+    resume_target.map(|target| {
+        let needs_double_dash = target.starts_with('-');
+        let escaped = shlex_join(&[target]);
+        if needs_double_dash {
+            format!("codex resume -- {escaped}")
+        } else {
+            format!("codex resume {escaped}")
         }
-    });
-
-    notify
-}
-
-#[allow(dead_code)]
-pub fn is_inside_git_repo(config: &Config) -> bool {
-    let mut dir = config.cwd.to_path_buf();
-
-    loop {
-        if dir.join(".git").exists() {
-            return true;
-        }
-
-        if !dir.pop() {
-            break;
-        }
-    }
-
-    false
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::strip_bash_lc_and_escape;
-    use std::path::PathBuf;
-
-    fn home_rc_path(name: &str) -> String {
-        let home = std::env::var_os("HOME").expect("HOME should be set for util tests");
-        PathBuf::from(home).join(name).to_string_lossy().to_string()
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_hides_profile_wrapper() {
-        let bashrc = home_rc_path(".bashrc");
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            format!("source {bashrc} && (sed -n '1,5p' file.txt)"),
-        ];
-
-        assert_eq!(strip_bash_lc_and_escape(&command), "sed -n '1,5p' file.txt");
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_shows_raw_shell_script_without_quotes() {
-        let command = vec!["git status --short".to_string()];
-
-        assert_eq!(strip_bash_lc_and_escape(&command), "git status --short");
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_shows_raw_multiline_shell_script_without_quotes() {
-        let command = vec!["cat <<'EOF'\nhello\nEOF".to_string()];
-
-        assert_eq!(strip_bash_lc_and_escape(&command), "cat <<'EOF'\nhello\nEOF");
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_hides_multiline_profile_wrapper() {
-        let bashrc = home_rc_path(".bashrc");
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            format!(
-                "set +m; source {bashrc} && {{\napply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH\n}}"
-            ),
-        ];
-
-        assert_eq!(
-            strip_bash_lc_and_escape(&command),
-            "apply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH"
-        );
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_preserves_user_set_plus_m_command() {
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "set +m; echo done".to_string(),
-        ];
-
-        assert_eq!(strip_bash_lc_and_escape(&command), "set +m; echo done");
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_preserves_user_source_command() {
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "source script.sh && echo done".to_string(),
-        ];
-
-        assert_eq!(
-            strip_bash_lc_and_escape(&command),
-            "source script.sh && echo done"
-        );
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_preserves_other_bashrc_paths() {
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "source /tmp/project/.bashrc && echo done".to_string(),
-        ];
-
-        assert_eq!(
-            strip_bash_lc_and_escape(&command),
-            "source /tmp/project/.bashrc && echo done"
-        );
-    }
-}
+#[path = "util_tests.rs"]
+mod tests;

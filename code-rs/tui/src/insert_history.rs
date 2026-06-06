@@ -1,10 +1,23 @@
+//! Inserts finalized history rows into terminal scrollback.
+//!
+//! Codex uses the terminal scrollback itself for finalized chat history, so inserting a history
+//! cell is an escape-sequence operation rather than a normal ratatui render. The mode determines
+//! how to create room for new history above the inline viewport.
+
 use std::fmt;
 use std::io;
 use std::io::Write;
 
-use crate::tui;
+use crate::wrapping::RtOptions;
+use crate::wrapping::adaptive_wrap_line;
+use crate::wrapping::line_contains_url_like;
+use crate::wrapping::line_has_mixed_url_and_non_url_tokens;
 use crossterm::Command;
+use crossterm::cursor::MoveDown;
 use crossterm::cursor::MoveTo;
+use crossterm::cursor::MoveToColumn;
+use crossterm::cursor::RestorePosition;
+use crossterm::cursor::SavePosition;
 use crossterm::queue;
 use crossterm::style::Color as CColor;
 use crossterm::style::Colors;
@@ -13,230 +26,264 @@ use crossterm::style::SetAttribute;
 use crossterm::style::SetBackgroundColor;
 use crossterm::style::SetColors;
 use crossterm::style::SetForegroundColor;
-// No terminal clears in terminal-mode insertion; preserve user's theme.
+use crossterm::terminal::Clear;
+use crossterm::terminal::ClearType;
 use ratatui::layout::Size;
+use ratatui::prelude::Backend;
 use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use textwrap::Options as TwOptions;
-use textwrap::WordSplitter;
 
-/// Insert `lines` above the viewport.
-#[allow(dead_code)]
-pub(crate) fn insert_history_lines(terminal: &mut tui::Tui, lines: Vec<Line>) {
-    let mut out = std::io::stdout();
-    insert_history_lines_to_writer(terminal, &mut out, lines);
+/// Selects the terminal escape strategy for inserting history lines above the viewport.
+///
+/// Standard terminals support `DECSTBM` scroll regions and Reverse Index (`ESC M`),
+/// which let us slide existing content down without redrawing it. Zellij silently
+/// drops or mishandles those sequences, so `Zellij` mode falls back to emitting
+/// newlines at the bottom of the screen and writing lines at absolute positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertHistoryMode {
+    Standard,
+    Zellij,
 }
 
-/// Like `insert_history_lines`, but writes ANSI to the provided writer. This
-/// is intended for testing where a capture buffer is used instead of stdout.
-#[allow(dead_code)]
-pub fn insert_history_lines_to_writer<B, W>(
-    terminal: &mut ratatui::Terminal<B>,
-    writer: &mut W,
-    lines: Vec<Line>,
-) where
-    B: ratatui::backend::Backend,
-    W: Write,
-{
-    let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
-    let cursor_pos = terminal.get_cursor_position().ok();
-
-    let mut area = terminal.get_frame().area();
-
-    // Pre-wrap lines using word-aware wrapping so terminal scrollback sees the same
-    // formatting as the TUI. This avoids character-level hard wrapping by the terminal.
-    // Wrap to the full content width of the viewport in standard mode.
-    let content_width = area.width.max(1);
-    let wrapped = word_wrap_lines(&lines, content_width);
-    let wrapped_lines = wrapped.len() as u16;
-    let cursor_top = if area.bottom() < screen_size.height {
-        // If the viewport is not at the bottom of the screen, scroll it down to make room.
-        // Don't scroll it past the bottom of the screen.
-        let scroll_amount = wrapped_lines.min(screen_size.height - area.bottom());
-
-        // Emit ANSI to scroll the lower region (from the top of the viewport to the bottom
-        // of the screen) downward by `scroll_amount` lines. We do this by:
-        //   1) Limiting the scroll region to [area.top()+1 .. screen_height] (1-based bounds)
-        //   2) Placing the cursor at the top margin of that region
-        //   3) Emitting Reverse Index (RI, ESC M) `scroll_amount` times
-        //   4) Resetting the scroll region back to full screen
-        let top_1based = area.top() + 1; // Convert 0-based row to 1-based for DECSTBM
-        queue!(writer, SetScrollRegion(top_1based..screen_size.height)).ok();
-        queue!(writer, MoveTo(0, area.top())).ok();
-        for _ in 0..scroll_amount {
-            // Reverse Index (RI)
-            queue!(writer, ReverseIndex).ok();
+impl InsertHistoryMode {
+    pub fn new(is_zellij: bool) -> Self {
+        if is_zellij {
+            Self::Zellij
+        } else {
+            Self::Standard
         }
-        queue!(writer, ResetScrollRegion).ok();
-
-        let cursor_top = area.top().saturating_sub(1);
-        // Adjust our local notion of area to account for the pre-scroll,
-        // but avoid touching ratatui::Terminal internals (set_viewport_area is private).
-        area.y += scroll_amount;
-        cursor_top
-    } else {
-        area.top().saturating_sub(1)
-    };
-
-    // Limit the scroll region to the lines from the top of the screen to the
-    // top of the viewport. With this in place, when we add lines inside this
-    // area, only the lines in this area will be scrolled. We place the cursor
-    // at the end of the scroll region, and add lines starting there.
-    //
-    // ┌─Screen───────────────────────┐
-    // │┌╌Scroll region╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐│
-    // │┆                            ┆│
-    // │┆                            ┆│
-    // │┆                            ┆│
-    // │█╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘│
-    // │╭─Viewport───────────────────╮│
-    // ││                            ││
-    // │╰────────────────────────────╯│
-    // └──────────────────────────────┘
-    queue!(writer, SetScrollRegion(1..area.top())).ok();
-
-    // Do not force theme colors in terminal mode; let native terminal theme show.
-
-    // NB: we are using MoveTo instead of set_cursor_position here to avoid messing with the
-    // terminal's last_known_cursor_position, which hopefully will still be accurate after we
-    // fetch/restore the cursor position. insert_history_lines should be cursor-position-neutral :)
-    queue!(writer, MoveTo(0, cursor_top)).ok();
-
-    for line in wrapped {
-        // Emit a real newline so terminals reliably scroll when at the bottom
-        // of the scroll region. Some terminals do not scroll on CSI E
-        // (MoveToNextLine); LF is the most portable.
-        queue!(writer, Print("\r\n")).ok();
-        write_spans(writer, line.iter()).ok();
-        // Avoid Clear(EOL) painting solid backgrounds over terminal theme.
     }
-
-    queue!(writer, ResetScrollRegion).ok();
-
-    // Restore the cursor position to where it was before we started.
-    if let Some(cursor_pos) = cursor_pos {
-        queue!(writer, MoveTo(cursor_pos.x, cursor_pos.y)).ok();
-    }
-
-    writer.flush().ok();
-}
-
-/// Variant of `insert_history_lines` that reserves `reserved_bottom_rows` at the
-/// bottom of the screen for a live UI (e.g., the input composer) and inserts
-/// history lines into the scrollback above that region.
-#[allow(dead_code)]
-pub(crate) fn insert_history_lines_above(terminal: &mut tui::Tui, reserved_bottom_rows: u16, lines: Vec<Line>) {
-    let mut out = std::io::stdout();
-    insert_history_lines_to_writer_above(terminal, &mut out, reserved_bottom_rows, lines);
-}
-
-#[allow(dead_code)]
-pub fn insert_history_lines_to_writer_above<B, W>(
-    terminal: &mut ratatui::Terminal<B>,
-    writer: &mut W,
-    reserved_bottom_rows: u16,
-    lines: Vec<Line>,
-) where
-    B: ratatui::backend::Backend,
-    W: Write,
-{
-    if lines.is_empty() { return; }
-    let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
-    let cursor_pos = terminal.get_cursor_position().ok();
-
-    // Compute the bottom of the reserved region; ensure at least 1 visible row remains
-    let screen_h = screen_size.height.max(1);
-    let reserved = reserved_bottom_rows.min(screen_h.saturating_sub(1));
-    let region_bottom = screen_h.saturating_sub(reserved).max(1);
-
-    // Pre-wrap to avoid terminal hard-wrap artifacts
-    let content_width = screen_size.width.max(1);
-    let wrapped = word_wrap_lines(&lines, content_width);
-    let wrapped_count = wrapped.len();
-
-    tracing::debug!(
-        target: "code_tui::scrollback",
-        screen_h,
-        reserved_bottom_rows,
-        reserved,
-        region_bottom,
-        wrapped_count,
-        "scrollback insert sizing"
-    );
-
-    if region_bottom <= 1 {
-        tracing::debug!(
-            target: "code_tui::scrollback",
-            screen_h,
-            reserved_bottom_rows,
-            reserved,
-            "scrollback insert fallback: region bottom collapsed"
-        );
-        // Degenerate case (startup or unknown size): fall back to simple
-        // line-by-line prints that let the terminal naturally scroll. This is
-        // safe before the first bottom-pane draw and avoids a 1-line scroll
-        // region that would overwrite the same line repeatedly.
-        for line in word_wrap_lines(&lines, screen_size.width.max(1)) {
-            write_spans(writer, line.iter()).ok();
-            queue!(writer, Print("\r\n")).ok();
-        }
-        writer.flush().ok();
-        return;
-    }
-
-    // Limit scroll region to rows [1 .. region_bottom] so the bottom reserved rows are untouched
-    queue!(writer, SetScrollRegion(1..region_bottom)).ok();
-    // Place cursor at the last line of the scroll region
-    queue!(writer, MoveTo(0, region_bottom.saturating_sub(1))).ok();
-
-    // Do not force theme colors in terminal mode; let native terminal theme show.
-
-    for line in wrapped {
-        // Ensure we're at the bottom row of the scroll region; printing a newline
-        // while at the bottom margin scrolls the region by one.
-        write_spans(writer, line.iter()).ok();
-        // Newline scrolls the region up by one when at the bottom margin.
-        queue!(writer, Print("\r\n")).ok();
-    }
-
-    tracing::debug!(
-        target: "code_tui::scrollback",
-        screen_h,
-        reserved_bottom_rows,
-        reserved,
-        region_bottom,
-        wrapped_count,
-        "scrollback insert complete"
-    );
-
-    queue!(writer, ResetScrollRegion).ok();
-    if let Some(cursor_pos) = cursor_pos {
-        queue!(writer, MoveTo(cursor_pos.x, cursor_pos.y)).ok();
-    }
-    writer.flush().ok();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReverseIndex;
+pub enum HistoryLineWrapPolicy {
+    PreWrap,
+    Terminal,
+}
 
-impl Command for ReverseIndex {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        // RI (Reverse Index): ESC M
-        write!(f, "\x1bM")
+/// Insert `lines` above the viewport using the terminal's backend writer
+/// (avoids direct stdout references).
+pub fn insert_history_lines<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    lines: Vec<Line>,
+) -> io::Result<()>
+where
+    B: Backend + Write,
+{
+    insert_history_lines_with_mode(terminal, lines, InsertHistoryMode::Standard)
+}
+
+/// Insert `lines` above the viewport, using the escape strategy selected by `mode`.
+///
+/// In `Standard` mode this manipulates DECSTBM scroll regions to slide existing
+/// scrollback down and writes new lines into the freed space. In `Zellij` mode it
+/// emits newlines at the screen bottom to create space (since Zellij ignores scroll
+/// region escapes) and writes lines at computed absolute positions. Both modes
+/// update `terminal.viewport_area` so subsequent draw passes know where the
+/// viewport moved to. Resize reflow uses the same viewport-aware path after
+/// clearing old scrollback.
+pub fn insert_history_lines_with_mode<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    lines: Vec<Line>,
+    mode: InsertHistoryMode,
+) -> io::Result<()>
+where
+    B: Backend + Write,
+{
+    insert_history_lines_with_mode_and_wrap_policy(
+        terminal,
+        lines,
+        mode,
+        HistoryLineWrapPolicy::PreWrap,
+    )
+}
+
+pub fn insert_history_lines_with_mode_and_wrap_policy<B>(
+    terminal: &mut crate::custom_terminal::Terminal<B>,
+    lines: Vec<Line>,
+    mode: InsertHistoryMode,
+    wrap_policy: HistoryLineWrapPolicy,
+) -> io::Result<()>
+where
+    B: Backend + Write,
+{
+    let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
+
+    let mut area = terminal.viewport_area;
+    let mut should_update_area = false;
+    let last_cursor_pos = terminal.last_known_cursor_pos;
+    let writer = terminal.backend_mut();
+
+    // Pre-wrap lines for terminal scrollback. Three paths:
+    //
+    // - URL-only-ish lines are kept intact (no hard newlines inserted) so that
+    //   terminal emulators can match them as clickable links. The
+    //   terminal will character-wrap these lines at the viewport
+    //   boundary.
+    // - Mixed lines (URL + non-URL prose) are adaptively wrapped so
+    //   non-URL text still wraps naturally while URL tokens remain
+    //   unsplit.
+    // - Non-URL lines also flow through adaptive wrapping; behavior is
+    //   equivalent to standard wrapping when no URL is present.
+    let wrap_width = area.width.max(1) as usize;
+    let mut wrapped = Vec::new();
+    let mut wrapped_rows = 0usize;
+
+    for line in &lines {
+        let line_wrapped = match wrap_policy {
+            HistoryLineWrapPolicy::Terminal => vec![line.clone()],
+            HistoryLineWrapPolicy::PreWrap
+                if line_contains_url_like(line) && !line_has_mixed_url_and_non_url_tokens(line) =>
+            {
+                vec![line.clone()]
+            }
+            HistoryLineWrapPolicy::PreWrap => adaptive_wrap_line(line, RtOptions::new(wrap_width)),
+        };
+        wrapped_rows += line_wrapped
+            .iter()
+            .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(wrap_width))
+            .sum::<usize>();
+        wrapped.extend(line_wrapped);
+    }
+    let wrapped_lines = wrapped_rows as u16;
+
+    match mode {
+        InsertHistoryMode::Zellij => {
+            let space_below = screen_size.height.saturating_sub(area.bottom());
+            let shift_down = wrapped_lines.min(space_below);
+            let scroll_up_amount = wrapped_lines.saturating_sub(shift_down);
+
+            if scroll_up_amount > 0 {
+                // Scroll the entire screen up by emitting \n at the bottom
+                queue!(
+                    writer,
+                    MoveTo(/*x*/ 0, screen_size.height.saturating_sub(1))
+                )?;
+                for _ in 0..scroll_up_amount {
+                    queue!(writer, Print("\n"))?;
+                }
+            }
+
+            if shift_down > 0 {
+                area.y += shift_down;
+                should_update_area = true;
+            }
+
+            let cursor_top = area.top().saturating_sub(scroll_up_amount + shift_down);
+            queue!(writer, MoveTo(/*x*/ 0, cursor_top))?;
+
+            for (i, line) in wrapped.iter().enumerate() {
+                if i > 0 {
+                    queue!(writer, Print("\r\n"))?;
+                }
+                write_history_line(writer, line, wrap_width)?;
+            }
+        }
+        InsertHistoryMode::Standard => {
+            let cursor_top = if area.bottom() < screen_size.height {
+                let scroll_amount = wrapped_lines.min(screen_size.height - area.bottom());
+
+                let top_1based = area.top() + 1;
+                queue!(writer, SetScrollRegion(top_1based..screen_size.height))?;
+                queue!(writer, MoveTo(/*x*/ 0, area.top()))?;
+                for _ in 0..scroll_amount {
+                    queue!(writer, Print("\x1bM"))?;
+                }
+                queue!(writer, ResetScrollRegion)?;
+
+                let cursor_top = area.top().saturating_sub(1);
+                area.y += scroll_amount;
+                should_update_area = true;
+                cursor_top
+            } else {
+                area.top().saturating_sub(1)
+            };
+
+            // Limit the scroll region to the lines from the top of the screen to the
+            // top of the viewport. With this in place, when we add lines inside this
+            // area, only the lines in this area will be scrolled. We place the cursor
+            // at the end of the scroll region, and add lines starting there.
+            //
+            // ┌─Screen───────────────────────┐
+            // │┌╌Scroll region╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐│
+            // │┆                            ┆│
+            // │┆                            ┆│
+            // │┆                            ┆│
+            // │█╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘│
+            // │╭─Viewport───────────────────╮│
+            // ││                            ││
+            // │╰────────────────────────────╯│
+            // └──────────────────────────────┘
+            queue!(writer, SetScrollRegion(1..area.top()))?;
+
+            // NB: we are using MoveTo instead of set_cursor_position here to avoid messing with the
+            // terminal's last_known_cursor_position, which hopefully will still be accurate after we
+            // fetch/restore the cursor position. insert_history_lines should be cursor-position-neutral :)
+            queue!(writer, MoveTo(/*x*/ 0, cursor_top))?;
+
+            for line in &wrapped {
+                queue!(writer, Print("\r\n"))?;
+                write_history_line(writer, line, wrap_width)?;
+            }
+
+            queue!(writer, ResetScrollRegion)?;
+        }
     }
 
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
-        // Use ANSI path through ConPTY; WinAPI equivalent isn't exposed.
-        Ok(())
+    // Restore the cursor position to where it was before we started.
+    queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;
+
+    let _ = writer;
+    if should_update_area {
+        terminal.set_viewport_area(area);
+    }
+    if wrapped_lines > 0 {
+        terminal.note_history_rows_inserted(wrapped_lines);
     }
 
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
+    Ok(())
+}
+
+/// Render a single wrapped history line: clear continuation rows for wide lines,
+/// set foreground/background colors, and write styled spans. Caller is responsible
+/// for cursor positioning and any leading `\r\n`.
+fn write_history_line<W: Write>(writer: &mut W, line: &Line, wrap_width: usize) -> io::Result<()> {
+    let physical_rows = line.width().max(1).div_ceil(wrap_width) as u16;
+    if physical_rows > 1 {
+        queue!(writer, SavePosition)?;
+        for _ in 1..physical_rows {
+            queue!(writer, MoveDown(1), MoveToColumn(0))?;
+            queue!(writer, Clear(ClearType::UntilNewLine))?;
+        }
+        queue!(writer, RestorePosition)?;
     }
+    queue!(
+        writer,
+        SetColors(Colors::new(
+            line.style
+                .fg
+                .map(std::convert::Into::into)
+                .unwrap_or(CColor::Reset),
+            line.style
+                .bg
+                .map(std::convert::Into::into)
+                .unwrap_or(CColor::Reset)
+        ))
+    )?;
+    queue!(writer, Clear(ClearType::UntilNewLine))?;
+    // Merge line-level style into each span so that ANSI colors reflect
+    // line styles (e.g., blockquotes with green fg).
+    let merged_spans: Vec<Span> = line
+        .spans
+        .iter()
+        .map(|s| Span {
+            style: s.style.patch(line.style),
+            content: s.content.clone(),
+        })
+        .collect();
+    write_spans(writer, merged_spans.iter())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,14 +291,11 @@ pub struct SetScrollRegion(pub std::ops::Range<u16>);
 
 impl Command for SetScrollRegion {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        // CSI Ps ; Ps r  (DECSTBM)
-        // Set Scrolling Region [top;bottom] (default = full size of window)
-        // 1-based line numbers
         write!(f, "\x1b[{};{}r", self.0.start, self.0.end)
     }
 
     #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
+    fn execute_winapi(&self) -> std::io::Result<()> {
         panic!("tried to execute SetScrollRegion command using WinAPI, use ANSI instead");
     }
 
@@ -267,13 +311,11 @@ pub struct ResetScrollRegion;
 
 impl Command for ResetScrollRegion {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        // CSI r  (DECSTBM)
-        // Reset Scrolling Region to full screen
         write!(f, "\x1b[r")
     }
 
     #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
+    fn execute_winapi(&self) -> std::io::Result<()> {
         panic!("tried to execute ResetScrollRegion command using WinAPI, use ANSI instead");
     }
 
@@ -351,10 +393,9 @@ impl ModifierDiff {
     }
 }
 
-/// Write the spans to the writer with the correct styling
 fn write_spans<'a, I>(mut writer: &mut impl Write, content: I) -> io::Result<()>
 where
-    I: Iterator<Item = &'a Span<'a>>,
+    I: IntoIterator<Item = &'a Span<'a>>,
 {
     let mut fg = Color::Reset;
     let mut bg = Color::Reset;
@@ -393,184 +434,463 @@ where
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct SetUnderlineColor(pub CColor);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown_render::render_markdown_text;
+    use crate::test_backend::VT100Backend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
 
-impl Command for SetUnderlineColor {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        // Use the CSI 58 sequence for underline color
-        // CSI 58:5:n m for 256 colors or CSI 58:2::r:g:b m for RGB
-        match self.0 {
-            CColor::Black => write!(f, "\x1b[58:5:0m"),
-            CColor::DarkGrey => write!(f, "\x1b[58:5:8m"),
-            CColor::Red => write!(f, "\x1b[58:5:1m"),
-            CColor::DarkRed => write!(f, "\x1b[58:5:9m"),
-            CColor::Green => write!(f, "\x1b[58:5:2m"),
-            CColor::DarkGreen => write!(f, "\x1b[58:5:10m"),
-            CColor::Yellow => write!(f, "\x1b[58:5:3m"),
-            CColor::DarkYellow => write!(f, "\x1b[58:5:11m"),
-            CColor::Blue => write!(f, "\x1b[58:5:4m"),
-            CColor::DarkBlue => write!(f, "\x1b[58:5:12m"),
-            CColor::Magenta => write!(f, "\x1b[58:5:5m"),
-            CColor::DarkMagenta => write!(f, "\x1b[58:5:13m"),
-            CColor::Cyan => write!(f, "\x1b[58:5:6m"),
-            CColor::DarkCyan => write!(f, "\x1b[58:5:14m"),
-            CColor::White => write!(f, "\x1b[58:5:7m"),
-            CColor::Grey => write!(f, "\x1b[58:5:15m"),
-            CColor::Rgb { r, g, b } => write!(f, "\x1b[58:2::{}:{}:{}m", r, g, b),
-            CColor::AnsiValue(n) => write!(f, "\x1b[58:5:{}m", n),
-            CColor::Reset => write!(f, "\x1b[59m"), // Reset underline color
+    #[test]
+    fn writes_bold_then_regular_spans() {
+        use ratatui::style::Stylize;
+
+        let spans = ["A".bold(), "B".into()];
+
+        let mut actual: Vec<u8> = Vec::new();
+        write_spans(&mut actual, spans.iter()).unwrap();
+
+        let mut expected: Vec<u8> = Vec::new();
+        queue!(
+            expected,
+            SetAttribute(crossterm::style::Attribute::Bold),
+            Print("A"),
+            SetAttribute(crossterm::style::Attribute::NormalIntensity),
+            Print("B"),
+            SetForegroundColor(CColor::Reset),
+            SetBackgroundColor(CColor::Reset),
+            SetAttribute(crossterm::style::Attribute::Reset),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(actual).unwrap(),
+            String::from_utf8(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn vt100_blockquote_line_emits_green_fg() {
+        // Set up a small off-screen terminal
+        let width: u16 = 40;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        // Place viewport on the last line so history inserts scroll upward
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        // Build a blockquote-like line: apply line-level green style and prefix "> "
+        let mut line: Line<'static> = Line::from(vec!["> ".into(), "Hello world".into()]);
+        line = line.style(Color::Green);
+        insert_history_lines(&mut term, vec![line])
+            .expect("Failed to insert history lines in test");
+
+        let mut saw_colored = false;
+        'outer: for row in 0..height {
+            for col in 0..width {
+                if let Some(cell) = term.backend().vt100().screen().cell(row, col)
+                    && cell.has_contents()
+                    && cell.fgcolor() != vt100::Color::Default
+                {
+                    saw_colored = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(
+            saw_colored,
+            "expected at least one colored cell in vt100 output"
+        );
+    }
+
+    #[test]
+    fn vt100_blockquote_wrap_preserves_color_on_all_wrapped_lines() {
+        // Force wrapping by using a narrow viewport width and a long blockquote line.
+        let width: u16 = 20;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        // Viewport is the last line so history goes directly above it.
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        // Create a long blockquote with a distinct prefix and enough text to wrap.
+        let mut line: Line<'static> = Line::from(vec![
+            "> ".into(),
+            "This is a long quoted line that should wrap".into(),
+        ]);
+        line = line.style(Color::Green);
+
+        insert_history_lines(&mut term, vec![line])
+            .expect("Failed to insert history lines in test");
+
+        // Parse and inspect the final screen buffer.
+        let screen = term.backend().vt100().screen();
+
+        // Collect rows that are non-empty; these should correspond to our wrapped lines.
+        let mut non_empty_rows: Vec<u16> = Vec::new();
+        for row in 0..height {
+            let mut any = false;
+            for col in 0..width {
+                if let Some(cell) = screen.cell(row, col)
+                    && cell.has_contents()
+                    && cell.contents() != "\0"
+                    && cell.contents() != " "
+                {
+                    any = true;
+                    break;
+                }
+            }
+            if any {
+                non_empty_rows.push(row);
+            }
+        }
+
+        // Expect at least two rows due to wrapping.
+        assert!(
+            non_empty_rows.len() >= 2,
+            "expected wrapped output to span >=2 rows, got {non_empty_rows:?}",
+        );
+
+        // For each non-empty row, ensure all non-space cells are using a non-default fg color.
+        for row in non_empty_rows {
+            for col in 0..width {
+                if let Some(cell) = screen.cell(row, col) {
+                    let contents = cell.contents();
+                    if !contents.is_empty() && contents != " " {
+                        assert!(
+                            cell.fgcolor() != vt100::Color::Default,
+                            "expected non-default fg on row {row} col {col}, got {:?}",
+                            cell.fgcolor()
+                        );
+                    }
+                }
+            }
         }
     }
 
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
-        // Windows doesn't support underline colors in the same way
-        Ok(())
-    }
-}
+    #[test]
+    fn vt100_colored_prefix_then_plain_text_resets_color() {
+        let width: u16 = 40;
+        let height: u16 = 6;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
 
-/// Word-aware wrapping for a list of `Line`s preserving styles.
-pub(crate) fn word_wrap_lines(lines: &[Line], width: u16) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let w = width.max(1) as usize;
-    for line in lines {
-        out.extend(word_wrap_line(line, w));
-    }
-    out
-}
+        // First span colored, rest plain.
+        let line: Line<'static> = Line::from(vec![
+            Span::styled("1. ", ratatui::style::Style::default().fg(Color::LightBlue)),
+            Span::raw("Hello world"),
+        ]);
 
-fn word_wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        return vec![to_owned_line(line)];
-    }
-    // Horizontal rule detection: lines consisting of --- *** or ___ (3+)
-    let flat_trim: String = line
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect::<String>()
-        .trim()
-        .to_string();
-    if !flat_trim.is_empty() {
-        let chars: Vec<char> = flat_trim.chars().collect();
-        let only = |ch: char| chars.iter().all(|c| *c == ch || c.is_whitespace());
-        let count = |ch: char| chars.iter().filter(|c| **c == ch).count();
-        if (only('-') && count('-') >= 3)
-            || (only('*') && count('*') >= 3)
-            || (only('_') && count('_') >= 3)
-        {
-            let hr = Line::from(Span::styled(
-                std::iter::repeat('─').take(width).collect::<String>(),
-                ratatui::style::Style::default().fg(crate::colors::assistant_hr()),
-            ));
-            return vec![hr];
+        insert_history_lines(&mut term, vec![line])
+            .expect("Failed to insert history lines in test");
+
+        let screen = term.backend().vt100().screen();
+
+        // Find the first non-empty row; verify first three cells are colored, following cells default.
+        'rows: for row in 0..height {
+            let mut has_text = false;
+            for col in 0..width {
+                if let Some(cell) = screen.cell(row, col)
+                    && cell.has_contents()
+                    && cell.contents() != " "
+                {
+                    has_text = true;
+                    break;
+                }
+            }
+            if !has_text {
+                continue;
+            }
+
+            // Expect "1. Hello world" starting at col 0.
+            for col in 0..3 {
+                let cell = screen.cell(row, col).unwrap();
+                assert!(
+                    cell.fgcolor() != vt100::Color::Default,
+                    "expected colored prefix at col {col}, got {:?}",
+                    cell.fgcolor()
+                );
+            }
+            for col in 3..(3 + "Hello world".len() as u16) {
+                let cell = screen.cell(row, col).unwrap();
+                assert_eq!(
+                    cell.fgcolor(),
+                    vt100::Color::Default,
+                    "expected default color for plain text at col {col}, got {:?}",
+                    cell.fgcolor()
+                );
+            }
+            break 'rows;
         }
     }
 
-    // Concatenate content and keep span boundaries for later re-slicing.
-    let mut flat = String::new();
-    let mut span_bounds = Vec::new(); // (start_byte, end_byte, style)
-    let mut cursor = 0usize;
-    for s in &line.spans {
-        let text = s.content.as_ref();
-        let start = cursor;
-        flat.push_str(text);
-        cursor += text.len();
-        span_bounds.push((start, cursor, s.style));
-    }
+    #[test]
+    fn vt100_deep_nested_mixed_list_third_level_marker_is_colored() {
+        // Markdown with five levels (ordered → unordered → ordered → unordered → unordered).
+        let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
+        let text = render_markdown_text(md);
+        let lines: Vec<Line<'static>> = text.lines.clone();
 
-    // Use textwrap for robust word-aware wrapping; no hyphenation, no breaking words.
-    let opts = TwOptions::new(width)
-        .break_words(false)
-        .word_splitter(WordSplitter::NoHyphenation);
-    let wrapped = textwrap::wrap(&flat, &opts);
+        let width: u16 = 60;
+        let height: u16 = 12;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = ratatui::layout::Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
 
-    if wrapped.len() <= 1 {
-        return vec![to_owned_line(line)];
-    }
+        insert_history_lines(&mut term, lines).expect("Failed to insert history lines in test");
 
-    // Map wrapped pieces back to byte ranges in `flat` sequentially.
-    let mut start_cursor = 0usize;
-    let mut out: Vec<Line<'static>> = Vec::with_capacity(wrapped.len());
-    for piece in wrapped {
-        let piece_str: &str = &piece;
-        if piece_str.is_empty() {
-            out.push(Line {
-                style: line.style,
-                alignment: line.alignment,
-                spans: Vec::new(),
-            });
-            continue;
-        }
-        // Find the next occurrence of piece_str at or after start_cursor.
-        // textwrap preserves order, so a linear scan is sufficient.
-        if let Some(rel) = flat[start_cursor..].find(piece_str) {
-            let s = start_cursor + rel;
-            let e = s + piece_str.len();
-            out.push(slice_line_spans(line, &span_bounds, s, e));
-            start_cursor = e;
-        } else {
-            // Fallback: slice by length from cursor.
-            let s = start_cursor;
-            let e = (start_cursor + piece_str.len()).min(flat.len());
-            out.push(slice_line_spans(line, &span_bounds, s, e));
-            start_cursor = e;
-        }
-    }
+        let screen = term.backend().vt100().screen();
 
-    out
-}
+        // Reconstruct screen rows as strings to locate the 3rd level line.
+        let rows: Vec<String> = screen.rows(0, width).collect();
 
-fn to_owned_line(l: &Line<'_>) -> Line<'static> {
-    Line {
-        style: l.style,
-        alignment: l.alignment,
-        spans: l
-            .spans
+        let needle = "1. Third level (ordered)";
+        let row_idx = rows
             .iter()
-            .map(|s| Span {
-                style: s.style,
-                content: std::borrow::Cow::Owned(s.content.to_string()),
-            })
-            .collect(),
-    }
-}
-
-fn slice_line_spans(
-    original: &Line<'_>,
-    span_bounds: &[(usize, usize, ratatui::style::Style)],
-    start_byte: usize,
-    end_byte: usize,
-) -> Line<'static> {
-    let mut acc: Vec<Span<'static>> = Vec::new();
-    for (i, (s, e, style)) in span_bounds.iter().enumerate() {
-        if *e <= start_byte {
-            continue;
-        }
-        if *s >= end_byte {
-            break;
-        }
-        let seg_start = start_byte.max(*s);
-        let seg_end = end_byte.min(*e);
-        if seg_end > seg_start {
-            let local_start = seg_start - *s;
-            let local_end = seg_end - *s;
-            let content = original.spans[i].content.as_ref();
-            let slice = &content[local_start..local_end];
-            acc.push(Span {
-                style: *style,
-                content: std::borrow::Cow::Owned(slice.to_string()),
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| {
+                panic!("expected to find row containing {needle:?}, have rows: {rows:?}")
             });
+        let col_start = rows[row_idx].find(needle).unwrap() as u16; // column where '1' starts
+
+        // Verify that the numeric marker ("1.") at the third level is colored
+        // (non-default fg) and the content after the following space resets to default.
+        for c in [col_start, col_start + 1] {
+            let cell = screen.cell(row_idx as u16, c).unwrap();
+            assert!(
+                cell.fgcolor() != vt100::Color::Default,
+                "expected colored 3rd-level marker at row {row_idx} col {c}, got {:?}",
+                cell.fgcolor()
+            );
         }
-        if *e >= end_byte {
-            break;
+        let content_col = col_start + 3; // skip '1', '.', and the space
+        if let Some(cell) = screen.cell(row_idx as u16, content_col) {
+            assert_eq!(
+                cell.fgcolor(),
+                vt100::Color::Default,
+                "expected default color for 3rd-level content at row {row_idx} col {content_col}, got {:?}",
+                cell.fgcolor()
+            );
         }
     }
-    Line {
-        style: original.style,
-        alignment: original.alignment,
-        spans: acc,
+
+    #[test]
+    fn vt100_prefixed_url_keeps_prefix_and_url_on_same_row() {
+        let width: u16 = 48;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let url = "http://a-long-url.com/this/that/blablablab/new.aspx/many_people_like_how";
+        let line: Line<'static> = Line::from(vec!["  │ ".into(), url.into()]);
+
+        insert_history_lines(&mut term, vec![line]).expect("insert history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+
+        assert!(
+            rows.iter().any(|r| r.contains("│ http://a-long-url.com")),
+            "expected prefix and URL on same row, rows: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.trim_end() == "│"),
+            "unexpected orphan prefix row, rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_prefixed_url_like_without_scheme_keeps_prefix_and_token_on_same_row() {
+        let width: u16 = 48;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let url_like =
+            "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890";
+        let line: Line<'static> = Line::from(vec!["  │ ".into(), url_like.into()]);
+
+        insert_history_lines(&mut term, vec![line]).expect("insert history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("│ example.test/api/v1/projects")),
+            "expected prefix and URL-like token on same row, rows: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.trim_end() == "│"),
+            "unexpected orphan prefix row, rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_prefixed_mixed_url_line_wraps_suffix_words_together() {
+        let width: u16 = 24;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let url = "https://example.test/path/abcdef12345";
+        let line: Line<'static> = Line::from(vec![
+            "  │ ".into(),
+            "see ".into(),
+            url.into(),
+            " tail words".into(),
+        ]);
+
+        insert_history_lines(&mut term, vec![line]).expect("insert mixed history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("│ see")),
+            "expected prefixed prose before URL, rows: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("tail words")),
+            "expected suffix words to wrap as a phrase, rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_terminal_wrap_policy_does_not_pre_wrap_long_paragraph() {
+        let width: u16 = 20;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let line = Line::from("alpha beta gamma delta epsilon zeta");
+
+        insert_history_lines_with_mode_and_wrap_policy(
+            &mut term,
+            vec![line],
+            InsertHistoryMode::Standard,
+            HistoryLineWrapPolicy::Terminal,
+        )
+        .expect("insert raw history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.trim_end() == "alpha beta gamma del"),
+            "expected terminal soft-wrap instead of Codex word pre-wrap, rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_unwrapped_url_like_clears_continuation_rows() {
+        let width: u16 = 20;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let filler_line: Line<'static> = Line::from(vec![
+            "  │ ".into(),
+            "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".into(),
+        ]);
+        insert_history_lines(&mut term, vec![filler_line]).expect("insert filler history");
+
+        let url_like = "example.test/api/v1/short";
+        let url_line: Line<'static> = Line::from(vec!["  │ ".into(), url_like.into()]);
+        insert_history_lines(&mut term, vec![url_line]).expect("insert url-like history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        let first_row = rows
+            .iter()
+            .position(|row| row.contains("│ example.test/api"))
+            .unwrap_or_else(|| panic!("expected url-like first row in screen rows: {rows:?}"));
+        assert!(
+            first_row + 1 < rows.len(),
+            "expected a continuation row for wrapped URL-like line, rows: {rows:?}"
+        );
+        let continuation_row = rows[first_row + 1].trim_end();
+
+        assert!(
+            continuation_row.contains("/v1/short") || continuation_row.contains("short"),
+            "expected continuation row to contain wrapped URL-like tail, got: {continuation_row:?}"
+        );
+        assert!(
+            !continuation_row.contains('X'),
+            "expected continuation row to be cleared before writing wrapped URL-like content, got: {continuation_row:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_long_unwrapped_url_does_not_insert_extra_blank_gap_before_content() {
+        let width: u16 = 56;
+        let height: u16 = 24;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let prompt = "Write a long URL as output for testing";
+        insert_history_lines(&mut term, vec![Line::from(prompt)]).expect("insert prompt line");
+
+        let long_url = format!(
+            "https://example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/{}",
+            "very-long-segment-".repeat(16),
+        );
+        let url_line: Line<'static> = Line::from(vec!["• ".into(), long_url.into()]);
+        insert_history_lines(&mut term, vec![url_line]).expect("insert long url line");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        let prompt_row = rows
+            .iter()
+            .position(|row| row.contains("Write a long URL as output for testing"))
+            .unwrap_or_else(|| panic!("expected prompt row in screen rows: {rows:?}"));
+        let url_row = rows
+            .iter()
+            .position(|row| row.contains("• https://example.test/api"))
+            .unwrap_or_else(|| panic!("expected URL first row in screen rows: {rows:?}"));
+
+        assert!(
+            url_row <= prompt_row + 2,
+            "expected URL content to appear immediately after prompt (allowing at most one spacer row), got prompt_row={prompt_row}, url_row={url_row}, rows={rows:?}",
+        );
+    }
+
+    #[test]
+    fn vt100_zellij_mode_inserts_history_and_updates_viewport() {
+        let width: u16 = 32;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(/*x*/ 0, /*y*/ 4, width, /*height*/ 2);
+        term.set_viewport_area(viewport);
+
+        let line: Line<'static> = Line::from("zellij history");
+        insert_history_lines_with_mode(&mut term, vec![line], InsertHistoryMode::Zellij)
+            .expect("insert zellij history");
+
+        let start_row = 0;
+        let rows: Vec<String> = term
+            .backend()
+            .vt100()
+            .screen()
+            .rows(start_row, width)
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains("zellij history")),
+            "expected zellij history row in screen output, rows: {rows:?}"
+        );
+        assert_eq!(term.viewport_area, Rect::new(0, 5, width, 2));
+        assert_eq!(term.visible_history_rows(), 1);
     }
 }

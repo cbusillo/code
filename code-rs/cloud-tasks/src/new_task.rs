@@ -1,4 +1,4 @@
-use code_tui::ComposerInput;
+use codex_tui::ComposerInput;
 
 pub struct NewTaskPage {
     pub composer: ComposerInput,
@@ -30,6 +30,6 @@ impl NewTaskPage {
 
 impl Default for NewTaskPage {
     fn default() -> Self {
-        Self::new(None, 1)
+        Self::new(/*env_id*/ None, /*best_of_n*/ 1)
     }
 }

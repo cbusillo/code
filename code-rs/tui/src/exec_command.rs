@@ -1,10 +1,35 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use code_core::util as core_util;
+use codex_shell_command::parse_command::extract_shell_command;
+use dirs::home_dir;
+use shlex::try_join;
+
+pub(crate) fn escape_command(command: &[String]) -> String {
+    try_join(command.iter().map(String::as_str)).unwrap_or_else(|_| command.join(" "))
+}
 
 pub(crate) fn strip_bash_lc_and_escape(command: &[String]) -> String {
-    core_util::strip_bash_lc_and_escape(command)
+    if let Some((_, script)) = extract_shell_command(command) {
+        return script.to_string();
+    }
+    escape_command(command)
+}
+
+pub(crate) fn split_command_string(command: &str) -> Vec<String> {
+    let Some(parts) = shlex::split(command) else {
+        return vec![command.to_string()];
+    };
+    match shlex::try_join(parts.iter().map(String::as_str)) {
+        Ok(round_trip)
+            if round_trip == command
+                || (!command.contains(":\\")
+                    && shlex::split(&round_trip).as_ref() == Some(&parts)) =>
+        {
+            parts
+        }
+        _ => vec![command.to_string()],
+    }
 }
 
 /// If `path` is absolute and inside $HOME, return the part *after* the home
@@ -20,97 +45,63 @@ where
         return None;
     }
 
-    if let Some(home_dir) = std::env::var_os("HOME").map(PathBuf::from) {
-        if let Ok(rel) = path.strip_prefix(&home_dir) {
-            return Some(rel.to_path_buf());
-        }
-    }
-
-    None
+    let home_dir = home_dir()?;
+    let rel = path.strip_prefix(&home_dir).ok()?;
+    Some(rel.to_path_buf())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_bash_lc_and_escape;
-    use std::path::PathBuf;
+    use super::*;
 
-    fn home_rc_path(name: &str) -> String {
-        let home = std::env::var_os("HOME").expect("HOME should be set for tui exec_command tests");
-        PathBuf::from(home).join(name).to_string_lossy().to_string()
+    #[test]
+    fn test_escape_command() {
+        let args = vec!["foo".into(), "bar baz".into(), "weird&stuff".into()];
+        let cmdline = escape_command(&args);
+        assert_eq!(cmdline, "foo 'bar baz' 'weird&stuff'");
     }
 
     #[test]
-    fn strip_bash_lc_and_escape_hides_profile_wrapper() {
-        let bashrc = home_rc_path(".bashrc");
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            format!("source {bashrc} && (sed -n '1,220p' file.txt)"),
-        ];
+    fn test_strip_bash_lc_and_escape() {
+        // Test bash
+        let args = vec!["bash".into(), "-lc".into(), "echo hello".into()];
+        let cmdline = strip_bash_lc_and_escape(&args);
+        assert_eq!(cmdline, "echo hello");
 
-        assert_eq!(strip_bash_lc_and_escape(&command), "sed -n '1,220p' file.txt");
+        // Test zsh
+        let args = vec!["zsh".into(), "-lc".into(), "echo hello".into()];
+        let cmdline = strip_bash_lc_and_escape(&args);
+        assert_eq!(cmdline, "echo hello");
+
+        // Test absolute path to zsh
+        let args = vec!["/usr/bin/zsh".into(), "-lc".into(), "echo hello".into()];
+        let cmdline = strip_bash_lc_and_escape(&args);
+        assert_eq!(cmdline, "echo hello");
+
+        // Test absolute path to bash
+        let args = vec!["/bin/bash".into(), "-lc".into(), "echo hello".into()];
+        let cmdline = strip_bash_lc_and_escape(&args);
+        assert_eq!(cmdline, "echo hello");
     }
 
     #[test]
-    fn strip_bash_lc_and_escape_shows_raw_shell_script_without_quotes() {
-        let command = vec!["git status --short".to_string()];
-
-        assert_eq!(strip_bash_lc_and_escape(&command), "git status --short");
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_hides_multiline_profile_wrapper() {
-        let bashrc = home_rc_path(".bashrc");
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            format!(
-                "set +m; source {bashrc} && {{\napply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH\n}}"
-            ),
-        ];
-
+    fn split_command_string_round_trips_shell_wrappers() {
+        let command =
+            shlex::try_join(["/bin/zsh", "-lc", r#"python3 -c 'print("Hello, world!")'"#])
+                .expect("round-trippable command");
         assert_eq!(
-            strip_bash_lc_and_escape(&command),
-            "apply_patch <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH"
+            split_command_string(&command),
+            vec![
+                "/bin/zsh".to_string(),
+                "-lc".to_string(),
+                r#"python3 -c 'print("Hello, world!")'"#.to_string(),
+            ]
         );
     }
 
     #[test]
-    fn strip_bash_lc_and_escape_preserves_user_set_plus_m_command() {
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "set +m; echo done".to_string(),
-        ];
-
-        assert_eq!(strip_bash_lc_and_escape(&command), "set +m; echo done");
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_preserves_user_source_command() {
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "source script.sh && echo done".to_string(),
-        ];
-
-        assert_eq!(
-            strip_bash_lc_and_escape(&command),
-            "source script.sh && echo done"
-        );
-    }
-
-    #[test]
-    fn strip_bash_lc_and_escape_preserves_other_bashrc_paths() {
-        let command = vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "source /tmp/project/.bashrc && echo done".to_string(),
-        ];
-
-        assert_eq!(
-            strip_bash_lc_and_escape(&command),
-            "source /tmp/project/.bashrc && echo done"
-        );
+    fn split_command_string_preserves_non_roundtrippable_windows_commands() {
+        let command = r#"C:\Program Files\Git\bin\bash.exe -lc "echo hi""#;
+        assert_eq!(split_command_string(command), vec![command.to_string()]);
     }
 }

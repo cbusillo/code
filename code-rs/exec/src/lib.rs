@@ -1,245 +1,275 @@
+// - In the default output mode, it is paramount that the only thing written to
+//   stdout is the final message (if any).
+// - In --json mode, stdout must be valid JSONL, one event per line.
+// For both modes, any other output must be written to stderr.
+#![deny(clippy::print_stdout)]
+
 mod cli;
 mod event_processor;
 mod event_processor_with_human_output;
-mod event_processor_with_json_output;
-mod slash;
+pub(crate) mod event_processor_with_jsonl_output;
+pub(crate) mod exec_events;
 
 pub use cli::Cli;
-use code_auto_drive_core::start_auto_coordinator;
-use code_auto_drive_core::AutoCoordinatorCommand;
-use code_auto_drive_core::AutoCoordinatorEvent;
-use code_auto_drive_core::AutoCoordinatorEventSender;
-use code_auto_drive_core::AutoCoordinatorStatus;
-use code_auto_drive_core::AutoDriveHistory;
-use code_auto_drive_core::AutoTurnAgentsAction;
-use code_auto_drive_core::AutoTurnAgentsTiming;
-use code_auto_drive_core::AutoTurnCliAction;
-use code_auto_drive_core::MODEL_SLUG;
-use code_core::AuthManager;
-use code_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
-use code_core::ConversationManager;
-use code_core::NewConversation;
-use code_core::CodexConversation;
-use code_core::config::set_default_originator;
-use code_core::config::Config;
-use code_core::config::ConfigOverrides;
-use code_core::config_types::AutoDriveContinueMode;
-use code_core::model_family::{derive_default_model_family, find_family_for_model};
-use code_core::git_info::get_git_repo_root;
-use code_core::review_coord::{
-    bump_snapshot_epoch_for,
-    clear_stale_lock_if_dead,
-    current_snapshot_epoch_for,
-    try_acquire_lock,
-};
-use code_core::protocol::AskForApproval;
-use code_core::protocol::AgentSourceKind;
-use code_core::protocol::AgentStatusUpdateEvent;
-use code_core::protocol::Event;
-use code_core::protocol::EventMsg;
-use code_core::protocol::InputItem;
-use code_core::protocol::Op;
-use code_core::protocol::ReviewOutputEvent;
-use code_core::protocol::ReviewRequest;
-use code_core::protocol::TaskCompleteEvent;
-use code_core::review_store::{
-    AutoReviewRun,
-    AutoReviewRunSource,
-    AutoReviewRunStatus,
-    AutoReviewRunStore,
-    auto_review_freshness_for_agent_status,
-};
-use code_protocol::models::ContentItem;
-use code_protocol::models::ResponseItem;
-use code_protocol::protocol::SessionSource;
-use code_ollama::DEFAULT_OSS_MODEL;
-use code_protocol::config_types::SandboxMode;
+pub use cli::Command;
+pub use cli::ReviewArgs;
+use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+use codex_app_server_client::EnvironmentManager;
+use codex_app_server_client::EnvironmentManagerArgs;
+use codex_app_server_client::ExecServerRuntimePaths;
+use codex_app_server_client::InProcessAppServerClient;
+use codex_app_server_client::InProcessClientStartArgs;
+use codex_app_server_client::InProcessServerEvent;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ConfigWarningNotification;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::McpServerElicitationAction;
+use codex_app_server_protocol::McpServerElicitationRequestResponse;
+use codex_app_server_protocol::PermissionProfileModificationParams;
+use codex_app_server_protocol::PermissionProfileSelectionParams;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ReviewStartParams;
+use codex_app_server_protocol::ReviewStartResponse;
+use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
+use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::Thread as AppServerThread;
+use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
+use codex_app_server_protocol::ThreadListParams;
+use codex_app_server_protocol::ThreadListResponse;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSortKey;
+use codex_app_server_protocol::ThreadSourceKind;
+use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnInterruptResponse;
+use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStartedNotification;
+use codex_arg0::Arg0DispatchPaths;
+use codex_cloud_requirements::cloud_requirements_loader_for_storage;
+use codex_config::ConfigLoadError;
+use codex_config::LoaderOverrides;
+use codex_config::format_config_error_with_source;
+use codex_core::StateDbHandle;
+use codex_core::check_execpolicy_for_warnings;
+use codex_core::config::Config;
+use codex_core::config::ConfigBuilder;
+use codex_core::config::ConfigOverrides;
+use codex_core::config::find_codex_home;
+use codex_core::config::load_config_as_toml_with_cli_and_loader_overrides;
+use codex_core::config::resolve_oss_provider;
+use codex_core::find_thread_meta_by_name_str;
+use codex_core::format_exec_policy_error_with_source;
+use codex_core::path_utils;
+use codex_feedback::CodexFeedback;
+use codex_git_utils::get_git_repo_root;
+use codex_login::AuthConfig;
+use codex_login::default_client::set_default_client_residency_requirement;
+use codex_login::default_client::set_default_originator;
+use codex_login::enforce_login_restrictions;
+use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
+use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
+use codex_otel::set_parent_from_context;
+use codex_otel::traceparent_context_from_env;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
+use codex_protocol::config_types::SandboxMode;
+use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::ActivePermissionProfileModification;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::ReviewRequest;
+use codex_protocol::protocol::ReviewTarget;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
+use codex_utils_cli::SharedCliOptions;
+use codex_utils_oss::ensure_oss_provider_ready;
+use codex_utils_oss::get_default_model_for_oss_provider;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
-use event_processor_with_json_output::EventProcessorWithJsonOutput;
-use event_processor::handle_last_message;
-use code_git_tooling::GhostCommit;
-use code_git_tooling::CreateGhostCommitOptions;
-use code_git_tooling::create_ghost_commit;
+pub use event_processor_with_jsonl_output::CodexStatus;
+pub use event_processor_with_jsonl_output::CollectedThreadEvents;
+pub use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
+pub use exec_events::AgentMessageItem;
+pub use exec_events::CollabAgentState;
+pub use exec_events::CollabAgentStatus;
+pub use exec_events::CollabTool;
+pub use exec_events::CollabToolCallItem;
+pub use exec_events::CollabToolCallStatus;
+pub use exec_events::CommandExecutionItem;
+pub use exec_events::CommandExecutionStatus;
+pub use exec_events::ErrorItem;
+pub use exec_events::FileChangeItem;
+pub use exec_events::FileUpdateChange;
+pub use exec_events::ItemCompletedEvent;
+pub use exec_events::ItemStartedEvent;
+pub use exec_events::ItemUpdatedEvent;
+pub use exec_events::McpToolCallItem;
+pub use exec_events::McpToolCallItemError;
+pub use exec_events::McpToolCallItemResult;
+pub use exec_events::McpToolCallStatus;
+pub use exec_events::PatchApplyStatus;
+pub use exec_events::PatchChangeKind;
+pub use exec_events::ReasoningItem;
+pub use exec_events::ThreadErrorEvent;
+pub use exec_events::ThreadEvent;
+pub use exec_events::ThreadItem as ExecThreadItem;
+pub use exec_events::ThreadItemDetails;
+pub use exec_events::ThreadStartedEvent;
+pub use exec_events::TodoItem;
+pub use exec_events::TodoListItem;
+pub use exec_events::TurnCompletedEvent;
+pub use exec_events::TurnFailedEvent;
+pub use exec_events::TurnStartedEvent;
+pub use exec_events::Usage;
+pub use exec_events::WebSearchItem;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::collections::HashMap;
-use std::backtrace::Backtrace;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Once;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::path::PathBuf;
 use supports_color::Stream;
-use tokio::time::{Duration, Instant};
-use tracing::debug;
+use tokio::sync::mpsc;
+use tracing::Instrument;
 use tracing::error;
+use tracing::field;
 use tracing::info;
+use tracing::info_span;
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::{Layer, SubscriberExt};
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::prelude::*;
+use uuid::Uuid;
 
-use anyhow::Context;
 use crate::cli::Command as ExecCommand;
-use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
-use crate::slash::{process_exec_slash_command, SlashContext, SlashDispatch};
-use code_auto_drive_core::AUTO_RESOLVE_REVIEW_FOLLOWUP;
-use code_auto_drive_core::AutoResolvePhase;
-use code_auto_drive_core::AutoResolveState;
-use code_core::{entry_to_rollout_path, AutoDriveMode, AutoDrivePidFile, SessionCatalog, SessionQuery};
-use code_core::protocol::SandboxPolicy;
 
-fn build_auto_drive_exec_config(config: &Config) -> Config {
-	    let mut auto_config = config.clone();
-	    auto_config.model = config.auto_drive.model.trim().to_string();
-	    if auto_config.model.is_empty() {
-	        auto_config.model = MODEL_SLUG.to_string();
-	    }
-	    auto_config.model_reasoning_effort = config.auto_drive.model_reasoning_effort;
-	    auto_config
+const DEFAULT_ANALYTICS_ENABLED: bool = true;
+const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
+
+enum InitialOperation {
+    UserTurn {
+        items: Vec<UserInput>,
+        output_schema: Option<Value>,
+    },
+    Review {
+        review_request: ReviewRequest,
+    },
 }
-use code_core::git_info::current_branch_name;
-use code_core::timeboxed_exec_guidance::{
-    AUTO_EXEC_TIMEBOXED_CLI_GUIDANCE,
-    AUTO_EXEC_TIMEBOXED_GOAL_SUFFIX,
-};
 
-/// How long exec waits after task completion before sending Shutdown when Auto Review
-/// may be about to start. Guarded so sub-agents are not delayed.
-const AUTO_REVIEW_SHUTDOWN_GRACE_MS: u64 = 1_500;
-const AUTO_REVIEW_STALE_SECS: u64 = 5 * 60;
-const REVIEW_SCOPE_MAX_LISTED_PATHS: usize = 120;
-const REVIEW_SCOPE_EXCLUDED_PREFIXES: [&str; 5] = [
-    "codex-rs/",
-    "node_modules/",
-    "target/",
-    ".git/",
-    ".code/",
-];
+enum StdinPromptBehavior {
+    /// Read stdin only when there is no positional prompt, which is the legacy
+    /// `codex exec` behavior for `codex exec` with piped input.
+    RequiredIfPiped,
+    /// Always treat stdin as the prompt, used for the explicit `codex exec -`
+    /// sentinel and similar forced-stdin call sites.
+    Forced,
+    /// If stdin is piped alongside a positional prompt, treat stdin as
+    /// additional context to append rather than as the primary prompt.
+    OptionalAppend,
+}
 
-pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
-    if let Err(err) = set_default_originator("code_exec") {
+struct RequestIdSequencer {
+    next: i64,
+}
+
+impl RequestIdSequencer {
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    fn next(&mut self) -> RequestId {
+        let id = self.next;
+        self.next += 1;
+        RequestId::Integer(id)
+    }
+}
+
+struct ExecRunArgs {
+    in_process_start_args: InProcessClientStartArgs,
+    state_db: Option<StateDbHandle>,
+    command: Option<ExecCommand>,
+    config: Config,
+    dangerously_bypass_approvals_and_sandbox: bool,
+    exec_span: tracing::Span,
+    images: Vec<PathBuf>,
+    json_mode: bool,
+    last_message_file: Option<PathBuf>,
+    model_provider: Option<String>,
+    oss: bool,
+    output_schema_path: Option<PathBuf>,
+    prompt: Option<String>,
+    skip_git_repo_check: bool,
+    stderr_with_ansi: bool,
+}
+
+fn exec_root_span() -> tracing::Span {
+    info_span!(
+        "codex.exec",
+        otel.kind = "internal",
+        thread.id = field::Empty,
+        turn.id = field::Empty,
+    )
+}
+
+fn exec_stderr_env_filter() -> EnvFilter {
+    // OTEL export is best-effort; keep exporter self-diagnostics out of
+    // headless command output unless the caller opts in with RUST_LOG.
+    EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(EXEC_DEFAULT_LOG_FILTER))
+        .unwrap_or_else(|_| EnvFilter::new("error"))
+}
+
+pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    #[allow(clippy::print_stderr)]
+    if let Some(message) = cli.removed_full_auto_warning() {
+        eprintln!("{message}");
+    }
+
+    if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
     }
 
     let Cli {
         command,
-        images,
-        model: model_cli_arg,
-        oss,
-        config_profile,
-        full_auto,
-        dangerously_bypass_approvals_and_sandbox,
-        cwd,
+        shared,
         skip_git_repo_check,
+        ephemeral,
+        ignore_user_config,
+        ignore_rules,
+        removed_full_auto,
         color,
         last_message_file,
         json: json_mode,
-        sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         output_schema: output_schema_path,
-        include_plan_tool,
         config_overrides,
-        auto_drive,
-        auto_review,
-        max_seconds,
-        turn_cap,
-        review_output_json,
-        ..
     } = cli;
+    let shared = shared.into_inner();
+    let SharedCliOptions {
+        images,
+        model: model_cli_arg,
+        oss,
+        oss_provider,
+        config_profile,
+        sandbox_mode: sandbox_mode_cli_arg,
+        dangerously_bypass_approvals_and_sandbox,
+        cwd,
+        add_dir,
+    } = shared;
 
-    let run_deadline = max_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
-    let run_deadline_std = run_deadline.map(|deadline| deadline.into_std());
-
-    // Determine the prompt source (parent or subcommand) and read from stdin if needed.
-    let prompt_arg = match &command {
-        // Allow prompt before the subcommand by falling back to the parent-level prompt
-        // when the Resume subcommand did not provide its own prompt.
-        Some(ExecCommand::Resume(args)) => args.prompt.clone().or(prompt),
-        None => prompt,
-    };
-
-    let prompt = match prompt_arg {
-        Some(p) if p != "-" => p,
-        // Either `-` was passed or no positional arg.
-        maybe_dash => {
-            // When no arg (None) **and** stdin is a TTY, bail out early – unless the
-            // user explicitly forced reading via `-`.
-            let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
-
-            if std::io::stdin().is_terminal() && !force_stdin {
-                eprintln!(
-                    "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
-                );
-                std::process::exit(1);
-            }
-
-            // Ensure the user knows we are waiting on stdin, as they may
-            // have gotten into this state by mistake. If so, and they are not
-            // writing to stdin, Codex will hang indefinitely, so this should
-            // help them debug in that case.
-            if !force_stdin {
-                eprintln!("Reading prompt from stdin...");
-            }
-            let mut buffer = String::new();
-            if let Err(e) = std::io::stdin().read_to_string(&mut buffer) {
-                eprintln!("Failed to read prompt from stdin: {e}");
-                std::process::exit(1);
-            } else if buffer.trim().is_empty() {
-                eprintln!("No prompt provided via stdin.");
-                std::process::exit(1);
-            }
-            buffer
-        }
-    };
-
-    let mut auto_drive_goal: Option<String> = None;
-    let trimmed_prompt = prompt.trim();
-    if trimmed_prompt.starts_with("/auto") {
-        auto_drive_goal = Some(trimmed_prompt.trim_start_matches("/auto").trim().to_string());
-    }
-    if auto_drive {
-        if trimmed_prompt.is_empty() {
-            eprintln!("Auto Drive requires a goal. Provide one after --auto or prefix the prompt with /auto.");
-            std::process::exit(1);
-        }
-        if auto_drive_goal
-            .as_ref()
-            .is_some_and(|goal| goal.is_empty())
-        {
-            auto_drive_goal = Some(trimmed_prompt.to_string());
-        } else if auto_drive_goal.is_none() {
-            auto_drive_goal = Some(trimmed_prompt.to_string());
-        }
-    }
-
-    if auto_drive_goal
-        .as_ref()
-        .is_some_and(|g| g.trim().is_empty())
-    {
-        eprintln!("Auto Drive requires a goal. Provide one after /auto or --auto.");
-        std::process::exit(1);
-    }
-
-    let timeboxed_auto_exec = auto_drive_goal.is_some() && max_seconds.is_some();
-    if timeboxed_auto_exec {
-        if let Some(goal) = auto_drive_goal.as_mut() {
-            *goal = append_timeboxed_auto_drive_goal(goal);
-        }
-    }
-
-    let mut prompt_to_send = prompt.clone();
-    let mut summary_prompt = if let Some(goal) = auto_drive_goal.as_ref() {
-        format!("/auto {goal}")
-    } else {
-        prompt.clone()
-    };
-    let mut review_request: Option<ReviewRequest> = None;
-
-    let _output_schema = load_output_schema(output_schema_path);
-
-    let (stdout_with_ansi, stderr_with_ansi) = match color {
+    let (_stdout_with_ansi, stderr_with_ansi) = match color {
         cli::Color::Always => (true, true),
         cli::Color::Never => (false, false),
         cli::Color::Auto => (
@@ -247,16 +277,12 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
             supports_color::on_cached(Stream::Stderr).is_some(),
         ),
     };
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(stderr_with_ansi)
+        .with_writer(std::io::stderr)
+        .with_filter(exec_stderr_env_filter());
 
-    // Build fmt layer (existing logging) to compose with OTEL layer.
-    let default_level = "error";
-
-    // Build env_filter separately and attach via with_filter.
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(default_level))
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
-
-    let sandbox_mode = if full_auto {
+    let sandbox_mode = if removed_full_auto {
         Some(SandboxMode::WorkspaceWrite)
     } else if dangerously_bypass_approvals_and_sandbox {
         Some(SandboxMode::DangerFullAccess)
@@ -264,21 +290,111 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
         sandbox_mode_cli_arg.map(Into::<SandboxMode>::into)
     };
 
-    // When using `--oss`, let the bootstrapper pick the model (defaulting to
-    // gpt-oss:20b) and ensure it is present locally. Also, force the built‑in
-    // `oss` model provider.
+    // Parse `-c` overrides from the CLI.
+    let cli_kv_overrides = match config_overrides.parse_overrides() {
+        Ok(v) => v,
+        #[allow(clippy::print_stderr)]
+        Err(e) => {
+            eprintln!("Error parsing -c overrides: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let resolved_cwd = cwd.clone();
+    let config_cwd = match resolved_cwd.as_deref() {
+        Some(path) => {
+            AbsolutePathBuf::from_absolute_path(canonicalize_existing_preserving_symlinks(path)?)?
+        }
+        None => AbsolutePathBuf::current_dir()?,
+    };
+
+    // we load config.toml here to determine project state.
+    #[allow(clippy::print_stderr)]
+    let codex_home = match find_codex_home() {
+        Ok(codex_home) => codex_home,
+        Err(err) => {
+            eprintln!("Error finding codex home: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    #[allow(clippy::print_stderr)]
+    let loader_overrides = LoaderOverrides {
+        ignore_user_config,
+        ignore_user_and_project_exec_policy_rules: ignore_rules,
+        ..Default::default()
+    };
+
+    let config_toml = match load_config_as_toml_with_cli_and_loader_overrides(
+        &codex_home,
+        Some(&config_cwd),
+        cli_kv_overrides.clone(),
+        loader_overrides.clone(),
+    )
+    .await
+    {
+        Ok(config_toml) => config_toml,
+        Err(err) => {
+            let config_error = err
+                .get_ref()
+                .and_then(|err| err.downcast_ref::<ConfigLoadError>())
+                .map(ConfigLoadError::config_error);
+            if let Some(config_error) = config_error {
+                eprintln!(
+                    "Error loading config.toml:\n{}",
+                    format_config_error_with_source(config_error)
+                );
+            } else {
+                eprintln!("Error loading config.toml: {err}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let chatgpt_base_url = config_toml
+        .chatgpt_base_url
+        .clone()
+        .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
+    // TODO(gt): Make cloud requirements failures blocking once we can fail-closed.
+    let cloud_requirements = cloud_requirements_loader_for_storage(
+        codex_home.to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        config_toml.cli_auth_credentials_store.unwrap_or_default(),
+        chatgpt_base_url,
+    )
+    .await;
+    let run_cli_overrides = cli_kv_overrides.clone();
+    let run_loader_overrides = loader_overrides.clone();
+    let run_cloud_requirements = cloud_requirements.clone();
+
+    let model_provider = if oss {
+        let resolved = resolve_oss_provider(
+            oss_provider.as_deref(),
+            &config_toml,
+            config_profile.clone(),
+        );
+
+        if let Some(provider) = resolved {
+            Some(provider)
+        } else {
+            return Err(anyhow::anyhow!(
+                "No default OSS provider configured. Use --local-provider=provider or set oss_provider to one of: {LMSTUDIO_OSS_PROVIDER_ID}, {OLLAMA_OSS_PROVIDER_ID} in config.toml"
+            ));
+        }
+    } else {
+        None // No OSS mode enabled
+    };
+
+    // When using `--oss`, let the bootstrapper pick the model based on selected provider
     let model = if let Some(model) = model_cli_arg {
         Some(model)
     } else if oss {
-        Some(DEFAULT_OSS_MODEL.to_owned())
+        model_provider
+            .as_ref()
+            .and_then(|provider_id| get_default_model_for_oss_provider(provider_id))
+            .map(std::borrow::ToOwned::to_owned)
     } else {
         None // No model specified, will use the default.
-    };
-
-    let model_provider = if oss {
-        Some(BUILT_IN_OSS_MODEL_PROVIDER_ID.to_string())
-    } else {
-        None // No specific model provider override.
     };
 
     // Load configuration and determine approval policy
@@ -286,54 +402,76 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
         model,
         review_model: None,
         config_profile,
-        // This CLI is intended to be headless and has no affordances for asking
-        // the user for approval.
+        // Default to never ask for approvals in headless mode. Feature flags can override.
         approval_policy: Some(AskForApproval::Never),
+        approvals_reviewer: None,
         sandbox_mode,
-        cwd: cwd.map(|p| p.canonicalize().unwrap_or(p)),
-        model_provider,
-        code_linux_sandbox_exe,
+        permission_profile: None,
+        default_permissions: None,
+        cwd: resolved_cwd,
+        model_provider: model_provider.clone(),
+        service_tier: None,
+        codex_self_exe: arg0_paths.codex_self_exe.clone(),
+        codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
+        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
+        zsh_path: None,
         base_instructions: None,
-        include_plan_tool: Some(include_plan_tool),
+        developer_instructions: None,
+        personality: None,
+        compact_prompt: None,
         include_apply_patch_tool: None,
-        include_view_image_tool: None,
-        disable_response_storage: None,
-        debug: None,
         show_raw_agent_reasoning: oss.then_some(true),
         tools_web_search_request: None,
-        mcp_servers: None,
-        experimental_client_tools: None,
-        dynamic_tools: None,
-        compact_prompt_override: None,
-        compact_prompt_override_file: None,
-    };
-    // Parse `-c` overrides.
-    let cli_kv_overrides = match config_overrides.parse_overrides() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Error parsing -c overrides: {e}");
-            std::process::exit(1);
-        }
+        ephemeral: ephemeral.then_some(true),
+        additional_writable_roots: add_dir,
     };
 
-    let mut config = Config::load_with_cli_overrides(cli_kv_overrides, overrides)?;
-    config.max_run_seconds = max_seconds;
-    config.max_run_deadline = run_deadline_std;
-    config.demo_developer_message = cli.demo_developer_message.clone();
-    config.timeboxed_exec_mode = timeboxed_auto_exec;
-    if timeboxed_auto_exec {
-        config.demo_developer_message = merge_developer_message(
-            config.demo_developer_message.take(),
-            AUTO_EXEC_TIMEBOXED_CLI_GUIDANCE,
-        );
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .harness_overrides(overrides)
+        .loader_overrides(loader_overrides)
+        .cloud_requirements(cloud_requirements)
+        .build()
+        .await?;
+
+    #[allow(clippy::print_stderr)]
+    match check_execpolicy_for_warnings(&config.config_layer_stack).await {
+        Ok(None) => {}
+        Ok(Some(err)) | Err(err) => {
+            eprintln!(
+                "Error loading rules:\n{}",
+                format_exec_policy_error_with_source(&err)
+            );
+            std::process::exit(1);
+        }
+    }
+
+    set_default_client_residency_requirement(config.enforce_residency.value());
+
+    if let Err(err) = enforce_login_restrictions(&AuthConfig {
+        codex_home: config.codex_home.to_path_buf(),
+        auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+        forced_login_method: config.forced_login_method,
+        forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+        chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+    })
+    .await
+    {
+        eprintln!("{err}");
+        std::process::exit(1);
     }
 
     let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        code_core::otel_init::build_provider(&config, code_version::version())
+        codex_core::otel_init::build_provider(
+            &config,
+            env!("CARGO_PKG_VERSION"),
+            /*service_name_override*/ None,
+            DEFAULT_ANALYTICS_ENABLED,
+        )
     })) {
         Ok(Ok(otel)) => otel,
-        Ok(Err(err)) => {
-            eprintln!("Could not create otel exporter: {err}");
+        Ok(Err(e)) => {
+            eprintln!("Could not create otel exporter: {e}");
             None
         }
         Err(_) => {
@@ -341,2556 +479,1172 @@ pub async fn run_main(cli: Cli, code_linux_sandbox_exe: Option<PathBuf>) -> anyh
             None
         }
     };
-    let otel_logger_layer = otel.as_ref().map(|provider| provider.logger_layer());
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(stderr_with_ansi)
-        .with_writer(|| std::io::stderr())
-        .with_filter(env_filter);
+    let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
+
+    let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
 
     let _ = tracing_subscriber::registry()
         .with(fmt_layer)
+        .with(otel_tracing_layer)
         .with(otel_logger_layer)
         .try_init();
-    install_exec_panic_hook();
-    if auto_drive_goal.is_some() {
-        // Exec is non-interactive; don't burn time on countdown delays between Auto Drive turns.
-        config.auto_drive.continue_mode = AutoDriveContinueMode::Immediate;
-        if let Some(turn_cap) = turn_cap {
-            config.auto_drive.coordinator_turn_cap = turn_cap;
-        }
+
+    let exec_span = exec_root_span();
+    if let Some(context) = traceparent_context_from_env() {
+        set_parent_from_context(&exec_span, context);
     }
-    let slash_context = SlashContext {
-        agents: &config.agents,
-        subagent_commands: &config.subagent_commands,
+    let config_warnings: Vec<ConfigWarningNotification> = config
+        .startup_warnings
+        .iter()
+        .map(|warning| ConfigWarningNotification {
+            summary: warning.clone(),
+            details: None,
+            path: None,
+            range: None,
+        })
+        .collect();
+    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+        arg0_paths.codex_self_exe.clone(),
+        arg0_paths.codex_linux_sandbox_exe.clone(),
+    )?;
+    let state_db = codex_core::init_state_db(&config).await;
+    let in_process_start_args = InProcessClientStartArgs {
+        arg0_paths,
+        config: std::sync::Arc::new(config.clone()),
+        cli_overrides: run_cli_overrides,
+        loader_overrides: run_loader_overrides,
+        cloud_requirements: run_cloud_requirements,
+        feedback: CodexFeedback::new(),
+        log_db: None,
+        state_db: state_db.clone(),
+        environment_manager: std::sync::Arc::new(
+            EnvironmentManager::new(EnvironmentManagerArgs::new(local_runtime_paths)).await,
+        ),
+        config_warnings,
+        session_source: SessionSource::Exec,
+        enable_codex_api_key_env: true,
+        client_name: "codex_exec".to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        experimental_api: true,
+        opt_out_notification_methods: Vec::new(),
+        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     };
+    run_exec_session(ExecRunArgs {
+        in_process_start_args,
+        state_db,
+        command,
+        config,
+        dangerously_bypass_approvals_and_sandbox,
+        exec_span: exec_span.clone(),
+        images,
+        json_mode,
+        last_message_file,
+        model_provider,
+        oss,
+        output_schema_path,
+        prompt,
+        skip_git_repo_check,
+        stderr_with_ansi,
+    })
+    .instrument(exec_span)
+    .await
+}
 
-    match process_exec_slash_command(prompt_to_send.trim(), slash_context) {
-        Ok(SlashDispatch::NotSlash) => {}
-        Ok(SlashDispatch::ExpandedPrompt { prompt, summary }) => {
-            prompt_to_send = prompt;
-            if auto_drive_goal.is_none() {
-                summary_prompt = summary;
-            }
-        }
-        Ok(SlashDispatch::Review { request, summary }) => {
-            review_request = Some(request);
-            if auto_drive_goal.is_none() {
-                summary_prompt = summary;
-            }
-        }
-        Err(msg) => {
-            eprintln!("{msg}");
-            std::process::exit(1);
-        }
-    }
+async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
+    let ExecRunArgs {
+        in_process_start_args,
+        state_db,
+        command,
+        config,
+        dangerously_bypass_approvals_and_sandbox,
+        exec_span,
+        images,
+        json_mode,
+        last_message_file,
+        model_provider,
+        oss,
+        output_schema_path,
+        prompt,
+        skip_git_repo_check,
+        stderr_with_ansi,
+    } = args;
 
-    let is_auto_review = auto_review;
-
-    if is_auto_review {
-        if config.auto_review_use_chat_model {
-            config.review_model = config.model.clone();
-            config.review_model_reasoning_effort = config.model_reasoning_effort;
-        } else {
-            config.review_model = config.auto_review_model.clone();
-            config.review_model_reasoning_effort = config.auto_review_model_reasoning_effort;
-        }
-        config.review_use_chat_model = config.auto_review_use_chat_model;
-
-        if config.auto_review_resolve_use_chat_model {
-            config.review_resolve_model = config.model.clone();
-            config.review_resolve_model_reasoning_effort = config.model_reasoning_effort;
-        } else {
-            config.review_resolve_model = config.auto_review_resolve_model.clone();
-            config.review_resolve_model_reasoning_effort =
-                config.auto_review_resolve_model_reasoning_effort;
-        }
-        config.review_resolve_use_chat_model = config.auto_review_resolve_use_chat_model;
-    }
-
-    let review_auto_resolve_requested = review_request.is_some()
-        && if is_auto_review {
-            config.tui.auto_review_enabled
-        } else {
-            config.tui.review_auto_resolve
-        };
-    if review_auto_resolve_requested && matches!(config.sandbox_policy, SandboxPolicy::ReadOnly) {
-        config.sandbox_policy = SandboxPolicy::new_workspace_write_policy();
-        eprintln!(
-            "Auto-resolve enabled for /review; upgrading sandbox to workspace-write so fixes can be applied."
-        );
-    }
-
-    let mut review_outputs: Vec<code_core::protocol::ReviewOutputEvent> = Vec::new();
-    let mut final_review_snapshot: Option<code_core::protocol::ReviewSnapshotInfo> = None;
-    let mut review_runs: u32 = 0;
-    let mut last_review_epoch: Option<u64> = None;
-    let max_auto_resolve_attempts: u32 = if is_auto_review {
-        config.auto_drive.auto_review_followup_attempts.get()
-    } else {
-        config.auto_drive.auto_resolve_review_attempts.get()
-    };
-    let mut auto_resolve_state: Option<AutoResolveState> = review_request.as_ref().and_then(|req| {
-        if review_auto_resolve_requested {
-            Some(AutoResolveState::new_with_limit(
-                req.prompt.clone(),
-                req.user_facing_hint.clone().unwrap_or_default(),
-                None,
-                max_auto_resolve_attempts,
-            ))
-        } else {
-            None
-        }
-    });
-    let mut auto_resolve_fix_guard: Option<code_core::review_coord::ReviewGuard> = None;
-    let mut auto_resolve_followup_guard: Option<code_core::review_coord::ReviewGuard> = None;
-    // Base snapshot captured at the start of auto-resolve; each review snapshot is parented to this.
-    let mut auto_resolve_base_snapshot: Option<GhostCommit> = None;
-    let resolve_model_for_auto_resolve = if is_auto_review {
-        if config.auto_review_resolve_use_chat_model {
-            config.model.clone()
-        } else {
-            config.auto_review_resolve_model.clone()
-        }
-    } else if config.review_resolve_use_chat_model {
-        config.model.clone()
-    } else {
-        config.review_resolve_model.clone()
-    };
-    let resolve_effort_for_auto_resolve = if is_auto_review {
-        if config.auto_review_resolve_use_chat_model {
-            config.model_reasoning_effort
-        } else {
-            config.auto_review_resolve_model_reasoning_effort
-        }
-    } else if config.review_resolve_use_chat_model {
-        config.model_reasoning_effort
-    } else {
-        config.review_resolve_model_reasoning_effort
-    };
-    if review_auto_resolve_requested
-        && (!resolve_model_for_auto_resolve.eq_ignore_ascii_case(&config.model)
-            || resolve_effort_for_auto_resolve != config.model_reasoning_effort)
-    {
-        let resolve_family = find_family_for_model(&resolve_model_for_auto_resolve)
-            .unwrap_or_else(|| derive_default_model_family(&resolve_model_for_auto_resolve));
-        config.model = resolve_model_for_auto_resolve.clone();
-        config.model_family = resolve_family.clone();
-        config.model_reasoning_effort = resolve_effort_for_auto_resolve;
-        if let Some(cw) = resolve_family.context_window {
-            config.model_context_window = Some(cw);
-        }
-        if let Some(max) = resolve_family.max_output_tokens {
-            config.model_max_output_tokens = Some(max);
-        }
-        config.model_auto_compact_token_limit = resolve_family.auto_compact_token_limit();
-    }
-    let stop_on_task_complete = auto_drive_goal.is_none() && auto_resolve_state.is_none();
-    let mut event_processor: Box<dyn EventProcessor> = if json_mode {
-        Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone()))
-    } else {
-        Box::new(EventProcessorWithHumanOutput::create_with_ansi(
-            stdout_with_ansi,
+    let mut event_processor: Box<dyn EventProcessor> = match json_mode {
+        true => Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone())),
+        _ => Box::new(EventProcessorWithHumanOutput::create_with_ansi(
+            stderr_with_ansi,
             &config,
             last_message_file.clone(),
-            stop_on_task_complete,
-        ))
+        )),
     };
-
     if oss {
-        code_ollama::ensure_oss_ready(&config)
+        // We're in the oss section, so provider_id should be Some
+        // Let's handle None case gracefully though just in case
+        let provider_id = match model_provider.as_ref() {
+            Some(id) => id,
+            None => {
+                error!("OSS provider unexpectedly not set when oss flag is used");
+                return Err(anyhow::anyhow!(
+                    "OSS provider not set but oss flag was used"
+                ));
+            }
+        };
+        ensure_oss_provider_ready(provider_id, &config)
             .await
             .map_err(|e| anyhow::anyhow!("OSS setup failed: {e}"))?;
     }
 
-    // Print the effective configuration and prompt so users can see what Codex
-    // is using.
     let default_cwd = config.cwd.to_path_buf();
-    let _default_approval_policy = config.approval_policy;
-    let _default_sandbox_policy = config.sandbox_policy.clone();
-    let _default_model = config.model.clone();
-    let _default_effort = config.model_reasoning_effort;
-    let _default_summary = config.model_reasoning_summary;
+    let default_approval_policy = config.permissions.approval_policy.value();
+    let default_effort = config.model_reasoning_effort;
 
-    if !skip_git_repo_check && get_git_repo_root(&default_cwd).is_none() {
+    let (initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
+        (Some(ExecCommand::Review(review_cli)), _, _) => {
+            let review_request = build_review_request(review_cli)?;
+            let summary = codex_core::review_prompts::user_facing_hint(&review_request.target);
+            (InitialOperation::Review { review_request }, summary)
+        }
+        (Some(ExecCommand::Resume(args)), root_prompt, imgs) => {
+            let prompt_arg = args
+                .prompt
+                .clone()
+                .or_else(|| {
+                    if args.last {
+                        args.session_id.clone()
+                    } else {
+                        None
+                    }
+                })
+                .or(root_prompt);
+            let prompt_text = resolve_prompt(prompt_arg);
+            let mut items: Vec<UserInput> = imgs
+                .into_iter()
+                .chain(args.images.iter().cloned())
+                .map(|path| UserInput::LocalImage { path })
+                .collect();
+            items.push(UserInput::Text {
+                text: prompt_text.clone(),
+                // CLI input doesn't track UI element ranges, so none are available here.
+                text_elements: Vec::new(),
+            });
+            let output_schema = load_output_schema(output_schema_path.clone());
+            (
+                InitialOperation::UserTurn {
+                    items,
+                    output_schema,
+                },
+                prompt_text,
+            )
+        }
+        (None, root_prompt, imgs) => {
+            let prompt_text = resolve_root_prompt(root_prompt);
+            let mut items: Vec<UserInput> = imgs
+                .into_iter()
+                .map(|path| UserInput::LocalImage { path })
+                .collect();
+            items.push(UserInput::Text {
+                text: prompt_text.clone(),
+                // CLI input doesn't track UI element ranges, so none are available here.
+                text_elements: Vec::new(),
+            });
+            let output_schema = load_output_schema(output_schema_path);
+            (
+                InitialOperation::UserTurn {
+                    items,
+                    output_schema,
+                },
+                prompt_text,
+            )
+        }
+    };
+
+    // When --yolo (dangerously_bypass_approvals_and_sandbox) is set, also skip the git repo check
+    // since the user is explicitly running in an externally sandboxed environment.
+    if !skip_git_repo_check
+        && !dangerously_bypass_approvals_and_sandbox
+        && get_git_repo_root(&default_cwd).is_none()
+    {
         eprintln!("Not inside a trusted directory and --skip-git-repo-check was not specified.");
         std::process::exit(1);
     }
 
-    let auth_manager = AuthManager::shared_with_mode_and_originator(
-        config.code_home.clone(),
-        code_app_server_protocol::AuthMode::ApiKey,
-        config.responses_originator_header.clone(),
-    );
-    let conversation_manager = ConversationManager::new(auth_manager.clone(), SessionSource::Exec);
+    let mut request_ids = RequestIdSequencer::new();
+    let mut client = InProcessAppServerClient::start(in_process_start_args)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
+        })?;
 
-    // Handle resume subcommand by resolving a rollout path and using explicit resume API.
-    let NewConversation {
-        conversation_id: _,
-        conversation,
-        session_configured,
-    } = if let Some(ExecCommand::Resume(args)) = command {
-        let resume_path = resolve_resume_path(&config, &args).await?;
-
-        if let Some(path) = resume_path {
-            conversation_manager
-                .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
-                .await?
+    // Handle resume subcommand through existing `thread/list` + `thread/resume`
+    // APIs so exec no longer reaches into rollout storage directly.
+    let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
+        command.as_ref()
+    {
+        if let Some(thread_id) =
+            resolve_resume_thread_id(&client, &config, state_db.as_ref(), args).await?
+        {
+            let response: ThreadResumeResponse = send_request_with_response(
+                &client,
+                ClientRequest::ThreadResume {
+                    request_id: request_ids.next(),
+                    params: thread_resume_params_from_config(&config, thread_id),
+                },
+                "thread/resume",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            let session_configured =
+                session_configured_from_thread_resume_response(&response, &config)
+                    .map_err(anyhow::Error::msg)?;
+            (session_configured.thread_id, session_configured)
         } else {
-            conversation_manager
-                .new_conversation(config.clone())
-                .await?
+            let response: ThreadStartResponse = send_request_with_response(
+                &client,
+                ClientRequest::ThreadStart {
+                    request_id: request_ids.next(),
+                    params: thread_start_params_from_config(&config),
+                },
+                "thread/start",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            let session_configured =
+                session_configured_from_thread_start_response(&response, &config)
+                    .map_err(anyhow::Error::msg)?;
+            (session_configured.thread_id, session_configured)
         }
     } else {
-        conversation_manager
-            .new_conversation(config.clone())
-            .await?
+        let response: ThreadStartResponse = send_request_with_response(
+            &client,
+            ClientRequest::ThreadStart {
+                request_id: request_ids.next(),
+                params: thread_start_params_from_config(&config),
+            },
+            "thread/start",
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        let session_configured = session_configured_from_thread_start_response(&response, &config)
+            .map_err(anyhow::Error::msg)?;
+        (session_configured.thread_id, session_configured)
     };
-    if auto_drive_goal.is_some() {
-        let summary_config = build_auto_drive_exec_config(&config);
-        event_processor.print_config_summary(&summary_config, &summary_prompt);
-    } else {
-        event_processor.print_config_summary(&config, &summary_prompt);
+
+    let primary_thread_id_for_span = primary_thread_id.to_string();
+    // Use the start/resume response as the authoritative bootstrap payload.
+    // Waiting for a later streamed `SessionConfigured` event adds up to 10s of
+    // avoidable startup latency on the in-process path.
+    let session_configured = fallback_session_configured;
+
+    exec_span.record("thread.id", primary_thread_id_for_span.as_str());
+
+    // Print the effective configuration and initial request so users can see what Codex
+    // is using.
+    event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
+    if !json_mode
+        && let Some(message) =
+            codex_core::config::system_bwrap_warning(config.permissions.permission_profile.get())
+    {
+        event_processor.process_warning(message);
     }
+
     info!("Codex initialized with event: {session_configured:?}");
 
-    if let Some(goal) = auto_drive_goal {
-        return run_auto_drive_session(
-            goal,
-            images,
-            config,
-            conversation,
-            event_processor,
-            last_message_file,
-            run_deadline,
-        )
-        .await;
-    }
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-    {
-        let conversation = conversation.clone();
-        tokio::spawn(async move {
-            #[cfg(unix)]
-            let mut sigterm_stream = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ) {
-                Ok(stream) => Some(stream),
-                Err(err) => {
-                    tracing::warn!("failed to install SIGTERM handler: {err}");
-                    None
-                }
-            };
-            #[cfg(unix)]
-            let mut sigterm_requested = false;
-
-            loop {
-                #[cfg(unix)]
-                {
-                    if let Some(stream) = sigterm_stream.as_mut() {
-                        tokio::select! {
-                            _ = stream.recv() => {
-                                tracing::debug!("SIGTERM received; requesting shutdown");
-                                conversation.submit(Op::Shutdown).await.ok();
-                                sigterm_requested = true;
-                                break;
-                            }
-                            _ = tokio::signal::ctrl_c() => {
-                                tracing::debug!("Keyboard interrupt");
-                                conversation.submit(Op::Interrupt).await.ok();
-                                break;
-                            }
-                            res = conversation.next_event() => match res {
-                                Ok(event) => {
-                                    debug!("Received event: {event:?}");
-
-                                    let is_shutdown_complete = matches!(event.msg, EventMsg::ShutdownComplete);
-                                    if let Err(e) = tx.send(event) {
-                                        error!("Error sending event: {e:?}");
-                                        break;
-                                    }
-                                    if is_shutdown_complete {
-                                        info!("Received shutdown event, exiting event loop.");
-                                        break;
-                                    }
-                                },
-                                Err(e) => {
-                                    error!("Error receiving event: {e:?}");
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        tokio::select! {
-                            _ = tokio::signal::ctrl_c() => {
-                                tracing::debug!("Keyboard interrupt");
-                                conversation.submit(Op::Interrupt).await.ok();
-                                break;
-                            }
-                            res = conversation.next_event() => match res {
-                                Ok(event) => {
-                                    debug!("Received event: {event:?}");
-
-                                    let is_shutdown_complete = matches!(event.msg, EventMsg::ShutdownComplete);
-                                    if let Err(e) = tx.send(event) {
-                                        error!("Error sending event: {e:?}");
-                                        break;
-                                    }
-                                    if is_shutdown_complete {
-                                        info!("Received shutdown event, exiting event loop.");
-                                        break;
-                                    }
-                                },
-                                Err(e) => {
-                                    error!("Error receiving event: {e:?}");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => {
-                            tracing::debug!("Keyboard interrupt");
-                            conversation.submit(Op::Interrupt).await.ok();
-                            break;
-                        }
-                        res = conversation.next_event() => match res {
-                            Ok(event) => {
-                                debug!("Received event: {event:?}");
-
-                                let is_shutdown_complete = matches!(event.msg, EventMsg::ShutdownComplete);
-                                if let Err(e) = tx.send(event) {
-                                    error!("Error sending event: {e:?}");
-                                    break;
-                                }
-                                if is_shutdown_complete {
-                                    info!("Received shutdown event, exiting event loop.");
-                                    break;
-                                }
-                            },
-                            Err(e) => {
-                                error!("Error receiving event: {e:?}");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            #[cfg(unix)]
-            drop(sigterm_stream);
-            #[cfg(unix)]
-            if sigterm_requested {
-                unsafe {
-                    libc::raise(libc::SIGTERM);
-                }
-            }
-        });
-    }
-
-    // Send the prompt.
-    let mut _review_guard: Option<code_core::review_coord::ReviewGuard> = None;
-
-    // Clear stale review lock in case a prior process crashed.
-    let _ = clear_stale_lock_if_dead(Some(&config.cwd));
-
-    let skip_review_lock = std::env::var("CODE_REVIEW_LOCK_LEASE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-
-    let _initial_prompt_task_id = if let Some(mut review_request) = review_request.clone() {
-        // Cross-process review coordination
-        if !skip_review_lock {
-            match try_acquire_lock("review", &config.cwd) {
-                Ok(Some(g)) => _review_guard = Some(g),
-                Ok(None) => {
-                    eprintln!("Another review is already running; skipping this /review.");
-                    return Ok(());
-                }
-                Err(err) => {
-                    eprintln!("Warning: could not acquire review lock: {err}");
-                }
-            }
+    let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::debug!("Keyboard interrupt");
+            let _ = interrupt_tx.send(());
         }
+    });
 
-        if auto_resolve_state.is_some() {
-            if auto_resolve_base_snapshot.is_none() {
-                auto_resolve_base_snapshot = capture_auto_resolve_snapshot(&config.cwd, None, "auto-resolve base snapshot");
-                if let Some(state) = auto_resolve_state.as_mut() {
-                    state.snapshot_epoch = Some(current_snapshot_epoch_for(&config.cwd));
-                }
-            }
-
-            if let Some(base) = auto_resolve_base_snapshot.as_ref() {
-                if let Some((snap, diff_paths)) = capture_snapshot_against_base(&config.cwd, base, "auto-resolve working snapshot") {
-                    review_request = apply_commit_scope_to_review_request(
-                        review_request,
-                        snap.id(),
-                        base.id(),
-                        Some(diff_paths.as_slice()),
-                    );
-                    if let Some(state) = auto_resolve_state.as_mut() {
-                        state.last_reviewed_commit = Some(snap.id().to_string());
-                    }
-                }
-            }
+    let task_id = match initial_operation {
+        InitialOperation::UserTurn {
+            items,
+            output_schema,
+        } => {
+            let response: TurnStartResponse = send_request_with_response(
+                &client,
+                ClientRequest::TurnStart {
+                    request_id: request_ids.next(),
+                    params: TurnStartParams {
+                        thread_id: primary_thread_id_for_span.clone(),
+                        input: items.into_iter().map(Into::into).collect(),
+                        responsesapi_client_metadata: None,
+                        environments: None,
+                        cwd: Some(default_cwd),
+                        approval_policy: Some(default_approval_policy.into()),
+                        approvals_reviewer: None,
+                        sandbox_policy: None,
+                        permissions: None,
+                        model: None,
+                        service_tier: None,
+                        effort: default_effort,
+                        summary: None,
+                        personality: None,
+                        output_schema,
+                        collaboration_mode: None,
+                    },
+                },
+                "turn/start",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            let task_id = response.turn.id;
+            info!("Sent prompt with event ID: {task_id}");
+            task_id
         }
-
-        // Capture baseline epoch after any snapshot creation so we don't trip on our own bumps.
-        last_review_epoch = Some(current_snapshot_epoch_for(&config.cwd));
-
-        let event_id = conversation.submit(Op::Review { review_request }).await?;
-        if is_auto_review {
-            eprintln!("[auto-review] phase: reviewing (started)");
+        InitialOperation::Review { review_request } => {
+            let response: ReviewStartResponse = send_request_with_response(
+                &client,
+                ClientRequest::ReviewStart {
+                    request_id: request_ids.next(),
+                    params: ReviewStartParams {
+                        thread_id: primary_thread_id_for_span.clone(),
+                        target: review_target_to_api(review_request.target),
+                        delivery: None,
+                    },
+                },
+                "review/start",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            let _ = event_processor.process_server_notification(ServerNotification::TurnStarted(
+                TurnStartedNotification {
+                    thread_id: response.review_thread_id.clone(),
+                    turn: response.turn.clone(),
+                },
+            ));
+            let task_id = response.turn.id;
+            info!("Sent review request with event ID: {task_id}");
+            task_id
         }
-        info!("Sent /review with event ID: {event_id}");
-        event_id
-    } else {
-        let mut items: Vec<InputItem> = Vec::new();
-        items.push(InputItem::Text { text: prompt_to_send });
-        items.extend(images.into_iter().map(|path| InputItem::LocalImage { path }));
-        // Fallback for older core protocol: send only user input items.
-        let event_id = conversation
-            .submit(Op::UserInput {
-                items,
-                final_output_json_schema: None,
-            })
-            .await?;
-        info!("Sent prompt with event ID: {event_id}");
-        event_id
     };
+    exec_span.record("turn.id", task_id.as_str());
 
     // Run the loop until the task is complete.
     // Track whether a fatal error was reported by the server so we can
     // exit with a non-zero status for automation-friendly signaling.
     let mut error_seen = false;
-    let mut shutdown_pending = false;
-    let mut shutdown_sent = false;
-    let mut shutdown_deadline: Option<Instant> = None;
-    let auto_review_grace_enabled = config.tui.auto_review_enabled;
-    let mut auto_review_tracker = AutoReviewTracker::new(&config.cwd);
+    let mut interrupt_channel_open = true;
+    let primary_thread_id_for_requests = primary_thread_id.to_string();
     loop {
-        tokio::select! {
-            _ = async {
-                if let Some(deadline) = run_deadline {
-                    tokio::time::sleep_until(deadline).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                eprintln!("Time budget exceeded (--max-seconds={})", max_seconds.unwrap_or_default());
-                error_seen = true;
-                let _ = conversation.submit(Op::Interrupt).await;
-                let _ = conversation.submit(Op::Shutdown).await;
-                break;
-            }
-            maybe_event = rx.recv() => {
-                let Some(event) = maybe_event else {
-                    break;
-                };
-        if let EventMsg::AgentStatusUpdate(status) = &event.msg {
-            let completions = auto_review_tracker.update(status);
-            for completion in completions {
-                emit_auto_review_completion(&completion);
-            }
-        }
-        if matches!(event.msg, EventMsg::Error(_)) {
-            error_seen = true;
-        }
-
-        // Handle review auto-resolve: chain follow-up reviews when enabled.
-        match &event.msg {
-            EventMsg::ExitedReviewMode(event) => {
-                // Any review that just finished should release follow-up locks.
-                auto_resolve_followup_guard = None;
-                // Release the global review lock as soon as the review finishes so follow-up
-                // auto-resolve steps can acquire it.
-                _review_guard = None;
-                review_runs = review_runs.saturating_add(1);
-                    if let Some(output) = event.review_output.as_ref() {
-                        review_outputs.push(output.clone());
-                    }
-                    if let Some(snapshot) = event.snapshot.as_ref() {
-                        final_review_snapshot = Some(snapshot.clone());
-                        // detect stale snapshot epoch
-                        if let Some(start_epoch) = last_review_epoch {
-                            let current_epoch = current_snapshot_epoch_for(&config.cwd);
-                            if current_epoch != start_epoch {
-                                eprintln!("Snapshot epoch changed during review; aborting auto-resolve and requiring restart.");
-                                auto_resolve_state = None;
-                                auto_resolve_base_snapshot = None;
-                                continue;
-                            }
-                        }
-                    }
-
-                // Surface review result to the parent CLI via stderr; avoid injecting
-                // synthetic user turns into the /review sub-agent conversation.
-                if review_request.is_some() {
-                    let findings_count = event
-                        .review_output
-                        .as_ref()
-                        .map(|o| o.findings.len())
-                        .unwrap_or(0);
-                    let branch = current_branch_name(&config.cwd)
-                        .await
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let worktree = config.cwd.clone();
-                    let summary = event.review_output.as_ref().and_then(review_summary_line);
-
-                    if findings_count == 0 {
-                        eprintln!(
-                            "[developer] Auto-review completed on branch '{branch}' (worktree: {}). No issues reported.",
-                            worktree.display()
-                        );
-                    } else {
-                        match summary {
-                            Some(ref text) if !text.is_empty() => eprintln!(
-                                "[developer] Auto-review found {findings_count} issue(s) on branch '{branch}'. Summary: {text}. Worktree: {}. Re-validate against current HEAD before merging fixes.",
-                                worktree.display()
-                            ),
-                            _ => eprintln!(
-                                "[developer] Auto-review found {findings_count} issue(s) on branch '{branch}'. Worktree: {}. Re-validate against current HEAD before merging fixes.",
-                                worktree.display()
-                            ),
-                        }
-                    }
-                }
-
-                if let Some(state) = auto_resolve_state.as_mut() {
-                    state.attempt = state.attempt.saturating_add(1);
-                    state.last_review = event.review_output.clone();
-                    state.last_fix_message = None;
-
-                    match event.review_output.as_ref() {
-                        Some(output) if output.findings.is_empty() => {
-                            eprintln!("Auto-resolve: review reported no actionable findings. Exiting.");
-                            auto_resolve_state = None;
-                            auto_resolve_base_snapshot = None;
-                        }
-                        Some(_) if state.max_attempts > 0 && state.attempt > state.max_attempts => {
-                            let limit = state.max_attempts;
-                            let msg = if limit == 1 {
-                                "Auto-resolve: reached the review attempt limit (1 allowed re-review). Handing control back.".to_string()
-                            } else {
-                                format!(
-                                    "Auto-resolve: reached the review attempt limit ({limit} allowed re-reviews). Handing control back."
-                                )
-                            };
-                            eprintln!("{msg}");
-                            auto_resolve_state = None;
-                            auto_resolve_base_snapshot = None;
-                        }
-                        Some(output) => {
-                            state.phase = AutoResolvePhase::PendingFix {
-                                review: output.clone(),
-                            };
-                        }
-                        None => {
-                            eprintln!(
-                                "Auto-resolve: review ended without findings. Please inspect manually."
-                            );
-                            auto_resolve_state = None;
-                            auto_resolve_base_snapshot = None;
-                        }
-                    }
-                }
-            }
-            EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
-                if let Some(state_snapshot) = auto_resolve_state.clone() {
-                    let current_epoch = current_snapshot_epoch_for(&config.cwd);
-                    match state_snapshot.phase {
-                        AutoResolvePhase::PendingFix { review } => {
-                            if auto_resolve_fix_guard.is_none() {
-                                auto_resolve_fix_guard = try_acquire_lock("auto-resolve-fix", &config.cwd).ok().flatten();
-                            }
-                            if auto_resolve_fix_guard.is_none() {
-                                eprintln!("Auto-resolve: another review is running; skipping fix.");
-                                auto_resolve_state = None;
-                                auto_resolve_base_snapshot = None;
-                                auto_resolve_fix_guard = None;
-                                auto_resolve_followup_guard = None;
-                                request_shutdown(
-                                    &conversation,
-                                    &auto_review_tracker,
-                                    &mut shutdown_pending,
-                                    &mut shutdown_sent,
-                                    &mut shutdown_deadline,
-                                    auto_review_grace_enabled,
-                                )
-                                .await?;
-                                continue;
-                            }
-                            if let Some(state) = auto_resolve_state.as_mut() {
-                                state.phase = AutoResolvePhase::AwaitingFix {
-                                    review: review.clone(),
-                                };
-                                state.snapshot_epoch = Some(current_epoch);
-                            }
-                            eprintln!("[auto-review] phase: resolving (started)");
-                            dispatch_auto_fix(&conversation, &review).await?;
-                        }
-                        AutoResolvePhase::AwaitingFix { .. } => {
-                            // Fix phase complete; release fix guard so follow-up can take the review lock
-                            auto_resolve_fix_guard = None;
-                            if let Some(state) = auto_resolve_state.as_mut() {
-                                state.last_fix_message = last_agent_message.clone();
-                                state.phase = AutoResolvePhase::WaitingForReview;
-                            }
-                            if auto_resolve_followup_guard.is_none() {
-                                auto_resolve_followup_guard =
-                                    try_acquire_lock("auto-resolve-followup", &config.cwd).ok().flatten();
-                            }
-                            if auto_resolve_followup_guard.is_none() {
-                                eprintln!("Auto-resolve: another review is running; stopping follow-up review.");
-                                auto_resolve_state = None;
-                                auto_resolve_base_snapshot = None;
-                                auto_resolve_fix_guard = None;
-                                auto_resolve_followup_guard = None;
-                                request_shutdown(
-                                    &conversation,
-                                    &auto_review_tracker,
-                                    &mut shutdown_pending,
-                                    &mut shutdown_sent,
-                                    &mut shutdown_deadline,
-                                    auto_review_grace_enabled,
-                                )
-                                .await?;
-                                continue;
-                            }
-                            if let Some(base) = auto_resolve_base_snapshot.as_ref() {
-                                if !head_is_ancestor_of_base(&config.cwd, base.id()) {
-                                    eprintln!("Auto-resolve: base snapshot no longer matches current HEAD; stopping to avoid stale review.");
-                                    auto_resolve_state = None;
-                                    auto_resolve_base_snapshot = None;
-                                    auto_resolve_followup_guard = None;
-                                    auto_resolve_fix_guard = None;
-                                    request_shutdown(
-                                        &conversation,
-                                        &auto_review_tracker,
-                                        &mut shutdown_pending,
-                                        &mut shutdown_sent,
-                                        &mut shutdown_deadline,
-                                        auto_review_grace_enabled,
-                                    )
-                                    .await?;
-                                    continue;
-                                }
-                                // stale epoch check
-                                if let Some(state) = auto_resolve_state.as_ref() {
-                                    if let Some(baseline) = state.snapshot_epoch {
-                                        if current_epoch > baseline {
-                                            eprintln!("Auto-resolve: snapshot epoch advanced; aborting follow-up review.");
-                                            auto_resolve_state = None;
-                                            auto_resolve_base_snapshot = None;
-                                            auto_resolve_followup_guard = None;
-                                            auto_resolve_fix_guard = None;
-                                            request_shutdown(
-                                                &conversation,
-                                                &auto_review_tracker,
-                                                &mut shutdown_pending,
-                                                &mut shutdown_sent,
-                                                &mut shutdown_deadline,
-                                                auto_review_grace_enabled,
-                                            )
-                                            .await?;
-                                            continue;
-                                        }
-                                    }
-                                }
-                                match capture_snapshot_against_base(
-                                    &config.cwd,
-                                    base,
-                                    "auto-resolve follow-up snapshot",
-                                ) {
-                                    Some((snap, diff_paths)) => {
-                                        if should_skip_followup(
-                                            state_snapshot.last_reviewed_commit.as_deref(),
-                                            &snap,
-                                        ) {
-                                            eprintln!("Auto-resolve: follow-up snapshot is identical to last reviewed commit; ending loop to avoid duplicate review.");
-                                            auto_resolve_state = None;
-                                            auto_resolve_base_snapshot = None;
-                                            auto_resolve_followup_guard = None;
-                                            auto_resolve_fix_guard = None;
-                                            request_shutdown(
-                                                &conversation,
-                                                &auto_review_tracker,
-                                                &mut shutdown_pending,
-                                                &mut shutdown_sent,
-                                                &mut shutdown_deadline,
-                                                auto_review_grace_enabled,
-                                            )
-                                            .await?;
-                                            continue;
-                                        }
-
-                                        if let Some(state) = auto_resolve_state.as_mut() {
-                                            state.last_reviewed_commit = Some(snap.id().to_string());
-                                            state.snapshot_epoch = Some(current_snapshot_epoch_for(&config.cwd));
-                                        }
-
-                                        let followup_request = build_followup_review_request(
-                                            &state_snapshot,
-                                            &config.cwd,
-                                            Some(&snap),
-                                            Some(diff_paths.as_slice()),
-                                            Some(base.id()),
-                                        )
-                                        .await;
-                                        last_review_epoch = Some(current_snapshot_epoch_for(&config.cwd));
-                                        eprintln!("[auto-review] phase: reviewing (started)");
-                                        let _ = conversation
-                                            .submit(Op::Review {
-                                                review_request: followup_request,
-                                            })
-                                            .await?;
-                                    }
-                                    None => {
-                                        eprintln!("Auto-resolve: failed to capture follow-up snapshot or no diff detected; stopping auto-resolve.");
-                                        auto_resolve_state = None;
-                                        auto_resolve_base_snapshot = None;
-                                        auto_resolve_followup_guard = None;
-                                        auto_resolve_fix_guard = None;
-                                        request_shutdown(
-                                            &conversation,
-                                            &auto_review_tracker,
-                                            &mut shutdown_pending,
-                                            &mut shutdown_sent,
-                                            &mut shutdown_deadline,
-                                            auto_review_grace_enabled,
-                                        )
-                                        .await?;
-                                    }
-                                }
-                            }
-                        }
-                        AutoResolvePhase::AwaitingJudge { .. } => {
-                            // Legacy branch: fall back to requesting a follow-up review.
-                            if let Some(state) = auto_resolve_state.as_mut() {
-                                state.last_fix_message = last_agent_message.clone();
-                                state.phase = AutoResolvePhase::WaitingForReview;
-                            }
-                            if let Some(base) = auto_resolve_base_snapshot.as_ref() {
-                                if !head_is_ancestor_of_base(&config.cwd, base.id()) {
-                                    eprintln!("Auto-resolve: base snapshot no longer matches current HEAD; stopping to avoid stale review.");
-                                    auto_resolve_state = None;
-                                    auto_resolve_base_snapshot = None;
-                                    request_shutdown(
-                                        &conversation,
-                                        &auto_review_tracker,
-                                        &mut shutdown_pending,
-                                        &mut shutdown_sent,
-                                        &mut shutdown_deadline,
-                                        auto_review_grace_enabled,
-                                    )
-                                    .await?;
-                                    continue;
-                                }
-                                match capture_snapshot_against_base(
-                                    &config.cwd,
-                                    base,
-                                    "auto-resolve follow-up snapshot",
-                                ) {
-                                    Some((snap, diff_paths)) => {
-                                        if should_skip_followup(
-                                            state_snapshot.last_reviewed_commit.as_deref(),
-                                            &snap,
-                                        ) {
-                                            eprintln!("Auto-resolve: follow-up snapshot is identical to last reviewed commit; ending loop to avoid duplicate review.");
-                                            auto_resolve_state = None;
-                                            auto_resolve_base_snapshot = None;
-                                            request_shutdown(
-                                                &conversation,
-                                                &auto_review_tracker,
-                                                &mut shutdown_pending,
-                                                &mut shutdown_sent,
-                                                &mut shutdown_deadline,
-                                                auto_review_grace_enabled,
-                                            )
-                                            .await?;
-                                            continue;
-                                        }
-
-                                        if let Some(state) = auto_resolve_state.as_mut() {
-                                            state.last_reviewed_commit = Some(snap.id().to_string());
-                                        }
-
-                                        let followup_request = build_followup_review_request(
-                                            &state_snapshot,
-                                            &config.cwd,
-                                            Some(&snap),
-                                            Some(diff_paths.as_slice()),
-                                            Some(base.id()),
-                                        )
-                                        .await;
-                                        last_review_epoch = Some(current_snapshot_epoch_for(&config.cwd));
-                                        let _ = conversation
-                                            .submit(Op::Review {
-                                                review_request: followup_request,
-                                            })
-                                            .await?;
-                                    }
-                                    None => {
-                                        eprintln!("Auto-resolve: failed to capture follow-up snapshot or no diff detected; stopping auto-resolve.");
-                                        auto_resolve_state = None;
-                                        auto_resolve_base_snapshot = None;
-                                        auto_resolve_followup_guard = None;
-                                        auto_resolve_fix_guard = None;
-                                    }
-                                }
-                            }
-                        }
-                        AutoResolvePhase::WaitingForReview => {
-                            // Task complete from a review; handled in ExitedReviewMode.
-                        }
-                    }
-                }
-
-                if auto_resolve_state.is_none() && !shutdown_sent {
-                    auto_resolve_base_snapshot = None;
-                    request_shutdown(
-                        &conversation,
-                        &auto_review_tracker,
-                        &mut shutdown_pending,
-                        &mut shutdown_sent,
-                        &mut shutdown_deadline,
-                        auto_review_grace_enabled,
-                    )
-                    .await?;
-                }
-            }
-            _ => {}
-        }
-
-        let shutdown: CodexStatus = event_processor.process_event(event);
-        match shutdown {
-            CodexStatus::Running => {}
-            CodexStatus::InitiateShutdown => {
-                request_shutdown(
-                    &conversation,
-                    &auto_review_tracker,
-                    &mut shutdown_pending,
-                    &mut shutdown_sent,
-                    &mut shutdown_deadline,
-                    auto_review_grace_enabled,
-                )
-                .await?;
-            }
-            CodexStatus::Shutdown => {
-                break;
-            }
-        }
-
-        if shutdown_pending {
-            request_shutdown(
-                &conversation,
-                &auto_review_tracker,
-                &mut shutdown_pending,
-                &mut shutdown_sent,
-                &mut shutdown_deadline,
-                auto_review_grace_enabled,
-            )
-            .await?;
-        }
-            }
-            _ = tokio::time::sleep_until(shutdown_deadline.unwrap_or_else(Instant::now)),
-                if shutdown_pending && shutdown_deadline.is_some() && auto_review_grace_enabled =>
-            {
-                request_shutdown(
-                    &conversation,
-                    &auto_review_tracker,
-                    &mut shutdown_pending,
-                    &mut shutdown_sent,
-                    &mut shutdown_deadline,
-                    auto_review_grace_enabled,
-                )
-                .await?;
-            }
-        }
-    }
-    if let Some(path) = review_output_json {
-        if !review_outputs.is_empty() {
-            let _ = write_review_json(path, &review_outputs, final_review_snapshot.as_ref());
-        }
-    }
-    if review_runs > 0 {
-        eprintln!("Review runs: {} (auto_resolve={} max_attempts={})", review_runs, config.tui.review_auto_resolve, max_auto_resolve_attempts);
-    }
-    if error_seen {
-        std::process::exit(1);
-    }
-
-    Ok(())
-}
-
-fn install_exec_panic_hook() {
-    static PANIC_HOOK_ONCE: Once = Once::new();
-
-    PANIC_HOOK_ONCE.call_once(|| {
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let current_thread = std::thread::current();
-            let thread_name = current_thread.name().unwrap_or("unnamed");
-            let thread_id = format!("{:?}", current_thread.id());
-            let backtrace = Backtrace::force_capture().to_string();
-
-            if let Some(location) = info.location() {
-                tracing::error!(
-                    thread_name,
-                    thread_id,
-                    file = location.file(),
-                    line = location.line(),
-                    column = location.column(),
-                    panic = %info,
-                    backtrace = %backtrace,
-                    "exec panic captured"
-                );
-            } else {
-                tracing::error!(
-                    thread_name,
-                    thread_id,
-                    panic = %info,
-                    backtrace = %backtrace,
-                    "exec panic captured"
-                );
-            }
-
-            prev_hook(info);
-        }));
-    });
-}
-
-async fn resolve_resume_path(
-    config: &Config,
-    args: &crate::cli::ResumeArgs,
-) -> anyhow::Result<Option<PathBuf>> {
-    if !args.last && args.session_id.is_none() {
-        return Ok(None);
-    }
-
-    let catalog = SessionCatalog::new(config.code_home.clone());
-
-    if let Some(id_str) = args.session_id.as_deref() {
-        let entry = catalog
-            .find_by_id(id_str)
-            .await
-            .context("failed to look up session by id")?;
-        Ok(entry.map(|entry| entry_to_rollout_path(&config.code_home, &entry)))
-    } else if args.last {
-        let query = SessionQuery {
-            cwd: None,
-            git_root: None,
-            sources: vec![SessionSource::Cli, SessionSource::VSCode, SessionSource::Exec],
-            min_user_messages: 1,
-            include_archived: false,
-            include_deleted: false,
-            limit: Some(1),
-        };
-        let entry = catalog
-            .get_latest(&query)
-            .await
-            .context("failed to get latest session from catalog")?;
-        Ok(entry.map(|entry| entry_to_rollout_path(&config.code_home, &entry)))
-    } else {
-        Ok(None)
-    }
-}
-
-struct TurnResult {
-    last_agent_message: Option<String>,
-    error_seen: bool,
-}
-
-async fn run_auto_drive_session(
-    goal: String,
-    images: Vec<PathBuf>,
-    config: Config,
-    conversation: Arc<CodexConversation>,
-    mut event_processor: Box<dyn EventProcessor>,
-    last_message_path: Option<PathBuf>,
-    run_deadline: Option<Instant>,
-) -> anyhow::Result<()> {
-    let mut final_last_message: Option<String> = None;
-    let mut error_seen = false;
-    let mut auto_review_tracker = AutoReviewTracker::new(&config.cwd);
-    let mut shutdown_sent = false;
-
-    if !images.is_empty() {
-        let items: Vec<InputItem> = images
-            .into_iter()
-            .map(|path| InputItem::LocalImage { path })
-            .collect();
-        let initial_images_event_id = conversation
-            .submit(Op::UserInput {
-                items,
-                final_output_json_schema: None,
-            })
-            .await?;
-        loop {
-            let event = if let Some(deadline) = run_deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, conversation.next_event()).await {
-                    Ok(event) => event?,
-                    Err(_) => {
-                        eprintln!(
-                            "Time budget exceeded (--max-seconds={})",
-                            config.max_run_seconds.unwrap_or_default()
-                        );
-                        let _ = conversation.submit(Op::Interrupt).await;
-                        let _ = conversation.submit(Op::Shutdown).await;
-                        return Err(anyhow::anyhow!("Time budget exceeded"));
-                    }
-                }
-            } else {
-                conversation.next_event().await?
-            };
-
-            let is_complete = event.id == initial_images_event_id
-                && matches!(
-                    event.msg,
-                    EventMsg::TaskComplete(TaskCompleteEvent {
-                        last_agent_message: _,
-                    })
-                );
-            let status = event_processor.process_event(event);
-            if is_complete || matches!(status, CodexStatus::Shutdown) {
-                break;
-            }
-        }
-    }
-
-    let mut history = AutoDriveHistory::new();
-
-    let mut auto_drive_pid_guard =
-        AutoDrivePidFile::write(&config.code_home, Some(goal.as_str()), AutoDriveMode::Exec);
-
-	    let auto_config = build_auto_drive_exec_config(&config);
-
-    let (auto_tx, mut auto_rx) = tokio::sync::mpsc::unbounded_channel();
-    let sender = AutoCoordinatorEventSender::new(move |event| {
-        let _ = auto_tx.send(event);
-    });
-
-    let handle = start_auto_coordinator(
-        sender,
-        goal.clone(),
-        history.raw_snapshot(),
-        auto_config,
-        config.debug,
-        false,
-    )?;
-
-    loop {
-        let maybe_event = if let Some(deadline) = run_deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, auto_rx.recv()).await {
-                Ok(event) => event,
-                Err(_) => {
-                    let _ = handle.send(AutoCoordinatorCommand::Stop);
-                    handle.cancel();
-                    let _ = conversation.submit(Op::Interrupt).await;
-                    let _ = conversation.submit(Op::Shutdown).await;
-                    return Err(anyhow::anyhow!("Time budget exceeded"));
-                }
-            }
-        } else {
-            auto_rx.recv().await
-        };
-
-        let Some(event) = maybe_event else {
-            break;
-        };
-
-        match event {
-            AutoCoordinatorEvent::Thinking { delta, .. } => {
-                println!("[auto] {delta}");
-            }
-            AutoCoordinatorEvent::Action { message } => {
-                println!("[auto] {message}");
-            }
-            AutoCoordinatorEvent::TokenMetrics {
-                total_usage,
-                last_turn_usage,
-                turn_count,
-                ..
-            } => {
-                println!(
-                    "[auto] turn {} tokens (turn/total): {}/{}",
-                    turn_count,
-                    last_turn_usage.blended_total(),
-                    total_usage.blended_total()
-                );
-            }
-            AutoCoordinatorEvent::CompactedHistory { conversation, .. } => {
-                history.replace_all(conversation.to_vec());
-            }
-            AutoCoordinatorEvent::UserReply {
-                user_response,
-                cli_command,
-            } => {
-                if let Some(text) = user_response.filter(|s| !s.trim().is_empty()) {
-                    history.append_raw(&[make_assistant_message(text.clone())]);
-                    final_last_message = Some(text);
-                }
-
-                if let Some(cmd) = cli_command {
-                    let prompt_text = cmd.trim();
-                    if !prompt_text.is_empty() {
-                        history.append_raw(&[make_user_message(prompt_text.to_string())]);
-                        let TurnResult {
-                            last_agent_message,
-                            error_seen: turn_error,
-                        } = match submit_and_wait(
-                            &conversation,
-                            event_processor.as_mut(),
-                            &mut auto_review_tracker,
-                            prompt_text.to_string(),
-                            run_deadline,
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(err) => {
-                                let _ = handle.send(AutoCoordinatorCommand::Stop);
-                                handle.cancel();
-                                return Err(err);
-                            }
-                        };
-                        error_seen |= turn_error;
-                        if let Some(text) = last_agent_message {
-                            history.append_raw(&[make_assistant_message(text.clone())]);
-                            final_last_message = Some(text);
-                        }
-                        let _ = handle
-                            .send(AutoCoordinatorCommand::UpdateConversation(
-                                history.raw_snapshot().into(),
-                            ));
-                    }
-                }
-            }
-            AutoCoordinatorEvent::Decision {
-                seq,
-                status,
-                status_title,
-                status_sent_to_user,
-                goal: maybe_goal,
-                cli,
-                agents_timing,
-                agents,
-                transcript,
-            } => {
-                history.append_raw(&transcript);
-                let _ = handle.send(AutoCoordinatorCommand::AckDecision { seq });
-
-                if let Some(title) = status_title.filter(|s| !s.trim().is_empty()) {
-                    println!("[auto] status: {title}");
-                }
-                if let Some(sent) = status_sent_to_user.filter(|s| !s.trim().is_empty()) {
-                    println!("[auto] update: {sent}");
-                }
-                if let Some(goal_text) = maybe_goal.filter(|s| !s.trim().is_empty()) {
-                    println!("[auto] goal: {goal_text}");
-                }
-
-                let Some(cli_action) = cli else {
-                    if matches!(status, AutoCoordinatorStatus::Success | AutoCoordinatorStatus::Failed)
-                    {
-                        let _ = handle.send(AutoCoordinatorCommand::Stop);
-                    }
+        let server_event = tokio::select! {
+            maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
+                if maybe_interrupt.is_none() {
+                    interrupt_channel_open = false;
                     continue;
-                };
-
-                let prompt_text = build_auto_prompt(&cli_action, &agents, agents_timing);
-                history.append_raw(&[make_user_message(prompt_text.clone())]);
-
-                let TurnResult {
-                    last_agent_message,
-                    error_seen: turn_error,
-                } = match submit_and_wait(
-                    &conversation,
-                    event_processor.as_mut(),
-                    &mut auto_review_tracker,
-                    prompt_text,
-                    run_deadline,
+                }
+                if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
+                    &client,
+                    ClientRequest::TurnInterrupt {
+                        request_id: request_ids.next(),
+                        params: TurnInterruptParams {
+                            thread_id: primary_thread_id_for_requests.clone(),
+                            turn_id: task_id.clone(),
+                        },
+                    },
+                    "turn/interrupt",
                 )
                 .await
                 {
-                    Ok(result) => result,
-                    Err(err) => {
-                        let _ = handle.send(AutoCoordinatorCommand::Stop);
-                        handle.cancel();
-                        return Err(err);
-                    }
-                };
-                error_seen |= turn_error;
-                if let Some(text) = last_agent_message {
-                    history.append_raw(&[make_assistant_message(text.clone())]);
-                    final_last_message = Some(text);
+                    warn!("turn/interrupt failed: {err}");
                 }
-
-                if handle
-                    .send(AutoCoordinatorCommand::UpdateConversation(
-                        history.raw_snapshot().into(),
-                    ))
-                    .is_err()
-                {
-                    break;
-                }
+                continue;
             }
-            AutoCoordinatorEvent::StopAck => {
-                break;
-            }
-        }
-    }
-
-    handle.cancel();
-
-    if !auto_review_tracker.is_running() {
-        let grace_deadline = Instant::now() + Duration::from_millis(AUTO_REVIEW_SHUTDOWN_GRACE_MS);
-        while Instant::now() < grace_deadline {
-            let remaining = grace_deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, conversation.next_event()).await {
-                Ok(Ok(event)) => {
-                    if let EventMsg::AgentStatusUpdate(status) = &event.msg {
-                        let completions = auto_review_tracker.update(status);
-                        for completion in completions {
-                            emit_auto_review_completion(&completion);
-                        }
-                    }
-
-                    let processor_status = event_processor.process_event(event);
-                    if matches!(processor_status, CodexStatus::Shutdown)
-                        || auto_review_tracker.is_running()
-                    {
-                        break;
-                    }
-                }
-                Ok(Err(err)) => return Err(err.into()),
-                Err(_) => break,
-            }
-        }
-    }
-
-    if auto_review_tracker.is_running() {
-        loop {
-            let event = if let Some(deadline) = run_deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, conversation.next_event()).await {
-                    Ok(event) => event?,
-                    Err(_) => {
-                        eprintln!(
-                            "Time budget exceeded (--max-seconds={})",
-                            config.max_run_seconds.unwrap_or_default()
-                        );
-                        let _ = conversation.submit(Op::Interrupt).await;
-                        let _ = conversation.submit(Op::Shutdown).await;
-                        return Err(anyhow::anyhow!("Time budget exceeded"));
-                    }
-                }
-            } else {
-                conversation.next_event().await?
-            };
-
-            if let EventMsg::AgentStatusUpdate(status) = &event.msg {
-                let completions = auto_review_tracker.update(status);
-                for completion in completions {
-                    emit_auto_review_completion(&completion);
-                }
-            }
-
-            let status = event_processor.process_event(event);
-
-            if !auto_review_tracker.is_running() {
-                break;
-            }
-
-            if matches!(status, CodexStatus::Shutdown) {
-                break;
-            }
-        }
-    }
-
-    let _ = send_shutdown_if_ready(&conversation, &auto_review_tracker, &mut shutdown_sent).await?;
-
-    loop {
-        let event = if let Some(deadline) = run_deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, conversation.next_event()).await {
-                Ok(event) => event?,
-                Err(_) => {
-                    eprintln!(
-                        "Time budget exceeded (--max-seconds={})",
-                        config.max_run_seconds.unwrap_or_default()
-                    );
-                    let _ = conversation.submit(Op::Interrupt).await;
-                    let _ = conversation.submit(Op::Shutdown).await;
-                    return Err(anyhow::anyhow!("Time budget exceeded"));
-                }
-            }
-        } else {
-            conversation.next_event().await?
+            maybe_event = client.next_event() => maybe_event,
         };
 
-        if let EventMsg::AgentStatusUpdate(status) = &event.msg {
-            let completions = auto_review_tracker.update(status);
-            for completion in completions {
-                emit_auto_review_completion(&completion);
+        let Some(server_event) = server_event else {
+            break;
+        };
+
+        match server_event {
+            InProcessServerEvent::ServerRequest(request) => {
+                handle_server_request(&client, request, &mut error_seen).await;
+            }
+            InProcessServerEvent::ServerNotification(mut notification) => {
+                if let ServerNotification::Error(payload) = &notification {
+                    if payload.thread_id == primary_thread_id_for_requests
+                        && payload.turn_id == task_id
+                        && !payload.will_retry
+                    {
+                        error_seen = true;
+                    }
+                } else if let ServerNotification::TurnCompleted(payload) = &notification
+                    && payload.thread_id == primary_thread_id_for_requests
+                    && payload.turn.id == task_id
+                    && matches!(
+                        payload.turn.status,
+                        codex_app_server_protocol::TurnStatus::Failed
+                            | codex_app_server_protocol::TurnStatus::Interrupted
+                    )
+                {
+                    error_seen = true;
+                }
+
+                maybe_backfill_turn_completed_items(
+                    config.ephemeral,
+                    &client,
+                    &mut request_ids,
+                    &mut notification,
+                )
+                .await;
+
+                if should_process_notification(
+                    &notification,
+                    &primary_thread_id_for_requests,
+                    &task_id,
+                ) {
+                    match event_processor.process_server_notification(notification) {
+                        CodexStatus::Running => {}
+                        CodexStatus::InitiateShutdown => {
+                            if let Err(err) = request_shutdown(
+                                &client,
+                                &mut request_ids,
+                                &primary_thread_id_for_requests,
+                            )
+                            .await
+                            {
+                                warn!("thread/unsubscribe failed during shutdown: {err}");
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            InProcessServerEvent::Lagged { skipped } => {
+                let message = lagged_event_warning_message(skipped);
+                warn!("{message}");
+                event_processor.process_warning(message);
             }
         }
-
-        if matches!(event.msg, EventMsg::ShutdownComplete) {
-            break;
-        }
-        let status = event_processor.process_event(event);
-        if matches!(status, CodexStatus::Shutdown) {
-            break;
-        }
     }
 
-    if let Some(path) = last_message_path.as_deref() {
-        handle_last_message(final_last_message.as_deref(), path);
+    if let Err(err) = client.shutdown().await {
+        warn!("in-process app-server shutdown failed: {err}");
     }
-
+    event_processor.print_final_output();
     if error_seen {
-        if let Some(guard) = auto_drive_pid_guard.take() {
-            guard.cleanup();
-        }
         std::process::exit(1);
     }
 
     Ok(())
 }
 
-fn append_timeboxed_auto_drive_goal(goal: &str) -> String {
-    let trimmed_goal = goal.trim();
-    if trimmed_goal.is_empty() {
-        return AUTO_EXEC_TIMEBOXED_GOAL_SUFFIX.to_string();
-    }
-
-    format!("{trimmed_goal}\n\n{AUTO_EXEC_TIMEBOXED_GOAL_SUFFIX}")
-}
-
-fn merge_developer_message(existing: Option<String>, extra: &str) -> Option<String> {
-    let extra_trimmed = extra.trim();
-    if extra_trimmed.is_empty() {
-        return existing;
-    }
-
-    match existing {
-        Some(mut message) => {
-            if !message.trim().is_empty() {
-                message.push_str("\n\n");
-            }
-            message.push_str(extra_trimmed);
-            Some(message)
-        }
-        None => Some(extra_trimmed.to_string()),
+fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
+    let permissions = permissions_selection_from_config(config);
+    let sandbox = permissions.is_none().then(|| {
+        sandbox_mode_from_permission_profile(
+            &config.permissions.permission_profile(),
+            config.cwd.as_path(),
+        )
+    });
+    ThreadStartParams {
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        cwd: Some(config.cwd.to_string_lossy().to_string()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        approvals_reviewer: approvals_reviewer_override_from_config(config),
+        sandbox: sandbox.flatten(),
+        permissions,
+        config: config_request_overrides_from_config(config),
+        ephemeral: Some(config.ephemeral),
+        ..ThreadStartParams::default()
     }
 }
 
-#[derive(Default, Debug, Clone)]
-struct AutoReviewSummary {
-    has_findings: bool,
-    findings: usize,
-    summary: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct AutoReviewCompletion {
-    branch: Option<String>,
-    worktree_path: Option<PathBuf>,
-    summary: AutoReviewSummary,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-struct AutoReviewTracker {
-    running: HashSet<String>,
-    processed: HashSet<String>,
-    run_ids: HashMap<String, uuid::Uuid>,
-    git_root: PathBuf,
-}
-
-impl AutoReviewTracker {
-    fn new(cwd: &Path) -> Self {
-        let git_root = get_git_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-        reconcile_auto_review_store_after_restart(&git_root);
-
-        Self {
-            running: HashSet::new(),
-            processed: HashSet::new(),
-            run_ids: HashMap::new(),
-            git_root,
-        }
-    }
-
-    fn update(&mut self, event: &AgentStatusUpdateEvent) -> Vec<AutoReviewCompletion> {
-        let mut completions: Vec<AutoReviewCompletion> = Vec::new();
-
-        for agent in event.agents.iter() {
-            if !matches!(agent.source_kind, Some(AgentSourceKind::AutoReview)) {
-                continue;
-            }
-
-            let status = agent.status.to_ascii_lowercase();
-            let run_id = if let Some(run_id) = self.run_ids.get(&agent.id).copied() {
-                run_id
-            } else {
-                let run_id = find_existing_auto_review_run_id(&self.git_root, &agent.id)
-                    .unwrap_or_else(uuid::Uuid::new_v4);
-                self.run_ids.insert(agent.id.clone(), run_id);
-                run_id
-            };
-            self.record_agent_status(run_id, agent, status.as_str());
-            if status == "pending" || status == "running" {
-                self.running.insert(agent.id.clone());
-                continue;
-            }
-
-            let is_terminal = matches!(
-                status.as_str(),
-                "completed" | "failed" | "cancelled"
-            );
-            if !is_terminal || self.processed.contains(&agent.id) {
-                continue;
-            }
-
-            self.running.remove(&agent.id);
-            self.processed.insert(agent.id.clone());
-
-            let summary = agent
-                .result
-                .as_deref()
-                .map(parse_auto_review_summary)
-                .unwrap_or_default();
-
-            completions.push(AutoReviewCompletion {
-                branch: agent.batch_id.clone(),
-                worktree_path: agent
-                    .batch_id
-                    .as_deref()
-                    .and_then(|branch| resolve_auto_review_worktree_path(&self.git_root, branch)),
-                summary,
-                error: agent.error.clone(),
-            });
-        }
-
-        completions
-    }
-
-    fn record_agent_status(
-        &self,
-        run_id: uuid::Uuid,
-        agent: &code_core::protocol::AgentInfo,
-        status: &str,
-    ) {
-        let now = unix_now_secs();
-        let mut store = match AutoReviewRunStore::open(&self.git_root) {
-            Ok(store) => store,
-            Err(err) => {
-                tracing::warn!(?err, run_id = %run_id, "failed to open exec auto-review run store");
-                return;
-            }
-        };
-
-        let durable_status = match status {
-            "completed" => AutoReviewRunStatus::Completed,
-            "failed" => AutoReviewRunStatus::Failed,
-            "cancelled" => AutoReviewRunStatus::Cancelled,
-            "running" => AutoReviewRunStatus::Reviewing,
-            _ => AutoReviewRunStatus::Pending,
-        };
-
-        let mut run = store
-            .get(run_id)
-            .cloned()
-            .unwrap_or_else(|| AutoReviewRun::new(run_id, AutoReviewRunSource::Exec, now));
-        run.source = AutoReviewRunSource::Exec;
-        run.agent_id = Some(agent.id.clone());
-        run.batch_id = agent.batch_id.clone().or_else(|| run.batch_id.clone());
-        run.branch = agent.batch_id.clone().or_else(|| run.branch.clone());
-        run.snapshot_commit = agent.worktree_base.clone().or_else(|| run.snapshot_commit.clone());
-        run.owner_session_id = agent
-            .owner_session_id
-            .as_deref()
-            .and_then(|id| uuid::Uuid::parse_str(id).ok())
-            .or(run.owner_session_id);
-        run.model = agent.model.clone().or_else(|| run.model.clone());
-        run.token_count = agent.token_count.or(run.token_count);
-        let elapsed_secs = Some(now.saturating_sub(run.started_at.unwrap_or(run.created_at)));
-        run.freshness = auto_review_freshness_for_agent_status(
-            durable_status.is_terminal(),
-            elapsed_secs,
-            agent.seconds_since_last_activity,
-            AUTO_REVIEW_STALE_SECS,
-        );
-        run.mark_status(durable_status, now);
-        if !durable_status.is_terminal() || agent.last_activity_at.is_some() {
-            run.mark_activity(now);
-        }
-        if let Some(error) = agent.error.as_deref() {
-            run.error_summary = Some(summarize_auto_review_error(error));
-        }
-        if durable_status.is_terminal()
-            && let Some(raw_result) = agent.result.as_deref()
-        {
-            let summary = parse_auto_review_summary(raw_result);
-            if summary.has_findings {
-                run.finding_count = summary.findings.max(1);
-            }
-            run.summary_digest = summary
-                .summary
-                .as_deref()
-                .map(|summary| summarize_auto_review_text(summary, 240))
-                .or(run.summary_digest);
-        }
-
-        if let Err(err) = store.upsert(run) {
-            tracing::warn!(?err, run_id = %run_id, "failed to persist exec auto-review run");
-            return;
-        }
-
-        if durable_status == AutoReviewRunStatus::Completed
-            && let Some(output) = parse_auto_review_output(agent.result.as_deref())
-        {
-            match AutoReviewRunStore::open(&self.git_root) {
-                Ok(mut store) => {
-                    if let Err(err) = store.write_output(run_id, &output) {
-                        tracing::warn!(?err, run_id = %run_id, "failed to persist exec auto-review output");
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(?err, run_id = %run_id, "failed to open exec auto-review store for output");
-                }
-            }
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        !self.running.is_empty()
+fn thread_resume_params_from_config(config: &Config, thread_id: String) -> ThreadResumeParams {
+    let permissions = permissions_selection_from_config(config);
+    let sandbox = permissions.is_none().then(|| {
+        sandbox_mode_from_permission_profile(
+            &config.permissions.permission_profile(),
+            config.cwd.as_path(),
+        )
+    });
+    ThreadResumeParams {
+        thread_id,
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        cwd: Some(config.cwd.to_string_lossy().to_string()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        approvals_reviewer: approvals_reviewer_override_from_config(config),
+        sandbox: sandbox.flatten(),
+        permissions,
+        config: config_request_overrides_from_config(config),
+        ..ThreadResumeParams::default()
     }
 }
 
-fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+fn permissions_selection_from_config(config: &Config) -> Option<PermissionProfileSelectionParams> {
+    config
+        .permissions
+        .active_permission_profile()
+        .map(permissions_selection_from_active_profile)
 }
 
-fn reconcile_auto_review_store_after_restart(git_root: &Path) {
-    let now = unix_now_secs();
-    match AutoReviewRunStore::open(git_root) {
-        Ok(mut store) => {
-            if let Err(err) = store.reconcile_orphaned_in_flight(std::iter::empty::<&str>(), now) {
-                tracing::warn!(?err, "failed to reconcile exec auto-review run store after restart");
+fn permissions_selection_from_active_profile(
+    active: ActivePermissionProfile,
+) -> PermissionProfileSelectionParams {
+    let modifications = active
+        .modifications
+        .into_iter()
+        .map(|modification| match modification {
+            ActivePermissionProfileModification::AdditionalWritableRoot { path } => {
+                PermissionProfileModificationParams::AdditionalWritableRoot { path }
             }
-        }
-        Err(err) => {
-            tracing::warn!(?err, "failed to open exec auto-review run store for restart reconciliation");
-        }
-    }
-}
-
-fn find_existing_auto_review_run_id(git_root: &Path, agent_id: &str) -> Option<uuid::Uuid> {
-    let store = AutoReviewRunStore::open(git_root).ok()?;
-    store
-        .runs()
-        .filter(|run| run.agent_id.as_deref() == Some(agent_id))
-        .max_by(|left, right| {
-            let left_in_flight = left.status.is_in_flight();
-            let right_in_flight = right.status.is_in_flight();
-            left_in_flight
-                .cmp(&right_in_flight)
-                .then_with(|| left.updated_at.cmp(&right.updated_at))
-                .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.run_id.cmp(&right.run_id))
         })
-        .map(|run| run.run_id)
+        .collect::<Vec<_>>();
+    PermissionProfileSelectionParams::Profile {
+        id: active.id,
+        modifications: (!modifications.is_empty()).then_some(modifications),
+    }
 }
 
-fn summarize_auto_review_error(error: &str) -> String {
-    let trimmed = error.trim();
-    if trimmed.is_empty() {
-        return "Auto review failed before producing findings.".to_string();
+fn sandbox_mode_from_permission_profile(
+    permission_profile: &PermissionProfile,
+    cwd: &Path,
+) -> Option<codex_app_server_protocol::SandboxMode> {
+    match permission_profile {
+        PermissionProfile::Disabled => {
+            Some(codex_app_server_protocol::SandboxMode::DangerFullAccess)
+        }
+        PermissionProfile::External { .. } => None,
+        PermissionProfile::Managed { .. } => {
+            let file_system_policy = permission_profile.file_system_sandbox_policy();
+            if file_system_policy.has_full_disk_write_access() {
+                permission_profile
+                    .network_sandbox_policy()
+                    .is_enabled()
+                    .then_some(codex_app_server_protocol::SandboxMode::DangerFullAccess)
+            } else if file_system_policy.can_write_path_with_cwd(cwd, cwd) {
+                Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite)
+            } else {
+                Some(codex_app_server_protocol::SandboxMode::ReadOnly)
+            }
+        }
     }
-    trimmed
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("Auto review failed before producing findings.")
-        .chars()
-        .take(240)
-        .collect()
 }
 
-fn summarize_auto_review_text(text: &str, max_chars: usize) -> String {
-    let trimmed = text.trim();
-    let mut chars = trimmed.chars();
-    let mut out = String::new();
-    for _ in 0..max_chars {
-        let Some(ch) = chars.next() else {
-            return out;
-        };
-        out.push(ch);
-    }
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
+fn config_request_overrides_from_config(config: &Config) -> Option<HashMap<String, Value>> {
+    config
+        .active_profile
+        .as_ref()
+        .map(|profile| HashMap::from([("profile".to_string(), Value::String(profile.clone()))]))
 }
 
-fn emit_auto_review_completion(completion: &AutoReviewCompletion) {
-    let branch = completion.branch.as_deref().unwrap_or("auto-review");
+fn approvals_reviewer_override_from_config(
+    config: &Config,
+) -> Option<codex_app_server_protocol::ApprovalsReviewer> {
+    Some(config.approvals_reviewer.into())
+}
 
-    if let Some(err) = completion.error.as_deref() {
-        eprintln!("[auto-review] {branch}: failed: {err}");
+async fn send_request_with_response<T>(
+    client: &InProcessAppServerClient,
+    request: ClientRequest,
+    method: &str,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    client.request_typed(request).await.map_err(|err| {
+        if method.is_empty() {
+            err.to_string()
+        } else {
+            format!("{method}: {err}")
+        }
+    })
+}
+
+fn session_configured_from_thread_start_response(
+    response: &ThreadStartResponse,
+    config: &Config,
+) -> Result<SessionConfiguredEvent, String> {
+    session_configured_from_thread_response(
+        &response.thread.session_id,
+        &response.thread.id,
+        response.thread.name.clone(),
+        response.thread.path.clone(),
+        response.model.clone(),
+        response.model_provider.clone(),
+        response.service_tier.clone(),
+        response.approval_policy.to_core(),
+        response.approvals_reviewer.to_core(),
+        response
+            .permission_profile
+            .clone()
+            .map(Into::into)
+            .unwrap_or_else(|| config.permissions.permission_profile()),
+        response.active_permission_profile.clone().map(Into::into),
+        response.cwd.clone(),
+        response.reasoning_effort,
+    )
+}
+
+fn session_configured_from_thread_resume_response(
+    response: &ThreadResumeResponse,
+    config: &Config,
+) -> Result<SessionConfiguredEvent, String> {
+    session_configured_from_thread_response(
+        &response.thread.session_id,
+        &response.thread.id,
+        response.thread.name.clone(),
+        response.thread.path.clone(),
+        response.model.clone(),
+        response.model_provider.clone(),
+        response.service_tier.clone(),
+        response.approval_policy.to_core(),
+        response.approvals_reviewer.to_core(),
+        response
+            .permission_profile
+            .clone()
+            .map(Into::into)
+            .unwrap_or_else(|| config.permissions.permission_profile()),
+        response.active_permission_profile.clone().map(Into::into),
+        response.cwd.clone(),
+        response.reasoning_effort,
+    )
+}
+
+fn review_target_to_api(target: ReviewTarget) -> ApiReviewTarget {
+    match target {
+        ReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
+        ReviewTarget::BaseBranch { branch } => ApiReviewTarget::BaseBranch { branch },
+        ReviewTarget::Commit { sha, title } => ApiReviewTarget::Commit { sha, title },
+        ReviewTarget::Custom { instructions } => ApiReviewTarget::Custom { instructions },
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session mapping keeps explicit fields"
+)]
+fn session_configured_from_thread_response(
+    session_id: &str,
+    thread_id: &str,
+    thread_name: Option<String>,
+    rollout_path: Option<PathBuf>,
+    model: String,
+    model_provider_id: String,
+    service_tier: Option<String>,
+    approval_policy: AskForApproval,
+    approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
+    permission_profile: PermissionProfile,
+    active_permission_profile: Option<codex_protocol::models::ActivePermissionProfile>,
+    cwd: AbsolutePathBuf,
+    reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+) -> Result<SessionConfiguredEvent, String> {
+    let session_id = SessionId::from_string(session_id)
+        .map_err(|err| format!("session id `{session_id}` is invalid: {err}"))?;
+    let thread_id = ThreadId::from_string(thread_id)
+        .map_err(|err| format!("thread id `{thread_id}` is invalid: {err}"))?;
+
+    Ok(SessionConfiguredEvent {
+        session_id,
+        thread_id,
+        forked_from_id: None,
+        thread_source: None,
+        thread_name,
+        model,
+        model_provider_id,
+        service_tier,
+        approval_policy,
+        approvals_reviewer,
+        permission_profile,
+        active_permission_profile,
+        cwd,
+        reasoning_effort,
+        initial_messages: None,
+        network_proxy: None,
+        rollout_path,
+    })
+}
+
+fn lagged_event_warning_message(skipped: usize) -> String {
+    format!("in-process app-server event stream lagged; dropped {skipped} events")
+}
+
+fn should_process_notification(
+    notification: &ServerNotification,
+    thread_id: &str,
+    turn_id: &str,
+) -> bool {
+    match notification {
+        ServerNotification::ConfigWarning(_) | ServerNotification::DeprecationNotice(_) => true,
+        ServerNotification::Error(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::HookCompleted(notification) => {
+            notification.thread_id == thread_id
+                && notification
+                    .turn_id
+                    .as_deref()
+                    .is_none_or(|candidate| candidate == turn_id)
+        }
+        ServerNotification::HookStarted(notification) => {
+            notification.thread_id == thread_id
+                && notification
+                    .turn_id
+                    .as_deref()
+                    .is_none_or(|candidate| candidate == turn_id)
+        }
+        ServerNotification::ItemCompleted(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::ItemStarted(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::ModelRerouted(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::ModelVerification(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::ThreadTokenUsageUpdated(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::TurnCompleted(notification) => {
+            notification.thread_id == thread_id && notification.turn.id == turn_id
+        }
+        ServerNotification::TurnDiffUpdated(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::TurnPlanUpdated(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
+        ServerNotification::TurnStarted(notification) => {
+            notification.thread_id == thread_id && notification.turn.id == turn_id
+        }
+        _ => false,
+    }
+}
+
+async fn maybe_backfill_turn_completed_items(
+    thread_ephemeral: bool,
+    client: &InProcessAppServerClient,
+    request_ids: &mut RequestIdSequencer,
+    notification: &mut ServerNotification,
+) {
+    // In-process delivery may drop non-terminal item notifications under backpressure while still
+    // guaranteeing `turn/completed`. Because app-server currently emits that completion with an
+    // empty `turn.items`, exec does one last `thread/read` here so human/json output can recover
+    // the final message and reconcile any still-running items before shutdown.
+    if !should_backfill_turn_completed_items(thread_ephemeral, notification) {
         return;
     }
 
-    let summary_text = completion
-        .summary
-        .summary
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("No issues reported.");
+    let ServerNotification::TurnCompleted(payload) = notification else {
+        return;
+    };
 
-    if completion.summary.has_findings {
-        let count = completion.summary.findings.max(1);
-        if let Some(path) = completion.worktree_path.as_ref() {
-            eprintln!(
-                "[auto-review] {branch}: {count} issue(s) found. Re-validate {} against current HEAD before merging fixes. Summary: {summary_text}",
-                path.display()
-            );
-        } else {
-            eprintln!(
-                "[auto-review] {branch}: {count} issue(s) found. Summary: {summary_text}"
-            );
-        }
-    } else if summary_text == "No issues reported." {
-        eprintln!("[auto-review] {branch}: no issues found.");
-    } else {
-        eprintln!("[auto-review] {branch}: no issues found. {summary_text}");
-    }
-}
+    let response = send_request_with_response::<ThreadReadResponse>(
+        client,
+        ClientRequest::ThreadRead {
+            request_id: request_ids.next(),
+            params: ThreadReadParams {
+                thread_id: payload.thread_id.clone(),
+                include_turns: true,
+            },
+        },
+        "thread/read",
+    )
+    .await;
 
-fn parse_auto_review_summary(raw: &str) -> AutoReviewSummary {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return AutoReviewSummary::default();
-    }
-
-    #[derive(serde::Deserialize)]
-    struct MultiRun {
-        #[serde(flatten)]
-        latest: ReviewOutputEvent,
-        #[serde(default)]
-        runs: Vec<ReviewOutputEvent>,
-    }
-
-    if let Ok(wrapper) = serde_json::from_str::<MultiRun>(trimmed) {
-        let mut runs = wrapper.runs;
-        if runs.is_empty() {
-            runs.push(wrapper.latest);
-        }
-        return summary_from_runs(&runs);
-    }
-
-    if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(trimmed) {
-        return summary_from_output(&output);
-    }
-
-    if let Some(start) = trimmed.find("```") {
-        if let Some((body, _)) = trimmed[start + 3..].split_once("```") {
-            let candidate = body.trim_start_matches("json").trim();
-            if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
-                return summary_from_output(&output);
+    match response {
+        Ok(response) => {
+            if let Some(items) = turn_items_for_thread(&response.thread, &payload.turn.id) {
+                payload.turn.items = items;
             }
         }
-    }
-
-    let lowered = trimmed.to_ascii_lowercase();
-    let clean_phrases = [
-        "no issues",
-        "no findings",
-        "clean",
-        "looks good",
-        "nothing to fix",
-    ];
-    let skip_phrases = [
-        "already running",
-        "another review",
-        "skipping this",
-        "skip this",
-    ];
-    let issue_markers = [
-        "issue",
-        "issues",
-        "finding",
-        "findings",
-        "bug",
-        "bugs",
-        "problem",
-        "problems",
-        "error",
-        "errors",
-    ];
-
-    if skip_phrases.iter().any(|p| lowered.contains(p)) {
-        return AutoReviewSummary {
-            has_findings: false,
-            findings: 0,
-            summary: Some(trimmed.to_string()),
-        };
-    }
-
-    if clean_phrases.iter().any(|p| lowered.contains(p)) {
-        return AutoReviewSummary {
-            has_findings: false,
-            findings: 0,
-            summary: Some(trimmed.to_string()),
-        };
-    }
-
-    let has_findings = issue_markers.iter().any(|p| lowered.contains(p));
-
-    AutoReviewSummary {
-        has_findings,
-        findings: 0,
-        summary: Some(trimmed.to_string()),
+        Err(err) => {
+            warn!("thread/read failed while backfilling turn items for turn completion: {err}");
+        }
     }
 }
 
-fn parse_auto_review_output(raw: Option<&str>) -> Option<ReviewOutputEvent> {
-    #[derive(serde::Deserialize)]
-    struct MultiRunReview {
-        #[serde(flatten)]
-        latest: ReviewOutputEvent,
-        #[serde(default)]
-        runs: Vec<ReviewOutputEvent>,
-    }
+/// Returns true only when `exec` can safely recover missing turn items from
+/// rollout-backed thread history.
+fn should_backfill_turn_completed_items(
+    thread_ephemeral: bool,
+    notification: &ServerNotification,
+) -> bool {
+    let ServerNotification::TurnCompleted(payload) = notification else {
+        return false;
+    };
 
-    let text = raw?.trim();
-    if text.is_empty() {
-        return None;
-    }
+    !thread_ephemeral && payload.turn.items.is_empty()
+}
 
-    if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(text) {
-        return wrapper.runs.last().cloned().or(Some(wrapper.latest));
-    }
-    if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(text) {
-        return Some(output);
-    }
-    if let Some(output) = extract_review_output_from_mixed_text(text) {
-        return Some(output);
-    }
-    if let Some(start) = text.find("```")
-        && let Some((body, _)) = text[start + 3..].split_once("```")
+fn turn_items_for_thread(
+    thread: &AppServerThread,
+    turn_id: &str,
+) -> Option<Vec<AppServerThreadItem>> {
+    thread
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_id)
+        .map(|turn| turn.items.clone())
+}
+
+fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
+    vec![
+        ThreadSourceKind::Cli,
+        ThreadSourceKind::VsCode,
+        ThreadSourceKind::Exec,
+        ThreadSourceKind::AppServer,
+        ThreadSourceKind::SubAgent,
+        ThreadSourceKind::SubAgentReview,
+        ThreadSourceKind::SubAgentCompact,
+        ThreadSourceKind::SubAgentThreadSpawn,
+        ThreadSourceKind::SubAgentOther,
+        ThreadSourceKind::Unknown,
+    ]
+}
+
+async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
+    if let Some(path) = thread.path.as_deref()
+        && let Some(cwd) = parse_latest_turn_context_cwd(path).await
     {
-        let candidate = body.trim_start_matches("json").trim();
-        if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
-            return Some(output);
+        return cwd;
+    }
+    thread.cwd.to_path_buf()
+}
+
+async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+            continue;
+        };
+        if let RolloutItem::TurnContext(item) = rollout_line.item {
+            return Some(item.cwd);
         }
     }
     None
 }
 
-fn extract_review_output_from_mixed_text(text: &str) -> Option<ReviewOutputEvent> {
-    #[derive(serde::Deserialize)]
-    struct MultiRunReview {
-        #[serde(flatten)]
-        latest: ReviewOutputEvent,
-        #[serde(default)]
-        runs: Vec<ReviewOutputEvent>,
+fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
+    path_utils::paths_match_after_normalization(current_cwd, session_cwd)
+}
+
+async fn resolve_resume_thread_id(
+    client: &InProcessAppServerClient,
+    config: &Config,
+    state_db: Option<&StateDbHandle>,
+    args: &crate::cli::ResumeArgs,
+) -> anyhow::Result<Option<String>> {
+    let model_providers = resume_lookup_model_providers(config, args);
+
+    if args.last {
+        let mut cursor = None;
+        loop {
+            let response: ThreadListResponse = send_request_with_response(
+                client,
+                ClientRequest::ThreadList {
+                    request_id: RequestId::Integer(0),
+                    params: ThreadListParams {
+                        cursor,
+                        limit: Some(100),
+                        sort_key: Some(ThreadSortKey::UpdatedAt),
+                        sort_direction: None,
+                        model_providers: model_providers.clone(),
+                        source_kinds: Some(all_thread_source_kinds()),
+                        archived: Some(false),
+                        cwd: None,
+                        use_state_db_only: false,
+                        search_term: None,
+                    },
+                },
+                "thread/list",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            for thread in response.data {
+                let latest_cwd = latest_thread_cwd(&thread).await;
+                if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
+                    return Ok(Some(thread.id));
+                }
+            }
+            let Some(next_cursor) = response.next_cursor else {
+                return Ok(None);
+            };
+            cursor = Some(next_cursor);
+        }
     }
 
-    let mut brace_depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut object_start = None;
-    let mut best_match: Option<ReviewOutputEvent> = None;
+    let Some(session_id) = args.session_id.as_deref() else {
+        return Ok(None);
+    };
+    if Uuid::parse_str(session_id).is_ok() {
+        return Ok(Some(session_id.to_string()));
+    }
+    if let Some(state_db) = state_db {
+        let cwd = (!args.all).then_some(config.cwd.as_path());
+        let resolved = state_db
+            .find_thread_by_exact_title(
+                session_id,
+                &[],
+                /*model_providers*/ None,
+                /*archived_only*/ false,
+                cwd,
+            )
+            .await?;
+        if let Some(thread) = resolved {
+            return Ok(Some(thread.id.to_string()));
+        }
+        if let Some((_, session_meta)) =
+            find_thread_meta_by_name_str(&config.codex_home, session_id, Some(state_db.as_ref()))
+                .await?
+            && (args.all || cwds_match(config.cwd.as_path(), &session_meta.meta.cwd))
+        {
+            return Ok(Some(session_meta.meta.id.to_string()));
+        }
+    }
 
-    for (idx, ch) in text.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
+    let mut cursor = None;
+    loop {
+        let response: ThreadListResponse = send_request_with_response(
+            client,
+            ClientRequest::ThreadList {
+                request_id: RequestId::Integer(0),
+                params: ThreadListParams {
+                    cursor,
+                    limit: Some(100),
+                    sort_key: Some(ThreadSortKey::UpdatedAt),
+                    sort_direction: None,
+                    model_providers: model_providers.clone(),
+                    source_kinds: Some(all_thread_source_kinds()),
+                    archived: Some(false),
+                    cwd: None,
+                    use_state_db_only: false,
+                    search_term: Some(session_id.to_string()),
+                },
+            },
+            "thread/list",
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        for thread in response.data {
+            if thread.name.as_deref() != Some(session_id) {
                 continue;
             }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => {
-                if brace_depth == 0 {
-                    object_start = Some(idx);
-                }
-                brace_depth = brace_depth.saturating_add(1);
-            }
-            '}' => {
-                if brace_depth == 0 {
-                    continue;
-                }
-                brace_depth -= 1;
-                if brace_depth == 0
-                    && let Some(start) = object_start.take()
-                {
-                    let candidate = &text[start..=idx];
-                    if let Ok(wrapper) = serde_json::from_str::<MultiRunReview>(candidate) {
-                        best_match = wrapper.runs.last().cloned().or(Some(wrapper.latest));
-                        continue;
-                    }
-                    if let Ok(output) = serde_json::from_str::<ReviewOutputEvent>(candidate) {
-                        best_match = Some(output);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    best_match
-}
-
-fn summary_from_runs(outputs: &[ReviewOutputEvent]) -> AutoReviewSummary {
-    if outputs.is_empty() {
-        return AutoReviewSummary::default();
-    }
-
-    let latest = outputs.last().unwrap();
-    let mut summary = summary_from_output(latest);
-
-    if let Some(idx) = outputs.iter().rposition(|o| !o.findings.is_empty()) {
-        let with_findings = summary_from_output(&outputs[idx]);
-        if with_findings.has_findings {
-            summary.has_findings = true;
-            summary.findings = with_findings.findings;
-            summary.summary = with_findings.summary.or(summary.summary);
-
-            if latest.findings.is_empty() {
-                let tail = "Final pass reported no issues after auto-resolve.";
-                summary.summary = match summary.summary {
-                    Some(ref existing) if existing.contains(tail) => Some(existing.clone()),
-                    Some(existing) => Some(format!("{existing} \n{tail}")),
-                    None => Some(tail.to_string()),
-                };
+            let latest_cwd = latest_thread_cwd(&thread).await;
+            if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
+                return Ok(Some(thread.id));
             }
         }
-    }
-
-    summary
-}
-
-fn summary_from_output(output: &ReviewOutputEvent) -> AutoReviewSummary {
-    let findings = output.findings.len();
-    let has_findings = findings > 0;
-
-    let mut parts: Vec<String> = Vec::new();
-    if !output.overall_explanation.trim().is_empty() {
-        parts.push(output.overall_explanation.trim().to_string());
-    }
-    if has_findings {
-        let titles: Vec<String> = output
-            .findings
-            .iter()
-            .filter_map(|f| {
-                let title = f.title.trim();
-                (!title.is_empty()).then_some(title.to_string())
-            })
-            .collect();
-        if !titles.is_empty() {
-            parts.push(format!("Findings: {}", titles.join("; ")));
-        }
-    }
-
-    let summary = (!parts.is_empty()).then(|| parts.join(" \n"));
-
-    AutoReviewSummary {
-        has_findings,
-        findings,
-        summary,
+        let Some(next_cursor) = response.next_cursor else {
+            return Ok(None);
+        };
+        cursor = Some(next_cursor);
     }
 }
 
-fn auto_review_branches_dir(git_root: &Path) -> Option<PathBuf> {
-    let repo_name = git_root.file_name()?.to_str()?;
-    let mut code_home = code_core::config::find_code_home().ok()?;
-    code_home = code_home.join("working").join(repo_name).join("branches");
-    std::fs::create_dir_all(&code_home).ok()?;
-    Some(code_home)
+fn resume_lookup_model_providers(
+    config: &Config,
+    args: &crate::cli::ResumeArgs,
+) -> Option<Vec<String>> {
+    if args.last {
+        Some(vec![config.model_provider_id.clone()])
+    } else {
+        None
+    }
 }
 
-fn resolve_auto_review_worktree_path(git_root: &Path, branch: &str) -> Option<PathBuf> {
-    if branch.is_empty() {
-        return None;
-    }
-
-    let branches_dir = auto_review_branches_dir(git_root)?;
-    let candidate = branches_dir.join(branch);
-    candidate.exists().then_some(candidate)
-}
-
-async fn send_shutdown_if_ready(
-    conversation: &Arc<CodexConversation>,
-    auto_review_tracker: &AutoReviewTracker,
-    shutdown_sent: &mut bool,
-) -> anyhow::Result<bool> {
-    if *shutdown_sent || auto_review_tracker.is_running() {
-        return Ok(false);
-    }
-
-    conversation.submit(Op::Shutdown).await?;
-    *shutdown_sent = true;
-    Ok(true)
+fn canceled_mcp_server_elicitation_response() -> Result<Value, String> {
+    serde_json::to_value(McpServerElicitationRequestResponse {
+        action: McpServerElicitationAction::Cancel,
+        content: None,
+        meta: None,
+    })
+    .map_err(|err| format!("failed to encode mcp elicitation response: {err}"))
 }
 
 async fn request_shutdown(
-    conversation: &Arc<CodexConversation>,
-    auto_review_tracker: &AutoReviewTracker,
-    shutdown_pending: &mut bool,
-    shutdown_sent: &mut bool,
-    shutdown_deadline: &mut Option<Instant>,
-    auto_review_grace_enabled: bool,
-) -> anyhow::Result<()> {
-    if *shutdown_sent {
-        *shutdown_pending = false;
-        *shutdown_deadline = None;
-        return Ok(());
-    }
-
-    let now = Instant::now();
-    let (attempt_send, new_pending, new_deadline) = shutdown_state_after_request(
-        auto_review_tracker.is_running(),
-        *shutdown_pending,
-        *shutdown_deadline,
-        now,
-        auto_review_grace_enabled,
-    );
-    *shutdown_pending = new_pending;
-    *shutdown_deadline = new_deadline;
-
-    if !attempt_send {
-        return Ok(());
-    }
-
-    if send_shutdown_if_ready(conversation, auto_review_tracker, shutdown_sent).await? {
-        *shutdown_pending = false;
-        *shutdown_deadline = None;
-    } else {
-        *shutdown_pending = true;
-        *shutdown_deadline = None;
-    }
-
-    Ok(())
-}
-
-fn shutdown_state_after_request(
-    auto_review_running: bool,
-    shutdown_pending: bool,
-    shutdown_deadline: Option<Instant>,
-    now: Instant,
-    grace_enabled: bool,
-) -> (bool, bool, Option<Instant>) {
-    if auto_review_running {
-        return (false, true, None);
-    }
-
-    if !grace_enabled {
-        return (true, true, None);
-    }
-
-    if !shutdown_pending && shutdown_deadline.is_none() {
-        let deadline = now + Duration::from_millis(AUTO_REVIEW_SHUTDOWN_GRACE_MS);
-        return (false, true, Some(deadline));
-    }
-
-    if let Some(deadline) = shutdown_deadline {
-        if deadline > now {
-            return (false, true, Some(deadline));
-        }
-    }
-
-    (true, true, None)
-}
-
-fn build_auto_prompt(
-    cli_action: &AutoTurnCliAction,
-    agents: &[AutoTurnAgentsAction],
-    agents_timing: Option<AutoTurnAgentsTiming>,
-) -> String {
-    let mut sections: Vec<String> = Vec::new();
-
-    if let Some(ctx) = cli_action
-        .context
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(ctx.to_string());
-    }
-
-    let cli_prompt = cli_action.prompt.trim();
-    if !cli_prompt.is_empty() {
-        sections.push(cli_prompt.to_string());
-    }
-
-    if !agents.is_empty() {
-        let mut lines: Vec<String> = Vec::new();
-        lines.push("<agents>".to_string());
-        lines.push("Please use agents to help you complete this task.".to_string());
-
-        for action in agents {
-            let prompt = action
-                .prompt
-                .trim()
-                .replace('\n', " ")
-                .replace('"', "\\\"");
-            let write_text = if action.write { "write: true" } else { "write: false" };
-
-            lines.push(String::new());
-            lines.push(format!("prompt: \"{prompt}\" ({write_text})"));
-
-            if let Some(ctx) = action
-                .context
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                lines.push(format!("context: {}", ctx.replace('\n', " ")));
-            }
-
-            if let Some(models) = action.models.as_ref().filter(|list| !list.is_empty()) {
-                lines.push(format!("models: {}", models.join(", ")));
-            }
-        }
-
-        let timing_line = match agents_timing {
-            Some(AutoTurnAgentsTiming::Parallel) =>
-                "Timing: parallel — continue the CLI prompt while agents run; call agent.wait when ready to merge results.".to_string(),
-            Some(AutoTurnAgentsTiming::Blocking) =>
-                "Timing: blocking — launch agents first, wait with agent.wait, then continue the CLI prompt.".to_string(),
-            None =>
-                "Timing: blocking — wait for agent.wait before continuing the CLI prompt.".to_string(),
-        };
-        lines.push(String::new());
-        lines.push(timing_line);
-        lines.push("</agents>".to_string());
-
-        sections.push(lines.join("\n"));
-    }
-
-    sections.join("\n\n")
-}
-
-async fn dispatch_auto_fix(
-    conversation: &Arc<CodexConversation>,
-    review: &code_core::protocol::ReviewOutputEvent,
-) -> anyhow::Result<()> {
-    let fix_prompt = build_fix_prompt(review);
-    let items: Vec<InputItem> = vec![InputItem::Text { text: fix_prompt }];
-    let _ = conversation
-        .submit(Op::UserInput {
-            items,
-            final_output_json_schema: None,
-        })
-        .await?;
-    Ok(())
-}
-
-fn capture_auto_resolve_snapshot(
-    cwd: &Path,
-    parent: Option<&str>,
-    message: &'static str,
-) -> Option<GhostCommit> {
-    let cwd_buf = cwd.to_path_buf();
-    let hook = move || bump_snapshot_epoch_for(&cwd_buf);
-    let mut options = CreateGhostCommitOptions::new(cwd)
-        .message(message)
-        .post_commit_hook(&hook);
-    if let Some(parent) = parent {
-        options = options.parent(parent);
-    }
-    let snap = create_ghost_commit(&options).ok();
-    if snap.is_some() {
-        bump_snapshot_epoch_for(cwd);
-    }
-    snap
-}
-
-fn snapshot_parent_diff_paths(cwd: &Path, parent: &str, head: &str) -> Option<Vec<String>> {
-    let output = std::process::Command::new("git")
-        .current_dir(cwd)
-        .args(["diff", "--name-only", parent, head])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let paths: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| line.to_string())
-        .collect();
-
-    Some(paths)
-}
-
-fn should_include_review_scope_path(path: &str) -> bool {
-    !REVIEW_SCOPE_EXCLUDED_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-}
-
-fn apply_commit_scope_to_review_request(
-    mut request: ReviewRequest,
-    commit: &str,
-    parent: &str,
-    paths: Option<&[String]>,
-) -> ReviewRequest {
-    let short_commit: String = commit.chars().take(7).collect();
-    let short_parent: String = parent.chars().take(7).collect();
-
-    let mut prompt = request.prompt.trim_end().to_string();
-    prompt.push_str("\n\nReview scope: changes captured in commit ");
-    prompt.push_str(commit);
-    prompt.push_str(" (parent ");
-    prompt.push_str(parent);
-    prompt.push(')');
-    prompt.push('.');
-
-    if let Some(paths) = paths {
-        if !paths.is_empty() {
-            let mut listed_paths: Vec<&str> = Vec::new();
-            let mut seen_paths: HashSet<&str> = HashSet::new();
-            let mut excluded_count = 0usize;
-            let mut truncated_count = 0usize;
-
-            for raw_path in paths {
-                let normalized = raw_path.trim().trim_start_matches("./");
-                if normalized.is_empty() {
-                    continue;
-                }
-                if !seen_paths.insert(normalized) {
-                    continue;
-                }
-                if !should_include_review_scope_path(normalized) {
-                    excluded_count = excluded_count.saturating_add(1);
-                    continue;
-                }
-                if listed_paths.len() < REVIEW_SCOPE_MAX_LISTED_PATHS {
-                    listed_paths.push(normalized);
-                } else {
-                    truncated_count = truncated_count.saturating_add(1);
-                }
-            }
-
-            if !listed_paths.is_empty() {
-                prompt.push_str("\nFiles changed in this snapshot:\n");
-                for path in listed_paths {
-                    prompt.push_str("- ");
-                    prompt.push_str(path);
-                    prompt.push('\n');
-                }
-            }
-
-            let omitted_count = excluded_count.saturating_add(truncated_count);
-            if omitted_count > 0 {
-                prompt.push_str(&format!(
-                    "\nOmitted {omitted_count} changed path(s) from this list ({excluded_count} excluded by path policy; {truncated_count} truncated for prompt size)."
-                ));
-            }
-
-            if excluded_count > 0 {
-                let excluded = REVIEW_SCOPE_EXCLUDED_PREFIXES.join(", ");
-                prompt.push_str(&format!(
-                    "\nExcluded prefixes: {excluded}. Do not spend review effort on those paths unless explicitly asked."
-                ));
-            }
-        }
-    }
-
-    request.prompt = prompt;
-    request.user_facing_hint = Some(format!("commit {short_commit} (parent {short_parent})"));
-    request.target = code_protocol::protocol::ReviewTarget::Custom {
-        instructions: request.prompt.clone(),
+    client: &InProcessAppServerClient,
+    request_ids: &mut RequestIdSequencer,
+    thread_id: &str,
+) -> Result<(), String> {
+    let request = ClientRequest::ThreadUnsubscribe {
+        request_id: request_ids.next(),
+        params: ThreadUnsubscribeParams {
+            thread_id: thread_id.to_string(),
+        },
     };
-    request
+    send_request_with_response::<ThreadUnsubscribeResponse>(client, request, "thread/unsubscribe")
+        .await
+        .map(|_| ())
 }
 
-fn capture_snapshot_against_base(
-    cwd: &Path,
-    base: &GhostCommit,
-    message: &'static str,
-) -> Option<(GhostCommit, Vec<String>)> {
-    let snapshot = capture_auto_resolve_snapshot(cwd, Some(base.id()), message)?;
-    let diff_paths = snapshot_parent_diff_paths(cwd, base.id(), snapshot.id())?;
-    if diff_paths.is_empty() {
-        return None;
-    }
-    bump_snapshot_epoch_for(cwd);
-    Some((snapshot, diff_paths))
+async fn resolve_server_request(
+    client: &InProcessAppServerClient,
+    request_id: RequestId,
+    value: serde_json::Value,
+    method: &str,
+) -> Result<(), String> {
+    client
+        .resolve_server_request(request_id, value)
+        .await
+        .map_err(|err| format!("failed to resolve `{method}` server request: {err}"))
 }
 
-fn strip_scope_from_prompt(prompt: &str) -> String {
-    let mut base = prompt.trim_end().to_string();
-    if let Some(idx) = base.find(AUTO_RESOLVE_REVIEW_FOLLOWUP) {
-        base = base[..idx].trim_end().to_string();
-    }
-    let filtered: Vec<&str> = base
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            !(trimmed.starts_with("Review scope:") || trimmed.starts_with("commit "))
-        })
-        .collect();
-    filtered.join("\n")
-}
-
-/// Remove lines that pin the review to specific commit hashes so follow-up
-/// reviews can safely re-scope to the newest snapshot.
-fn strip_commit_mentions(prompt: &str, commits: &[&str]) -> String {
-    prompt
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            if trimmed
-                .to_ascii_lowercase()
-                .contains("analyze only changes made in commit")
-            {
-                return false;
-            }
-            for c in commits {
-                if !c.is_empty() && trimmed.contains(c) {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn should_skip_followup(last_reviewed_commit: Option<&str>, next_snapshot: &GhostCommit) -> bool {
-    match last_reviewed_commit {
-        Some(prev) => prev == next_snapshot.id(),
-        None => false,
-    }
-}
-
-/// Returns true if the current HEAD is an ancestor of `base_commit`.
-///
-/// Ghost snapshots are created as children of the then-current HEAD. That means
-/// HEAD should be an ancestor of the snapshot immediately after creation. If
-/// HEAD moves later (new commits, rebases, etc.) it may no longer be an
-/// ancestor, which indicates the snapshot is stale relative to the live branch
-/// we plan to patch against.
-fn head_is_ancestor_of_base(cwd: &Path, base_commit: &str) -> bool {
-    let output = std::process::Command::new("git")
-        .current_dir(cwd)
-        .args(["merge-base", "--is-ancestor", "HEAD", base_commit])
-        .output();
-
-    match output {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
-}
-
-async fn build_followup_review_request(
-    state: &AutoResolveState,
-    _cwd: &Path,
-    snapshot: Option<&GhostCommit>,
-    diff_paths: Option<&[String]>,
-    parent_commit: Option<&str>,
-) -> ReviewRequest {
-    let mut prompt = strip_scope_from_prompt(&state.prompt);
-
-    let mut user_facing_hint = (!state.hint.trim().is_empty()).then(|| state.hint.clone());
-
-    if let (Some(snapshot), Some(parent)) = (snapshot, parent_commit) {
-        let updated = apply_commit_scope_to_review_request(
-            ReviewRequest {
-                target: code_protocol::protocol::ReviewTarget::Custom {
-                    instructions: prompt.clone(),
-                },
-                prompt: prompt.clone(),
-                user_facing_hint: user_facing_hint.clone(),
+async fn reject_server_request(
+    client: &InProcessAppServerClient,
+    request_id: RequestId,
+    method: &str,
+    reason: String,
+) -> Result<(), String> {
+    client
+        .reject_server_request(
+            request_id,
+            JSONRPCErrorError {
+                code: -32000,
+                message: reason,
+                data: None,
             },
-            snapshot.id(),
-            parent,
-            diff_paths,
-        );
-        prompt = updated.prompt;
-        user_facing_hint = updated.user_facing_hint;
-    }
-
-    // Strip lingering references to earlier commits so follow-up /review scopes to
-    // the freshly captured snapshot instead of the original hash baked into the
-    // user prompt.
-    let mut commit_ids: Vec<&str> = Vec::new();
-    if let Some(last) = state.last_reviewed_commit.as_deref() {
-        commit_ids.push(last);
-    }
-    if let Some(parent) = parent_commit {
-        commit_ids.push(parent);
-    }
-    prompt = strip_commit_mentions(&prompt, &commit_ids);
-
-    if let Some(last_review) = state.last_review.as_ref() {
-        let recap = format_review_findings(last_review);
-        if !recap.is_empty() {
-            prompt.push_str("\n\nPreviously reported findings to re-validate:\n");
-            prompt.push_str(&recap);
-        }
-    }
-
-    if !prompt.contains(AUTO_RESOLVE_REVIEW_FOLLOWUP) {
-        prompt.push_str("\n\n");
-        prompt.push_str(AUTO_RESOLVE_REVIEW_FOLLOWUP);
-    }
-
-    let target = code_protocol::protocol::ReviewTarget::Custom {
-        instructions: prompt.clone(),
-    };
-    ReviewRequest {
-        target,
-        user_facing_hint,
-        prompt,
-    }
+        )
+        .await
+        .map_err(|err| format!("failed to reject `{method}` server request: {err}"))
 }
 
-fn build_fix_prompt(review: &code_core::protocol::ReviewOutputEvent) -> String {
-    let summary = format_review_findings(review);
-    let raw_json = serde_json::to_string_pretty(review).unwrap_or_else(|_| "{}".to_string());
-    let mut preface = String::from(
-        "You are continuing an automated /review resolution loop. Review the listed findings and determine whether they represent real issues introduced by our changes. If they are, apply the necessary fixes and resolve any similar issues you can identify before responding."
-    );
-    if !summary.is_empty() {
-        preface.push_str("\n\nFindings:\n");
-        preface.push_str(&summary);
-    }
-    preface.push_str("\n\nFull review JSON (includes file paths and line ranges):\n");
-    preface.push_str(&raw_json);
-    format!(
-        "Is this a real issue introduced by our changes? If so, please fix and resolve all similar issues.\n\n{preface}"
-    )
-}
-
-fn format_review_findings(output: &code_core::protocol::ReviewOutputEvent) -> String {
-    if output.findings.is_empty() {
-        return String::new();
-    }
-    let mut parts = Vec::new();
-    for (idx, f) in output.findings.iter().enumerate() {
-        let title = f.title.trim();
-        let body = f.body.trim();
-        let location = format!(
-            "path: {}:{}-{}",
-            f.code_location
-                .absolute_file_path
-                .to_string_lossy()
-                .to_string(),
-            f.code_location.line_range.start,
-            f.code_location.line_range.end
-        );
-        if body.is_empty() {
-            parts.push(format!("{}. {}\n{}", idx + 1, title, location));
-        } else {
-            parts.push(format!("{}. {}\n{}\n{}", idx + 1, title, location, body));
-        }
-    }
-    parts.join("\n\n")
-}
-
-fn review_summary_line(output: &code_core::protocol::ReviewOutputEvent) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    let explanation = output.overall_explanation.trim();
-    if !explanation.is_empty() {
-        parts.push(explanation.to_string());
-    }
-
-    if !output.findings.is_empty() {
-        let titles: Vec<String> = output
-            .findings
-            .iter()
-            .filter_map(|f| {
-                let title = f.title.trim();
-                (!title.is_empty()).then_some(title.to_string())
-            })
-            .collect();
-        if !titles.is_empty() {
-            parts.push(format!("Findings: {}", titles.join("; ")));
-        }
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" \n"))
-    }
-}
-
-fn make_user_message(text: String) -> ResponseItem {
-    ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText { text }],
-        end_turn: None,
-        phase: None,
-    }
-}
-
-fn make_assistant_message(text: String) -> ResponseItem {
-    ResponseItem::Message {
-        id: None,
-        role: "assistant".to_string(),
-        content: vec![ContentItem::OutputText { text }],
-        end_turn: None,
-        phase: None,
-    }
-}
-
-fn write_review_json(
-    path: PathBuf,
-    outputs: &[code_core::protocol::ReviewOutputEvent],
-    snapshot: Option<&code_core::protocol::ReviewSnapshotInfo>,
-) -> std::io::Result<()> {
-    if outputs.is_empty() {
-        return Ok(());
-    }
-
-    #[derive(serde::Serialize)]
-    struct ReviewRun<'a> {
-        index: usize,
-        #[serde(flatten)]
-        output: &'a code_core::protocol::ReviewOutputEvent,
-    }
-
-    #[derive(serde::Serialize)]
-    struct ReviewJsonOutput<'a> {
-        #[serde(flatten)]
-        latest: &'a code_core::protocol::ReviewOutputEvent,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        runs: Vec<ReviewRun<'a>>,
-        #[serde(flatten, skip_serializing_if = "Option::is_none")]
-        snapshot: Option<&'a code_core::protocol::ReviewSnapshotInfo>,
-    }
-
-    let latest = outputs
-        .last()
-        .expect("outputs is non-empty due to earlier guard");
-    let runs: Vec<ReviewRun<'_>> = outputs
-        .iter()
-        .enumerate()
-        .map(|(idx, output)| ReviewRun {
-            index: idx + 1,
-            output,
+fn server_request_method_name(request: &ServerRequest) -> String {
+    serde_json::to_value(request)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
         })
-        .collect();
-
-    let payload = ReviewJsonOutput {
-        latest,
-        runs,
-        snapshot,
-    };
-    let json = serde_json::to_string_pretty(&payload)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    std::fs::write(path, json)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
-async fn submit_and_wait(
-    conversation: &Arc<CodexConversation>,
-    event_processor: &mut dyn EventProcessor,
-    auto_review_tracker: &mut AutoReviewTracker,
-    prompt_text: String,
-    run_deadline: Option<Instant>,
-) -> anyhow::Result<TurnResult> {
-    let mut error_seen = false;
-
-    let submit_id = conversation
-        .submit(Op::UserInput {
-            items: vec![InputItem::Text { text: prompt_text }],
-            final_output_json_schema: None,
-        })
-        .await?;
-
-    loop {
-        let res = if let Some(deadline) = run_deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    let _ = conversation.submit(Op::Interrupt).await;
-                    return Err(anyhow::anyhow!("Interrupted"));
+async fn handle_server_request(
+    client: &InProcessAppServerClient,
+    request: ServerRequest,
+    error_seen: &mut bool,
+) {
+    let method = server_request_method_name(&request);
+    let handle_result = match request {
+        ServerRequest::McpServerElicitationRequest { request_id, .. } => {
+            // Exec auto-cancels elicitation instead of surfacing it
+            // interactively. Preserve that behavior for attached subagent
+            // threads too so we do not turn a cancel into a decline/error.
+            match canceled_mcp_server_elicitation_response() {
+                Ok(value) => {
+                    resolve_server_request(
+                        client,
+                        request_id,
+                        value,
+                        "mcpServer/elicitation/request",
+                    )
+                    .await
                 }
-                res = tokio::time::timeout(remaining, conversation.next_event()) => {
-                    match res {
-                        Ok(event) => event,
-                        Err(_) => {
-                            let _ = conversation.submit(Op::Interrupt).await;
-                            let _ = conversation.submit(Op::Shutdown).await;
-                            return Err(anyhow::anyhow!("Time budget exceeded"));
-                        }
-                    }
-                }
-            }
-        } else {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    let _ = conversation.submit(Op::Interrupt).await;
-                    return Err(anyhow::anyhow!("Interrupted"));
-                }
-                res = conversation.next_event() => res,
-            }
-        };
-
-        let event = res?;
-        let event_id = event.id.clone();
-        if matches!(event.msg, EventMsg::Error(_)) {
-            error_seen = true;
-        }
-
-        if let EventMsg::AgentStatusUpdate(status) = &event.msg {
-            let completions = auto_review_tracker.update(status);
-            for completion in completions {
-                emit_auto_review_completion(&completion);
+                Err(err) => Err(err),
             }
         }
-
-        let last_agent_message = if let EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) = &event.msg {
-            last_agent_message.clone()
-        } else {
-            None
-        };
-
-        let status = event_processor.process_event(event);
-
-        if matches!(status, CodexStatus::Shutdown) {
-            return Ok(TurnResult {
-                last_agent_message: None,
-                error_seen,
-            });
+        ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "command execution approval is not supported in exec mode for thread `{}`",
+                    params.thread_id
+                ),
+            )
+            .await
         }
-
-        if last_agent_message.is_some() && event_id == submit_id {
-            return Ok(TurnResult {
-                last_agent_message,
-                error_seen,
-            });
+        ServerRequest::FileChangeRequestApproval { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "file change approval is not supported in exec mode for thread `{}`",
+                    params.thread_id
+                ),
+            )
+            .await
         }
+        ServerRequest::ToolRequestUserInput { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "request_user_input is not supported in exec mode for thread `{}`",
+                    params.thread_id
+                ),
+            )
+            .await
+        }
+        ServerRequest::DynamicToolCall { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "dynamic tool calls are not supported in exec mode for thread `{}`",
+                    params.thread_id
+                ),
+            )
+            .await
+        }
+        ServerRequest::ChatgptAuthTokensRefresh { request_id, .. } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                "chatgpt auth token refresh is not supported in exec mode".to_string(),
+            )
+            .await
+        }
+        ServerRequest::ApplyPatchApproval { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "apply_patch approval is not supported in exec mode for thread `{}`",
+                    params.conversation_id
+                ),
+            )
+            .await
+        }
+        ServerRequest::ExecCommandApproval { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "exec command approval is not supported in exec mode for thread `{}`",
+                    params.conversation_id
+                ),
+            )
+            .await
+        }
+        ServerRequest::PermissionsRequestApproval { request_id, params } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                format!(
+                    "permissions approval is not supported in exec mode for thread `{}`",
+                    params.thread_id
+                ),
+            )
+            .await
+        }
+    };
+
+    if let Err(err) = handle_result {
+        *error_seen = true;
+        warn!("{err}");
     }
 }
 
@@ -2920,545 +1674,195 @@ fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::time::{Duration, SystemTime};
-
-    use code_core::config::{ConfigOverrides, ConfigToml};
-    use code_protocol::models::{ContentItem, ResponseItem};
-	    use code_protocol::ThreadId;
-	    use code_protocol::protocol::{
-	        EventMsg as ProtoEventMsg, RecordedEvent, RolloutItem, RolloutLine, SessionMeta,
-	        SessionMetaLine, SessionSource, UserMessageEvent,
-	    };
-	    use filetime::{set_file_mtime, FileTime};
-	    use tempfile::TempDir;
-	    use uuid::Uuid;
-
-	    #[test]
-	    fn shutdown_state_schedules_grace_on_first_request() {
-	        let now = Instant::now();
-	        let (attempt_send, pending, deadline) = shutdown_state_after_request(
-	            false,
-	            false,
-	            None,
-	            now,
-	            true,
-	        );
-	        assert!(!attempt_send);
-	        assert!(pending);
-	        assert!(deadline.expect("deadline").gt(&now));
-	    }
-
-	    #[test]
-	    fn shutdown_state_waits_until_deadline() {
-	        let now = Instant::now();
-	        let future_deadline = now + tokio::time::Duration::from_millis(100);
-	        let (attempt_send, pending, deadline) = shutdown_state_after_request(
-	            false,
-	            true,
-	            Some(future_deadline),
-	            now,
-	            true,
-	        );
-	        assert!(!attempt_send);
-	        assert!(pending);
-	        assert_eq!(deadline, Some(future_deadline));
-	    }
-
-	    #[test]
-	    fn shutdown_state_attempts_send_after_grace_elapses() {
-	        let now = Instant::now();
-	        let expired_deadline = now - tokio::time::Duration::from_millis(1);
-	        let (attempt_send, pending, deadline) = shutdown_state_after_request(
-	            false,
-	            true,
-	            Some(expired_deadline),
-	            now,
-	            true,
-	        );
-	        assert!(attempt_send);
-	        assert!(pending);
-	        assert!(deadline.is_none());
-	    }
-
-	    #[test]
-	    fn shutdown_state_sends_immediately_without_grace() {
-	        let now = Instant::now();
-	        let (attempt_send, pending, deadline) = shutdown_state_after_request(
-	            false,
-	            false,
-	            None,
-	            now,
-	            false,
-	        );
-	        assert!(attempt_send);
-	        assert!(pending);
-	        assert!(deadline.is_none());
-	    }
-
-    #[test]
-    fn write_review_json_includes_snapshot() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("out.json");
-
-        let output = code_core::protocol::ReviewOutputEvent {
-            findings: vec![code_core::protocol::ReviewFinding {
-                title: "bug".into(),
-                body: "details".into(),
-                confidence_score: 0.5,
-                priority: 1,
-                code_location: code_core::protocol::ReviewCodeLocation {
-                    absolute_file_path: PathBuf::from("src/lib.rs"),
-                    line_range: code_core::protocol::ReviewLineRange { start: 1, end: 2 },
-                },
-            }],
-            overall_correctness: "incorrect".into(),
-            overall_explanation: "needs fixes".into(),
-            overall_confidence_score: 0.7,
-        };
-
-        let snapshot = code_core::protocol::ReviewSnapshotInfo {
-            snapshot_commit: Some("abc123".into()),
-            branch: Some("auto-review-branch".into()),
-            worktree_path: Some(PathBuf::from("/tmp/wt")),
-            repo_root: Some(PathBuf::from("/tmp/repo")),
-        };
-
-        write_review_json(path.clone(), &[output], Some(&snapshot)).unwrap();
-
-        let content = std::fs::read_to_string(path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(v["branch"], "auto-review-branch");
-        assert_eq!(v["snapshot_commit"], "abc123");
-        assert_eq!(v["worktree_path"], "/tmp/wt");
-        assert_eq!(v["findings"].as_array().unwrap().len(), 1);
-        let runs = v["runs"].as_array().unwrap();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["index"], 1);
-    }
-
-    #[test]
-    fn write_review_json_keeps_all_runs() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("multi.json");
-
-        let first = code_core::protocol::ReviewOutputEvent {
-            findings: vec![code_core::protocol::ReviewFinding {
-                title: "bug".into(),
-                body: "details".into(),
-                confidence_score: 0.6,
-                priority: 1,
-                code_location: code_core::protocol::ReviewCodeLocation {
-                    absolute_file_path: PathBuf::from("src/lib.rs"),
-                    line_range: code_core::protocol::ReviewLineRange { start: 1, end: 2 },
-                },
-            }],
-            overall_correctness: "incorrect".into(),
-            overall_explanation: "needs fixes".into(),
-            overall_confidence_score: 0.7,
-        };
-
-        let second = code_core::protocol::ReviewOutputEvent {
-            findings: Vec::new(),
-            overall_correctness: "correct".into(),
-            overall_explanation: "clean".into(),
-            overall_confidence_score: 0.9,
-        };
-
-        write_review_json(path.clone(), &[first, second], None).unwrap();
-
-        let content = std::fs::read_to_string(path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(v["overall_explanation"], "clean"); // latest run is flattened
-        let runs = v["runs"].as_array().unwrap();
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0]["index"], 1);
-        assert_eq!(runs[0]["findings"].as_array().unwrap().len(), 1);
-        assert_eq!(runs[1]["index"], 2);
-        assert_eq!(runs[1]["findings"].as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn strip_scope_removes_previous_commit_scope() {
-        let prompt = format!(
-            "Please review.\nReview scope: commit abc123 (parent deadbeef)\nMore text\n\n{}",
-            AUTO_RESOLVE_REVIEW_FOLLOWUP
-        );
-        let cleaned = strip_scope_from_prompt(&prompt);
-        assert!(!cleaned.contains("abc123"));
-        assert!(!cleaned.contains("Review scope"));
-        assert!(!cleaned.contains(AUTO_RESOLVE_REVIEW_FOLLOWUP));
-        assert!(cleaned.contains("Please review."));
-    }
-
-    #[test]
-    fn apply_commit_scope_filters_and_truncates_paths() {
-        let mut paths = vec![
-            "./src/main.rs".to_string(),
-            "codex-rs/Cargo.lock".to_string(),
-            "./src/main.rs".to_string(),
-        ];
-        for idx in 0..130 {
-            paths.push(format!("src/generated_{idx}.rs"));
-        }
-
-        let request = ReviewRequest {
-            target: code_protocol::protocol::ReviewTarget::Custom {
-                instructions: "baseline".to_string(),
-            },
-            user_facing_hint: None,
-            prompt: "baseline".to_string(),
-        };
-
-        let scoped = apply_commit_scope_to_review_request(request, "abc1234", "def5678", Some(&paths));
-        assert!(scoped.prompt.contains("Files changed in this snapshot:"));
-        assert!(scoped.prompt.contains("- src/main.rs"));
-        assert!(!scoped.prompt.contains("codex-rs/Cargo.lock"));
-        assert!(
-            scoped
-                .prompt
-                .contains("Omitted 12 changed path(s) from this list (1 excluded by path policy; 11 truncated for prompt size).")
-        );
-        assert!(scoped.prompt.contains("Excluded prefixes: codex-rs/"));
-    }
-
-    #[test]
-    fn apply_commit_scope_reports_when_all_paths_excluded() {
-        let paths = vec![
-            "codex-rs/Cargo.lock".to_string(),
-            "target/debug/code".to_string(),
-            "node_modules/pkg/index.js".to_string(),
-        ];
-
-        let request = ReviewRequest {
-            target: code_protocol::protocol::ReviewTarget::Custom {
-                instructions: "baseline".to_string(),
-            },
-            user_facing_hint: None,
-            prompt: "baseline".to_string(),
-        };
-
-        let scoped = apply_commit_scope_to_review_request(request, "abc1234", "def5678", Some(&paths));
-        assert!(!scoped.prompt.contains("Files changed in this snapshot:"));
-        assert!(
-            scoped
-                .prompt
-                .contains("Omitted 3 changed path(s) from this list (3 excluded by path policy; 0 truncated for prompt size).")
-        );
-        assert!(scoped.prompt.contains("Excluded prefixes: codex-rs/"));
-    }
-
-    #[test]
-    fn should_skip_followup_detects_duplicate_snapshot() {
-        let temp = TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .current_dir(temp.path())
-            .args(["init"])
-            .output()
-            .unwrap();
-        std::fs::write(temp.path().join("foo.txt"), "hello").unwrap();
-        std::process::Command::new("git")
-            .current_dir(temp.path())
-            .args(["add", "."])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .current_dir(temp.path())
-            .args(["commit", "-m", "init"])
-            .output()
-            .unwrap();
-
-        let base = capture_auto_resolve_snapshot(temp.path(), None, "base").expect("base snapshot");
-        let snap = capture_auto_resolve_snapshot(temp.path(), Some(base.id()), "dup").expect("child");
-
-        assert!(should_skip_followup(Some(snap.id()), &snap));
-        assert!(!should_skip_followup(Some("different"), &snap));
-        assert!(!should_skip_followup(None, &snap));
-    }
-
-    #[test]
-    fn base_ancestor_check_matches_git_history() {
-        let temp = TempDir::new().unwrap();
-        let run_git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(temp.path())
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-            output
-        };
-
-        run_git(["init"].as_slice());
-        run_git(["config", "user.email", "codex@example.com"].as_slice());
-        run_git(["config", "user.name", "Codex Tester"].as_slice());
-        std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-        run_git(["add", "."].as_slice());
-        run_git(["commit", "-m", "c1"].as_slice());
-
-        // second commit (represents a snapshot captured off the current HEAD)
-        std::fs::write(temp.path().join("a.txt"), "b").unwrap();
-        run_git(["commit", "-am", "c2"].as_slice());
-        let base = String::from_utf8_lossy(
-            &run_git(["rev-parse", "HEAD"].as_slice()).stdout,
-        )
-        .trim()
-        .to_string();
-
-        assert!(head_is_ancestor_of_base(temp.path(), &base));
-
-        // move HEAD back to check false case
-        run_git(["checkout", "HEAD~1"].as_slice());
-        assert!(!head_is_ancestor_of_base(temp.path(), "deadbeef"));
-    }
-
-    fn test_config(code_home: &Path) -> Config {
-        let mut overrides = ConfigOverrides::default();
-        let workspace = code_home.join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        overrides.cwd = Some(workspace);
-        Config::load_from_base_config_with_overrides(
-            ConfigToml::default(),
-            overrides,
-            code_home.to_path_buf(),
-        )
-        .unwrap()
-    }
-
-	    #[test]
-	    fn auto_drive_exec_config_uses_auto_drive_reasoning_effort() {
-	        let temp = TempDir::new().unwrap();
-	        let mut config = test_config(temp.path());
-	        config.model_reasoning_effort = code_core::config_types::ReasoningEffort::Low;
-	        config.auto_drive.model = "gpt-5.2".to_string();
-	        config.auto_drive.model_reasoning_effort =
-	            code_core::config_types::ReasoningEffort::XHigh;
-
-	        let auto_config = build_auto_drive_exec_config(&config);
-	        assert_eq!(auto_config.model, "gpt-5.2");
-	        assert_eq!(
-	            auto_config.model_reasoning_effort,
-	            code_core::config_types::ReasoningEffort::XHigh
-	        );
-	    }
-
-    fn write_rollout(
-        code_home: &Path,
-        session_id: Uuid,
-        created_at: &str,
-        last_event_at: &str,
-        source: SessionSource,
-        message: &str,
-    ) -> PathBuf {
-        let sessions_dir = code_home.join("sessions").join("2025").join("11").join("16");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let filename = format!(
-            "rollout-{}-{}.jsonl",
-            created_at.replace(':', "-"),
-            session_id
-        );
-        let path = sessions_dir.join(filename);
-
-        let session_meta = SessionMeta {
-            id: ThreadId::from_string(&session_id.to_string()).unwrap(),
-            timestamp: created_at.to_string(),
-            cwd: Path::new("/workspace/project").to_path_buf(),
-            originator: "test".to_string(),
-            cli_version: "0.0.0-test".to_string(),
-            source,
-            automation_origin: None,
-            model_provider: None,
-            base_instructions: None,
-            dynamic_tools: None,
-            forked_from_id: None,
-        };
-
-        let session_line = RolloutLine {
-            timestamp: created_at.to_string(),
-            item: RolloutItem::SessionMeta(SessionMetaLine {
-                meta: session_meta,
-                git: None,
-            }),
-        };
-        let event_line = RolloutLine {
-            timestamp: last_event_at.to_string(),
-            item: RolloutItem::Event(RecordedEvent {
-                id: "event-0".to_string(),
-                event_seq: 0,
-                order: None,
-                msg: ProtoEventMsg::UserMessage(UserMessageEvent {
-                    message: message.to_string(),
-                    images: None,
-                    local_images: vec![],
-                    text_elements: vec![],
-                }),
-            }),
-        };
-        let user_line = RolloutLine {
-            timestamp: last_event_at.to_string(),
-            item: RolloutItem::ResponseItem(ResponseItem::Message {
-                id: Some(format!("user-{}", session_id)),
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: message.to_string(),
-                }],
-                end_turn: None,
-                phase: None,
-            }),
-        };
-
-        let assistant_line = RolloutLine {
-            timestamp: last_event_at.to_string(),
-            item: RolloutItem::ResponseItem(ResponseItem::Message {
-                id: Some(format!("msg-{}", session_id)),
-                role: "assistant".to_string(),
-                content: vec![ContentItem::OutputText {
-                    text: format!("Ack: {}", message),
-                }],
-                end_turn: None,
-                phase: None,
-            }),
-        };
-
-        let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
-        serde_json::to_writer(&mut writer, &session_line).unwrap();
-        writer.write_all(b"\n").unwrap();
-        serde_json::to_writer(&mut writer, &event_line).unwrap();
-        writer.write_all(b"\n").unwrap();
-        serde_json::to_writer(&mut writer, &user_line).unwrap();
-        writer.write_all(b"\n").unwrap();
-        serde_json::to_writer(&mut writer, &assistant_line).unwrap();
-        writer.write_all(b"\n").unwrap();
-        writer.flush().unwrap();
-
-        path
-    }
-
-    #[tokio::test]
-    async fn exec_resolve_last_prefers_latest_timestamp() {
-        let temp = TempDir::new().unwrap();
-        let config = test_config(temp.path());
-        let older = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
-        let newer = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
-
-        write_rollout(
-            temp.path(),
-            older,
-            "2025-11-10T09:00:00Z",
-            "2025-11-10T09:05:00Z",
-            SessionSource::Cli,
-            "older",
-        );
-        write_rollout(
-            temp.path(),
-            newer,
-            "2025-11-16T09:00:00Z",
-            "2025-11-16T09:10:00Z",
-            SessionSource::Exec,
-            "newer",
-        );
-
-        let args = crate::cli::ResumeArgs {
-            session_id: None,
-            last: true,
-            prompt: None,
-        };
-        let path = resolve_resume_path(&config, &args)
-            .await
-            .unwrap()
-            .expect("path");
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-            "resolved path should reference newer session, got {}",
-            path_str
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_resolve_by_id_uses_catalog_bootstrap() {
-        let temp = TempDir::new().unwrap();
-        let config = test_config(temp.path());
-        let session_id = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap();
-        write_rollout(
-            temp.path(),
-            session_id,
-            "2025-11-12T09:00:00Z",
-            "2025-11-12T09:05:00Z",
-            SessionSource::Cli,
-            "resume",
-        );
-
-        let args = crate::cli::ResumeArgs {
-            session_id: Some("cccccccc".to_string()),
-            last: false,
-            prompt: None,
-        };
-
-        let path = resolve_resume_path(&config, &args)
-            .await
-            .unwrap()
-            .expect("path");
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
-            "resolved path should match requested session, got {}",
-            path_str
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_resolve_last_ignores_mtime_drift() {
-        let temp = TempDir::new().unwrap();
-        let config = test_config(temp.path());
-        let older = Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-dddddddddddd").unwrap();
-        let newer = Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").unwrap();
-
-        let older_path = write_rollout(
-            temp.path(),
-            older,
-            "2025-11-01T09:00:00Z",
-            "2025-11-01T09:05:00Z",
-            SessionSource::Cli,
-            "old",
-        );
-        let newer_path = write_rollout(
-            temp.path(),
-            newer,
-            "2025-11-20T09:00:00Z",
-            "2025-11-20T09:05:00Z",
-            SessionSource::Exec,
-            "new",
-        );
-
-        let base = SystemTime::now();
-        set_file_mtime(&older_path, FileTime::from_system_time(base + Duration::from_secs(500))).unwrap();
-        set_file_mtime(&newer_path, FileTime::from_system_time(base + Duration::from_secs(10))).unwrap();
-
-        let args = crate::cli::ResumeArgs {
-            session_id: None,
-            last: true,
-            prompt: None,
-        };
-        let path = resolve_resume_path(&config, &args)
-            .await
-            .unwrap()
-            .expect("path");
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
-            "resolved path should ignore mtime drift, got {}",
-            path_str
-        );
-    }
-
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptDecodeError {
+    InvalidUtf8 { valid_up_to: usize },
+    InvalidUtf16 { encoding: &'static str },
+    UnsupportedBom { encoding: &'static str },
 }
+
+impl std::fmt::Display for PromptDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptDecodeError::InvalidUtf8 { valid_up_to } => write!(
+                f,
+                "input is not valid UTF-8 (invalid byte at offset {valid_up_to}). Convert it to UTF-8 and retry (e.g., `iconv -f <ENC> -t UTF-8 prompt.txt`)."
+            ),
+            PromptDecodeError::InvalidUtf16 { encoding } => write!(
+                f,
+                "input looked like {encoding} but could not be decoded. Convert it to UTF-8 and retry."
+            ),
+            PromptDecodeError::UnsupportedBom { encoding } => write!(
+                f,
+                "input appears to be {encoding}. Convert it to UTF-8 and retry."
+            ),
+        }
+    }
+}
+
+fn decode_prompt_bytes(input: &[u8]) -> Result<String, PromptDecodeError> {
+    let input = input.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(input);
+
+    if input.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
+        return Err(PromptDecodeError::UnsupportedBom {
+            encoding: "UTF-32LE",
+        });
+    }
+
+    if input.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+        return Err(PromptDecodeError::UnsupportedBom {
+            encoding: "UTF-32BE",
+        });
+    }
+
+    if let Some(rest) = input.strip_prefix(&[0xFF, 0xFE]) {
+        return decode_utf16(rest, "UTF-16LE", u16::from_le_bytes);
+    }
+
+    if let Some(rest) = input.strip_prefix(&[0xFE, 0xFF]) {
+        return decode_utf16(rest, "UTF-16BE", u16::from_be_bytes);
+    }
+
+    std::str::from_utf8(input)
+        .map(str::to_string)
+        .map_err(|e| PromptDecodeError::InvalidUtf8 {
+            valid_up_to: e.valid_up_to(),
+        })
+}
+
+fn decode_utf16(
+    input: &[u8],
+    encoding: &'static str,
+    decode_unit: fn([u8; 2]) -> u16,
+) -> Result<String, PromptDecodeError> {
+    if !input.len().is_multiple_of(2) {
+        return Err(PromptDecodeError::InvalidUtf16 { encoding });
+    }
+
+    let units: Vec<u16> = input
+        .chunks_exact(2)
+        .map(|chunk| decode_unit([chunk[0], chunk[1]]))
+        .collect();
+
+    String::from_utf16(&units).map_err(|_| PromptDecodeError::InvalidUtf16 { encoding })
+}
+
+fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> Option<String> {
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+
+    match behavior {
+        StdinPromptBehavior::RequiredIfPiped if stdin_is_terminal => {
+            eprintln!(
+                "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
+            );
+            std::process::exit(1);
+        }
+        StdinPromptBehavior::RequiredIfPiped => {
+            eprintln!("Reading prompt from stdin...");
+        }
+        StdinPromptBehavior::Forced => {}
+        StdinPromptBehavior::OptionalAppend if stdin_is_terminal => return None,
+        StdinPromptBehavior::OptionalAppend => {
+            eprintln!("Reading additional input from stdin...");
+        }
+    }
+
+    let mut bytes = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
+        eprintln!("Failed to read prompt from stdin: {e}");
+        std::process::exit(1);
+    }
+
+    let buffer = match decode_prompt_bytes(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read prompt from stdin: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if buffer.trim().is_empty() {
+        match behavior {
+            StdinPromptBehavior::OptionalAppend => None,
+            StdinPromptBehavior::RequiredIfPiped | StdinPromptBehavior::Forced => {
+                eprintln!("No prompt provided via stdin.");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Some(buffer)
+    }
+}
+
+fn prompt_with_stdin_context(prompt: &str, stdin_text: &str) -> String {
+    let mut combined = format!("{prompt}\n\n<stdin>\n{stdin_text}");
+    if !stdin_text.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined.push_str("</stdin>");
+    combined
+}
+
+fn resolve_prompt(prompt_arg: Option<String>) -> String {
+    match prompt_arg {
+        Some(p) if p != "-" => p,
+        maybe_dash => {
+            let behavior = if matches!(maybe_dash.as_deref(), Some("-")) {
+                StdinPromptBehavior::Forced
+            } else {
+                StdinPromptBehavior::RequiredIfPiped
+            };
+            let Some(prompt) = read_prompt_from_stdin(behavior) else {
+                unreachable!("required stdin prompt should produce content");
+            };
+            prompt
+        }
+    }
+}
+
+fn resolve_root_prompt(prompt_arg: Option<String>) -> String {
+    match prompt_arg {
+        Some(prompt) if prompt != "-" => {
+            if let Some(stdin_text) = read_prompt_from_stdin(StdinPromptBehavior::OptionalAppend) {
+                prompt_with_stdin_context(&prompt, &stdin_text)
+            } else {
+                prompt
+            }
+        }
+        maybe_dash => resolve_prompt(maybe_dash),
+    }
+}
+
+fn build_review_request(args: &ReviewArgs) -> anyhow::Result<ReviewRequest> {
+    let target = if args.uncommitted {
+        ReviewTarget::UncommittedChanges
+    } else if let Some(branch) = args.base.clone() {
+        ReviewTarget::BaseBranch { branch }
+    } else if let Some(sha) = args.commit.clone() {
+        ReviewTarget::Commit {
+            sha,
+            title: args.commit_title.clone(),
+        }
+    } else if let Some(prompt_arg) = args.prompt.clone() {
+        let prompt = resolve_prompt(Some(prompt_arg)).trim().to_string();
+        if prompt.is_empty() {
+            anyhow::bail!("Review prompt cannot be empty");
+        }
+        ReviewTarget::Custom {
+            instructions: prompt,
+        }
+    } else {
+        anyhow::bail!(
+            "Specify --uncommitted, --base, --commit, or provide custom review instructions"
+        );
+    };
+
+    Ok(ReviewRequest {
+        target,
+        user_facing_hint: None,
+    })
+}
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

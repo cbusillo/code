@@ -1,12 +1,13 @@
 [package]
-name = "code-app-server-protocol"
+name = "codex-app-server-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "code_app_server_protocol"
+name = "codex_app_server_protocol"
 path = "src/lib.rs"
+doctest = false
 
 [lints]
 workspace = true
@@ -14,21 +15,30 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-code-protocol = { workspace = true }
-code-experimental-api-macros = { workspace = true }
-code-utils-absolute-path = { workspace = true }
+codex-experimental-api-macros = { workspace = true }
+codex-protocol = { workspace = true }
+codex-shell-command = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_with = { workspace = true }
 strum_macros = { workspace = true }
 thiserror = { workspace = true }
+rmcp = { workspace = true, default-features = false, features = [
+    "base64",
+    "macros",
+    "schemars",
+    "server",
+] }
 ts-rs = { workspace = true }
 inventory = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-code-utils-cargo-bin = { workspace = true }
+codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
 similar = { workspace = true }
 tempfile = { workspace = true }

@@ -4,11 +4,13 @@ mod pull;
 mod url;
 
 pub use client::OllamaClient;
-use code_core::config::Config;
+use codex_core::config::Config;
+use codex_model_provider_info::ModelProviderInfo;
 pub use pull::CliProgressReporter;
 pub use pull::PullEvent;
 pub use pull::PullProgressReporter;
 pub use pull::TuiProgressReporter;
+use semver::Version;
 
 /// Default OSS model to use when `--oss` is passed without an explicit `-m`.
 pub const DEFAULT_OSS_MODEL: &str = "gpt-oss:20b";
@@ -19,7 +21,10 @@ pub const DEFAULT_OSS_MODEL: &str = "gpt-oss:20b";
 /// - Checks if the model exists locally and pulls it if missing.
 pub async fn ensure_oss_ready(config: &Config) -> std::io::Result<()> {
     // Only download when the requested model is the default OSS model (or when -m is not provided).
-    let model = config.model.as_ref();
+    let model = match config.model.as_ref() {
+        Some(model) => model,
+        None => DEFAULT_OSS_MODEL,
+    };
 
     // Verify local Ollama is reachable.
     let ollama_client = crate::OllamaClient::try_from_oss_provider(config).await?;
@@ -40,15 +45,53 @@ pub async fn ensure_oss_ready(config: &Config) -> std::io::Result<()> {
         }
     }
 
-    // Attempt to detect the model's maximum context window and expose it as an
-    // environment variable so downstream request builders can tune `num_ctx`.
-    if let Ok(Some(ctx)) = ollama_client.fetch_model_max_context(model).await {
-        // Avoid exporting obviously tiny defaults (some installs report 2048);
-        // still set it so the client can override server defaults.
-        // Mutating process env requires `unsafe` on Rust 2024; scoped to process.
-        unsafe { std::env::set_var("CODEX_OLLAMA_NUM_CTX", ctx.to_string()); }
-        tracing::info!("Detected Ollama model context length: {ctx}");
+    Ok(())
+}
+
+fn min_responses_version() -> Version {
+    Version::new(0, 13, 4)
+}
+
+fn supports_responses(version: &Version) -> bool {
+    *version == Version::new(0, 0, 0) || *version >= min_responses_version()
+}
+
+/// Ensure the running Ollama server is new enough to support the Responses API.
+///
+/// Returns `Ok(())` when the version endpoint is missing or unparsable.
+pub async fn ensure_responses_supported(provider: &ModelProviderInfo) -> std::io::Result<()> {
+    let client = crate::OllamaClient::try_from_provider(provider).await?;
+    let Some(version) = client.fetch_version().await? else {
+        return Ok(());
+    };
+
+    if supports_responses(&version) {
+        return Ok(());
     }
 
-    Ok(())
+    let min = min_responses_version();
+    Err(std::io::Error::other(format!(
+        "Ollama {version} is too old. Codex requires Ollama {min} or newer."
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supports_responses_for_dev_zero() {
+        assert!(supports_responses(&Version::new(0, 0, 0)));
+    }
+
+    #[test]
+    fn does_not_support_responses_before_cutoff() {
+        assert!(!supports_responses(&Version::new(0, 13, 3)));
+    }
+
+    #[test]
+    fn supports_responses_at_or_after_cutoff() {
+        assert!(supports_responses(&Version::new(0, 13, 4)));
+        assert!(supports_responses(&Version::new(0, 14, 0)));
+    }
 }

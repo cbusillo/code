@@ -6,18 +6,19 @@ use crate::CloudTaskError;
 use crate::DiffSummary;
 use crate::Result;
 use crate::TaskId;
+use crate::TaskListPage;
 use crate::TaskStatus;
 use crate::TaskSummary;
 use crate::TurnAttempt;
 use crate::api::TaskText;
 use chrono::DateTime;
 use chrono::Utc;
-use std::borrow::Cow;
-use std::path::Path;
-use std::path::PathBuf;
 
-use code_backend_client as backend;
-use code_backend_client::CodeTaskDetailsResponseExt;
+use codex_api::SharedAuthProvider;
+use codex_backend_client as backend;
+use codex_backend_client::CodeTaskDetailsResponseExt;
+use codex_git_utils::ApplyGitRequest;
+use codex_git_utils::apply_git_patch;
 
 #[derive(Clone)]
 pub struct HttpClient {
@@ -32,23 +33,18 @@ impl HttpClient {
         Ok(Self { base_url, backend })
     }
 
-    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.backend = self.backend.clone().with_bearer_token(token);
-        self
-    }
-
     pub fn with_user_agent(mut self, ua: impl Into<String>) -> Self {
         self.backend = self.backend.clone().with_user_agent(ua);
         self
     }
 
-    pub fn with_chatgpt_account_id(mut self, account_id: impl Into<String>) -> Self {
-        self.backend = self.backend.clone().with_chatgpt_account_id(account_id);
+    pub fn with_auth_provider(mut self, auth: SharedAuthProvider) -> Self {
+        self.backend = self.backend.clone().with_auth_provider(auth);
         self
     }
 
-    pub fn with_fedramp_routing_header(mut self) -> Self {
-        self.backend = self.backend.clone().with_fedramp_routing_header();
+    pub fn with_chatgpt_account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.backend = self.backend.clone().with_chatgpt_account_id(account_id);
         self
     }
 
@@ -67,8 +63,17 @@ impl HttpClient {
 
 #[async_trait::async_trait]
 impl CloudBackend for HttpClient {
-    async fn list_tasks(&self, env: Option<&str>) -> Result<Vec<TaskSummary>> {
-        self.tasks_api().list(env).await
+    async fn list_tasks(
+        &self,
+        env: Option<&str>,
+        limit: Option<i64>,
+        cursor: Option<&str>,
+    ) -> Result<TaskListPage> {
+        self.tasks_api().list(env, limit, cursor).await
+    }
+
+    async fn get_task_summary(&self, id: TaskId) -> Result<TaskSummary> {
+        self.tasks_api().summary(id).await
     }
 
     async fn get_task_diff(&self, id: TaskId) -> Result<Option<String>> {
@@ -92,7 +97,9 @@ impl CloudBackend for HttpClient {
     }
 
     async fn apply_task(&self, id: TaskId, diff_override: Option<String>) -> Result<ApplyOutcome> {
-        self.apply_api().run(id, diff_override, false).await
+        self.apply_api()
+            .run(id, diff_override, /*preflight*/ false)
+            .await
     }
 
     async fn apply_task_preflight(
@@ -100,7 +107,9 @@ impl CloudBackend for HttpClient {
         id: TaskId,
         diff_override: Option<String>,
     ) -> Result<ApplyOutcome> {
-        self.apply_api().run(id, diff_override, true).await
+        self.apply_api()
+            .run(id, diff_override, /*preflight*/ true)
+            .await
     }
 
     async fn create_task(
@@ -136,10 +145,16 @@ mod api {
             }
         }
 
-        pub(crate) async fn list(&self, env: Option<&str>) -> Result<Vec<TaskSummary>> {
+        pub(crate) async fn list(
+            &self,
+            env: Option<&str>,
+            limit: Option<i64>,
+            cursor: Option<&str>,
+        ) -> Result<TaskListPage> {
+            let limit_i32 = limit.and_then(|lim| i32::try_from(lim).ok());
             let resp = self
                 .backend
-                .list_tasks(Some(20), Some("current"), env)
+                .list_tasks(limit_i32, Some("current"), env, cursor)
                 .await
                 .map_err(|e| CloudTaskError::Http(format!("list_tasks failed: {e}")))?;
 
@@ -149,12 +164,89 @@ mod api {
                 .map(map_task_list_item_to_summary)
                 .collect();
 
-            append_debug_log(&format!(
-                "http.list_tasks: env={} items={}",
+            append_error_log(&format!(
+                "http.list_tasks: env={} limit={} cursor_in={} cursor_out={} items={}",
                 env.unwrap_or("<all>"),
+                limit_i32
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "<default>".to_string()),
+                cursor.unwrap_or("<none>"),
+                resp.cursor.as_deref().unwrap_or("<none>"),
                 tasks.len()
             ));
-            Ok(tasks)
+            Ok(TaskListPage {
+                tasks,
+                cursor: resp.cursor,
+            })
+        }
+
+        pub(crate) async fn summary(&self, id: TaskId) -> Result<TaskSummary> {
+            let id_str = id.0.clone();
+            let (details, body, ct) = self
+                .details_with_body(&id.0)
+                .await
+                .map_err(|e| CloudTaskError::Http(format!("get_task_details failed: {e}")))?;
+            let parsed: Value = serde_json::from_str(&body).map_err(|e| {
+                CloudTaskError::Http(format!(
+                    "Decode error for {}: {e}; content-type={ct}; body={body}",
+                    id.0
+                ))
+            })?;
+            let task_obj = parsed
+                .get("task")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    CloudTaskError::Http(format!("Task metadata missing from details for {id_str}"))
+                })?;
+            let status_display = parsed
+                .get("task_status_display")
+                .or_else(|| task_obj.get("task_status_display"))
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<HashMap<String, Value>>()
+                });
+            let status = map_status(status_display.as_ref());
+            let mut summary = diff_summary_from_status_display(status_display.as_ref());
+            if summary.files_changed == 0
+                && summary.lines_added == 0
+                && summary.lines_removed == 0
+                && let Some(diff) = details.unified_diff()
+            {
+                summary = diff_summary_from_diff(&diff);
+            }
+            let updated_at_raw = task_obj
+                .get("updated_at")
+                .and_then(Value::as_f64)
+                .or_else(|| task_obj.get("created_at").and_then(Value::as_f64))
+                .or_else(|| latest_turn_timestamp(status_display.as_ref()));
+            let environment_id = task_obj
+                .get("environment_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let environment_label = env_label_from_status_display(status_display.as_ref());
+            let attempt_total = attempt_total_from_status_display(status_display.as_ref());
+            let title = task_obj
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("<untitled>")
+                .to_string();
+            let is_review = task_obj
+                .get("is_review")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(TaskSummary {
+                id,
+                title,
+                status,
+                updated_at: parse_updated_at(updated_at_raw.as_ref()),
+                environment_id,
+                environment_label,
+                summary,
+                is_review,
+                attempt_total,
+            })
         }
 
         pub(crate) async fn diff(&self, id: TaskId) -> Result<Option<String>> {
@@ -268,7 +360,7 @@ mod api {
 
             match self.backend.create_task(request_body).await {
                 Ok(id) => {
-                    append_info_log(&format!(
+                    append_error_log(&format!(
                         "new_task: created id={id} env={} prompt_chars={}",
                         env_id,
                         prompt.chars().count()
@@ -370,13 +462,13 @@ mod api {
                 });
             }
 
-            let req = code_git_apply::ApplyGitRequest {
+            let req = ApplyGitRequest {
                 cwd: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
                 diff: diff.clone(),
                 revert: false,
                 preflight,
             };
-            let r = code_git_apply::apply_git_patch(&req)
+            let r = apply_git_patch(&req)
                 .map_err(|e| CloudTaskError::Io(format!("git apply failed to run: {e}")))?;
 
             let status = if r.exit_code == 0 {
@@ -448,8 +540,8 @@ mod api {
                 let _ = writeln!(
                     &mut log,
                     "stdout_tail=\n{}\nstderr_tail=\n{}",
-                    tail(&r.stdout, 2000),
-                    tail(&r.stderr, 2000)
+                    tail(&r.stdout, /*max*/ 2000),
+                    tail(&r.stderr, /*max*/ 2000)
                 );
                 let _ = writeln!(&mut log, "{summary}");
                 let _ = writeln!(
@@ -687,6 +779,34 @@ mod api {
             .map(str::to_string)
     }
 
+    fn diff_summary_from_diff(diff: &str) -> DiffSummary {
+        let mut files_changed = 0usize;
+        let mut lines_added = 0usize;
+        let mut lines_removed = 0usize;
+        for line in diff.lines() {
+            if line.starts_with("diff --git ") {
+                files_changed += 1;
+                continue;
+            }
+            if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+                continue;
+            }
+            match line.as_bytes().first() {
+                Some(b'+') => lines_added += 1,
+                Some(b'-') => lines_removed += 1,
+                _ => {}
+            }
+        }
+        if files_changed == 0 && !diff.trim().is_empty() {
+            files_changed = 1;
+        }
+        DiffSummary {
+            files_changed,
+            lines_added,
+            lines_removed,
+        }
+    }
+
     fn diff_summary_from_status_display(v: Option<&HashMap<String, Value>>) -> DiffSummary {
         let mut out = DiffSummary::default();
         let Some(map) = v else { return out };
@@ -706,6 +826,17 @@ mod api {
             }
         }
         out
+    }
+
+    fn latest_turn_timestamp(v: Option<&HashMap<String, Value>>) -> Option<f64> {
+        let map = v?;
+        let latest = map
+            .get("latest_turn_status_display")
+            .and_then(Value::as_object)?;
+        latest
+            .get("updated_at")
+            .or_else(|| latest.get("created_at"))
+            .and_then(Value::as_f64)
     }
 
     fn attempt_total_from_status_display(v: Option<&HashMap<String, Value>>) -> Option<usize> {
@@ -764,190 +895,14 @@ mod api {
     }
 }
 
-const CLOUD_TASKS_LOG_FILE: &str = "cloud-tasks.log";
-const CLOUD_TASKS_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
-const CLOUD_TASKS_LOG_BACKUPS: usize = 2;
-const CLOUD_TASKS_LOG_MAX_MESSAGE_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum CloudLogLevel {
-    Off = 0,
-    Error = 1,
-    Info = 2,
-    Debug = 3,
-}
-
-fn log_level_from_env() -> CloudLogLevel {
-    if let Ok(raw) = std::env::var("CODEX_CLOUD_TASKS_LOG_LEVEL") {
-        let value = raw.trim().to_ascii_lowercase();
-        return match value.as_str() {
-            "off" | "none" | "0" => CloudLogLevel::Off,
-            "error" | "warn" | "1" => CloudLogLevel::Error,
-            "info" | "2" => CloudLogLevel::Info,
-            "debug" | "trace" | "3" => CloudLogLevel::Debug,
-            _ => CloudLogLevel::Error,
-        };
-    }
-
-    if env_truthy("CODE_SUBAGENT_DEBUG") || env_truthy("CODEX_CLOUD_TASKS_DEBUG") {
-        return CloudLogLevel::Debug;
-    }
-
-    CloudLogLevel::Off
-}
-
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-}
-
-fn should_log(level: CloudLogLevel) -> bool {
-    let configured = log_level_from_env();
-    configured != CloudLogLevel::Off && level <= configured
-}
-
-fn user_home_dir() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home));
-    }
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        return Some(PathBuf::from(home));
-    }
-    None
-}
-
-fn resolve_log_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("CODEX_CLOUD_TASKS_LOG_PATH") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-
-    let base = if let Ok(dir) = std::env::var("CODEX_CLOUD_TASKS_LOG_DIR") {
-        PathBuf::from(dir)
-    } else if let Ok(home) = std::env::var("CODE_HOME").or_else(|_| std::env::var("CODEX_HOME")) {
-        PathBuf::from(home).join("debug_logs")
-    } else if let Some(home) = user_home_dir() {
-        home.join(".code").join("debug_logs")
-    } else {
-        return None;
-    };
-
-    Some(base.join(CLOUD_TASKS_LOG_FILE))
-}
-
-fn ensure_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-}
-
-fn rotate_log_file(path: &Path, max_bytes: u64, backups: usize) {
-    if backups == 0 {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
-    };
-    if meta.len() <= max_bytes {
-        return;
-    }
-
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    let Some(dir) = path.parent() else {
-        return;
-    };
-
-    let lock_path = dir.join(format!("{file_name}.rotate.lock"));
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path);
-    let Ok(_lock_file) = lock_file else {
-        return;
-    };
-
-    let Ok(meta) = std::fs::metadata(path) else {
-        let _ = std::fs::remove_file(&lock_path);
-        return;
-    };
-    if meta.len() <= max_bytes {
-        let _ = std::fs::remove_file(&lock_path);
-        return;
-    }
-
-    let oldest = dir.join(format!("{file_name}.{backups}"));
-    let _ = std::fs::remove_file(&oldest);
-
-    if backups > 1 {
-        for idx in (1..backups).rev() {
-            let from = dir.join(format!("{file_name}.{idx}"));
-            let to = dir.join(format!("{file_name}.{}", idx + 1));
-            let _ = std::fs::rename(&from, &to);
-        }
-    }
-
-    let rotated = dir.join(format!("{file_name}.1"));
-    let _ = std::fs::copy(path, &rotated);
-    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
-        let _ = file.set_len(0);
-    }
-
-    let _ = std::fs::remove_file(&lock_path);
-}
-
-fn truncate_message(message: &str, max_bytes: usize) -> Cow<'_, str> {
-    if message.len() <= max_bytes {
-        return Cow::Borrowed(message);
-    }
-    let bytes = message.as_bytes();
-    let head = String::from_utf8_lossy(&bytes[..max_bytes]).to_string();
-    Cow::Owned(format!("{head}\n...truncated..."))
-}
-
 fn append_error_log(message: &str) {
-    append_cloud_log(CloudLogLevel::Error, message);
-}
-
-fn append_info_log(message: &str) {
-    append_cloud_log(CloudLogLevel::Info, message);
-}
-
-fn append_debug_log(message: &str) {
-    append_cloud_log(CloudLogLevel::Debug, message);
-}
-
-fn append_cloud_log(level: CloudLogLevel, message: &str) {
-    if !should_log(level) {
-        return;
-    }
-
-    let Some(path) = resolve_log_path() else {
-        return;
-    };
-    ensure_parent_dir(&path);
-    rotate_log_file(&path, CLOUD_TASKS_LOG_MAX_BYTES, CLOUD_TASKS_LOG_BACKUPS);
-
     let ts = Utc::now().to_rfc3339();
-    let level_label = match level {
-        CloudLogLevel::Error => "ERROR",
-        CloudLogLevel::Info => "INFO",
-        CloudLogLevel::Debug => "DEBUG",
-        CloudLogLevel::Off => return,
-    };
-    let message = truncate_message(message, CLOUD_TASKS_LOG_MAX_MESSAGE_BYTES);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open("error.log")
     {
         use std::io::Write as _;
-        let _ = writeln!(f, "[{ts}] {level_label} {message}");
+        let _ = writeln!(f, "[{ts}] {message}");
     }
 }

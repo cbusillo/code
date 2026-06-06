@@ -28,8 +28,11 @@
         "go",
         "plus",
         "pro",
+        "prolite",
         "team",
+        "self_serve_business_usage_based",
         "business",
+        "enterprise_cbp_usage_based",
         "enterprise",
         "edu",
         "unknown"
@@ -98,8 +101,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "secondary": {
           "anyOf": [
@@ -148,13 +150,13 @@
           "$ref": "#/definitions/RateLimitSnapshot"
         }
       ],
-      "description": "Backward-compatible single-bucket view."
+      "description": "Backward-compatible single-bucket view; mirrors the historical payload."
     },
     "rateLimitsByLimitId": {
       "additionalProperties": {
         "$ref": "#/definitions/RateLimitSnapshot"
       },
-      "description": "Multi-bucket view keyed by metered `limit_id`.",
+      "description": "Multi-bucket view keyed by metered `limit_id` (for example, `codex`).",
       "type": [
         "object",
         "null"

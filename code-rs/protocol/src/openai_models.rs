@@ -305,16 +305,13 @@ pub struct ModelInfo {
     /// Input modalities accepted by the backend for this model.
     #[serde(default = "default_input_modalities")]
     pub input_modalities: Vec<InputModality>,
-    #[serde(default)]
-    pub supports_search_tool: bool,
-    /// When true, this model should use websocket transport even when websocket features are off.
-    #[serde(default)]
-    pub prefer_websockets: bool,
     /// Internal-only marker set by core when a model slug resolved to fallback metadata.
     #[serde(default, skip_serializing, skip_deserializing)]
     #[schemars(skip)]
     #[ts(skip)]
     pub used_fallback_model_metadata: bool,
+    #[serde(default)]
+    pub supports_search_tool: bool,
 }
 
 impl ModelInfo {
@@ -579,7 +576,7 @@ mod tests {
             default_verbosity: None,
             apply_patch_tool_type: None,
             web_search_tool_type: WebSearchToolType::Text,
-            truncation_policy: TruncationPolicyConfig::bytes(10_000),
+            truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
             supports_parallel_tool_calls: false,
             supports_image_detail_original: false,
             context_window: None,
@@ -588,9 +585,8 @@ mod tests {
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
-            supports_search_tool: false,
-            prefer_websockets: false,
             used_fallback_model_metadata: false,
+            supports_search_tool: false,
         }
     }
 
@@ -603,21 +599,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_compact_token_limit_uses_context_default() {
-        let mut model = test_model(None);
-        model.context_window = Some(100_000);
-        model.auto_compact_token_limit = None;
-
-        assert_eq!(model.auto_compact_token_limit(), Some(90_000));
+    fn reasoning_effort_from_str_accepts_known_values() {
+        assert_eq!("high".parse(), Ok(ReasoningEffort::High));
+        assert_eq!("minimal".parse(), Ok(ReasoningEffort::Minimal));
     }
 
     #[test]
-    fn auto_compact_token_limit_clamps_to_context_limit() {
-        let mut model = test_model(None);
-        model.context_window = Some(200_000);
-        model.auto_compact_token_limit = Some(250_000);
-
-        assert_eq!(model.auto_compact_token_limit(), Some(180_000));
+    fn reasoning_effort_from_str_rejects_unknown_values() {
+        assert_eq!(
+            "unsupported".parse::<ReasoningEffort>(),
+            Err("invalid reasoning_effort: unsupported".to_string())
+        );
     }
 
     #[test]
@@ -654,7 +646,10 @@ mod tests {
             model.get_model_instructions(Some(Personality::None)),
             "Hello\n"
         );
-        assert_eq!(model.get_model_instructions(None), "Hello\n");
+        assert_eq!(
+            model.get_model_instructions(/*personality*/ None),
+            "Hello\n"
+        );
 
         let model_no_personality = test_model(Some(ModelMessages {
             instructions_template: Some("Hello\n{{ personality }}".to_string()),
@@ -676,7 +671,10 @@ mod tests {
             model_no_personality.get_model_instructions(Some(Personality::None)),
             "Hello\n"
         );
-        assert_eq!(model_no_personality.get_model_instructions(None), "Hello\n");
+        assert_eq!(
+            model_no_personality.get_model_instructions(/*personality*/ None),
+            "Hello\n"
+        );
     }
 
     #[test]
@@ -699,7 +697,7 @@ mod tests {
     fn get_personality_message_returns_default_when_personality_is_none() {
         let personality_template = personality_variables();
         assert_eq!(
-            personality_template.get_personality_message(None),
+            personality_template.get_personality_message(/*personality*/ None),
             Some("default".to_string())
         );
     }
@@ -720,7 +718,7 @@ mod tests {
             Some(String::new())
         );
         assert_eq!(
-            personality_variables.get_personality_message(None),
+            personality_variables.get_personality_message(/*personality*/ None),
             Some("default".to_string())
         );
 
@@ -742,7 +740,7 @@ mod tests {
             Some(String::new())
         );
         assert_eq!(
-            personality_variables.get_personality_message(None),
+            personality_variables.get_personality_message(/*personality*/ None),
             Some("default".to_string())
         );
 
@@ -763,7 +761,10 @@ mod tests {
             personality_variables.get_personality_message(Some(Personality::None)),
             Some(String::new())
         );
-        assert_eq!(personality_variables.get_personality_message(None), None);
+        assert_eq!(
+            personality_variables.get_personality_message(/*personality*/ None),
+            None
+        );
     }
 
     #[test]
@@ -795,16 +796,14 @@ mod tests {
             "auto_compact_token_limit": null,
             "effective_context_window_percent": 95,
             "experimental_supported_tools": [],
-            "input_modalities": ["text", "image"],
-            "supports_search_tool": false,
-            "prefer_websockets": false
+            "input_modalities": ["text", "image"]
         }))
         .expect("deserialize model info");
 
         assert_eq!(model.availability_nux, None);
         assert!(!model.supports_image_detail_original);
-        assert!(!model.supports_search_tool);
         assert_eq!(model.web_search_tool_type, WebSearchToolType::Text);
+        assert!(!model.supports_search_tool);
     }
 
     #[test]
@@ -812,7 +811,7 @@ mod tests {
         let model = ModelInfo {
             context_window: Some(273_000),
             max_context_window: Some(400_000),
-            ..test_model(None)
+            ..test_model(/*spec*/ None)
         };
 
         assert_eq!(model.resolved_context_window(), Some(273_000));
@@ -823,7 +822,7 @@ mod tests {
         let model = ModelInfo {
             context_window: None,
             max_context_window: Some(400_000),
-            ..test_model(None)
+            ..test_model(/*spec*/ None)
         };
 
         assert_eq!(model.resolved_context_window(), Some(400_000));
@@ -837,7 +836,8 @@ mod tests {
                 message: "Try Spark.".to_string(),
             }),
             additional_speed_tiers: vec![SPEED_TIER_FAST.to_string()],
-            ..test_model(None)
+            service_tiers: Vec::new(),
+            ..test_model(/*spec*/ None)
         });
 
         assert_eq!(
@@ -855,25 +855,11 @@ mod tests {
             service_tiers: vec![ModelServiceTier {
                 id: SPEED_TIER_FAST.to_string(),
                 name: "Fast".to_string(),
-                description: "Priority processing".to_string(),
+                description: "Priority processing.".to_string(),
             }],
-            ..test_model(None)
+            ..test_model(/*spec*/ None)
         });
 
         assert!(preset.supports_fast_mode());
-    }
-
-    #[test]
-    fn reasoning_effort_from_str_accepts_known_values() {
-        assert_eq!("high".parse(), Ok(ReasoningEffort::High));
-        assert_eq!("minimal".parse(), Ok(ReasoningEffort::Minimal));
-    }
-
-    #[test]
-    fn reasoning_effort_from_str_rejects_unknown_values() {
-        assert_eq!(
-            "unsupported".parse::<ReasoningEffort>(),
-            Err("invalid reasoning_effort: unsupported".to_string())
-        );
     }
 }
