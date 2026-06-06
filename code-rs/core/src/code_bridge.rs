@@ -6,6 +6,8 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
@@ -79,10 +81,11 @@ impl BridgeSubscription {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum BridgeClientMessage {
+pub(crate) enum BridgeClientMessage {
     Auth {
         role: BridgeRole,
         secret: String,
+        #[serde(rename = "clientId")]
         client_id: String,
     },
     Subscribe {
@@ -96,6 +99,8 @@ pub enum BridgeClientMessage {
 
 impl BridgeClientMessage {
     pub fn is_desktop_remote_control_message(&self) -> bool {
+        // Structural boundary check: bridge messages should never gain the
+        // JSON-RPC `method` discriminator used by Desktop remote-control.
         serde_json::to_value(self)
             .ok()
             .and_then(|value| {
@@ -110,7 +115,7 @@ impl BridgeClientMessage {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum BridgeRole {
+pub(crate) enum BridgeRole {
     Consumer,
 }
 
@@ -137,9 +142,10 @@ pub enum BridgeControlAction {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum BridgeServerMessage {
+pub(crate) enum BridgeServerMessage {
     AuthSuccess,
     SubscribeAck,
+    Event(BridgeEvent),
     ControlForwarded {
         id: String,
         delivered: usize,
@@ -171,6 +177,38 @@ pub struct BridgeControlOutcome {
 pub struct BridgeScreenshot {
     pub mime: String,
     pub data_len: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum BridgeEventData {
+    Console {
+        level: String,
+        message: String,
+    },
+    Error {
+        message: String,
+        #[serde(default)]
+        stack: Option<String>,
+    },
+    Pageview {
+        url: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    Screenshot {
+        mime: String,
+        data_len: usize,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeEvent {
+    pub page_id: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(flatten)]
+    pub data: BridgeEventData,
 }
 
 pub async fn discover_bridge_targets(cwd: &Path) -> Result<Vec<BridgeTarget>> {
@@ -224,36 +262,7 @@ pub async fn request_control(
         .await
         .with_context(|| format!("connect to bridge {}", target.meta.url))?;
 
-    let auth = BridgeClientMessage::Auth {
-        role: BridgeRole::Consumer,
-        secret: target.meta.secret.clone(),
-        client_id: client_id_for(target),
-    };
-    send_json(&mut ws, &auth).await.context("send bridge auth")?;
-    wait_for_server_message(
-        &mut ws,
-        |message| matches!(message, BridgeServerMessage::AuthSuccess),
-        AUTH_TIMEOUT,
-    )
-    .await
-    .context("wait for bridge auth success")?;
-
-    let subscription = subscription.clone().normalized();
-    let subscribe = BridgeClientMessage::Subscribe {
-        levels: subscription.levels,
-        capabilities: subscription.capabilities,
-        llm_filter: subscription.llm_filter,
-    };
-    send_json(&mut ws, &subscribe)
-        .await
-        .context("send bridge subscribe")?;
-    wait_for_server_message(
-        &mut ws,
-        |message| matches!(message, BridgeServerMessage::SubscribeAck),
-        SUBSCRIBE_TIMEOUT,
-    )
-    .await
-    .context("wait for bridge subscribe ack")?;
+    send_auth_and_subscribe(&mut ws, target, subscription).await?;
 
     let id = request.id.clone();
     let waits_for_screenshot = request.action == BridgeControlAction::Screenshot;
@@ -318,7 +327,7 @@ pub async fn request_control(
                 } if screenshot_id == id => {
                     screenshot = Some(BridgeScreenshot {
                         mime,
-                        data_len: data.len(),
+                        data_len: decoded_data_len(&data),
                     });
                 }
                 _ => {}
@@ -335,6 +344,39 @@ pub async fn request_control(
         result,
         screenshot,
     })
+}
+
+pub async fn collect_events(
+    target: &BridgeTarget,
+    subscription: &BridgeSubscription,
+    max_events: usize,
+    event_timeout: Duration,
+) -> Result<Vec<BridgeEvent>> {
+    let (mut ws, _) = connect_async(&target.meta.url)
+        .await
+        .with_context(|| format!("connect to bridge {}", target.meta.url))?;
+
+    send_auth_and_subscribe(&mut ws, target, subscription).await?;
+
+    let mut events = Vec::new();
+    let collect_result = timeout(event_timeout, async {
+        while events.len() < max_events {
+            let Some(message) = next_server_message(&mut ws).await? else {
+                break;
+            };
+            if let BridgeServerMessage::Event(event) = message {
+                events.push(event);
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    if let Ok(result) = collect_result {
+        result?;
+    }
+
+    Ok(events)
 }
 
 fn default_levels() -> Vec<String> {
@@ -363,6 +405,13 @@ fn normalize_unique(values: Vec<String>) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn decoded_data_len(data: &str) -> usize {
+    BASE64_STANDARD
+        .decode(data)
+        .map(|bytes| bytes.len())
+        .unwrap_or_else(|_| data.len())
 }
 
 async fn compute_staleness(meta: &BridgeMeta, path: &Path) -> (bool, Option<i64>) {
@@ -402,6 +451,51 @@ where
 {
     let text = serde_json::to_string(value).context("serialize bridge message")?;
     ws.send(Message::Text(text.into())).await?;
+    Ok(())
+}
+
+async fn send_auth_and_subscribe<S>(
+    ws: &mut S,
+    target: &BridgeTarget,
+    subscription: &BridgeSubscription,
+) -> Result<()>
+where
+    S: futures::SinkExt<Message>
+        + futures::StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    let auth = BridgeClientMessage::Auth {
+        role: BridgeRole::Consumer,
+        secret: target.meta.secret.clone(),
+        client_id: client_id_for(target),
+    };
+    send_json(ws, &auth).await.context("send bridge auth")?;
+    wait_for_server_message(
+        ws,
+        |message| matches!(message, BridgeServerMessage::AuthSuccess),
+        AUTH_TIMEOUT,
+    )
+    .await
+    .context("wait for bridge auth success")?;
+
+    let subscription = subscription.clone().normalized();
+    let subscribe = BridgeClientMessage::Subscribe {
+        levels: subscription.levels,
+        capabilities: subscription.capabilities,
+        llm_filter: subscription.llm_filter,
+    };
+    send_json(ws, &subscribe)
+        .await
+        .context("send bridge subscribe")?;
+    wait_for_server_message(
+        ws,
+        |message| matches!(message, BridgeServerMessage::SubscribeAck),
+        SUBSCRIBE_TIMEOUT,
+    )
+    .await
+    .context("wait for bridge subscribe ack")?;
+
     Ok(())
 }
 

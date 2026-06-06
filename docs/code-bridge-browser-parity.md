@@ -65,9 +65,11 @@ after local-page fixtures prove the lifecycle boundary.
    detection, subscription normalization, and control request/result matching,
    while first proving Code Bridge-shaped control does not enter the Codex
    Desktop remote-control JSON-RPC path. The app-server path separation fixture
-   landed in #417; core fake bridge fixtures landed in #399 follow-up work.
+   landed in #417; core fake bridge fixtures landed in #418.
 2. Port the local navigation probe to the new overlay boundary using a local HTTP
-   server and no external network.
+   server and no external network. First land bridge event fixtures for local
+   `pageview`, `console`, and `screenshot` payloads before reintroducing a
+   browser runtime.
 3. Add TUI snapshot coverage only after event schema and storage are stable.
 4. Wire implementation behind the additive Every Code bridge surface.
 
