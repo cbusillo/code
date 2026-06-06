@@ -64,7 +64,8 @@ after local-page fixtures prove the lifecycle boundary.
 1. Add fake bridge metadata/server fixtures that prove discovery, stale heartbeat
    detection, subscription normalization, and control request/result matching,
    while first proving Code Bridge-shaped control does not enter the Codex
-   Desktop remote-control JSON-RPC path.
+   Desktop remote-control JSON-RPC path. The app-server path separation fixture
+   landed in #417; core fake bridge fixtures landed in #399 follow-up work.
 2. Port the local navigation probe to the new overlay boundary using a local HTTP
    server and no external network.
 3. Add TUI snapshot coverage only after event schema and storage are stable.
