@@ -68,6 +68,14 @@ local-code-rebuild:
     ./scripts/local/rebuild-path-code.sh
 
 [no-cd]
+local-code-rebuild-preflight:
+    ./scripts/local/rebuild-path-code.sh --preflight
+
+[no-cd]
+local-code-rebuild-preflight-check:
+    ./scripts/local/check-code-rebuild-preflight.sh
+
+[no-cd]
 local-remove-homebrew-code-link:
     ./scripts/local/remove-homebrew-code-link.sh
 

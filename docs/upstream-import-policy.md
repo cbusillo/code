@@ -241,10 +241,19 @@ git status --short --branch
 Install and smoke-check the local binary before tagging:
 
 ```sh
+just local-code-rebuild-preflight
 just local-code-rebuild
 code --version
 code exec -m gpt-5.5 --sandbox read-only --max-seconds 30 "Reply with exactly OK."
 ```
+
+`just local-code-rebuild-preflight` does not build or mutate files. It prints
+the current PATH entry, the release binary target, whether the release binary is
+a symlink that would be restored after a failed rebuild, and a `SAFE` or
+`WARNING` verdict for the local dogfood command wiring. Use
+`just local-code-rebuild-preflight-check` to run deterministic temp-directory
+fixtures for this preflight path without touching the real PATH-resolved
+`code` command.
 
 Run `just local-code-rebuild` after any release-readiness `./build-fast.sh` run:
 the fast build creates dev-fast artifacts for validation, while the rebuild
