@@ -794,6 +794,16 @@ client_request_definitions! {
         serialization: global("config"),
         response: v2::ExperimentalFeatureEnablementSetResponse,
     },
+    RemoteControlStatusRead => "remoteControl/status/read" {
+        params: v2::RemoteControlStatusReadParams,
+        serialization: global_shared_read("config"),
+        response: v2::RemoteControlStatusReadResponse,
+    },
+    RemoteControlEnable => "remoteControl/enable" {
+        params: v2::RemoteControlEnableParams,
+        serialization: global("config"),
+        response: v2::RemoteControlEnableResponse,
+    },
     #[experimental("collaborationMode/list")]
     /// Lists collaboration mode presets.
     CollaborationModeList => "collaborationMode/list" {
@@ -2606,6 +2616,36 @@ mod tests {
                 }
             }),
             serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_remote_control_startup_requests() -> Result<()> {
+        let status_read = ClientRequest::RemoteControlStatusRead {
+            request_id: RequestId::Integer(9),
+            params: v2::RemoteControlStatusReadParams::default(),
+        };
+        assert_eq!(
+            json!({
+                "method": "remoteControl/status/read",
+                "id": 9,
+                "params": {}
+            }),
+            serde_json::to_value(&status_read)?,
+        );
+
+        let enable = ClientRequest::RemoteControlEnable {
+            request_id: RequestId::Integer(10),
+            params: v2::RemoteControlEnableParams::default(),
+        };
+        assert_eq!(
+            json!({
+                "method": "remoteControl/enable",
+                "id": 10,
+                "params": {}
+            }),
+            serde_json::to_value(&enable)?,
         );
         Ok(())
     }
