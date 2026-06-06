@@ -802,6 +802,78 @@ def request_assertion_target(request: dict[str, Any], assertion: dict[str, Any])
     raise HarnessError(f"unsupported responses assertion scope: {scope}")
 
 
+def workspace_root_from_summary(summary: dict[str, Any]) -> Path:
+    run_dir = summary.get("run_dir")
+    if not isinstance(run_dir, str):
+        raise HarnessError("summary is missing run_dir")
+    return Path(run_dir) / "workspace"
+
+
+def workspace_path_from_summary(summary: dict[str, Any], relative_path: str) -> Path:
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise HarnessError(f"workspace file expectation path must be relative: {relative_path}")
+    return workspace_root_from_summary(summary) / path
+
+
+def workspace_file_expectation_failures(summary: dict[str, Any], assertion: dict[str, Any]) -> list[str]:
+    relative_path = str(assertion.get("path", ""))
+    if not relative_path:
+        return ["workspace_files expectation is missing path"]
+    try:
+        path = workspace_path_from_summary(summary, relative_path)
+    except HarnessError as exc:
+        return [str(exc)]
+
+    expected_exists = assertion.get("exists")
+    if expected_exists is not None and path.exists() != bool(expected_exists):
+        return [f"workspace file {relative_path!r} exists expected {bool(expected_exists)}, got {path.exists()}"]
+    if not path.exists():
+        return []
+    if not path.is_file():
+        return [f"workspace path {relative_path!r} is not a file"]
+
+    contents = read_text(path)
+    failures = []
+    if "equals" in assertion and contents != str(assertion["equals"]):
+        failures.append(f"workspace file {relative_path!r} did not equal expected contents")
+    if "contains" in assertion and str(assertion["contains"]) not in contents:
+        failures.append(f"workspace file {relative_path!r} did not contain {assertion['contains']!r}")
+    for needle in assertion.get("contains_all", []):
+        if str(needle) not in contents:
+            failures.append(f"workspace file {relative_path!r} did not contain {needle!r}")
+    if "not_contains" in assertion and str(assertion["not_contains"]) in contents:
+        failures.append(f"workspace file {relative_path!r} unexpectedly contained {assertion['not_contains']!r}")
+    return failures
+
+
+def workspace_git_status_failures(summary: dict[str, Any], assertion: dict[str, Any]) -> list[str]:
+    try:
+        workspace = workspace_root_from_summary(summary)
+    except HarnessError as exc:
+        return [str(exc)]
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=workspace,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    status = result.stdout
+    if result.returncode != 0:
+        return [f"git status failed in harness workspace: {result.stderr.strip()}"]
+    failures = []
+    if "equals" in assertion and status != str(assertion["equals"]):
+        failures.append("workspace git status did not equal expected output")
+    for needle in assertion.get("contains_all", []):
+        if str(needle) not in status:
+            failures.append(f"workspace git status did not contain {needle!r}")
+    if "not_contains" in assertion and str(assertion["not_contains"]) in status:
+        failures.append(f"workspace git status unexpectedly contained {assertion['not_contains']!r}")
+    return failures
+
+
 def request_input_items(request: dict[str, Any]) -> list[dict[str, Any]]:
     body = request.get("body")
     if not isinstance(body, dict):
@@ -964,6 +1036,16 @@ def assert_expectations(summary: dict[str, Any], scenario: dict[str, Any]) -> li
         expected = int(expect["responses_request_count"])
         if actual != expected:
             failures.append(f"responses request count expected {expected}, got {actual}")
+    for assertion in expect.get("workspace_files", []):
+        if not isinstance(assertion, dict):
+            failures.append("workspace_files expectation entries must be objects")
+            continue
+        failures.extend(workspace_file_expectation_failures(summary, assertion))
+    for assertion in expect.get("workspace_git_status", []):
+        if not isinstance(assertion, dict):
+            failures.append("workspace_git_status expectation entries must be objects")
+            continue
+        failures.extend(workspace_git_status_failures(summary, assertion))
     for assertion in expect.get("command_events", []):
         if not isinstance(assertion, dict):
             failures.append("command_events expectation entries must be objects")

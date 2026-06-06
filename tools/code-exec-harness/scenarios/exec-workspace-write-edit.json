@@ -1,47 +1,47 @@
 {
-    "name": "exec-readonly-write-denied",
+    "name": "exec-workspace-write-edit",
     "model": "gpt-5.1-codex",
-    "sandbox": "read-only",
+    "sandbox": "workspace-write",
     "files": {
-        "README.md": "# Read-only write denial fixture\n"
+        "README.md": "# Workspace write fixture\n"
     },
-    "prompt": "Try to create blocked.txt in the workspace, then reply with exactly: write denied",
+    "prompt": "Create edited.txt containing harness-edit-ok, then reply with exactly: edit done",
     "responses_api": {
         "responses": [
             {
-                "response_id": "resp-write-call",
+                "response_id": "resp-edit-call",
                 "events": [
                     {
                         "type": "response.created",
                         "payload": {
                             "type": "response.created",
                             "response": {
-                                "id": "resp-write-call"
+                                "id": "resp-edit-call"
                             }
                         }
                     },
                     {
                         "item": {
                             "type": "function_call",
-                            "call_id": "call-write-denied",
+                            "call_id": "call-edit-file",
                             "name": "shell_command",
-                            "arguments": "{\"command\":\"printf denied > blocked.txt\",\"login\":false,\"timeout_ms\":1000}"
+                            "arguments": "{\"command\":\"printf 'harness-edit-ok\\n' > edited.txt\",\"login\":false,\"timeout_ms\":1000}"
                         }
                     }
                 ]
             },
             {
-                "response_id": "resp-write-final",
+                "response_id": "resp-edit-final",
                 "events": [
                     {
                         "item": {
                             "type": "message",
                             "role": "assistant",
-                            "id": "msg-write-final",
+                            "id": "msg-edit-final",
                             "content": [
                                 {
                                     "type": "output_text",
-                                    "text": "write denied"
+                                    "text": "edit done"
                                 }
                             ]
                         }
@@ -53,13 +53,19 @@
     "expect": {
         "returncode": 0,
         "assistant_contains": [
-            "write denied"
+            "edit done"
         ],
         "responses_request_count": 2,
         "workspace_files": [
             {
-                "path": "blocked.txt",
-                "exists": false
+                "path": "edited.txt",
+                "exists": true,
+                "equals": "harness-edit-ok\n"
+            }
+        ],
+        "workspace_git_status": [
+            {
+                "equals": "?? edited.txt\n"
             }
         ],
         "event_count_any": [
@@ -77,32 +83,20 @@
         ],
         "command_events": [
             {
-                "command_contains": "blocked.txt",
+                "command_contains": "edited.txt",
                 "status_any": [
                     "started",
-                    "failed"
-                ]
-            },
-            {
-                "status_any": [
-                    "output",
-                    "failed"
-                ],
-                "output_contains": [
-                    "operation not permitted"
+                    "completed"
                 ]
             }
         ],
         "function_call_outputs": [
             {
                 "request": 1,
-                "call_id": "call-write-denied",
-                "contains_all": [
-                    "operation not permitted"
-                ],
+                "call_id": "call-edit-file",
                 "contains_any": [
-                    "\"exit_code\":1",
-                    "Exit code: 1"
+                    "\"exit_code\":0",
+                    "Exit code: 0"
                 ]
             }
         ]
