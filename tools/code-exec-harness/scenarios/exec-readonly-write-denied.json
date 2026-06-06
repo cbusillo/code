@@ -64,7 +64,7 @@
                 "msg.task_lifecycle": 2
             },
             {
-                "item.command_execution": 1,
+                "item.command_execution": 2,
                 "item.agent_message": 1,
                 "turn.completed": 1
             }
