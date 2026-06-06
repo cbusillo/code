@@ -27,9 +27,13 @@ use code_app_server_protocol::ConfigWriteErrorCode;
 use code_app_server_protocol::ConfigWriteResponse;
 use code_app_server_protocol::ExternalAgentConfigDetectParams;
 use code_app_server_protocol::ExternalAgentConfigImportParams;
+use code_app_server_protocol::ExperimentalFeatureListResponse;
 use code_app_server_protocol::GetAccountParams;
+use code_app_server_protocol::ListMcpServerStatusResponse;
 use code_app_server_protocol::LoginAccountParams;
 use code_app_server_protocol::MergeStrategy;
+use code_app_server_protocol::ModelListResponse;
+use code_app_server_protocol::ThreadListResponse;
 use code_app_server_protocol::ToolsV2;
 use code_app_server_protocol::AskForApproval as V2AskForApproval;
 use code_app_server_protocol::WriteStatus;
@@ -279,6 +283,17 @@ impl MessageProcessor {
                 | "config/batchWrite"
                 | "externalAgentConfig/detect"
                 | "externalAgentConfig/import"
+                | "thread/list"
+                | "model/list"
+                | "skills/list"
+                | "plugin/list"
+                | "hooks/list"
+                | "mcpServerStatus/list"
+                | "remoteControl/status/read"
+                | "remoteControl/enable"
+                | "collaborationMode/list"
+                | "experimentalFeature/list"
+                | "experimentalFeature/enablement/set"
                 | "account/read"
                 | "account/login/start"
                 | "account/login/cancel"
@@ -451,6 +466,86 @@ impl MessageProcessor {
                     Ok(response) => self.outgoing.send_response(request_id, response).await,
                     Err(error) => self.outgoing.send_error(request_id, error).await,
                 }
+                true
+            }
+            "thread/list" => {
+                let response = ThreadListResponse {
+                    data: Vec::new(),
+                    next_cursor: None,
+                };
+                self.outgoing.send_response(request_id, response).await;
+                true
+            }
+            "model/list" => {
+                let response = ModelListResponse {
+                    data: Vec::new(),
+                    next_cursor: None,
+                };
+                self.outgoing.send_response(request_id, response).await;
+                true
+            }
+            "skills/list" => {
+                self.outgoing
+                    .send_response(request_id, json!({ "data": [], "nextCursor": null }))
+                    .await;
+                true
+            }
+            "plugin/list" | "hooks/list" => {
+                self.outgoing
+                    .send_response(request_id, json!({ "data": [], "nextCursor": null }))
+                    .await;
+                true
+            }
+            "mcpServerStatus/list" => {
+                let response = ListMcpServerStatusResponse {
+                    data: Vec::new(),
+                    next_cursor: None,
+                };
+                self.outgoing.send_response(request_id, response).await;
+                true
+            }
+            "remoteControl/status/read" => {
+                self.outgoing
+                    .send_response(request_id, json!({ "enabled": false }))
+                    .await;
+                true
+            }
+            "remoteControl/enable" => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        json!({
+                            "enabled": false,
+                            "unsupported": true,
+                        }),
+                    )
+                    .await;
+                true
+            }
+            "collaborationMode/list" => {
+                self.outgoing
+                    .send_response(request_id, json!({ "data": [], "nextCursor": null }))
+                    .await;
+                true
+            }
+            "experimentalFeature/list" => {
+                let response = ExperimentalFeatureListResponse {
+                    data: Vec::new(),
+                    next_cursor: None,
+                };
+                self.outgoing.send_response(request_id, response).await;
+                true
+            }
+            "experimentalFeature/enablement/set" => {
+                self.outgoing
+                    .send_response(
+                        request_id,
+                        json!({
+                            "enabled": false,
+                            "unsupported": true,
+                        }),
+                    )
+                    .await;
                 true
             }
             "account/read" => {

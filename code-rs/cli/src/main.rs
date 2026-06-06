@@ -20,6 +20,7 @@ mod llm;
 mod update;
 use llm::{LlmCli, run_llm};
 use update::{UpdateCheckCommand, UpdateCommand, run_update, run_update_check};
+use code_app_server::AppServerTransport;
 use code_common::CliConfigOverrides;
 use code_core::{entry_to_rollout_path, SessionCatalog, SessionQuery};
 use code_core::spawn::spawn_std_command_with_retry;
@@ -122,7 +123,7 @@ enum Subcommand {
     McpServer,
 
     /// [experimental] Run the app server.
-    AppServer,
+    AppServer(AppServerArgs),
 
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
@@ -170,6 +171,24 @@ enum Subcommand {
 
     /// Manage Code Bridge subscription for this workspace.
     Bridge(BridgeCommand),
+}
+
+#[derive(Debug, Parser)]
+struct AppServerArgs {
+    /// Accepted for Codex Desktop compatibility. Every Code handles analytics
+    /// policy through its normal config path, so this flag is intentionally a
+    /// no-op for the app-server process.
+    #[arg(long = "analytics-default-enabled", default_value_t = false)]
+    _analytics_default_enabled: bool,
+
+    /// Transport endpoint URL. Supported values: `stdio://` (default),
+    /// `ws://IP:PORT`.
+    #[arg(
+        long = "listen",
+        value_name = "URL",
+        default_value = AppServerTransport::DEFAULT_LISTEN_URL
+    )]
+    listen: AppServerTransport,
 }
 
 #[derive(Debug, Parser)]
@@ -499,8 +518,13 @@ async fn cli_main(code_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()>
             prepend_config_flags(&mut mcp_cli.config_overrides, root_config_overrides.clone());
             mcp_cli.run().await?;
         }
-        Some(Subcommand::AppServer) => {
-            code_app_server::run_main(code_linux_sandbox_exe, root_config_overrides).await?;
+        Some(Subcommand::AppServer(args)) => {
+            code_app_server::run_main_with_transport(
+                code_linux_sandbox_exe,
+                root_config_overrides,
+                args.listen,
+            )
+            .await?;
         }
         Some(Subcommand::Resume(ResumeCommand {
             session_id,
