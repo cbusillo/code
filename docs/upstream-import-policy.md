@@ -117,6 +117,11 @@ started, and each slice must state its compatibility target, ownership boundary,
 and validation evidence. Each slice still ends with the repository gate,
 `./build-fast.sh`, passing cleanly.
 
+Current `main` is provisional until [#397](https://github.com/cbusillo/code/issues/397)
+classifies the pre-#390 Every Code fixture and behavior surface. Use
+`docs/codex-fork-parity-ledger.md` before assuming that an Every Code feature
+missing from the Codex-base workspace was intentionally retired.
+
 Do not remove the remote inbox backend merely because Codex Desktop is becoming
 the preferred GUI. Remote inbox currently carries GitHub/LaunchPlane-created
 session continuity and remote approval/reply flows. Drop or replace

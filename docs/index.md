@@ -28,3 +28,9 @@ Use these docs to install, configure, and operate Every Code (Code).
 - [Sandboxing overview](sandbox.md)
 - [Platform sandboxing](platform-sandboxing.md)
 - [Windows sandbox security](platform-sandboxing.md#windows)
+
+## Maintainer Notes
+
+- [Codex fork parity ledger](codex-fork-parity-ledger.md)
+- [Codex-base feature inventory](codex-base-feature-inventory.md)
+- [Upstream import and runtime policy](upstream-import-policy.md)
