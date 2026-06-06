@@ -13,7 +13,7 @@ use codex_core_plugins::marketplace_remove::remove_marketplace;
 use codex_utils_cli::CliConfigOverrides;
 
 #[derive(Debug, Parser)]
-#[command(bin_name = "codex plugin marketplace")]
+#[command(bin_name = "code plugin marketplace")]
 pub struct MarketplaceCli {
     #[clap(flatten)]
     pub config_overrides: CliConfigOverrides,
@@ -30,7 +30,7 @@ enum MarketplaceSubcommand {
 }
 
 #[derive(Debug, Parser)]
-#[command(bin_name = "codex plugin marketplace add")]
+#[command(bin_name = "code plugin marketplace add")]
 struct AddMarketplaceArgs {
     /// Marketplace source. Supports owner/repo[@ref], HTTP(S) Git URLs, SSH URLs,
     /// or local marketplace root directories.
@@ -48,13 +48,13 @@ struct AddMarketplaceArgs {
 }
 
 #[derive(Debug, Parser)]
-#[command(bin_name = "codex plugin marketplace upgrade")]
+#[command(bin_name = "code plugin marketplace upgrade")]
 struct UpgradeMarketplaceArgs {
     marketplace_name: Option<String>,
 }
 
 #[derive(Debug, Parser)]
-#[command(bin_name = "codex plugin marketplace remove")]
+#[command(bin_name = "code plugin marketplace remove")]
 struct RemoveMarketplaceArgs {
     /// Configured marketplace name to remove.
     marketplace_name: String,
@@ -88,7 +88,7 @@ async fn run_add(args: AddMarketplaceArgs) -> Result<()> {
         sparse_paths,
     } = args;
 
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+    let codex_home = find_codex_home().context("failed to resolve Every Code config home")?;
     let outcome = add_marketplace(
         codex_home.to_path_buf(),
         MarketplaceAddRequest {
@@ -126,7 +126,7 @@ async fn run_upgrade(
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+    let codex_home = find_codex_home().context("failed to resolve Every Code config home")?;
     let manager = PluginsManager::new(codex_home.to_path_buf());
     let plugins_input = config.plugins_config_input();
     let outcome = manager
@@ -137,7 +137,7 @@ async fn run_upgrade(
 
 async fn run_remove(args: RemoveMarketplaceArgs) -> Result<()> {
     let RemoveMarketplaceArgs { marketplace_name } = args;
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+    let codex_home = find_codex_home().context("failed to resolve Every Code config home")?;
     let outcome = remove_marketplace(
         codex_home.to_path_buf(),
         MarketplaceRemoveRequest { marketplace_name },
