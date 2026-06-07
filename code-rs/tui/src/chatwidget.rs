@@ -6134,6 +6134,26 @@ impl ChatWidget {
             } => {
                 self.on_image_generation_end(id, revised_prompt, saved_path);
             }
+            ThreadItem::DynamicToolCall {
+                namespace,
+                tool,
+                arguments,
+                status,
+                content_items,
+                success,
+                ..
+            } => {
+                self.flush_answer_stream_with_separator();
+                self.add_to_history(history_cell::new_dynamic_tool_call(
+                    namespace,
+                    tool,
+                    arguments,
+                    status,
+                    content_items,
+                    success,
+                ));
+                self.request_redraw();
+            }
             ThreadItem::EnteredReviewMode { review, .. } => {
                 if from_replay {
                     self.enter_review_mode_with_hint(review, /*from_replay*/ true);
@@ -6167,7 +6187,6 @@ impl ChatWidget {
                 reasoning_effort,
                 agents_states,
             }),
-            ThreadItem::DynamicToolCall { .. } => {}
         }
 
         if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot)) && turn_id.is_empty() {
