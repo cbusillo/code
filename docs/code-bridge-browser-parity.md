@@ -40,7 +40,7 @@ proves an additive extension is required:
 | `code-rs/cli/src/bridge.rs` | CLI-facing bridge discovery, event tailing, screenshot request, JavaScript request, and stale heartbeat handling. | Rewrite | CLI or harness fixtures with fake bridge metadata/server before restoring user commands. |
 | `code-rs/tui/src/chatwidget/browser_sessions.rs` and `code-rs/tui/src/history_cell/browser.rs` | TUI grouping and transcript rendering for browser/page events. | Rewrite | Snapshot fixtures against current TUI history/rendering once bridge event shape is defined. |
 | `vt100_chatwidget_snapshot__browser_session_*.snap` and `vt100_chatwidget_snapshot__context_cell_browser_badge.snap` | Browser-session grouping, unordered action stability, foreign-event filtering, and context badge visibility. | Rewrite | Current TUI snapshots after the additive bridge event schema exists. |
-| `code-rs/core/templates/compact/history_bridge.md` | Preserve bridge context during compaction. | Defer | Track under #399 after bridge event storage and transcript representation are defined. |
+| `code-rs/core/templates/compact/history_bridge.md` | Preserve handoff context during compaction. Despite the filename, this was a generic history handoff template, not a Code Bridge-specific artifact. | Retire | Keep the Codex-aligned programmatic compaction path. Preserve collected bridge evidence through the active compaction prompt and transcript summary instead of restoring the old template. |
 
 ## Proposed Additive Event Contract
 
@@ -74,7 +74,16 @@ event evidence rather than the control acknowledgement itself.
    control request fixtures landed after that event schema stabilized, still
    without reintroducing the old browser crate.
 3. Add TUI snapshot coverage only after event schema and storage are stable.
-4. Wire implementation behind the additive Every Code bridge surface.
+   Generic dynamic tool-call rendering and Code Bridge collect/screenshot
+   history snapshots landed in #422.
+4. Preserve bridge context through Codex-aligned compaction rather than
+   restoring the old generic `history_bridge.md` template. The active compact
+   prompt should ask the summarizing model to carry forward collected Code
+   Bridge console, error, pageview, screenshot, and control evidence when that
+   evidence is already present in the transcript. A later compaction fixture
+   should seed bridge tool results and assert the resulting summary carries the
+   important bridge findings forward.
+5. Wire implementation behind the additive Every Code bridge surface.
 
 Do not port the old browser crate, TUI cells, or CLI bridge commands wholesale
 before the relevant fixture in this document exists.
