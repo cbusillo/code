@@ -844,6 +844,57 @@ pub(super) fn handle_image_generation_end(
     );
 }
 
+pub(super) fn handle_dynamic_tool_call(
+    chat: &mut ChatWidget,
+    call_id: impl Into<String>,
+    namespace: Option<String>,
+    tool: impl Into<String>,
+    arguments: serde_json::Value,
+    content_items: Vec<AppServerDynamicToolCallOutputContentItem>,
+    success: bool,
+) {
+    handle_dynamic_tool_call_with_status(
+        chat,
+        call_id,
+        namespace,
+        tool,
+        arguments,
+        AppServerDynamicToolCallStatus::Completed,
+        content_items,
+        Some(success),
+    );
+}
+
+pub(super) fn handle_dynamic_tool_call_with_status(
+    chat: &mut ChatWidget,
+    call_id: impl Into<String>,
+    namespace: Option<String>,
+    tool: impl Into<String>,
+    arguments: serde_json::Value,
+    status: AppServerDynamicToolCallStatus,
+    content_items: Vec<AppServerDynamicToolCallOutputContentItem>,
+    success: Option<bool>,
+) {
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id(chat),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: AppServerThreadItem::DynamicToolCall {
+                id: call_id.into(),
+                namespace,
+                tool: tool.into(),
+                arguments,
+                status,
+                content_items: Some(content_items),
+                success,
+                duration_ms: Some(12),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+}
+
 pub(super) fn replay_user_message_inputs(
     chat: &mut ChatWidget,
     item_id: &str,
