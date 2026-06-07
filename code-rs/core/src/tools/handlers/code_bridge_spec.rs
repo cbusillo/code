@@ -12,8 +12,13 @@ pub fn create_code_bridge_tool() -> ToolSpec {
         (
             "action".to_string(),
             JsonSchema::string_enum(
-                vec![json!("subscribe"), json!("screenshot"), json!("javascript")],
-                Some("Required: subscribe, screenshot, or javascript.".to_string()),
+                vec![
+                    json!("subscribe"),
+                    json!("collect"),
+                    json!("screenshot"),
+                    json!("javascript"),
+                ],
+                Some("Required: subscribe, collect, screenshot, or javascript.".to_string()),
             ),
         ),
         (
@@ -33,14 +38,21 @@ pub fn create_code_bridge_tool() -> ToolSpec {
         (
             "timeout_ms".to_string(),
             JsonSchema::integer(Some(
-                "Optional control-result timeout in milliseconds.".to_string(),
+                "Optional timeout in milliseconds for control results or event collection."
+                    .to_string(),
+            )),
+        ),
+        (
+            "max_events".to_string(),
+            JsonSchema::integer(Some(
+                "For action=collect: maximum number of bridge events to collect.".to_string(),
             )),
         ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: CODE_BRIDGE_TOOL_NAME.to_string(),
-        description: "Code Bridge local app telemetry/control. Subscribe to events, request a screenshot, or run JavaScript on a connected bridge client.".to_string(),
+        description: "Code Bridge local app telemetry/control. Subscribe to events, collect recent bridge events, request a screenshot, or run JavaScript on a connected bridge client.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(

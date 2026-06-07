@@ -177,9 +177,10 @@ pub struct BridgeControlOutcome {
 pub struct BridgeScreenshot {
     pub mime: String,
     pub data_len: usize,
+    pub data: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum BridgeEventData {
     Console {
@@ -202,7 +203,7 @@ pub enum BridgeEventData {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeEvent {
     pub page_id: String,
@@ -325,9 +326,11 @@ pub async fn request_control(
                     mime,
                     data,
                 } if screenshot_id == id => {
+                    let data_len = decoded_data_len(&data);
                     screenshot = Some(BridgeScreenshot {
                         mime,
-                        data_len: decoded_data_len(&data),
+                        data_len,
+                        data: Some(data),
                     });
                 }
                 _ => {}
@@ -379,6 +382,60 @@ pub async fn collect_events(
     Ok(events)
 }
 
+pub fn format_events_transcript(events: &[BridgeEvent]) -> String {
+    events
+        .iter()
+        .map(format_event_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_event_line(event: &BridgeEvent) -> String {
+    let timestamp = event.timestamp.to_rfc3339();
+    match &event.data {
+        BridgeEventData::Console { level, message } => format!(
+            "[{timestamp}] console page={} level={} message={}",
+            quote_for_transcript(&event.page_id),
+            level,
+            quote_for_transcript(message)
+        ),
+        BridgeEventData::Error { message, stack } => {
+            let mut line = format!(
+                "[{timestamp}] error page={} message={}",
+                quote_for_transcript(&event.page_id),
+                quote_for_transcript(message)
+            );
+            if let Some(stack) = stack.as_ref().filter(|stack| !stack.trim().is_empty()) {
+                line.push_str(" stack=");
+                line.push_str(&quote_for_transcript(stack));
+            }
+            line
+        }
+        BridgeEventData::Pageview { url, title } => {
+            let mut line = format!(
+                "[{timestamp}] pageview page={} url={}",
+                quote_for_transcript(&event.page_id),
+                quote_for_transcript(url)
+            );
+            if let Some(title) = title.as_ref().filter(|title| !title.trim().is_empty()) {
+                line.push_str(" title=");
+                line.push_str(&quote_for_transcript(title));
+            }
+            line
+        }
+        BridgeEventData::Screenshot { mime, data_len } => format!(
+            "[{timestamp}] screenshot page={} mime={} bytes={}",
+            quote_for_transcript(&event.page_id),
+            mime,
+            data_len
+        ),
+    }
+}
+
+fn quote_for_transcript(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn default_levels() -> Vec<String> {
     vec!["errors".to_string()]
 }
@@ -411,7 +468,7 @@ fn decoded_data_len(data: &str) -> usize {
     BASE64_STANDARD
         .decode(data)
         .map(|bytes| bytes.len())
-        .unwrap_or_else(|_| data.len())
+        .unwrap_or(0)
 }
 
 async fn compute_staleness(meta: &BridgeMeta, path: &Path) -> (bool, Option<i64>) {
@@ -640,5 +697,59 @@ mod tests {
         assert!(wire.get("method").is_none());
         assert!(!message.is_desktop_remote_control_message());
         Ok(())
+    }
+
+    #[test]
+    fn format_events_transcript_renders_all_event_kinds() -> Result<()> {
+        let timestamp = DateTime::parse_from_rfc3339("2026-06-06T12:00:00Z")?.with_timezone(&Utc);
+        let events = vec![
+            BridgeEvent {
+                page_id: "page-1".to_string(),
+                timestamp,
+                data: BridgeEventData::Pageview {
+                    url: "https://example.test/app".to_string(),
+                    title: Some("Example App".to_string()),
+                },
+            },
+            BridgeEvent {
+                page_id: "page-1".to_string(),
+                timestamp,
+                data: BridgeEventData::Console {
+                    level: "info".to_string(),
+                    message: "ready".to_string(),
+                },
+            },
+            BridgeEvent {
+                page_id: "page-1".to_string(),
+                timestamp,
+                data: BridgeEventData::Error {
+                    message: "TypeError: boom".to_string(),
+                    stack: Some("at app.js:1".to_string()),
+                },
+            },
+            BridgeEvent {
+                page_id: "page-1".to_string(),
+                timestamp,
+                data: BridgeEventData::Screenshot {
+                    mime: "image/png".to_string(),
+                    data_len: 68,
+                },
+            },
+        ];
+
+        let transcript = format_events_transcript(&events);
+
+        assert!(transcript.contains("pageview page=\"page-1\""));
+        assert!(transcript.contains("url=\"https://example.test/app\""));
+        assert!(transcript.contains("console page=\"page-1\" level=info message=\"ready\""));
+        assert!(transcript.contains("error page=\"page-1\" message=\"TypeError: boom\""));
+        assert!(transcript.contains("stack=\"at app.js:1\""));
+        assert!(transcript.contains("screenshot page=\"page-1\" mime=image/png bytes=68"));
+        Ok(())
+    }
+
+    #[test]
+    fn format_events_transcript_empty_is_empty() {
+        assert_eq!(format_events_transcript(&[]), "");
     }
 }
