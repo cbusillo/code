@@ -37,9 +37,9 @@ proves an additive extension is required:
 | `code-rs/browser/tests/local_navigation.rs` | Internal browser can open a local HTTP page, report current URL, execute JavaScript, and read page text in headless and headed modes. | Port | A deterministic local-navigation fixture for the new bridge/browser overlay crate or harness. |
 | `code-rs/browser/src/manager.rs`, `page.rs`, and `tools/browser_tools.rs` | Browser session lifecycle, navigation, JavaScript execution, screenshots, and tool-call facing browser actions. | Port | A no-network fixture that drives a local page through navigation, JavaScript, screenshot, and cleanup. |
 | `code-rs/core/src/bridge_client.rs` | Discover `.code/code-bridge.json`, subscribe to console/error/pageview/screenshot/control events, batch summaries, and send control requests. | Port | Metadata discovery and subscription normalization tests before reconnect/batching implementation. |
-| `code-rs/cli/src/bridge.rs` | CLI-facing bridge discovery, event tailing, screenshot request, JavaScript request, and stale heartbeat handling. | Rewrite | CLI or harness fixtures with fake bridge metadata/server before restoring user commands. |
-| `code-rs/tui/src/chatwidget/browser_sessions.rs` and `code-rs/tui/src/history_cell/browser.rs` | TUI grouping and transcript rendering for browser/page events. | Rewrite | Snapshot fixtures against current TUI history/rendering once bridge event shape is defined. |
-| `vt100_chatwidget_snapshot__browser_session_*.snap` and `vt100_chatwidget_snapshot__context_cell_browser_badge.snap` | Browser-session grouping, unordered action stability, foreign-event filtering, and context badge visibility. | Rewrite | Current TUI snapshots after the additive bridge event schema exists. |
+| `code-rs/cli/src/bridge.rs` | CLI-facing bridge discovery, event tailing, screenshot request, JavaScript request, and stale heartbeat handling. | Retire for now | Do not restore the old `code bridge` subcommands while the model-facing `code_bridge` tool covers subscribe, collect, screenshot, JavaScript, and navigate through the current Codex-style tool path. Reconsider only if a concrete human CLI workflow remains after the browser host boundary is implemented. |
+| `code-rs/tui/src/chatwidget/browser_sessions.rs` and `code-rs/tui/src/history_cell/browser.rs` | TUI grouping and transcript rendering for browser/page events. | Supersede | Keep using generic dynamic tool-call history rendering for Code Bridge. Avoid restoring browser-specific TUI cells unless a focused fixture proves generic rendering cannot represent a required workflow. |
+| `vt100_chatwidget_snapshot__browser_session_*.snap` and `vt100_chatwidget_snapshot__context_cell_browser_badge.snap` | Browser-session grouping, unordered action stability, foreign-event filtering, and context badge visibility. | Supersede | Generic dynamic tool-call snapshots now cover Code Bridge collect/screenshot history. Add future snapshots against that generic surface rather than reviving old browser-session snapshot fixtures. |
 | `code-rs/core/templates/compact/history_bridge.md` | Preserve handoff context during compaction. Despite the filename, this was a generic history handoff template, not a Code Bridge-specific artifact. | Retire | Keep the Codex-aligned programmatic compaction path. Preserve collected bridge evidence through the active compaction prompt and transcript summary instead of restoring the old template. |
 
 ## Proposed Additive Event Contract
@@ -83,7 +83,10 @@ event evidence rather than the control acknowledgement itself.
    evidence is already present in the transcript. A later compaction fixture
    should seed bridge tool results and assert the resulting summary carries the
    important bridge findings forward.
-5. Wire implementation behind the additive Every Code bridge surface.
+5. Keep human CLI commands retired unless a later browser-host slice identifies
+   a non-model workflow that cannot be handled through the `code_bridge` tool or
+   existing debug surfaces.
+6. Wire implementation behind the additive Every Code bridge surface.
 
-Do not port the old browser crate, TUI cells, or CLI bridge commands wholesale
-before the relevant fixture in this document exists.
+Do not port the old browser crate, TUI cells, snapshots, or CLI bridge commands
+wholesale before the relevant fixture in this document exists.
