@@ -125,6 +125,8 @@ pub struct BridgeControlRequest {
     pub id: String,
     pub action: BridgeControlAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -136,6 +138,7 @@ pub struct BridgeControlRequest {
 #[serde(rename_all = "camelCase")]
 pub enum BridgeControlAction {
     Ping,
+    Navigate,
     Screenshot,
     Javascript,
 }
@@ -687,6 +690,7 @@ mod tests {
         let message = BridgeClientMessage::ControlRequest(BridgeControlRequest {
             id: "request-1".to_string(),
             action: BridgeControlAction::Javascript,
+            url: None,
             code: Some("location.href".to_string()),
             timeout_ms: Some(1_000),
             expect_result: Some(true),

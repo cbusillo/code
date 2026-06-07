@@ -67,6 +67,7 @@ async fn fake_bridge_round_trip_covers_subscription_and_control_result() -> Resu
         BridgeControlRequest {
             id: "control-1".to_string(),
             action: BridgeControlAction::Ping,
+            url: None,
             code: None,
             timeout_ms: Some(1_000),
             expect_result: Some(true),
@@ -126,6 +127,7 @@ async fn fake_bridge_failed_control_result_is_returned_as_error() -> Result<()> 
         BridgeControlRequest {
             id: "control-1".to_string(),
             action: BridgeControlAction::Ping,
+            url: None,
             code: None,
             timeout_ms: Some(1_000),
             expect_result: Some(true),
@@ -138,6 +140,53 @@ async fn fake_bridge_failed_control_result_is_returned_as_error() -> Result<()> 
     let observed = fake.wait().await?;
     assert_eq!(observed.control["type"], "control_request");
     assert!(err.to_string().contains("bridge refused ping"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fake_bridge_navigate_control_sends_url_without_remote_control_shape() -> Result<()> {
+    let fake = FakeBridgeServer::start(FakeBridgeMode::Control(FakeBridgeControlResponse::Success))
+        .await?;
+    let workspace = TempDir::new()?;
+    let code_dir = workspace.path().join(".code");
+    fs::create_dir(&code_dir)?;
+    fs::write(
+        code_dir.join(META_FILE),
+        serde_json::to_string(&json!({
+            "url": fake.url,
+            "secret": fake.secret,
+            "workspacePath": workspace.path(),
+            "heartbeatAt": chrono::Utc::now(),
+        }))?,
+    )?;
+    let navigate_url = "http://127.0.0.1/local-navigation".to_string();
+
+    let mut targets = discover_bridge_targets(workspace.path()).await?;
+    let target = targets.remove(0);
+    let subscription = load_subscription(workspace.path()).await?;
+    let outcome = request_control(
+        &target,
+        &subscription,
+        BridgeControlRequest {
+            id: "control-navigate".to_string(),
+            action: BridgeControlAction::Navigate,
+            url: Some(navigate_url.clone()),
+            code: None,
+            timeout_ms: Some(1_000),
+            expect_result: Some(true),
+        },
+        Duration::from_secs(2),
+    )
+    .await?;
+
+    let observed = fake.wait().await?;
+    assert_eq!(outcome.delivered, 1);
+    assert!(outcome.ok);
+    assert_eq!(observed.control["type"], "control_request");
+    assert_eq!(observed.control["action"], "navigate");
+    assert_eq!(observed.control["url"], navigate_url);
+    assert!(observed.control.get("code").is_none());
+    assert!(observed.control.get("method").is_none());
     Ok(())
 }
 
@@ -167,6 +216,7 @@ async fn fake_bridge_closed_connection_before_result_is_error() -> Result<()> {
         BridgeControlRequest {
             id: "control-1".to_string(),
             action: BridgeControlAction::Ping,
+            url: None,
             code: None,
             timeout_ms: Some(1_000),
             expect_result: Some(true),
