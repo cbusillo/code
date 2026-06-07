@@ -2,6 +2,11 @@
 
 What Auto Drive is, how to start it, and how it behaves in Every Code.
 
+> Status: Auto Drive is not live on the current Codex-fork `main` baseline. This
+> page preserves the intended Every Code behavior while #398 rebuilds fixtures
+> and implementation on current Codex thread/session/goal/review primitives. See
+> [auto-drive-parity.md](auto-drive-parity.md) for the active boundary map.
+
 ## Start points
 - TUI: `/auto <goal>`. If you omit the goal and there is recent history, Every Code proposes one for you. `/auto settings` jumps straight to the Auto Drive pane.
 - CLI: `code exec --auto "<goal>"` or `code exec "/auto <goal>"`. A goal is required when launching headless.
