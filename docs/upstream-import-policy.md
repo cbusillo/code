@@ -144,12 +144,11 @@ original/direct upstream and provenance source.
 
 ## Every Code-Owned Surfaces
 
-- **Remote Inbox:** remote session control, request-user-input forwarding, and
-  remote Auto Drive triggers. Keep transport/protocol code isolated from TUI
-  event handling where possible.
-- **Auto Drive integration:** coordinator UI, Esc semantics, status surfaces,
-  and local crash diagnostics. Keep routing in `chatwidget.rs` and `app.rs`
-  consistent with `AGENTS.md`.
+- **Remote Inbox:** remote session control and request-user-input forwarding.
+  Keep transport/protocol code isolated from TUI event handling where possible.
+- **Goal-mode automation:** standalone Auto Drive is retired. Preserve useful
+  long-running-work semantics through current goal/review/session surfaces
+  instead of porting Auto Drive coordinator UI, commands, or status cards.
 - **Patch harness:** local validation for changed files, project tool discovery,
   and workspace-aware validator execution.
 - **Release workflow:** GitHub Releases and local PATH rebuilds are Every Code

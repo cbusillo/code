@@ -21,7 +21,7 @@ reviewer wholesale.
 | --- | --- | --- | --- |
 | `code-rs/core/src/review_store.rs` run ledger | Durable status, freshness, elapsed time, token/prompt estimate, error summary, finding count, and compact byte-capped ledger rows. | Rewrite | A small fixture around the current review/guardian event stream that records terminal proof without depending on the deleted store shape. |
 | `code-rs/core/src/review_coord.rs` and `review_coord_integration.rs` | One active background review per snapshot, supersession, orphan reconciliation, and ghost-commit/worktree identity. | Rewrite | A coordinator fixture that proves current Codex thread/review primitives can supersede stale evidence before adding any new store. |
-| Old `code exec --auto-review` review-model and auto-resolve path | Dedicated background review models and follow-up limits for Auto Drive review gates. | Rewrite | An Auto Drive review-gate fixture after #398 re-establishes the coordinator boundary. Do not map this onto plain `code exec` user turns. |
+| Old `code exec --auto-review` review-model and auto-resolve path | Dedicated background review models and follow-up limits for retired Auto Drive review gates. | Retire for Auto Drive | #398 retires the standalone Auto Drive coordinator boundary. Preserve only review/guardian proof value that #400 maps onto current Codex review primitives. |
 | Auto-review run output snapshots | Stable finding digests and reviewer output artifacts for later status display. | Rewrite | A structured `ReviewOutputEvent` fixture with digest/summary expectations. |
 
 ## Deferred Or Retired Semantics
