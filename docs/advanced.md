@@ -9,7 +9,7 @@ Run Every Code headless in pipelines. Example GitHub Action step:
   run: |
     just local-code-rebuild
     export OPENAI_API_KEY="${{ secrets.OPENAI_KEY }}"
-    code exec --full-auto "update CHANGELOG for next release"
+    code exec --sandbox workspace-write "update CHANGELOG for next release"
 ```
 
 ### Resuming non-interactive sessions
