@@ -300,7 +300,7 @@ pub async fn request_control(
     timeout(result_timeout, async {
         while ok.is_none() || (waits_for_screenshot && screenshot.is_none()) {
             let Some(message) = next_server_message(&mut ws).await? else {
-                break;
+                bail!("bridge connection closed before control result was received");
             };
             match message {
                 BridgeServerMessage::ControlResult {

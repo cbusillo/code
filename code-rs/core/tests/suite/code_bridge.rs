@@ -142,6 +142,50 @@ async fn fake_bridge_failed_control_result_is_returned_as_error() -> Result<()> 
 }
 
 #[tokio::test]
+async fn fake_bridge_closed_connection_before_result_is_error() -> Result<()> {
+    let fake = FakeBridgeServer::start(FakeBridgeMode::Control(FakeBridgeControlResponse::Close))
+        .await?;
+    let workspace = TempDir::new()?;
+    let code_dir = workspace.path().join(".code");
+    fs::create_dir(&code_dir)?;
+    fs::write(
+        code_dir.join(META_FILE),
+        serde_json::to_string(&json!({
+            "url": fake.url,
+            "secret": fake.secret,
+            "workspacePath": workspace.path(),
+            "heartbeatAt": chrono::Utc::now(),
+        }))?,
+    )?;
+
+    let mut targets = discover_bridge_targets(workspace.path()).await?;
+    let target = targets.remove(0);
+    let subscription = load_subscription(workspace.path()).await?;
+    let err = request_control(
+        &target,
+        &subscription,
+        BridgeControlRequest {
+            id: "control-1".to_string(),
+            action: BridgeControlAction::Ping,
+            code: None,
+            timeout_ms: Some(1_000),
+            expect_result: Some(true),
+        },
+        Duration::from_secs(2),
+    )
+    .await
+    .expect_err("closed bridge connection should surface as an error");
+
+    let observed = fake.wait().await?;
+    assert_eq!(observed.control["type"], "control_request");
+    assert!(
+        err.to_string()
+            .contains("bridge connection closed before control result was received")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn fake_bridge_local_page_events_cover_navigation_console_and_screenshot() -> Result<()> {
     let local_page = LocalPageServer::start().await?;
     let local_page_url = local_page.url.clone();
@@ -259,6 +303,7 @@ enum FakeBridgeMode {
 enum FakeBridgeControlResponse {
     Success,
     Failure,
+    Close,
 }
 
 async fn accept_one(
@@ -313,6 +358,14 @@ async fn accept_one(
         }
         FakeBridgeControlResponse::Failure => {
             json!({ "type": "control_result", "id": id, "ok": false, "error": { "message": "bridge refused ping" } })
+        }
+        FakeBridgeControlResponse::Close => {
+            websocket.close(None).await.context("close fake bridge websocket")?;
+            return Ok(ObservedBridgeMessages {
+                auth,
+                subscribe,
+                control,
+            });
         }
     };
     websocket
