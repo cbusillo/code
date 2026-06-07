@@ -15,10 +15,14 @@ pub fn create_code_bridge_tool() -> ToolSpec {
                 vec![
                     json!("subscribe"),
                     json!("collect"),
+                    json!("navigate"),
                     json!("screenshot"),
                     json!("javascript"),
                 ],
-                Some("Required: subscribe, collect, screenshot, or javascript.".to_string()),
+                Some(
+                    "Required: subscribe, collect, navigate, screenshot, or javascript."
+                        .to_string(),
+                ),
             ),
         ),
         (
@@ -26,6 +30,12 @@ pub fn create_code_bridge_tool() -> ToolSpec {
             JsonSchema::string(Some(
                 "For action=subscribe: log level, one of errors, warn, info, or trace."
                     .to_string(),
+            )),
+        ),
+        (
+            "url".to_string(),
+            JsonSchema::string(Some(
+                "For action=navigate: URL to open in the bridge client.".to_string(),
             )),
         ),
         (
@@ -52,7 +62,7 @@ pub fn create_code_bridge_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: CODE_BRIDGE_TOOL_NAME.to_string(),
-        description: "Code Bridge local app telemetry/control. Subscribe to events, collect recent bridge events, request a screenshot, or run JavaScript on a connected bridge client.".to_string(),
+        description: "Code Bridge local app telemetry/control. Subscribe to events, collect recent bridge events, navigate a connected bridge client, request a screenshot, or run JavaScript.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(

@@ -43,6 +43,7 @@ pub struct CodeBridgeHandler;
 enum CodeBridgeAction {
     Subscribe,
     Collect,
+    Navigate,
     Screenshot,
     Javascript,
 }
@@ -52,6 +53,8 @@ struct CodeBridgeArgs {
     action: CodeBridgeAction,
     #[serde(default)]
     level: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -110,10 +113,31 @@ impl ToolHandler for CodeBridgeHandler {
             CodeBridgeAction::Collect => {
                 collect(&turn.cwd, args.max_events, args.timeout_ms).await?
             }
+            CodeBridgeAction::Navigate => {
+                let Some(url) = args
+                    .url
+                    .map(|url| url.trim().to_string())
+                    .filter(|url| !url.is_empty())
+                else {
+                    return Err(FunctionCallError::RespondToModel(
+                        "code_bridge navigate action requires non-empty `url`".to_string(),
+                    ));
+                };
+                control(
+                    &turn.cwd,
+                    BridgeControlAction::Navigate,
+                    Some(url),
+                    None,
+                    args.timeout_ms,
+                    supports_image,
+                )
+                .await?
+            }
             CodeBridgeAction::Screenshot => {
                 control(
                     &turn.cwd,
                     BridgeControlAction::Screenshot,
+                    None,
                     None,
                     args.timeout_ms,
                     supports_image,
@@ -129,6 +153,7 @@ impl ToolHandler for CodeBridgeHandler {
                 control(
                     &turn.cwd,
                     BridgeControlAction::Javascript,
+                    None,
                     Some(code),
                     args.timeout_ms,
                     supports_image,
@@ -257,6 +282,7 @@ async fn collect(
 async fn control(
     cwd: &std::path::Path,
     action: BridgeControlAction,
+    url: Option<String>,
     code: Option<String>,
     timeout_ms: Option<u64>,
     supports_image: bool,
@@ -267,6 +293,7 @@ async fn control(
     let request = BridgeControlRequest {
         id: format!("code-bridge-{}", Utc::now().timestamp_millis()),
         action,
+        url,
         code,
         timeout_ms: Some(timeout_ms),
         expect_result: Some(true),
@@ -292,6 +319,7 @@ fn output_from_control(
         ok: outcome.ok,
         message: match action {
             BridgeControlAction::Ping => "Code Bridge ping completed".to_string(),
+            BridgeControlAction::Navigate => "Code Bridge navigation completed".to_string(),
             BridgeControlAction::Screenshot => "Code Bridge screenshot completed".to_string(),
             BridgeControlAction::Javascript => "Code Bridge JavaScript completed".to_string(),
         },
@@ -432,6 +460,7 @@ mod tests {
         let output = control(
             workspace.path(),
             BridgeControlAction::Javascript,
+            None,
             Some("window.location.href".to_string()),
             Some(2_000),
             false,
@@ -453,6 +482,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn navigate_control_sends_url_over_code_bridge_wire_shape() -> Result<()> {
+        let fake = FakeBridgeServer::start(FakeBridgeResponse::Navigate).await?;
+        let workspace = workspace_with_bridge_meta(&fake)?;
+        let target_url = "http://127.0.0.1:4321/local-navigation".to_string();
+
+        let output = control(
+            workspace.path(),
+            BridgeControlAction::Navigate,
+            Some(target_url.clone()),
+            None,
+            Some(2_000),
+            false,
+        )
+        .await?;
+        let observed = fake.wait().await?;
+
+        assert!(output.ok);
+        assert_eq!(output.delivered, Some(1));
+        assert_eq!(output.result, Some(json!({ "url": target_url })));
+        assert!(output.screenshot.is_none());
+        assert_eq!(observed.control["type"], "control_request");
+        assert_eq!(observed.control["action"], "navigate");
+        assert_eq!(observed.control["url"], target_url);
+        assert!(observed.control.get("code").is_none());
+        assert!(observed.control.get("method").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn screenshot_control_returns_screenshot_summary() -> Result<()> {
         let fake = FakeBridgeServer::start(FakeBridgeResponse::Screenshot).await?;
         let workspace = workspace_with_bridge_meta(&fake)?;
@@ -460,6 +518,7 @@ mod tests {
         let output = control(
             workspace.path(),
             BridgeControlAction::Screenshot,
+            None,
             None,
             Some(2_000),
             false,
@@ -486,6 +545,7 @@ mod tests {
         let output = control(
             workspace.path(),
             BridgeControlAction::Screenshot,
+            None,
             None,
             Some(2_000),
             true,
@@ -546,6 +606,7 @@ mod tests {
                 [
                     json!("subscribe"),
                     json!("collect"),
+                    json!("navigate"),
                     json!("screenshot"),
                     json!("javascript"),
                 ]
@@ -619,6 +680,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum FakeBridgeResponse {
         Javascript,
+        Navigate,
         Screenshot,
         Events,
     }
@@ -680,6 +742,25 @@ mod tests {
                     ))
                     .await
                     .context("send javascript control result")?;
+            }
+            FakeBridgeResponse::Navigate => {
+                let url = control
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .context("navigate control request should include url")?;
+                websocket
+                    .send(Message::Text(
+                        json!({
+                            "type": "control_result",
+                            "id": id,
+                            "ok": true,
+                            "result": { "url": url }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .context("send navigate control result")?;
             }
             FakeBridgeResponse::Screenshot => {
                 websocket

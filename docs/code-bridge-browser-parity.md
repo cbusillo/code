@@ -55,9 +55,11 @@ remote-control responses as the transport contract:
 | `screenshot` | mime type, byte length or data reference, page id, timestamp. |
 | `control` | request id, action, delivery/result status, optional response payload. |
 
-Control actions should start with `ping`, `screenshot`, and `javascript` because
-the old CLI and browser tool paths depended on those. Navigation can follow
-after local-page fixtures prove the lifecycle boundary.
+Control actions start with `ping`, `navigate`, `screenshot`, and `javascript`
+because the old CLI and browser tool paths depended on those. `navigate`
+travels over the bridge `control_request` channel with a `url` field and must
+return a `control_result`; any resulting `pageview` event is separate passive
+event evidence rather than the control acknowledgement itself.
 
 ## Validation Order
 
@@ -67,9 +69,10 @@ after local-page fixtures prove the lifecycle boundary.
    Desktop remote-control JSON-RPC path. The app-server path separation fixture
    landed in #417; core fake bridge fixtures landed in #418.
 2. Port the local navigation probe to the new overlay boundary using a local HTTP
-   server and no external network. First land bridge event fixtures for local
-   `pageview`, `console`, and `screenshot` payloads before reintroducing a
-   browser runtime.
+   server and no external network. Local bridge event fixtures for `pageview`,
+   `console`, and `screenshot` payloads landed in #419. Bridge `navigate`
+   control request fixtures landed after that event schema stabilized, still
+   without reintroducing the old browser crate.
 3. Add TUI snapshot coverage only after event schema and storage are stable.
 4. Wire implementation behind the additive Every Code bridge surface.
 
