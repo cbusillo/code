@@ -3,7 +3,7 @@
 This inventory supports [#386](https://github.com/cbusillo/code/issues/386) and
 is now gated by [#397](https://github.com/cbusillo/code/issues/397). It compares
 the practical pre-#390 Every Code Rust workspace anchor `fa0c33944f` with the
-Codex-base `code-rs` workspace after PR #391 (`114ba08163`). The companion
+Codex CLI-substrate `code-rs` workspace after PR #391 (`114ba08163`). The companion
 [Codex fork parity ledger](codex-fork-parity-ledger.md) compares the same
 pre-#390 anchor against current `origin/main` for deleted fixtures, tests, and
 behavior probes.
@@ -23,9 +23,10 @@ has classified the removed Every Code fixtures, tests, and behavior probes. Do
 not treat a missing old feature as intentionally retired unless that ledger or a
 linked issue says so.
 
-`code-rs` is now the editable Codex-base Every Code product workspace.
-`codex-rs` remains the read-only `openai/codex:main` mirror. Do not re-add
-dependencies from `code-rs` to sibling `../codex-rs` while porting features.
+`code-rs` is now the editable Every Code product workspace built on the Codex
+CLI substrate. `codex-rs` remains the read-only `openai/codex:main` mirror. Do
+not re-add dependencies from `code-rs` to sibling `../codex-rs` while porting or
+aligning features.
 
 ## Decision Summary
 

@@ -95,7 +95,8 @@ When you ask the Every Code agent to "ask agents" or gather dissent, it should p
 ## Headless `code exec`
 - `code exec --json` streams JSONL events (agent turns included).
 - `--output-schema <schema.json>` enforces structured JSON output; combine with `--output-last-message` to capture only the final payload.
-- `code exec` defaults to read-only; add `--full-auto` plus a writable sandbox to permit edits.
+- `code exec` defaults to read-only; use a writable sandbox and the explicit
+  bypass flag only for agents that are allowed to edit.
 
 ## Quick examples
 - Custom agent:

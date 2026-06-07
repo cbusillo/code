@@ -618,8 +618,6 @@ def build_command_for_prompt(
     command.extend(["-C", str(paths.workspace)])
     if scenario.get("include_plan_tool", False):
         command.append("--include-plan-tool")
-    if scenario.get("auto", False):
-        command.append("--auto")
     if scenario.get("auto_review", False):
         command.append("--auto-review")
     model = scenario.get("model") or args.model

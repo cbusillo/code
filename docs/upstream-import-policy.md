@@ -1,12 +1,11 @@
 # Upstream Import And Runtime Policy
 
-Every Code owns its product direction, defaults, releases, and UX. `main` is the
-canonical product branch and GitHub default branch for the local `code` command on
-this machine.
+Every Code owns its product direction, defaults, releases, and UX while using
+Codex CLI as the upstream substrate. `main` is the canonical product branch and
+GitHub default branch for the local `code` command on this machine.
 
-This document replaces the old local overlay framing. Every Code now owns
-`main`; upstream imports are synchronization work into the product branch, not a
-long-running feature branch overlay.
+Every Code owns `main`; upstream imports are synchronization work into the
+product branch, not a long-running feature branch overlay.
 
 ## Naming Ledger
 
@@ -26,12 +25,13 @@ long-running feature branch overlay.
   `just-every/code` is a fork upstream/import source. `openai/codex` / Codex CLI
   is the original/direct upstream and provenance source.
 - `codex-rs/` is a read-only local mirror of `openai/codex:main`. `code-rs/` is
-  the editable Every Code Rust implementation. During the Codex-base substrate
-  migration, `code-rs/` is expected to become a Codex-based product workspace.
-  Imported Codex substrate crates may keep `codex-*` names only while they remain
-  compatibility-critical or mostly upstream-shaped; Every Code-owned crates and
-  new product-layer crates should use `code-*` names unless a documented external
-  compatibility contract requires the upstream spelling.
+  the editable Every Code Rust implementation built on the Codex CLI substrate.
+  Align `code-rs/` toward upstream Codex CLI shapes first, then layer Every Code
+  behavior through focused product overlays. Imported Codex substrate crates may
+  keep `codex-*` names only while they remain compatibility-critical or mostly
+  upstream-shaped; Every Code-owned crates and new product-layer crates should
+  use `code-*` names unless a documented external compatibility contract
+  requires the upstream spelling.
 - `CODE_HOME` / `~/.code` are primary config and state locations. `CODEX_HOME` /
   `~/.codex` are compatibility fallbacks. Keep `CODEX_*` names where external,
   backend, or upstream compatibility requires them; add `CODE_*` aliases or
@@ -77,7 +77,7 @@ editable Rust changes under `code-rs/`. `code-rs/` must not depend on sibling
 `../codex-rs` paths. Import or port the needed upstream source into `code-rs`
 instead.
 
-During the Codex-base substrate migration, crate names are ownership markers:
+During Codex CLI substrate alignment, crate names are ownership markers:
 
 - Imported Codex substrate crates may keep `codex-*` names when they remain
   compatibility-critical or mostly upstream-shaped.
@@ -87,20 +87,23 @@ During the Codex-base substrate migration, crate names are ownership markers:
 - Renaming a crate from `codex-*` to `code-*` should happen only when ownership,
   compatibility impact, and upstream merge cost are understood in that PR.
 
-## Codex-Base Substrate Direction
+## Codex CLI Substrate Direction
 
 [Issue #377](https://github.com/cbusillo/code/issues/377) proved the Codex
 Desktop app launches its bundled CLI app-server and can reach the main chat UI
 when a copied app bundle uses an Every Code binary.
 [Issue #384](https://github.com/cbusillo/code/issues/384) owns the migration
-from an Every Code-divergent Rust workspace toward a Codex-base product
-workspace.
+from an Every Code-divergent Rust workspace toward Codex CLI as the substrate
+with Every Code layered on top.
 
 The working migration direction is:
 
-- Make `code-rs/` the editable Codex-base Every Code product workspace.
+- Make `code-rs/` the editable Codex CLI-substrate Every Code product workspace.
 - Keep `codex-rs/` as the read-only `openai/codex:main` mirror for upstream
   review and provenance until a later issue explicitly changes that role.
+- Prefer bringing Every Code code in `code-rs/` closer to upstream Codex CLI
+  surfaces before adding product overlays. Do not make `codex-rs/` mirror Every
+  Code.
 - Keep imported Codex substrate crates internally named `codex-*` only when they
   remain compatibility-critical or mostly upstream-shaped.
 - Add or port Every Code-owned features as `code-*` crates or product-layer
